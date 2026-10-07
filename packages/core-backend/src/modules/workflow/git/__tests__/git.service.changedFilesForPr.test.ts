@@ -517,3 +517,127 @@ describe('GitService.changedPathsForPr: who pays for the fetch', () => {
     ).toEqual(['brief.pdf']);
   });
 });
+
+/**
+ * `changedPathsAndPairsForPr` is what a change-request SUMMARY is built from,
+ * and `changedFilesForPr` is what its DETAIL is built from. A read gate decides
+ * visibility over each — so if they ever describe different files, or pair a
+ * rename differently, a list advertises requests its own detail answers 404 for.
+ * That happened (ticket log, attempt 2: the list judged the flat path list,
+ * which names a rename by its new path alone), so the agreement is asserted
+ * here against a real repository rather than assumed.
+ */
+describe('GitService.changedPathsAndPairsForPr agrees with changedFilesForPr', () => {
+  let root: string;
+  const workspaceId = 'current-company-state';
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-pr-pairs-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  /** The two file sets, each reduced to `path` + `previousPath`, sorted. */
+  async function bothViews(git: GitService, branch: string) {
+    const files = await git.changedFilesForPr(workspaceId, 'current-company-state', branch);
+    const { paths, pairs } = await git.changedPathsAndPairsForPr(
+      workspaceId,
+      'current-company-state',
+      branch,
+    );
+    const key = (f: { path: string; previousPath?: string }) => `${f.path}<=${f.previousPath ?? ''}`;
+    return {
+      detail: files.map(key).sort(),
+      summary: pairs.map(key).sort(),
+      paths: paths.sort(),
+    };
+  }
+
+  it('pairs a rename the same way, and the flat paths still name only the new side', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await fs.mkdir(path.join(repo, 'Engineering'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Engineering/note.md'), 'one\ntwo\nthree\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'note']);
+    await runGit(repo, ['push', 'origin', 'current-company-state']);
+    await runGit(repo, ['checkout', '-b', 'alice/moved']);
+    await fs.mkdir(path.join(repo, 'GTM'), { recursive: true });
+    await runGit(repo, ['mv', 'Engineering/note.md', 'GTM/note.md']);
+    await runGit(repo, ['commit', '-m', 'move it']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/moved']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
+    const { detail, summary, paths } = await bothViews(git, 'alice/moved');
+
+    expect(summary).toEqual(['GTM/note.md<=Engineering/note.md']);
+    expect(summary).toEqual(detail);
+    // And this is exactly why the pairs are needed: the flat list cannot say
+    // the file came out of `Engineering/`.
+    expect(paths).toEqual(['GTM/note.md']);
+  });
+
+  it('agrees on a mixed change: add, modify, delete and rename together', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await fs.writeFile(path.join(repo, 'old-home.md'), 'a\nb\nc\nd\ne\n');
+    await fs.writeFile(path.join(repo, 'doomed.md'), 'goes away\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'seed more']);
+    await runGit(repo, ['push', 'origin', 'current-company-state']);
+    await runGit(repo, ['checkout', '-b', 'alice/mixed']);
+    await runGit(repo, ['mv', 'old-home.md', 'new-home.md']);
+    await fs.rm(path.join(repo, 'doomed.md'));
+    await fs.writeFile(path.join(repo, 'base.md'), 'base changed\n');
+    await fs.writeFile(path.join(repo, 'fresh.md'), 'new\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'mixed']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/mixed']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
+    const { detail, summary } = await bothViews(git, 'alice/mixed');
+    expect(summary).toEqual(detail);
+    expect(summary).toContain('new-home.md<=old-home.md');
+  });
+
+  it('agrees that roles.yaml and the folder placeholder are not files of the request', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'alice/config']);
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - a@x.io\n');
+    await fs.mkdir(path.join(repo, 'Reports'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Reports/.gitkeep'), '');
+    await fs.writeFile(path.join(repo, 'Reports/q3.md'), 'one\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'config + folder']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/config']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
+    const { detail, summary, paths } = await bothViews(git, 'alice/config');
+    expect(summary).toEqual(['Reports/q3.md<=']);
+    expect(summary).toEqual(detail);
+    // The flat list keeps the placeholder — it is the authoritative
+    // empty-request check — which is a third reason not to gate reads on it.
+    expect(paths).toContain('Reports/.gitkeep');
+  });
+
+  it('agrees an empty file replaced by the placeholder is the file\'s removal', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await fs.mkdir(path.join(repo, 'Reports'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Reports/empty.md'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'empty file']);
+    await runGit(repo, ['push', 'origin', 'current-company-state']);
+    await runGit(repo, ['checkout', '-b', 'alice/emptied']);
+    await fs.rm(path.join(repo, 'Reports/empty.md'));
+    await fs.writeFile(path.join(repo, 'Reports/.gitkeep'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'emptied']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/emptied']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
+    const { detail, summary } = await bothViews(git, 'alice/emptied');
+    // `withoutPlaceholderRename` runs on both sides, so neither reports a
+    // rename onto `.gitkeep` and neither loses the removed file.
+    expect(summary).toEqual(['Reports/empty.md<=']);
+    expect(summary).toEqual(detail);
+  });
+});

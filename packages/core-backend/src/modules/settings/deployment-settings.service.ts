@@ -7,7 +7,6 @@ import { deploymentSettings } from '../database/core-schema.js';
 import {
   DEFAULT_KB_LAYOUT,
   type KbLayout,
-  validateAgentsFileName,
   validateBranchModel,
   validateKbLayout,
   validateKbRootName,
@@ -228,14 +227,16 @@ export const CORE_SETTINGS: SettingDef[] = [
   /**
    * The KB layout: the three root folders a deployment may rename so hexis can
    * read a repository laid out by someone else (`skills/` and `plugins/` in
-   * lowercase, say), and the file name of the managed agent guide.
+   * lowercase, say). The agent guide's name is not among them any more: the
+   * guide is served by the platform as `AGENTS.md` everywhere, and a name a
+   * deployment saved for the written guide is ignored.
    * Restart-to-apply like the branch model — the names are applied once at boot
    * through `configureKbLayout` and served to the browser once by
    * `/api/config`. Each has a default, so an unset field means the default, not
-   * an unconfigured deployment. Checked as a QUARTET in `save`: the four must
+   * an unconfigured deployment. Checked as a TRIO in `save`: the three must
    * differ, and one field alone cannot see the other three.
    *
-   * NO `envVar`, on any of the four. Layout is deployment configuration that is
+   * NO `envVar`, on any of the three. Layout is deployment configuration that is
    * entered once in the app; the three that used to be environment-driven are
    * imported into their saved setting on the first boot after the upgrade
    * ({@link DeploymentSettingsService.importLegacyLayoutEnv}) so nothing
@@ -261,37 +262,6 @@ export const CORE_SETTINGS: SettingDef[] = [
     validate: validateKbRootName,
     restartToApply: true,
     unsetMeans: DEFAULT_KB_LAYOUT.pluginsDir,
-  },
-  {
-    /**
-     * The managed agent guide's file name. Its own validator says what a guide
-     * may be called; the quartet check in `plan` is what keeps it clear of the
-     * three folder names it is saved beside.
-     */
-    key: 'agentsFile',
-    section: 'knowledge-base',
-    // Judged against the default roots here; the quartet check in `plan`
-    // judges it against the roots the same save puts in effect.
-    validate: (v) => validateAgentsFileName(v, DEFAULT_KB_LAYOUT),
-    restartToApply: true,
-    unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
-  },
-  {
-    /**
-     * Whether to keep the platform's one-sentence pointer in a customer's own
-     * `AGENTS.md` — the admin's consent to the only text the platform ever adds
-     * to a file it does not own. On unless it is explicitly turned off, because
-     * a renamed guide nothing points at is a guide no coding agent will find.
-     *
-     * Restart-to-apply like the name it belongs to: the check runs once per
-     * start, in the KB startup phase.
-     */
-    key: 'agentsFileLink',
-    section: 'knowledge-base',
-    validate: (v) => (v === 'true' || v === 'false' ? null : 'Use "true" or "false".'),
-    restartToApply: true,
-    // On unless explicitly turned off — the reading `resolveAgentsFileLink` applies.
-    unsetMeans: 'true',
   },
 
 
@@ -587,18 +557,8 @@ export class DeploymentSettingsService {
       knowledgeBaseDir: this.resolve('knowledgeBaseDir') || DEFAULT_KB_LAYOUT.knowledgeBaseDir,
       skillsDir: this.resolve('skillsDir') || DEFAULT_KB_LAYOUT.skillsDir,
       pluginsDir: this.resolve('pluginsDir') || DEFAULT_KB_LAYOUT.pluginsDir,
-      agentsFile: this.resolve('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile,
+      agentsFile: DEFAULT_KB_LAYOUT.agentsFile,
     };
-  }
-
-  /**
-   * Whether the platform should keep its pointer sentence in a customer-owned
-   * `AGENTS.md`. On unless the admin turned it off — an unset setting is a
-   * deployment that never saw the checkbox, and the sentence is what makes a
-   * renamed guide findable at all.
-   */
-  resolveAgentsFileLink(): boolean {
-    return this.resolve('agentsFileLink') !== 'false';
   }
 
   /**
@@ -832,12 +792,12 @@ export class DeploymentSettingsService {
       if (problem) problems.protectedBranches = problem;
     }
 
-    // The layout quartet is the other cross-field rule: three folder names and
-    // a guide file name that must all differ. Judged on the layout this save
-    // WOULD produce, with the default standing in for anything neither written
-    // nor stored — so renaming the plugins folder to what the guide is already
-    // called is refused whichever of the two the save names.
-    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir', 'agentsFile'] as const;
+    // The layout trio is the other cross-field rule: three folder names that
+    // must all differ. Judged on the layout this save WOULD produce, with the
+    // default standing in for anything neither written nor stored — so
+    // renaming one folder to what another is already called is refused
+    // whichever of the two the save names.
+    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
     if (toWrite.some((w) => (layoutKeys as readonly string[]).includes(w.key))) {
       const effective = (key: (typeof layoutKeys)[number]) =>
         toWrite.find((w) => w.key === key)?.value || this.resolve(key) || DEFAULT_KB_LAYOUT[key];
@@ -845,7 +805,6 @@ export class DeploymentSettingsService {
         knowledgeBaseDir: effective('knowledgeBaseDir'),
         skillsDir: effective('skillsDir'),
         pluginsDir: effective('pluginsDir'),
-        agentsFile: effective('agentsFile'),
       });
       // Against the field being written — the first one in the batch — since
       // any of the three could be the one that collides.
@@ -873,7 +832,7 @@ export class DeploymentSettingsService {
           knowledgeBaseDir: effective('knowledgeBaseDir'),
           skillsDir: effective('skillsDir'),
           pluginsDir: effective('pluginsDir'),
-          agentsFile: effective('agentsFile'),
+          agentsFile: DEFAULT_KB_LAYOUT.agentsFile,
         });
       } catch (err) {
         // Against the field this save is writing — the checkout name when that

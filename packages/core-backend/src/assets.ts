@@ -23,3 +23,13 @@ export function coreMigrationsDir(): string {
 export function defaultKbTemplateDir(): string {
   return path.join(packageRoot(), 'kb-template');
 }
+
+/**
+ * The sections of the platform's agent guide, one markdown file each — the
+ * text `get_agent_guide` and a `read_file` of the guide's name serve, composed
+ * by `modules/agent-guide`. Beside `kb-template/` rather than under `src/`,
+ * so a build and the published source find it at the same place.
+ */
+export function agentGuideDir(): string {
+  return path.join(packageRoot(), 'agent-guide');
+}

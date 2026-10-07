@@ -4,6 +4,10 @@ import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import {
+  createAgentUploadRoutes,
+  isAgentUploadRawBodyPath,
+} from '../modules/workspace/agent-upload.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
@@ -22,7 +26,9 @@ import {
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
+import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import {
   registerSkillsTools,
@@ -210,7 +216,14 @@ export async function createCoreServer(
   // refused with its own 403, never parsed first (and answered 400 or 413).
   app.use(createWriteGateMiddleware(core.writeAccess));
   app.use((req, res, next) => {
-    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
+    // The agent upload route is exempt for the same reason `/api/sync` is:
+    // whoever needs the EXACT bytes has to see them before any parser can
+    // drain the stream. `curl --data-binary @file.zip` with a JSON
+    // content-type is a request an agent can make, and the parser would
+    // otherwise leave the handler nothing to store.
+    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path) || isAgentUploadRawBodyPath(req.path)) {
+      return next();
+    }
     return globalJson(req, res, next);
   });
 
@@ -445,17 +458,33 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  // The five read tools over change requests. Separate from the workflow tools
+  // because they are the only ones that gate their whole payload on the
+  // caller's read access, so they take the access service and nothing else.
+  registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  // The guide on its own, beside the file tools that serve it by name.
+  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
+  // The agent upload route, on the same router as the tool endpoints so it
+  // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
+  // whole credential is the single-use token in its path, which is the point
+  // (an agent's `curl` carries no session and no connection key). It resolves
+  // no workspace and writes into none; every access, platform-file and branch
+  // rule is applied later by `apply_file_upload`.
+  toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
-  registerPluginsTools(core.toolRegistry);
+  registerPluginsTools(core.toolRegistry, core.kb);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
     kb: core.kb,
+    // What the proxy's schema check found when each server's tools were last
+    // loaded — reported to a caller who may write the tool, nobody else.
+    hiddenTools: core.mcpService.hiddenTools,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({
@@ -489,7 +518,7 @@ export async function createCoreServer(
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
   // External agent access card. Same `manualAuth`, same router, as `all-tools`.
-  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble));
+  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble, () => core.kb.layout));
   // The fingerprint of the caller's released catalog. The local `hexis-mcp`
   // server polls it to learn that a manual or a skill changed under a
   // connection it cannot be pushed to; nothing else consults it. Same

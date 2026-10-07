@@ -158,8 +158,55 @@ describe('the example call satisfies the schema of the tool it names', () => {
   });
 
   it('omits every optional argument — an example asks for nothing it was not asked for', () => {
-    const { call } = chainExample('KNOWLEDGE_BASE', HOSTED);
-    for (const optional of ['offset', 'limit', 'sessionId']) expect(call).not.toContain(optional);
+    // A schema whose REQUIRED argument is determined (a closed enum) and which
+    // also declares optional ones, each with a value the schema names. Those
+    // are the arguments an example could be tempted to write — over the hosted
+    // fixture the call is `start_session({ body: {} })`, which carries no
+    // argument either way and so could not have failed.
+    const withOptionals = {
+      type: 'object',
+      properties: {
+        body: {
+          type: 'object',
+          properties: {
+            mode: { type: 'string', enum: ['fast', 'full'] },
+            limit: { type: 'integer', default: 30 },
+            verbose: { type: 'boolean', default: false },
+            format: { type: 'string', enum: ['json'] },
+          },
+          required: ['mode'],
+        },
+      },
+      required: ['body'],
+    };
+    const { call } = chainExample('X', [{ utcpName: 'X.scan', inputSchema: withOptionals }]);
+    expect(call).toBe("X.scan({ body: { mode: 'fast' } })");
+    for (const optional of ['limit', 'verbose', 'format']) expect(call).not.toContain(optional);
+  });
+
+  /**
+   * `__proto__` is a property name a schema may require, and written bare in
+   * an object literal it sets the prototype instead of creating the property.
+   * The example is read back as JavaScript, which is the only reading that
+   * shows the difference.
+   */
+  it('writes a required argument named __proto__ as an own property, not as the prototype', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        body: {
+          type: 'object',
+          properties: { ['__proto__']: { type: 'string', enum: ['x'] } },
+          required: ['__proto__'],
+        },
+      },
+      required: ['body'],
+    };
+    const { call } = chainExample('X', [{ utcpName: 'X.odd', inputSchema: schema }]);
+    expect(call).not.toBeNull();
+    const args = new Function(`return (${call!.slice('X.odd('.length, -1)});`)() as { body: object };
+    expect(Object.prototype.hasOwnProperty.call(args.body, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(args.body)).toBe(Object.prototype);
   });
 });
 
@@ -181,8 +228,26 @@ describe('the example name', () => {
     expect(chainExample('hexis', [{ utcpName: 'localbox.local_echo' }]).name).toBe('localbox.local_echo');
   });
 
-  it('falls back to the namespace shape only for an empty catalog', () => {
-    expect(chainExample('hexis', [])).toEqual({ namespace: 'hexis', name: 'hexis.read_file', call: null });
+  it('names no tool for an empty catalog, rather than one it would have to invent', () => {
+    expect(chainExample('hexis', [])).toEqual({ namespace: 'hexis', name: null, call: null });
+    // And the descriptions say nothing they cannot back: no `e.g.` at all.
+    const tools = codeModeMetaTools('hexis', []);
+    for (const tool of tools) {
+      expect(tool.description, tool.name).not.toContain('read_file`)');
+      expect(tool.description, tool.name).not.toContain('e.g. `null`');
+      expect(tool.description, tool.name).not.toContain('(e.g. `hexis.');
+    }
+    expect(tools.find((t) => t.name === 'list_tools')!.description).toBe(
+      'List every UTCP tool currently registered, in TypeScript-accessible form for use inside `call_tool_chain`.',
+    );
+  });
+
+  it('names no tool when every name in the catalog is shared by two tools', () => {
+    const colliding: ChainExampleTool[] = [
+      { utcpName: 'M.s.a', inputSchema: NO_ARGS },
+      { utcpName: 'M.s_a', inputSchema: NO_ARGS },
+    ];
+    expect(chainExample('M', colliding)).toEqual({ namespace: 'M', name: null, call: null });
   });
 
   it('sanitizes the namespace the way the runtime does', () => {

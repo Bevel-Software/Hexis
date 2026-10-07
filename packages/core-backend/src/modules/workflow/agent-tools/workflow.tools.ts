@@ -534,6 +534,14 @@ export function registerWorkflowTools(
       });
       if (!detail) {        throw new ToolError(`Change request #${number} not found.`, 404);
       }
+      // A comment anchors to a commit, and a DECLINED request has none to anchor
+      // to: nothing durable records what it proposed, so its detail carries no
+      // head (see `changeSourceFor`). Say that, rather than letting the service's
+      // `head sha is required` surface as a 400 about an argument the caller
+      // never passed. An APPLIED request still takes comments — its head is the
+      // source tip its merge commit recorded.
+      if (!detail.headSha) {        throw new ToolError(`Change request #${number} is ${detail.state} and has no commit to anchor a comment to.`, 409);
+      }
       const comment = await ctx.workflowService.postComment(
         number,
         ctx.user,

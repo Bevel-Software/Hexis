@@ -103,8 +103,12 @@ export interface ChangeRequestSummary {
  * does with either is look at where the text came from — so both read `moved`.
  * `unchanged` is a file the request lists without changing (git reports it on
  * a mode-only change); `changed` is the honest word for it among these four.
+ *
+ * Exported because `list_change_request_files` answers `change` under this same
+ * name: an agent that opens a request and reads its files back must not be told
+ * `moved` by one tool and `renamed` by the other.
  */
-function changeKindOf(status: PrFileStatus | undefined): ChangeKind {
+export function changeKindOf(status: PrFileStatus | undefined): ChangeKind {
   switch (status) {
     case 'added':
       return 'added';

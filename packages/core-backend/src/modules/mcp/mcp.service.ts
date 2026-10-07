@@ -43,6 +43,7 @@ import {
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
+import type { KbLayout } from '@bevel-software/platform-shared';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import {
   scopesCovered,
@@ -52,6 +53,7 @@ import {
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { SpillStore } from '../workspace/spill-store.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import type { IAgentEventRecorder } from '../audit/audit.contract.js';
@@ -59,6 +61,7 @@ import { RequestAudit } from '../audit/request-audit.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';
+import { ToolSchemaGuard, type ScreenedHiddenTool } from './tool-schema-guard.js';
 import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
 import { printable } from '../../shared/printable.js';
 import {
@@ -68,6 +71,7 @@ import {
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
+import { guideFirstDescription } from '../tool-registry/guide-first.js';
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -91,6 +95,13 @@ export interface McpProxyOptions {
    * carries the platform header alone.
    */
   readAgentPreamble?: AgentPreambleReader;
+  /**
+   * The layout in effect, read per request: the shared file rules name the
+   * guide by the name a deployment saved for it, and the setup save applies
+   * a layout without a restart. A GETTER, so nothing snapshots the
+   * pre-setup default. Absent, the rules name `AGENTS.md`.
+   */
+  kbLayout?: () => KbLayout;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
   downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
   /**
@@ -157,6 +168,14 @@ interface RequestSurface {
    * They differ only when the name holds a non-word character (`my-server`).
    */
   catalogNames: ReadonlyMap<string, string>;
+  /**
+   * The tools this request's load took OFF the surface for an invalid schema,
+   * by the name an agent would have called them by. Carried on the surface
+   * rather than read back out of the guard: it is this caller's own load, so a
+   * call answered from it cannot answer about a schema some other caller's
+   * connection was shown.
+   */
+  hidden: ReadonlyMap<string, ScreenedHiddenTool>;
 }
 
 /** A manual off the surface for want of a sign-in — see {@link RequestSurface.unavailable}. */
@@ -263,6 +282,15 @@ export class McpService {
    * server's tools.
    */
   private readonly knownDownstreamTools = new Map<string, { definition: string; tools: UtcpTool[] }>();
+
+  /**
+   * The JSON Schema check on connected tools, and the memory of what it found.
+   * Process-wide rather than per request, because a schema's validity is a
+   * property of the server and not of the caller — and because the point of
+   * remembering is that the check runs when a server's tools are loaded, not
+   * once per request and never on a tool call. See {@link ToolSchemaGuard}.
+   */
+  private readonly toolSchemas = new ToolSchemaGuard();
 
   // The downstream connection pool for `mcp` manuals — see the class doc.
   private readonly downstream: DownstreamPool<PooledDownstream>;
@@ -441,17 +469,24 @@ export class McpService {
           dropped.push(t.mcpName);
           continue;
         }
-        if (seen.has(entry.name)) {
-          dropped.push(`${entry.name} (duplicate)`);
-          continue;
-        }
-        seen.add(entry.name);
         // Kept for the worked example in the meta-tool descriptions: it must
         // be derived from the tools THIS caller actually gets, not from the
         // whole catalog, or a connection-key caller is shown an example naming
         // a credential-gated tool the filter above just removed from its
         // listing — a copied call that cannot work.
+        //
+        // BEFORE the duplicate drop below, on purpose. A tool dropped from the
+        // LISTING for sharing its name with another is still in the catalog a
+        // chain dispatches to, so the chain sees two tools under one name and
+        // refuses the call as ambiguous. The example has to know about both to
+        // steer clear of either (`chainExample` skips a name two tools share);
+        // shown only the survivor, it took that name for a safe one.
         examplePool.push(t);
+        if (seen.has(entry.name)) {
+          dropped.push(`${entry.name} (duplicate)`);
+          continue;
+        }
+        seen.add(entry.name);
         // The four knowledge-base tools carry the purpose prefix: the one
         // pre-call channel every client shows the model, for the clients that
         // drop the handshake's `instructions`. Applied AFTER the credential
@@ -469,7 +504,18 @@ export class McpService {
       // as a constant: the local MCP server registers the same tools under a
       // different name, and one fixed example is necessarily wrong on one of the
       // two surfaces.
-      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool);
+      //
+      // What a chain does with a failure, a large result or an image is
+      // stated once, in the shared rules — in the guide and in the handshake
+      // instructions — and not on the chain itself (an EMPTY pointer is how
+      // `mcp-core` is told the rules are served elsewhere). Like every tool of
+      // the platform's own, each meta-tool opens with the one sentence saying
+      // what to do before any of them, which is where those rules are. The
+      // registry puts the sentence on the tools it lists; the meta-tools are
+      // built here, so here it is.
+      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
+        sharedRulesPointer: '',
+      }).map((tool) => ({ ...tool, description: guideFirstDescription(tool.description) }));
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
       // it by rejecting the whole response.
@@ -486,7 +532,7 @@ export class McpService {
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      const { client, tools, unavailable, catalogNames } = await requestSurface();
+      const { client, tools, unavailable, catalogNames, hidden: hiddenTools } = await requestSurface();
       const toolName = request.params.name;
       const args = request.params.arguments ?? {};
       if (META_TOOL_NAMES.has(toolName)) {
@@ -527,6 +573,24 @@ export class McpService {
       };
       const proxied = tools.find((t) => t.mcpName === toolName);
       if (!proxied) {
+        // A tool this process hid for an invalid schema: say that, rather than
+        // "Unknown tool" about a tool the agent has every reason to think
+        // exists. The place and the reason are deliberately NOT here — they are
+        // for the people who manage the server, who are the only ones who can
+        // act on them.
+        const hidden = hiddenTools.get(toolName);
+        if (hidden) {
+          // The UTCP name, as every other audit path records a tool: the
+          // flattened agent name loses the server segment of a multi-segment
+          // `<manual>.<server>.<tool>`, and an audit trail that names a
+          // different tool than the rest of the trail is worse than none.
+          if (audit) await audit.denied(hidden.utcpName, args);
+          return toolError(
+            `The "${toolName}" tool is hidden from agents because its schema is invalid, so it cannot be ` +
+              `called. The people who manage its server can see the place in the schema and the reason, on ` +
+              `the tool's page in Hexis and through \`list_tool_setup\`.`,
+          );
+        }
         // Not on the surface — but if the name belongs to a manual that is off
         // it only because this caller's sign-in is gone (and nothing in this
         // process has seen its tools yet), the honest answer is the sign-in
@@ -602,7 +666,7 @@ export class McpService {
     const manuals = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(loopbackBearer, userId, manuals);
-    const { tools, unavailable, catalogNames } = await this.discoverTools(client, manuals, userId);
+    const { tools, unavailable, catalogNames, hidden } = await this.discoverTools(client, manuals, userId);
     const totalMs = performance.now() - started;
     // Per user: on a shape change or once per interval, never per request —
     // see SurfaceLogThrottle for why both halves matter.
@@ -617,7 +681,7 @@ export class McpService {
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
       );
     }
-    return { client, tools, unavailable, catalogNames };
+    return { client, tools, unavailable, catalogNames, hidden };
   }
 
   /**
@@ -627,13 +691,14 @@ export class McpService {
    * fails over its preamble.
    */
   private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
+    const layout = this.opts.kbLayout?.();
     const read = this.opts.readAgentPreamble;
-    if (!read) return composeAgentInstructions(null);
+    if (!read) return composeAgentInstructions(null, layout);
     try {
-      return composeAgentInstructions(await read());
+      return composeAgentInstructions(await read(), layout);
     } catch (err) {
-      log.warn('could not read mcp-description.md; this request gets the platform header alone:', { err });
-      return composeAgentInstructions(null);
+      log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
+      return composeAgentInstructions(null, layout);
     }
   }
 
@@ -773,12 +838,36 @@ export class McpService {
     client: CodeModeUtcpClient,
     manuals: CallTemplate[],
     userId: string,
-  ): Promise<{ tools: ProxiedTool[]; unavailable: UnavailableManual[]; catalogNames: Map<string, string> }> {
+  ): Promise<{
+    tools: ProxiedTool[];
+    unavailable: UnavailableManual[];
+    catalogNames: Map<string, string>;
+    hidden: Map<string, ScreenedHiddenTool>;
+  }> {
     const routes = new Map<string, DownstreamRoute>();
     const unavailable: UnavailableManual[] = [];
+    // Taken BEFORE a single manual is registered, so it ranks this load by the
+    // freshness of what it is about to read — see ToolSchemaGuard.beginLoad.
+    const loadId = this.toolSchemas.beginLoad();
     const catalogNames = new Map<string, string>();
     for (const m of manuals) {
       if (m.call_template_type === 'mcp') catalogNames.set(utcpManualName(m), String(m.name));
+    }
+    // Every manual's catalog name, which is how the owner-facing surfaces know
+    // it. `catalogNames` above is the credential catalog's map and covers `mcp`
+    // manuals only; the schema check is about the tools of every connected
+    // server, so it needs the whole list. Taken HERE, before registration:
+    // registering a manual renames the template in place, so `m.name` read
+    // afterwards is the rewritten identifier and `my-server` would be recorded
+    // as `my_server` — a name no tool page ever looks up.
+    // Keyed by the rewritten name, which two manuals can share (the collision
+    // handled below): the KB manual's entry is the one that stays, since it is
+    // the one that is registered when a `.tool` collides with it.
+    const manualCatalogNames = new Map<string, string>();
+    for (const m of manuals) {
+      const rewritten = utcpManualName(m);
+      if (manualCatalogNames.get(rewritten) === EXTERNAL_KB_MANUAL_NAME) continue;
+      manualCatalogNames.set(rewritten, String(m.name));
     }
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
@@ -859,11 +948,65 @@ export class McpService {
     if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
     if (routes.size > 0) routeToDownstream(client, routes);
     const utcpTools = await client.getTools();
-    return {
-      tools: utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME)),
-      unavailable,
-      catalogNames,
-    };
+    const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
+    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
+    return { tools, unavailable, catalogNames, hidden };
+  }
+
+  /**
+   * Check the input schema of every tool the servers just advertised, and take
+   * the invalid ones OFF the client's tool repository.
+   *
+   * The repository is the single place `tools/list`, `list_tools`/`tools_info`
+   * and the TypeScript interfaces `call_tool_chain` generates are all built
+   * from, so removing a tool here removes it from all three — which is what
+   * "not offered to agents" has to mean. Its siblings are untouched: the check
+   * is per tool, so one bad schema costs that tool and nothing else of the
+   * server.
+   *
+   * A client would otherwise drop such a tool itself, silently, and the agent
+   * would be left without it and without a reason. Hidden here, the reason
+   * reaches the people who manage the server (see {@link ToolSchemaGuard}).
+   */
+  private async hideInvalidSchemas(
+    client: CodeModeUtcpClient,
+    tools: ProxiedTool[],
+    catalogNames: ReadonlyMap<string, string>,
+    userId: string,
+    loadId: number,
+  ): Promise<{ tools: ProxiedTool[]; hidden: Map<string, ScreenedHiddenTool> }> {
+    const byManual = new Map<string, ProxiedTool[]>();
+    // EVERY manual of this surface is screened, including the ones that
+    // advertised nothing. A server that removed its last invalid tool, and one
+    // whose tools never loaded at all (a sign-in that has gone), both come
+    // through here with an empty group — and an empty group is what clears the
+    // marker. Screening only the groups that have tools would leave the tool
+    // page, `list_tool_setup` and the hidden-tool answer on a call all
+    // reporting a defect this process can no longer see.
+    for (const manual of catalogNames.values()) byManual.set(manual, []);
+    for (const tool of tools) {
+      const manual = catalogNames.get(tool.manualName) ?? tool.manualName;
+      byManual.set(manual, [...(byManual.get(manual) ?? []), tool]);
+    }
+    const found = this.toolSchemas.screen(userId, loadId, byManual);
+    const hidden = new Map<string, ScreenedHiddenTool>();
+    for (const tool of found.values()) hidden.set(tool.name, tool);
+    if (found.size === 0) return { tools, hidden };
+    for (const utcpName of found.keys()) {
+      await client.config.tool_repository.removeTool(utcpName);
+    }
+    // Logged every time rather than throttled: a hidden tool is the one thing
+    // about this surface that a person has to act on, and it is rare.
+    log.warn(
+      `hiding ${found.size} connected tool(s) whose input schema is not valid JSON Schema: ` +
+        `${[...found.values()].map((t) => `${t.name} (${t.path}: ${t.reason})`).join(', ')}`,
+    );
+    return { tools: tools.filter((tool) => !found.has(tool.utcpName)), hidden };
+  }
+
+  /** The schema findings the owner-facing surfaces report — see {@link ToolSchemaGuard}. */
+  get hiddenTools(): HiddenToolSource {
+    return this.toolSchemas;
   }
 
   /**

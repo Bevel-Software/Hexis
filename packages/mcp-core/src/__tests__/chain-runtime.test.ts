@@ -29,7 +29,10 @@ function sandbox(): Record<string, never> & {
   atob: (s: string) => string;
   btoa: (s: string) => string;
   TextEncoder: new () => { encode(s?: string): Uint8Array; encoding: string };
-  TextDecoder: new (label?: string, options?: { ignoreBOM?: boolean }) => { decode(b?: unknown): string; encoding: string };
+  TextDecoder: new (label?: string, options?: { ignoreBOM?: boolean }) => {
+    decode(b?: unknown, options?: { stream?: boolean }): string;
+    encoding: string;
+  };
 } {
   const g = {} as never;
   new Function('globalThis', CHAIN_RUNTIME_PRELUDE)(g);
@@ -169,6 +172,39 @@ describe('TextEncoder and TextDecoder, for UTF-8', () => {
     expect(dec.decode(new Uint8Array([]))).toBe('');
     expect(g.TextEncoder.name).toBe('TextEncoder');
     expect(g.TextDecoder.name).toBe('TextDecoder');
+  });
+
+  /**
+   * A chain that reads bytes in pieces decodes them in pieces, and a character
+   * does not know where a piece ends. Every cut of every text below is decoded
+   * with `{ stream: true }` and compared with Node's own decoder doing the
+   * same: a decoder that forgot the sequence in progress between two calls
+   * answered two replacement characters for one `é`.
+   */
+  it('decodes a text cut anywhere into pieces, as Node does, under { stream: true }', () => {
+    const g = sandbox();
+    for (const text of ['é', 'a€b', '𝄞 and 😀', '﻿with a mark', 'plain']) {
+      const bytes = new TextEncoder().encode(text);
+      for (let cut = 0; cut <= bytes.length; cut++) {
+        const ours = new g.TextDecoder();
+        const node = new TextDecoder();
+        const pieces = [bytes.subarray(0, cut), bytes.subarray(cut)];
+        const got = pieces.map((p) => ours.decode(p, { stream: true })).join('') + ours.decode();
+        const want = pieces.map((p) => node.decode(p, { stream: true })).join('') + node.decode();
+        expect(got, `${JSON.stringify(text)} cut at ${cut}`).toBe(want);
+      }
+    }
+  });
+
+  it('ends the stream on a call without the option: an unfinished sequence is one replacement character, and the next text starts clean', () => {
+    const g = sandbox();
+    const ours = new g.TextDecoder();
+    const node = new TextDecoder();
+    const half = new Uint8Array([0x61, 0xc3]); // `a`, then the first byte of `é`
+    expect(ours.decode(half, { stream: true }) + ours.decode()).toBe(node.decode(half, { stream: true }) + node.decode());
+    // Nothing of that sequence leaks into what is decoded next.
+    const next = new TextEncoder().encode('﻿é');
+    expect(ours.decode(next)).toBe(node.decode(next));
   });
 
   /**

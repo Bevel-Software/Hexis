@@ -62,9 +62,25 @@ describe('derivePiiKeys: seal / open / read', () => {
       expect(isEncryptedBlob(sealed)).toBe(true);
       expect(regex.test(sealed)).toBe(true);
     }
-    for (const unsealed of ['a@b.co', '', `${PII_CIPHERTEXT_PREFIX}abc:def:ghi`, new TokenCrypto(KEY).encrypt('x')]) {
-      expect(isEncryptedBlob(unsealed)).toBe(false);
-      expect(regex.test(unsealed)).toBe(false);
+    // The same blob with its padding spelled otherwise decodes to the same
+    // bytes, and the two predicates used to disagree about it: the database
+    // called it unsealed and selected it, this process called it sealed and
+    // skipped it, on every start. One answer, from one pattern.
+    const [iv, tag, ct] = keys.seal('a@b.co').slice(PII_CIPHERTEXT_PREFIX.length).split(':') as [string, string, string];
+    const respelled = [
+      `${PII_CIPHERTEXT_PREFIX}${iv}:${tag.replace(/=+$/, '')}:${ct}`,
+      `${PII_CIPHERTEXT_PREFIX}${iv}==:${tag}:${ct}`,
+      `${PII_CIPHERTEXT_PREFIX}${iv}:${tag}:${ct}\n`,
+    ];
+    for (const unsealed of [
+      'a@b.co',
+      '',
+      `${PII_CIPHERTEXT_PREFIX}abc:def:ghi`,
+      new TokenCrypto(KEY).encrypt('x'),
+      ...respelled,
+    ]) {
+      expect(isEncryptedBlob(unsealed), JSON.stringify(unsealed)).toBe(false);
+      expect(regex.test(unsealed), JSON.stringify(unsealed)).toBe(false);
     }
   });
 
@@ -95,6 +111,51 @@ describe('derivePiiKeys: seal / open / read', () => {
 
   it('refuses a key that is not 32 bytes', () => {
     expect(() => derivePiiKeys('too-short')).toThrow();
+  });
+
+  /**
+   * Node's base64 decoder is forgiving in ways a key must not be. Every value
+   * below DECODES TO 32 BYTES, so the length check passes each of them, and
+   * none of them is a way those 32 bytes are written: a mistyped key that
+   * became another key, sealing data the value an operator wrote down will
+   * never open. The property is one, whatever the mistake was — what is
+   * written must be a spelling of what it decodes to.
+   */
+  it('refuses whatever decodes to 32 bytes without being a spelling of them', () => {
+    const unpadded = KEY.replace(/=+$/, '');
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    // The last character of 32 bytes carries four bits of the key and two
+    // that must be zero. Its neighbour in the alphabet sets one of those two.
+    const trailingBits = unpadded.slice(0, -1) + alphabet[alphabet.indexOf(unpadded.slice(-1)) + 1];
+    const mistakes = {
+      'a character the alphabet does not have': `${KEY.slice(0, 10)}$${KEY.slice(10)}`,
+      'a space in the middle': `${KEY.slice(0, 20)} ${KEY.slice(20)}`,
+      'more padding than its length takes': `${unpadded}==`,
+      'bits its last character should not carry': trailingBits,
+    };
+    for (const [mistake, written] of Object.entries(mistakes)) {
+      // The premise: only the round trip can tell this from a key.
+      expect(Buffer.from(written, 'base64'), mistake).toHaveLength(32);
+      expect(() => derivePiiKeys(written), mistake).toThrow(/SECRETS_ENC_KEY is not a clean hex or base64 spelling/);
+    }
+    // Padding in the MIDDLE ends the decoding there, so that one is short and
+    // the length check has always refused it.
+    expect(() => derivePiiKeys(`${unpadded.slice(0, 20)}=${unpadded.slice(20)}`)).toThrow(/must decode to 32 bytes/);
+  });
+
+  it('takes one key in any of its spellings: hex, base64, url-safe, unpadded, with whitespace around it', () => {
+    const raw = Buffer.from(KEY, 'base64');
+    const index = keys.index('a@b.co');
+    for (const spelled of [
+      raw.toString('hex'),
+      raw.toString('hex').toUpperCase(),
+      raw.toString('base64url'),
+      `${raw.toString('base64url')}=`,
+      KEY.replace(/=+$/, ''),
+      `  ${KEY}\n`,
+    ]) {
+      expect(derivePiiKeys(spelled).index('a@b.co'), spelled).toBe(index);
+    }
   });
 });
 

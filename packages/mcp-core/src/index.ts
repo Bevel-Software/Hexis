@@ -35,6 +35,12 @@ export {
 } from './proxied-tool.js';
 
 export {
+  type SchemaDefect,
+  inputSchemaDefect,
+  schemaDefectMarker,
+} from './schema-validity.js';
+
+export {
   describeToolFailure,
   withTransportDetail,
   toCallToolResult,
@@ -55,6 +61,10 @@ export {
   chainNamespaceExample,
   META_TOOL_NAMES,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
+  CALL_TOOL_CHAIN_NAME,
+  CHAIN_FAILURES_RULE,
+  CHAIN_LARGE_RESULTS_RULE,
+  type CodeModeMetaToolsOptions,
   type SpillPort,
   dispatchMetaTool,
 } from './meta-tools.js';
@@ -140,3 +150,21 @@ export {
 } from './code-mode-names.js';
 
 export { printable } from './printable.js';
+
+// Loading this package teaches UTCP `auth_type: google_service_account`, on
+// both surfaces alike: the auth type validates and the `http` protocol mints
+// the token. A side effect of the import, like the `@utcp/http` registration
+// it builds on, so neither surface has a step to forget.
+export {
+  GOOGLE_SERVICE_ACCOUNT_AUTH_TYPE,
+  GOOGLE_TOKEN_URL,
+  GoogleAuthHttpProtocol,
+  GoogleServiceAccountTokenSource,
+  ServiceAccountAuthError,
+  findUnservedGoogleServiceAccountAuth,
+  holdsLiteralGoogleServiceAccountKey,
+  installGoogleServiceAccountAuth,
+  isGoogleServiceAccountAuth,
+  type GoogleServiceAccountAuth,
+  type IServiceAccountTokenSource,
+} from './google-service-account/index.js';

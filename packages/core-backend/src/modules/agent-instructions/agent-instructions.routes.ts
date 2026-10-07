@@ -1,4 +1,5 @@
 import express, { type RequestHandler } from 'express';
+import type { KbLayout } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('agent-instructions');
@@ -22,7 +23,17 @@ import type { AgentPreambleReader } from './read-preamble.js';
  * name folders the caller cannot open. A reader throw is a 500, never an
  * empty preamble, so the caller's own fallback decides what to send.
  */
-export function createAgentInstructionsRoutes(manualAuth: RequestHandler, readPreamble: AgentPreambleReader): express.Router {
+export function createAgentInstructionsRoutes(
+  manualAuth: RequestHandler,
+  readPreamble: AgentPreambleReader,
+  /**
+   * The layout in effect, read per request — the shared file rules name the
+   * guide by the name a deployment saved for it, which the setup save may
+   * change without a restart. Optional so a construction with no layout in
+   * hand gets `AGENTS.md`.
+   */
+  kbLayout?: () => KbLayout,
+): express.Router {
   const router = express.Router();
 
   router.get('/agent/instructions', manualAuth, async (_req, res) => {
@@ -30,7 +41,7 @@ export function createAgentInstructionsRoutes(manualAuth: RequestHandler, readPr
     // successful one: the contract is on the route, not on the happy path.
     res.setHeader('Cache-Control', 'no-store');
     try {
-      res.json(composeAgentInstructions(await readPreamble()));
+      res.json(composeAgentInstructions(await readPreamble(), kbLayout?.()));
     } catch (err) {
       log.error('reading mcp-description.md failed:', { err });
       res.status(500).json({ error: 'Failed to read the agent instructions' });

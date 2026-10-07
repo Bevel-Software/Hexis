@@ -7,7 +7,6 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
 import { personalAccessMd, pluginAccessMd } from '../../plugins/plugin-provision.service.js';
-import { defaultKbTemplateDir } from '../../../assets.js';
 import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-spaces.step.js';
 
 /**
@@ -17,10 +16,7 @@ import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-
  *  - a personal space must stay private even after an administrator opens
  *    the repository root with `read: everyone` (the usual way to let a new
  *    joiner read anything), while its owner keeps reading it — and Admin,
- *    who reads everything else, does not;
- *  - the managed AGENTS.md must be readable by every signed-in person even
- *    when the root grants read to nobody, because agents are told to read
- *    it before their first action.
+ *    who reads everything else, does not.
  */
 
 const KB_DIR = 'knowledge-base';
@@ -137,17 +133,4 @@ describe('the seeded access templates, resolved', () => {
     expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(false);
   });
 
-  it('the packaged AGENTS.md is readable by a non-admin even when the root grants read to nobody', async () => {
-    const template = await fs.readFile(path.join(defaultKbTemplateDir(), 'AGENTS.md'), 'utf8');
-    const svc = await makeService({
-      'roles.yaml': ROLES_YAML,
-      'access.md': '---\nowner:\n  - Admin\n---\nwrite:\n  - Admin\n',
-      'AGENTS.md': template,
-      'KnowledgeBase/Notes.md': '# Notes\n',
-    });
-    const bob = await svc.canReadBatch(workspaceId, 'bob@x.io', ['AGENTS.md', 'KnowledgeBase/Notes.md']);
-    expect(bob.get('AGENTS.md')).toBe(true);
-    // The grant is the FILE's own, not a widening of the root.
-    expect(bob.get('KnowledgeBase/Notes.md')).toBe(false);
-  });
 });

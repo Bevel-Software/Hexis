@@ -7,14 +7,6 @@ import { toKbRelative } from '../access-model/kb-read-filter.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 
-/**
- * Appended to the description of every workspace tool whose refusal is mapped
- * by `writeDenial`, so an agent knows before it is refused that a refusal is
- * not necessarily the end of the road.
- */
-export const PROPOSAL_ROUTE_NOTE =
-  ' If this is refused for permissions, the `write-denied` error says whether you may propose the change instead (create a branch from this one, repeat this call on it, then `open_change_request` into this branch) and lists those steps.';
-
 /** One step of the proposal route, named by the tool the agent calls. */
 export interface ProposalStep {
   tool: string;

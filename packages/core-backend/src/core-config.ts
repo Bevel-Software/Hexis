@@ -88,6 +88,7 @@ export interface TenantConfig {
   readonly workspacesRoot: string;
   readonly backupsRoot: string;
   readonly spillRoot: string;
+  readonly agentUploadsRoot: string;
   readonly docExtractCacheRoot: string;
   readonly jwtSecret: string;
   readonly adminEmail: string;
@@ -184,6 +185,21 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    * never committed, best-effort GC'd on write.
    */
   readonly spillRoot: string;
+  /**
+   * Sibling-to-`workspacesRoot` location for the bytes an agent uploads with
+   * `request_file_upload`, held until `apply_file_upload` lands them (or their
+   * token expires, whichever comes first). BESIDE the workspaces, never inside
+   * one, and that placement is the point: an upload is content the server has
+   * accepted but not yet judged, so no file tool may name it — every workspace
+   * path resolves against a branch's checkout, and there is no spelling of one
+   * that reaches in here. Ephemeral and never committed.
+   *
+   * `AGENT_UPLOADS_ROOT` overrides it, and the placement is CHECKED at boot
+   * (`assertUploadsRootOutsideWorkspaces`): a value inside `workspacesRoot` —
+   * or one that resolves there through a link — refuses to start rather than
+   * quietly staging unjudged bytes where the file tools read.
+   */
+  readonly agentUploadsRoot: string;
   /**
    * Sibling-to-`workspacesRoot` location for the document-extraction cache —
    * text extracted from office documents/PDFs (`read_file`/`grep`), keyed by
@@ -380,6 +396,8 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     this.workspacesRoot = process.env.WORKSPACES_ROOT || path.resolve(process.cwd(), 'workspaces');
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
+    this.agentUploadsRoot =
+      process.env.AGENT_UPLOADS_ROOT || path.resolve(this.workspacesRoot, '..', 'agent-uploads');
     this.docExtractCacheRoot =
       process.env.DOC_EXTRACT_CACHE_ROOT || path.resolve(this.workspacesRoot, '..', 'doc-extract-cache');
     // Required, and checked BEFORE the auth routes it signs for are ever

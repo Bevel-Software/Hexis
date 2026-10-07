@@ -152,6 +152,38 @@ describe('withTransportDetail', () => {
     ).toBe('The branch is protected. {"kind":"branch-protected"} (HTTP 403)');
   });
 
+  it('still hands over what the body holds beyond its reason, without saying the reason twice', () => {
+    // A transport error whose message IS the body's `error`: the reason is
+    // said, but the `kind` a caller switches on and the steps a refused write
+    // offers are not, and taking the whole body for covered dropped them.
+    const body = {
+      error: 'You may not write "a.md".',
+      kind: 'write-denied',
+      proposal: { steps: ['create_branch', 'write_file', 'open_change_request'] },
+    };
+    expect(withTransportDetail('You may not write "a.md".', 403, body)).toBe(
+      'You may not write "a.md". (HTTP 403) Error data: ' +
+        '{"kind":"write-denied","proposal":{"steps":["create_branch","write_file","open_change_request"]}}',
+    );
+    // A field the message already states is not repeated beside it.
+    expect(withTransportDetail('You may not write "a.md". [write-denied]', 403, { error: body.error, kind: body.kind })).toBe(
+      'You may not write "a.md". [write-denied] (HTTP 403)',
+    );
+  });
+
+  it('hands over every field of the body it has not said, whatever the field is called', () => {
+    // A body is JSON from a server, and any name is a legal key in it. Parsed,
+    // each is an own property — including the ones that mean something to a
+    // JavaScript object when ASSIGNED: copied by assignment, `__proto__` set
+    // the copy's prototype and was gone from what the caller was told.
+    for (const name of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      const body = JSON.parse(`{"error":"refused","${name}":{"why":"it is a key like any other"}}`) as unknown;
+      expect(withTransportDetail('refused', undefined, body), name).toBe(
+        `refused Error data: {"${name}":{"why":"it is a key like any other"}}`,
+      );
+    }
+  });
+
   it('appends the body when the message is the generic transport line', () => {
     // The other shape the UTCP http transport throws: the reason is in `data`,
     // which `describeToolFailure` does not read, so the message says nothing

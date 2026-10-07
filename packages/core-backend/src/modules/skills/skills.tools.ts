@@ -1,5 +1,7 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
+import { TOOL_DESCRIPTION_CAP } from '../tool-registry/description-length.js';
+import { GUIDE_FIRST_SENTENCE } from '../tool-registry/guide-first.js';
 import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
@@ -136,25 +138,66 @@ function branchArg(args: Record<string, unknown>): string | undefined {
   return typeof branch === 'string' && branch.trim().length > 0 ? branch : undefined;
 }
 
-/** "Currently available skills: `a`, `b`." (or a no-skills note), filtered to what the caller may read. */
-async function availableSkillsLine(skillService: ISkillService, userEmail?: string): Promise<string> {
+/**
+ * "Currently available skills: `a`, `b`." (or a no-skills note), filtered to
+ * what the caller may read, and cut to `budget` characters: as many names as
+ * fit, then a count of the rest. The names are a convenience — `list_skills`
+ * is the complete answer — and a description a client cuts from the end
+ * would lose the tool's own tail to a catalog that grew; the budget is what
+ * the tool's fixed text leaves under {@link TOOL_DESCRIPTION_CAP} once the
+ * guide-first sentence the registry puts in front is counted.
+ */
+async function availableSkillsLine(skillService: ISkillService, userEmail: string | undefined, budget: number): Promise<string> {
   const skills = await skillService.listSkills(userEmail);
   if (skills.length === 0) return 'No skills are currently available.';
-  return `Currently available skills: ${skills.map((s) => `\`${s.name}\``).join(', ')}.`;
+  const names = skills.map((s) => `\`${s.name}\``);
+  const rest = (shown: number): string =>
+    shown < names.length ? `, and ${names.length - shown} more that list_skills names.` : '.';
+  const head = 'Currently available skills: ';
+  // The complete line first: it ends in a full stop, not in a count, so it
+  // can fit where a shorter list plus its "and N more" tail would not.
+  const complete = `${head}${names.join(', ')}.`;
+  if (complete.length <= budget) return complete;
+  // Otherwise one pass, accumulating: the cut is where the next name — with
+  // the separator before it and the tail that would follow it — no longer
+  // fits. (Rebuilding the joined prefix per candidate made this quadratic in
+  // the catalog's size, on every catalog listing.)
+  let shown = 0;
+  let length = head.length;
+  for (const name of names) {
+    const added = (shown > 0 ? 2 : 0) + name.length;
+    if (length + added + rest(shown + 1).length > budget) break;
+    length += added;
+    shown += 1;
+  }
+  if (shown === 0) {
+    return names.length === 1
+      ? '1 skill is currently available; list_skills names it.'
+      : `${names.length} skills are currently available; list_skills names them.`;
+  }
+  return `${head}${names.slice(0, shown).join(', ')}${rest(shown)}`;
 }
+
+/** What the fixed part of a description leaves the skills line, with the guide-first sentence counted. */
+function skillsLineBudget(fixed: string): number {
+  return TOOL_DESCRIPTION_CAP - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
+}
+
+const LIST_SKILLS_DESCRIPTION =
+  'List the available skills (reusable specialist instructions) with their names, descriptions and, ' +
+  'for a skill that declares one, its current `version` (its SKILL.md `metadata.version`, else a ' +
+  'top-level `version`, else `lifecycle.version`). ' +
+  'Discover what skills exist before specialist work, then `get_skill` to load one. ' +
+  'Pass `branch` to list the skills as they are on a draft branch instead of the released set — ' +
+  'what you need to try a skill you just wrote there; each skill that differs from the released ' +
+  'one comes back with `unmerged: true` and that branch, meaning nobody has approved it. ';
 
 async function buildListSkillsDef(skillService: ISkillService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
     name: 'list_skills',
     description:
-      'List the available skills (reusable specialist instructions) with their names, descriptions and, ' +
-      'for a skill that declares one, its current `version` (its SKILL.md `metadata.version`, else a ' +
-      'top-level `version`, else `lifecycle.version`). ' +
-      'Discover what skills exist before specialist work, then `get_skill` to load one. ' +
-      'Pass `branch` to list the skills as they are on a draft branch instead of the released set — ' +
-      'what you need to try a skill you just wrote there; each skill that differs from the released ' +
-      'one comes back with `unmerged: true` and that branch, meaning nobody has approved it. ' +
-      (await availableSkillsLine(skillService, userEmail)),
+      LIST_SKILLS_DESCRIPTION +
+      (await availableSkillsLine(skillService, userEmail, skillsLineBudget(LIST_SKILLS_DESCRIPTION))),
     path: '/api/agent/tools/list_skills',
     inputs: LIST_SKILLS_INPUTS,
     outputs: {
@@ -191,15 +234,18 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
   });
 }
 
+const GET_SKILL_DESCRIPTION =
+  'Load a skill by name: returns its full instructions (SKILL.md body) to follow, plus the skill ' +
+  'folder path and the list of bundled files. Pass `file` to fetch a bundled file’s content ' +
+  '(e.g. a script) instead of the body. Loads the latest copy unless `version` names an earlier ' +
+  'one the skill declared, or `branch` names a draft to load it from. ';
+
 async function buildGetSkillDef(skillService: ISkillService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
     name: 'get_skill',
     description:
-      'Load a skill by name: returns its full instructions (SKILL.md body) to follow, plus the skill ' +
-      'folder path and the list of bundled files. Pass `file` to fetch a bundled file’s content ' +
-      '(e.g. a script) instead of the body. Loads the latest copy unless `version` names an earlier ' +
-      'one the skill declared, or `branch` names a draft to load it from. ' +
-      (await availableSkillsLine(skillService, userEmail)),
+      GET_SKILL_DESCRIPTION +
+      (await availableSkillsLine(skillService, userEmail, skillsLineBudget(GET_SKILL_DESCRIPTION))),
     path: '/api/agent/tools/get_skill',
     inputs: GET_SKILL_INPUTS,
     outputs: {

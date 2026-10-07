@@ -9,6 +9,7 @@ import type { IErasureParticipant } from '../modules/auth/account-erasure.servic
 import type { IAccountAdmission } from '../modules/auth/account-admission.js';
 import type { IWriteAccess } from '../modules/write-access/write-access.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
+import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -100,6 +101,16 @@ export interface CorePorts {
    * contract each step signs up to). Core default: `[]`.
    */
   kbStartupSteps?: readonly OnServerStart[];
+  /**
+   * THIS distribution's say over the agent guide — the text `get_agent_guide`
+   * and a `read_file` of the guide's name serve. Called with core's sections
+   * and the layout in effect on every composition; returns the sections the
+   * guide is made of, so a distribution appends its own, replaces one of
+   * core's by id, or drops one, and every change core makes to the rest still
+   * reaches it. Core default: core's sections as they are. See
+   * `modules/agent-guide`.
+   */
+  agentGuide?: AgentGuideHook;
   /**
    * Mirror this composition's branch model and knowledge-base layout onto the
    * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,

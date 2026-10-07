@@ -54,6 +54,7 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
@@ -137,6 +138,12 @@ import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm
 import { McpService } from '../modules/mcp/mcp.service.js';
 import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
+import {
+  agentGuideSections,
+  joinGuideSections,
+  type AgentGuideReader,
+  type AgentGuideSectionsReader,
+} from '../modules/agent-guide/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -220,6 +227,8 @@ export interface CoreServices {
   /** The scope this graph's vault is registered under with the UTCP variable loader. */
   secretsScope: string;
   spillStore: SpillStore;
+  /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
+  agentUploadStore: AgentUploadStore;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -236,6 +245,14 @@ export interface CoreServices {
    * and `GET /api/agent/instructions`. See modules/agent-instructions.
    */
   readAgentPreamble: AgentPreambleReader;
+  /**
+   * Composes the platform's agent guide for the layout in effect, through
+   * the distribution's hook when it passed one: what `get_agent_guide` and a
+   * `read_file` of the guide's name answer. See modules/agent-guide.
+   */
+  agentGuide: AgentGuideReader;
+  /** The same guide as its sections, each with its title — what `get_agent_guide` lists and serves one of. */
+  agentGuideSections: AgentGuideSectionsReader;
   mcpServerEditService: McpServerEditService;
   /** Deleting one tool — the owner's verb (see ToolDeleteService). */
   toolDeleteService: ToolDeleteService;
@@ -603,10 +620,7 @@ export async function createCoreServices(
     // backfill would walk a tree still missing those manifests.
     new PluginDisplayNamesStep(disk, kb),
     new PersonalSpacesStep(disk, kb),
-    // A getter, not a value: the step is built here, while the process may
-    // still hold the defaults, and the save that completes first-run setup
-    // applies the admin's answer afterwards.
-    new TemplateFilesStep(disk, kb, extraDirs, () => settings.resolveAgentsFileLink()),
+    new TemplateFilesStep(disk, kb, extraDirs),
     new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
@@ -660,6 +674,17 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // The upload route an agent lands files by, so their content never passes
+  // through the model. Bytes live BESIDE the workspaces root (never inside
+  // one) until the apply commits them or the token expires — checked here
+  // rather than assumed, because a root configured inside a workspace would
+  // put bytes no gate has judged where the file tools read.
+  await assertUploadsRootOutsideWorkspaces(config.agentUploadsRoot, config.workspacesRoot);
+  const agentUploadStore = new AgentUploadStore({
+    root: config.agentUploadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    tokenPrefix: config.uploadTokenPrefix,
+  });
   // Office-document/PDF text extraction for `read_file`/`grep`, cached by
   // content hash beside the workspaces root (see `DocExtractionCache`).
   const docExtractService = new DocExtractService(config.docExtractCacheRoot);
@@ -1154,6 +1179,12 @@ export async function createCoreServices(
   // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
+  // The guide every agent is told to read first, composed when asked for —
+  // the layout is read per call, so a name the setup save applies lands
+  // without a restart, and the distribution's hook sees every composition.
+  const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
+    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName });
+  const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
@@ -1175,6 +1206,9 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
+      // The guide's name the shared file rules spell, read per request so a name
+      // the setup save applies lands without a restart.
+      kbLayout: () => kb.layout,
       secretsScope,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
@@ -1197,6 +1231,11 @@ export async function createCoreServices(
   // so a just-repaired credential is retried on the very next request instead
   // of waiting out the failure memo's TTL, and pooled downstream connections.
   secretsVaultService.onMutation((changedUserId) => mcpService.onSecretsChanged(changedUserId));
+  // The proxy is the one place a connected server's tools are loaded, so it is
+  // the one place their schemas are checked — and the tool catalog is where the
+  // people who manage a server read what it found. Setter injection, like the
+  // OAuth discovery above: the proxy is constructed after the catalog.
+  toolManualService.setHiddenTools(mcpService.hiddenTools);
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
@@ -1412,6 +1451,7 @@ export async function createCoreServices(
     kb,
     kbDirName,
     spillStore,
+    agentUploadStore,
     docExtractService,
     accessControl,
     creatorAccess,
@@ -1422,6 +1462,8 @@ export async function createCoreServices(
     toolManualService,
     pendingToolsService,
     readAgentPreamble: readPreamble,
+    agentGuide,
+    agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,

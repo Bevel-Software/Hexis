@@ -88,7 +88,11 @@ const UNDEFINED_IDENTIFIER = /ReferenceError: ([A-Za-z_$][\w$]*) is not defined/
  * byte-order mark the way a browser's default does, and keeps it under
  * `{ ignoreBOM: true }`: a chain decoding a UTF-8 file written on Windows would
  * otherwise find a stray `\uFEFF` at the front of it, which breaks a
- * `JSON.parse` and every exact-match comparison. Each is defined only when the
+ * `JSON.parse` and every exact-match comparison. It honours `{ stream: true }`:
+ * a chain that decodes bytes in pieces gets a character whose bytes straddle
+ * two pieces whole, where a decoder that started afresh on every call returned
+ * two replacement characters for it — and a call without the option ends the
+ * stream, answering a sequence left unfinished as one. Each is defined only when the
  * runtime does not already have it, so a future `@utcp/code-mode` that ships
  * them natively wins.
  */
@@ -131,26 +135,32 @@ export const CHAIN_RUNTIME_PRELUDE: string = [
   'this.ignoreBOM=!!(options&&options.ignoreBOM);};',
   'TD.prototype.encoding="utf-8";',
   'TD.prototype.ignoreBOM=false;',
-  'TD.prototype.decode=function(input){',
-  'if(input===undefined||input===null)return "";',
-  'var b=input instanceof Uint8Array?input:(input instanceof ArrayBuffer?new Uint8Array(input):(input&&input.buffer instanceof ArrayBuffer?new Uint8Array(input.buffer,input.byteOffset,input.byteLength):new Uint8Array(input)));',
-  'var o="",n=b.length,need=0,seen=0,c=0,lo=128,hi=191,x,t;',
-  'var i=(!this.ignoreBOM&&n>=3&&b[0]===239&&b[1]===187&&b[2]===191)?3:0;',
+  // `p` is what one call leaves for the next under `{ stream: true }`: the
+  // sequence in progress (need, seen, c and the bounds on its next byte) and
+  // whether the stream has produced its first character yet, which is the
+  // only place a byte-order mark is one.
+  'TD.prototype.decode=function(input,options){',
+  'var st=!!(options&&options.stream),ig=this.ignoreBOM,p=this._p||[0,0,0,128,191,0];',
+  'var b=(input===undefined||input===null)?new Uint8Array(0):(input instanceof Uint8Array?input:(input instanceof ArrayBuffer?new Uint8Array(input):(input&&input.buffer instanceof ArrayBuffer?new Uint8Array(input.buffer,input.byteOffset,input.byteLength):new Uint8Array(input))));',
+  'var o="",n=b.length,need=p[0],seen=p[1],c=p[2],lo=p[3],hi=p[4],bom=p[5],i=0,x,t;',
   'while(i<n){x=b[i];',
   'if(need===0){i++;',
-  'if(x<128)o+=String.fromCharCode(x);',
+  'if(x<128){bom=1;o+=String.fromCharCode(x);}',
   'else if(x>=194&&x<=223){need=1;c=x&31;}',
   'else if(x>=224&&x<=239){if(x===224)lo=160;if(x===237)hi=159;need=2;c=x&15;}',
   'else if(x>=240&&x<=244){if(x===240)lo=144;if(x===244)hi=143;need=3;c=x&7;}',
-  'else o+="\\uFFFD";',
+  'else{bom=1;o+="\\uFFFD";}',
   'continue;}',
-  'if(x<lo||x>hi){need=0;seen=0;c=0;lo=128;hi=191;o+="\\uFFFD";continue;}',
+  'if(x<lo||x>hi){need=0;seen=0;c=0;lo=128;hi=191;bom=1;o+="\\uFFFD";continue;}',
   'lo=128;hi=191;i++;c=(c<<6)|(x&63);seen++;',
   'if(seen===need){',
-  'if(c<=65535)o+=String.fromCharCode(c);',
+  'if(c===65279&&!bom&&!ig){}',
+  'else if(c<=65535)o+=String.fromCharCode(c);',
   'else{t=c-65536;o+=String.fromCharCode(55296+(t>>10),56320+(t&1023));}',
-  'need=0;seen=0;c=0;}}',
+  'bom=1;need=0;seen=0;c=0;}}',
+  'if(st){this._p=[need,seen,c,lo,hi,bom];return o;}',
   'if(need!==0)o+="\\uFFFD";',
+  'this._p=null;',
   'return o;};',
   'g.TextDecoder=TD;}',
   '})(globalThis);',

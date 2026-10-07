@@ -261,12 +261,40 @@ describe('listedTools', () => {
     expect(chainTool.description).not.toContain('hexis.hexis_read_file');
   });
 
+  /**
+   * Two tools the LISTING takes for one (their names flatten alike) are both
+   * still in the catalog a chain dispatches to, which refuses the name as
+   * ambiguous. The example has to steer clear of that name — and it can only
+   * do so when it is shown both, not just the one the listing kept.
+   */
+  it('writes no example against a name two tools share, though the listing kept one of them', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const colliding = (utcpName: string): ProxiedTool => ({
+      utcpName,
+      mcpName: 'hexis_s_a',
+      description: '',
+      inputSchema: { type: 'object', properties: {} },
+      manualName: REMOTE_MANUAL_NAME,
+    });
+    const listed = listedTools([colliding('hexis.s.a'), colliding('hexis.s_a')]);
+    expect(listed.filter((t) => t.name === 'hexis_s_a')).toHaveLength(1);
+    for (const meta of ['list_tools', 'call_tool_chain']) {
+      const description = listed.find((t) => t.name === meta)!.description!;
+      expect(description, meta).not.toContain('hexis.s_a');
+      expect(description, meta).not.toContain('A call that works exactly as written');
+    }
+  });
+
   it('tells a chain it has the four browser globals, and that a timeout is answered', () => {
     const chainTool = listedTools([tool('read_file')]).find((t) => t.name === 'call_tool_chain')!;
     for (const name of ['atob', 'btoa', 'TextEncoder', 'TextDecoder']) {
       expect(chainTool.description).toContain(name);
     }
-    expect(chainTool.description).toMatch(/timed out|timeout/);
+    // The SENTENCE that says a chain past its timeout is answered. The word
+    // `timeout` alone proves nothing: it is the argument's name and is in the
+    // description whatever it says about what happens.
+    expect(chainTool.description).toContain('Failures are answered, never dropped');
+    expect(chainTool.description).toMatch(/one that outlives `timeout` \(.*\) comes back saying so/);
     // The constant, not its current value: the description renders
     // `${CHAIN_TIMEOUT_MAX_MS} ms` and a literal here would let the cap change
     // in one place and not the other without a single test failing.

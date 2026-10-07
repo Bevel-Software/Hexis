@@ -70,15 +70,21 @@ people see, so nothing is relabelled.
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.
 
-### Personal data in the database is encrypted (0.23+)
+### Personal data in the database is encrypted (0.24+)
 
-From 0.23, personal data in the database — emails, display names, avatar
+From 0.24, personal data in the database — emails, display names, avatar
 URLs, change-request and review text, and the error messages of merges,
 queued commits and plugin join requests, including every copy of a name or
 email kept beside an approval, comment, lock or merge — is encrypted with a
 key derived from `SECRETS_ENC_KEY`, in addition to the secrets vault it
 already sealed. The first boot after the upgrade rewrites existing rows
 automatically.
+
+What is not encrypted is what names a place in the repository rather than a
+person: branch names and file paths. A draft branch is usually named after
+its author (`ada.lovelace/pricing-page`) and a personal folder after its
+owner, so those still say who worked where. They are in the repository's own
+history too, which this does not change.
 
 Two things are different about this upgrade:
 
@@ -94,17 +100,44 @@ Two things are different about this upgrade:
   name and address as ciphertext, so a downgrade after the first start means
   restoring the database as it was before. Take a database backup first.
 
+That first start also removes two kinds of data, which is one more reason
+for the backup:
+
+- **Duplicate approvals and join requests.** Addresses are compared without
+  regard to case or surrounding whitespace from now on. Where one change
+  request holds two approvals of the same file at the same version from
+  `Ada@example.com` and `ada@example.com`, they are one person's approval
+  recorded twice: the earlier row is kept and the later one deleted. The same
+  goes for two requests to join one plugin. If your deployment really has two
+  people whose addresses differ only in case, give one of them another
+  address before upgrading.
+- **The name on a refused apply recorded before this release.** A change
+  request that could not be applied shows who tried. Older versions kept that
+  name without the address it belongs to, so it could not be found again when
+  the person's account is erased. The name is taken off those refusals; the
+  refusal, its reason and its time stay.
+
 That first start refuses to come up in two cases, and says which:
 
 - Two accounts share one address up to case and whitespace
   (`Alice@example.com` and `alice@example.com` could both exist before).
   The log names the conflicting user ids; merge or delete the duplicates,
   then start again.
-- A sealed row does not open with the configured key. From then on, every
-  start checks this: changing `SECRETS_ENC_KEY` is no longer a configuration
-  change but a re-keying of the database, and a start under a different key
-  stops instead of locking everyone out. Restore the key that sealed the
-  data.
+- `SECRETS_ENC_KEY` is not a clean hex or base64 spelling of its key: it
+  holds a character the encoding does not have, padding where none belongs,
+  or bits its last character should not carry. Such a value used to be
+  accepted with the odd part skipped, and the key in use is what it decoded
+  to. The refusal gives a one-line command that prints that same key spelled
+  properly; set the variable to what it prints, and nothing sealed is lost.
+
+And every start after it refuses in one more:
+
+- A sealed row does not open with the configured key. Changing
+  `SECRETS_ENC_KEY` is no longer a configuration change but a re-keying of
+  the database, and a start under a different key stops instead of locking
+  everyone out. Restore the key that sealed the data. The first start has
+  nothing sealed to check the key against, which is why this one begins with
+  the second.
 
 A process that serves several knowledge bases (`TENANTS_FILE`) seals each
 tenant's rows with that tenant's own key, the one derived for it from

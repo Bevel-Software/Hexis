@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { ReviewWorkflowService } from '../review-workflow.service.js';
 import type { ApprovalTx } from '../review-workflow.interface.js';
 
@@ -34,6 +36,8 @@ function harness() {
   const locked: unknown[][] = [];
   const lockSql: string[] = [];
   const sets: unknown[] = [];
+  /** The condition each rewrite was limited to, as the SQL and values it sends. */
+  const wheres: { sql: string; params: unknown[] }[] = [];
   const tx = {
     execute: async (statement: { queryChunks?: unknown[] }) => {
       const text = statementText(statement);
@@ -48,8 +52,9 @@ function harness() {
     },
     update: (table: unknown) => ({
       set: (values: unknown) => ({
-        where: async () => {
+        where: async (condition: SQL) => {
           sets.push(values);
+          wheres.push(new PgDialect().sqlToQuery(condition));
           order.push(`update:${tableOf(table)}`);
         },
       }),
@@ -58,7 +63,7 @@ function harness() {
   // `eraseApprover` touches nothing but the transaction it is given, so the
   // service's own collaborators are never reached.
   const svc = new ReviewWorkflowService({} as never, {} as never, {} as never, {} as never);
-  return { svc, tx: tx as unknown as ApprovalTx, order, locked, lockSql, sets };
+  return { svc, tx: tx as unknown as ApprovalTx, order, locked, lockSql, sets, wheres };
 }
 
 describe('ReviewWorkflowService.eraseApprover', () => {
@@ -89,5 +94,13 @@ describe('ReviewWorkflowService.eraseApprover', () => {
         approverName: 'Deleted user',
       },
     ]);
+    // WHICH rows: the ones whose blind index is the erased address's. The
+    // address column holds randomized ciphertext, so a match on it finds
+    // nothing — the rewrite would report success having rewritten no row, and
+    // every approval of the erased person would keep their name.
+    expect(h.wheres).toHaveLength(1);
+    expect(h.wheres[0]!.sql).toMatch(/"approver_email_bidx" = \$1$/);
+    expect(h.wheres[0]!.sql).not.toMatch(/"approver_email" =/);
+    expect(JSON.stringify(h.wheres[0]!.params)).toContain('bob@bevel.software');
   });
 });
