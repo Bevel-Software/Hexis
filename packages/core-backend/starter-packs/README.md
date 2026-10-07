@@ -73,3 +73,30 @@ rules of the default branch, which an admin passes.
 A distribution can offer its own set by pointing `STARTER_PACKS_DIR` at a
 folder in this format. A folder with no valid pack in it means the question is
 never asked.
+
+## Vendored skills
+
+Most packs carry skills adapted from open-source projects. Each plugin's
+`SOURCE.md` names the repository, the commit and what was changed; its
+`LICENSE` is the project's own. Both ship inside the plugin folder, so the
+licence travels with the skills wherever the plugin is copied. (The generated
+`THIRD-PARTY-NOTICES.md` covers npm dependencies only; vendored content is
+attributed here, in the plugin.)
+
+To refresh a plugin's skills from a newer upstream commit:
+
+1. Clone the upstream repository outside this one, at the commit you want, and
+   record it: `git clone --depth 1 <repo> /tmp/upstream && git -C /tmp/upstream rev-parse HEAD`.
+2. Diff the upstream skills against the commit named in `SOURCE.md`
+   (`git -C /tmp/upstream diff <old-sha> -- <skill folders>` after fetching the
+   old commit) and carry the changes into the adapted files by hand. The
+   adaptation notes in `SOURCE.md` say what was removed and why — keep it removed.
+3. Copy the upstream `LICENSE` again if it changed, and update the commit and
+   notes in `SOURCE.md`.
+4. Check every `SKILL.md` still has `name` and `description` frontmatter, that
+   skill names stay unique across all packs, and that nothing points at the
+   upstream project's own install (paths into `~/.claude/skills/…`, its setup
+   or binaries). Then run the backend's tests: the loader test reads every
+   packaged pack.
+
+Nothing here fetches at build or test time; the packs are files in the repository.

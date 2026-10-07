@@ -81,6 +81,25 @@ describe('loadStarterPacks', () => {
     const packs = await loadStarterPacks(defaultStarterPacksDir());
     expect(packs.map((p) => p.id).sort()).toEqual(dirs.map((d) => d.name).sort());
   });
+
+  it("the packaged skills are named, described, unique across packs, and free of their upstream's install", async () => {
+    const names = new Map<string, string>();
+    for (const pack of await loadStarterPacks(defaultStarterPacksDir())) {
+      for (const file of await starterPackFiles(pack, DEFAULT_KB_LAYOUT)) {
+        if (path.posix.basename(file.repoPath) !== 'SKILL.md') continue;
+        const text = file.content as string;
+        const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '';
+        const name = /^name:\s*(.+)$/m.exec(frontmatter)?.[1]?.trim();
+        expect(name, `${pack.id}: ${file.repoPath} has no name`).toBeTruthy();
+        expect(frontmatter, `${pack.id}: ${file.repoPath} has no description`).toMatch(/^description:/m);
+        expect(path.posix.basename(path.posix.dirname(file.repoPath)), `${file.repoPath}: folder and name differ`).toBe(name);
+        expect(names.get(name!), `skill "${name}" is in two packs`).toBeUndefined();
+        names.set(name!, pack.id);
+        expect(text, `${file.repoPath} points into an upstream install`).not.toMatch(/~\/\.claude\/skills/);
+      }
+    }
+    expect(names.size).toBeGreaterThan(0);
+  });
 });
 
 describe('packProblem', () => {
