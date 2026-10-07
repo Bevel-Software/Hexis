@@ -155,6 +155,11 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
   // recovery is already running; if it does not clear, the person decides.
   // Different copy, and the files themselves, each a link.
   if (failure.conflictedPaths && failure.conflictedPaths.length > 0) {
+    // Shown for a branch other than the one in view (the change-request
+    // dialog's source branch), the files are names, not links — they open in
+    // that branch's workspace, so the copy says to go there first.
+    const elsewhere =
+      Boolean(forWorkspaceId) && (!focusedId || canonicalizeWorkspaceId(focusedId) !== canonId);
     return (
       <div
         role="alert"
@@ -165,12 +170,13 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
           <span className="flex-1">
             <span className="font-mono font-semibold">{failure.branch}</span> isn’t in sync with
             the git repository yet: these files were changed both here and there. Hexis is trying
-            to reconcile them. If this notice stays, open each one, keep the content you want, and
-            save.
+            to reconcile them. If this notice stays,{' '}
+            {elsewhere
+              ? 'switch to that branch, open each file there, keep the content you want, and save.'
+              : 'open each one, keep the content you want, and save.'}
           </span>
         </div>
-        {forWorkspaceId &&
-        (!focusedId || canonicalizeWorkspaceId(focusedId) !== canonId) ? (
+        {elsewhere ? (
           <ConflictFileNames paths={failure.conflictedPaths} />
         ) : (
           <ConflictFiles paths={failure.conflictedPaths} />

@@ -768,7 +768,7 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
         // so the cooperative pull runs first; it changes nothing here.
         pull: vi.fn().mockResolvedValue({ treeChanged: false }),
       });
-      const { svc, fileLocks, prs } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
+      const { svc, fileLocks, prs, db } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
 
       const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
       expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
@@ -788,6 +788,9 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
       // Nothing is closed on the strength of a branch the host never received:
       // the remaining files (read from the published refs) are not even asked.
       expect(git.changedPathsForPr).toHaveBeenCalledTimes(1);
+      // Nor is a recorded apply failure erased: the published head it
+      // describes did not move.
+      expect(db.update).not.toHaveBeenCalled();
 
       // The banner, on the request's source branch, in words — not git's.
       const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
@@ -812,6 +815,20 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
       );
     });
 
+    it('a divergence whose retry push the host then refuses is answered as a refusal, not a divergence', async () => {
+      const push = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('! [rejected] ali/x -> ali/x (non-fast-forward)'))
+        .mockRejectedValueOnce(REFUSED);
+      const git = makeRevertGit({ push, pull: vi.fn().mockResolvedValue({ treeChanged: true }) });
+      const { svc } = makeHarness({ git });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+      expect((err as PushNeedsAgentResolutionError).message).toContain('the repository host refused the push');
+      expect(push).toHaveBeenCalledTimes(2);
+    });
+
     it('a non-fast-forward still takes the cooperative pull-rebase, then lands', async () => {
       const emit = vi.fn();
       const push = vi
@@ -824,8 +841,10 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
 
       await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).resolves.toMatchObject({ closed: false });
       expect(push).toHaveBeenCalledTimes(2);
-      // Once to freshen the checkout, once as the cooperative recovery.
+      // Once to freshen the checkout, once as the cooperative recovery —
+      // which replays merges as merges on every push.
       expect(pull).toHaveBeenCalledTimes(2);
+      expect(pull).toHaveBeenLastCalledWith('ali%2Fx', { preserveMerges: true });
       expect(kindsOf(emit)).not.toContain('git-sync-failed');
     });
   });

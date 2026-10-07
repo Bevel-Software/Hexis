@@ -399,13 +399,15 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
     const REFUSED = new Error('git push failed: remote: Internal Server Error');
 
     it('keeps the merge applied locally and answers 409 with the saved-locally sentence and the banner', async () => {
-      const h = harness({ changedPaths: ['Sales/Deal.md'], pushes: [REFUSED, REFUSED] });
+      const h = harness({ changedPaths: ['Sales/Deal.md'], pushes: [REFUSED] });
       const err = await h.svc.updateFromTarget(WS, USER, 7).catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
       expect((err as PushNeedsAgentResolutionError).status).toBe(409);
       expect((err as Error).message).toContain('Saved locally on "alice/deal"');
       expect(JSON.stringify((err as PushNeedsAgentResolutionError).payload)).not.toContain('Internal Server Error');
+      // One attempt: a refusal is not a divergence, so nothing is retried.
+      expect(h.git.push).toHaveBeenCalledTimes(1);
       // The merge ran and stays in the clone — the next push carries it.
       expect(h.git.mergeFromOrigin).toHaveBeenCalledTimes(1);
       expect(h.emit).toHaveBeenCalledWith(

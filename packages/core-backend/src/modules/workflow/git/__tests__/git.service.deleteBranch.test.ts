@@ -221,6 +221,19 @@ describe('GitService.deleteBranch — authorship + remote delete', () => {
     ).toBe('refs/heads/alice/my-draft');
   });
 
+  it('deletes the remote branch even when this clone has no tracking ref for it (pushed from elsewhere since the last fetch)', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['update-ref', '-d', 'refs/remotes/origin/alice/my-draft']);
+    const svc = makeService();
+
+    await svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE);
+
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(false);
+    expect(
+      await gitOut(repo, ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)']),
+    ).toBe('');
+  });
+
   it("refuses when the user isn't the author — leaves the remote ref intact", async () => {
     const { upstream } = await seedWorkspace(root, workspaceId);
     const svc = makeService();

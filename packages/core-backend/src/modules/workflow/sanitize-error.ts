@@ -74,12 +74,20 @@ export function sanitizeError(err: unknown, opts: { maxLen?: number } = {}): str
  * `remote: Internal Server Error`, a git `fatal:` line, a URL — and those must
  * not reach the browser (the sync banner, a route's answer). The raw text
  * belongs in the server log, which is where the banner already sends whoever
- * can act on it. Order matters: an auth failure also reads "unable to access".
+ * can act on it. Order matters: an auth failure also reads "unable to access",
+ * and a permission refusal is told apart from a rejected credential.
  */
 export function describeSyncFailure(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  if (/authentication failed|could not read username|invalid username or password|permission (to .* )?denied|returned error: 40[13]|repository not found/i.test(raw)) {
+  if (/authentication failed|could not read username|invalid username or password|returned error: 401/i.test(raw)) {
     return "The repository host did not accept this server's credentials.";
+  }
+  // Credentials the host accepted but that may not write here — a 403, a
+  // "Permission to … denied", a token scoped to other repositories (GitHub
+  // answers those "Repository not found"). Replacing the credential is the
+  // wrong fix; granting it push access is the right one.
+  if (/permission (to .* )?denied|returned error: 403|write access .* not granted|repository not found/i.test(raw)) {
+    return "The repository host did not give this server's credentials permission to push here.";
   }
   if (/could not resolve host|failed to connect|couldn't connect|connection (refused|timed out|reset)|network is unreachable|operation timed out/i.test(raw)) {
     return 'The repository host could not be reached.';

@@ -1495,12 +1495,6 @@ export class WorkflowService implements IWorkflowService {
     targetPath: string,
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
-    /**
-     * How the cooperative pull replays local commits. A push that carries a
-     * MERGE (opening a request, update-from-target) must replay with
-     * `--rebase-merges`, or the recovery flattens the merge it exists to publish.
-     */
-    recovery: { preserveMerges?: boolean } = {},
   ): Promise<void> {
     // No explicit `undefined` third argument when there are no options: the
     // call shape stays the bare `push(workspaceId, user)` every caller made.
@@ -1515,10 +1509,24 @@ export class WorkflowService implements IWorkflowService {
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
       let recoveryError: unknown = null;
+      // The retry push's own rejection, when the pull got that far: the
+      // divergence is cured by then, so it — not the first rejection — says
+      // whether the host is refusing.
+      let retryDetail: string | null = null;
       if (looksLikeNonFastForward) {
         try {
-          await this.pullWorkspace(workspaceId, recovery);
-          await push();
+          // `preserveMerges` on every push, not only the ones that make a
+          // merge: a merge stranded by a refused open or update rides along
+          // with whatever push of the branch comes next — a save, a share —
+          // and a plain rebase would flatten it into cherry-picks. With no
+          // merge among the local commits the two spellings replay the same.
+          await this.pullWorkspace(workspaceId, { preserveMerges: true });
+          try {
+            await push();
+          } catch (retryErr) {
+            retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            throw retryErr;
+          }
           recovered = true;
           this.noteGitSyncOk(workspaceId, branch);
           log.info(
@@ -1554,7 +1562,7 @@ export class WorkflowService implements IWorkflowService {
           // `rejected` above also matches the host's own `[remote rejected]`
           // (an outage, a hook): worth the cooperative try, but only a real
           // divergence is described as one.
-          /non-fast-forward|fetch first|updates were rejected|! \[rejected\]/i.test(firstDetail)
+          /non-fast-forward|fetch first|updates were rejected|! \[rejected\]/i.test(retryDetail ?? firstDetail)
             ? 'diverged'
             : 'refused',
         );
@@ -1890,8 +1898,6 @@ export class WorkflowService implements IWorkflowService {
         branchForWorkspaceId(workspaceId),
         '(opening a change request)',
         user,
-        undefined,
-        { preserveMerges: true },
       );
     } catch (err) {
       if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
@@ -2163,8 +2169,6 @@ export class WorkflowService implements IWorkflowService {
         branchForWorkspaceId(workspaceId),
         `(update from ${detail.base})`,
         user,
-        undefined,
-        { preserveMerges: true },
       );
     }
     // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
@@ -2498,12 +2502,14 @@ export class WorkflowService implements IWorkflowService {
     if (revertError) throw revertError.reason;
     const failedRelease = released.find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failedRelease) throw failedRelease.reason;
+    this.prs.invalidateDetailCache(number);
+    // A refused push moved nothing the request is judged on. A recorded
+    // apply failure describes the published head, which is still where it
+    // was, so it stays; and the file list reads the published refs, so
+    // closing an "empty" request is decided once the push lands.
+    if (pushRefused) throw pushRefused;
     // The source head moved: the refusal described a revision that is gone.
     await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
-    this.prs.invalidateDetailCache(number);
-    // The request's file list reads the published refs, which the refused
-    // push never moved — closing an "empty" request is decided once it lands.
-    if (pushRefused) throw pushRefused;
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
     if (remaining.length > 0) {

@@ -804,16 +804,21 @@ export class GitService implements IGitService {
       }
 
       // Remote delete FIRST. Skip in `onlyIfNoRemote` mode (the contract is
-      // local-only cleanup) and skip when there's no remote ref to delete.
-      // A refusal by the host fails the whole delete: the local branch is
-      // untouched, so nothing is half-deleted and the person can try again.
-      // Deleting locally first would leave a branch that vanished here but
-      // lives on the remote — and, unlike a refused write, a deleted branch
-      // has no later push to reconcile it.
-      if (!opts.onlyIfNoRemote
-        && await this.refExists(cwd, `refs/remotes/origin/${name}`)) {
+      // local-only cleanup) and skip when origin has no such branch. Origin
+      // is asked, not this clone's remote-tracking ref: a branch pushed from
+      // another clone since the last fetch has no tracking ref here, and
+      // trusting the cache would delete it locally while it lives on.
+      // A refusal by the host — or a host that cannot be asked — fails the
+      // whole delete: the local branch is untouched, so nothing is
+      // half-deleted and the person can try again. Deleting locally first
+      // would leave a branch that vanished here but lives on the remote —
+      // and, unlike a refused write, a deleted branch has no later push to
+      // reconcile it.
+      if (!opts.onlyIfNoRemote) {
         try {
-          await this.git(cwd, ['push', 'origin', '--delete', name]);
+          if (await this.originHasBranch(cwd, name)) {
+            await this.git(cwd, ['push', 'origin', '--delete', name]);
+          }
         } catch (err) {
           const detail = sanitizeError(err);
           log.warn(`the repository host refused to delete branch "${name}"; leaving it in place:`, { detail });
@@ -1875,7 +1880,10 @@ export class GitService implements IGitService {
    */
   async remoteBranchExists(workspaceId: string, branch: string): Promise<boolean> {
     assertValidBranchName(branch);
-    const cwd = await this.repoDir(workspaceId);
+    return this.originHasBranch(await this.repoDir(workspaceId), branch);
+  }
+
+  private async originHasBranch(cwd: string, branch: string): Promise<boolean> {
     try {
       await this.git(cwd, ['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${branch}`]);
       return true;
@@ -1970,9 +1978,10 @@ export class GitService implements IGitService {
       // commit the clone holds but origin has not seen into cherry-picks of
       // the commits it merged — the merged branch stops being a parent, so
       // "does the published head contain the target's head" answers no
-      // however many times the update runs. Only the change-request update
-      // asks for it; every other pull replays plain saves, where the two
-      // spellings produce the same history.
+      // however many times the update runs. The change-request update and
+      // every push's cooperative recovery ask for it (a merge a refused push
+      // stranded rides along with the branch's next push); with no merge
+      // among the local commits the two spellings produce the same history.
       await this.git(cwd, [
         'rebase',
         '--autostash',

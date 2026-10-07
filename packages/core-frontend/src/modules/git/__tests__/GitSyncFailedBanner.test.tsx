@@ -206,6 +206,7 @@ describe('GitSyncFailedBanner — remote-sync conflict', () => {
     // This one IS the author's to act on — no "check the server logs".
     expect(alert.textContent).toContain('changed both here and there');
     expect(alert.textContent).not.toContain('server logs');
+    expect(alert.textContent).toContain('open each one, keep the content you want');
     expect(screen.getByRole('button', { name: 'Plugins/x/SKILL.md' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Docs/a.md' })).toBeTruthy();
   });
@@ -288,5 +289,9 @@ describe('GitSyncFailedBanner — for a named workspace (the change-request view
     bus.emit(conflict);
     expect(screen.getByText('Docs/a.md').tagName).toBe('SPAN');
     expect(screen.queryByRole('button', { name: 'Docs/a.md' })).toBeNull();
+    // Nothing here opens, so the copy sends the person to the branch first.
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('switch to that branch, open each file there');
+    expect(text).not.toContain('open each one');
   });
 });

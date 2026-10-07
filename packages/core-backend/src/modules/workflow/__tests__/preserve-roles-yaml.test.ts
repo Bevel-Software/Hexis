@@ -253,6 +253,9 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     expect(await fs.readFile(path.join(headRepoDir, 'roles.yaml'), 'utf-8')).toBe(BASE_ROLES);
     expect(git.commitFile).toHaveBeenCalled();
     expect(fileLocks.release).toHaveBeenCalled();
+    // A refusal is not a divergence: no cooperative pull-rebase, no retry.
+    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(git.pull).not.toHaveBeenCalledWith(expect.anything(), { preserveMerges: true });
     expect(emit).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'git-sync-failed', workspaceId: HEAD, branch: HEAD }),
     );

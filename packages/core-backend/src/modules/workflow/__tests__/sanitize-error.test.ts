@@ -85,8 +85,16 @@ describe('describeSyncFailure', () => {
       "The repository host did not accept this server's credentials.",
     ],
     [
-      "fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403",
+      "fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 401",
       "The repository host did not accept this server's credentials.",
+    ],
+    [
+      "fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403",
+      "The repository host did not give this server's credentials permission to push here.",
+    ],
+    [
+      'remote: Permission to acme/kb.git denied to kb-bot.',
+      "The repository host did not give this server's credentials permission to push here.",
     ],
     [
       "fatal: unable to access 'https://127.0.0.1:9/none.git/': Failed to connect to 127.0.0.1 port 9: Connection refused",

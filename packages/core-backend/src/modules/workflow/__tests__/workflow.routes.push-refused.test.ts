@@ -40,9 +40,17 @@ const WS = encodeURIComponent(BRANCH);
 const GIT_OUTPUT =
   'git push failed: remote: Internal Server Error\nTo https://x-access-token:ghp_abc@github.com/acme/kb.git\n ! [remote rejected] alice/deal -> alice/deal (Internal Server Error)';
 
-function refused(path: string): PushNeedsAgentResolutionError {
-  return new PushNeedsAgentResolutionError(BRANCH, path, GIT_OUTPUT, '(cooperative path not attempted)', 'refused');
+function refused(path: string, branch = BRANCH): PushNeedsAgentResolutionError {
+  return new PushNeedsAgentResolutionError(branch, path, GIT_OUTPUT, '(cooperative path not attempted)', 'refused');
 }
+
+/**
+ * Each operation's refusal names its own branch, so a route that answered
+ * with a fixed name — or another operation's — fails its case.
+ */
+const REVERT_BRANCH = 'alice/revert-src';
+const OPEN_BRANCH = 'alice/open-src';
+const UPDATE_BRANCH = 'alice/update-src';
 
 async function serve(workflow: Partial<IWorkflowService>): Promise<{ server: Server; baseUrl: string }> {
   const authService = { getUserById: vi.fn(async () => ALICE) } as unknown as AuthService;
@@ -96,14 +104,14 @@ describe('routes answer a push the host refused with 409 and the saved-locally s
 
   const workflow: Partial<IWorkflowService> = {
     revertChangeRequestFile: vi.fn(async () => {
-      throw refused('Sales/Deal.md');
+      throw refused('Sales/Deal.md', REVERT_BRANCH);
     }),
     openChangeRequest: vi.fn(async () => {
-      throw refused('(opening a change request)');
+      throw refused('(opening a change request)', OPEN_BRANCH);
     }),
     getChangeRequest: vi.fn(async () => ({ number: 7, branch: BRANCH, base: 'main' }) as never),
     updateFromTarget: vi.fn(async () => {
-      throw refused('(update from main)');
+      throw refused('(update from main)', UPDATE_BRANCH);
     }),
     deleteBranch: vi.fn(async () => {
       throw new BranchDeleteRefusedError(BRANCH, GIT_OUTPUT);
@@ -118,17 +126,17 @@ describe('routes answer a push the host refused with 409 and the saved-locally s
   });
 
   it.each([
-    ['reverting a file of a change request', 'POST', '/workflow/change-requests/7/files/revert', { path: 'Sales/Deal.md' }],
-    ['opening a change request', 'POST', '/workflow/change-requests', { sourceBranch: BRANCH, targetBranch: 'main', title: 'Deal' }],
-    ['updating a change request from its target', 'POST', '/workflow/change-requests/7/update-from-target', undefined],
-  ])('%s', async (_what, method, path, body) => {
+    ['reverting a file of a change request', REVERT_BRANCH, 'POST', '/workflow/change-requests/7/files/revert', { path: 'Sales/Deal.md' }],
+    ['opening a change request', OPEN_BRANCH, 'POST', '/workflow/change-requests', { sourceBranch: OPEN_BRANCH, targetBranch: 'main', title: 'Deal' }],
+    ['updating a change request from its target', UPDATE_BRANCH, 'POST', '/workflow/change-requests/7/update-from-target', undefined],
+  ])('%s', async (_what, branch, method, path, body) => {
     const res = await call(baseUrl, method, path, body);
     expect(res.status).toBe(409);
     expect(res.json.error).toBe(
-      `Saved locally on "${BRANCH}" but couldn't share with the team automatically — ` +
+      `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
         'the repository host refused the push. The next save on this branch shares it.',
     );
-    expect(res.json).toMatchObject({ kind: 'push-needs-resolution', branch: BRANCH });
+    expect(res.json).toMatchObject({ kind: 'push-needs-resolution', branch });
     expect(res.json).not.toHaveProperty('originalDetail');
     expect(res.json).not.toHaveProperty('recoveryDetail');
     expectNoGitOutput(res.text);
