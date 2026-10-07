@@ -382,6 +382,50 @@ describe('GetStartedColumn: a connected agent', () => {
     expect(within(page).queryByText('Connect your agent and it can write pages for you.')).not.toBeInTheDocument();
   });
 
+  it('leads with "Ask ChatGPT to write it" for a ChatGPT connection, Claude quiet beside Copy prompt', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT' });
+    mount();
+    const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask ChatGPT to write it' });
+    expect(ask).toHaveAttribute('href', chatGptPromptUrl(FIRST_PAGE_PROMPT));
+    const page = row('Write your first page')!;
+    expect(within(page).getByRole('link', { name: 'Open in Claude' })).toHaveAttribute(
+      'href',
+      claudePromptUrl(FIRST_PAGE_PROMPT),
+    );
+    expect(within(page).getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
+    expect(within(page).queryByRole('link', { name: 'Ask Claude to write it' })).not.toBeInTheDocument();
+    expect(within(page).queryByText(/Paste it into/)).not.toBeInTheDocument();
+  });
+
+  it('leads with Copy prompt for an agent no link opens, and says where to paste it', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude Code · local server on LAPTOP-1' });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    try {
+      mount();
+      const copy = await within(row('Write your first page')!).findByRole('button', { name: 'Copy prompt' });
+      const page = row('Write your first page')!;
+      expect(within(page).getByText('Paste it into Claude Code.')).toBeInTheDocument();
+      expect(within(page).getByRole('link', { name: 'Open in Claude' })).toBeInTheDocument();
+      expect(within(page).getByRole('link', { name: 'Open in ChatGPT' })).toBeInTheDocument();
+      expect(within(page).queryByRole('link', { name: /to write it/ })).not.toBeInTheDocument();
+      expect(within(page).getByRole('button', { name: 'New page' })).toBeInTheDocument();
+      await userEvent.click(copy);
+      expect(writeText).toHaveBeenCalledWith(FIRST_PAGE_PROMPT);
+      expect(within(row('Write your first page')!).getByRole('status')).toHaveTextContent('Prompt copied');
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('says "your agent" when the connection has no name to offer', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Unnamed agent' });
+    mount();
+    expect(await within(row('Write your first page')!).findByText('Paste it into your agent.')).toBeInTheDocument();
+  });
+
   it('copies the prompt and says so', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
     const writeText = vi.fn().mockResolvedValue(undefined);

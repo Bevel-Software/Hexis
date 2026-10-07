@@ -21,7 +21,7 @@ import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspace
 import { useFileNav } from '../../workspace/routing/kb-routes';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
-import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
+import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPageRoute } from '../first-page-prompt';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
 
@@ -283,8 +283,9 @@ export function GetStartedColumn() {
     : undefined;
   /**
    * With an agent connected, the quickest first page is one it writes: a new
-   * chat with the request already typed, and the tick arrives by itself when
-   * the page lands in the tree. Before then that button would open a chat
+   * chat with the request already typed (or the request to paste, for an
+   * agent no link can open), and the tick arrives by itself when the page
+   * lands in the tree. Before then that button would open a chat
    * that cannot reach this knowledge base, so the step says what connecting
    * would add instead.
    */
@@ -295,7 +296,7 @@ export function GetStartedColumn() {
     ...(agent.connected
       ? {
           hint: 'Have your agent write it, or start one here.',
-          extra: <FirstPagePromptActions newPage={newPageAction} />,
+          extra: <FirstPagePromptActions client={agent.client} newPage={newPageAction} />,
         }
       : {
           hint: 'Start one here, or drop files into the file tree.',
@@ -411,22 +412,46 @@ export function GetStartedColumn() {
   );
 }
 
+/** The prompt opened in a new chat, as a real link (see `FirstPagePromptActions`). */
+function PromptLink({ href, primary, children }: { href: string; primary?: boolean; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={
+        primary
+          ? buttonClasses({ variant: 'primary', size: 'sm' })
+          : 'text-ink-muted transition-colors hover:text-ink'
+      }
+    >
+      {children}
+    </a>
+  );
+}
+
 /**
- * "Ask Claude to write it", and the quieter ways to the same prompt.
+ * The agent's way to the first-page prompt, led by the one that suits the
+ * agent that connected (`firstPageRoute`), with the others quiet beneath it.
+ *
+ * Claude's and ChatGPT's connectors get "Ask … to write it", a new chat with
+ * the prompt typed. Every other agent — Claude Code, Cursor, anything on the
+ * local server, an unknown name — has no link that would reach it, so Copy
+ * prompt leads there and says where to paste; the two web links stay as
+ * quiet extras for someone who uses those too.
  *
  * Real links rather than buttons that call `window.open`: a new tab is what
  * they are, so they should say so to the browser — middle-click, "copy link",
- * and the status-bar preview of where they go all work. ChatGPT is a quiet
- * second because the step is phrased for one agent, and copying is there for
- * every other client, which has no link to prefill.
+ * and the status-bar preview of where they go all work.
  *
  * Copying answers on the button itself and in a live region; there is no
  * toast to fall back on out here (toasts speak inside the Library only).
  */
-function FirstPagePromptActions({ newPage }: { newPage?: SetupAction }) {
+function FirstPagePromptActions({ client, newPage }: { client?: string; newPage?: SetupAction }) {
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
   const resetTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+  const { primary, agentName } = firstPageRoute(client);
 
   async function copy() {
     const ok = await copyToClipboard(FIRST_PAGE_PROMPT);
@@ -435,51 +460,62 @@ function FirstPagePromptActions({ newPage }: { newPage?: SetupAction }) {
     resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
   }
 
+  const copyButton = (lead: boolean) => (
+    <Button
+      size={lead ? 'sm' : 'tiny'}
+      variant={lead ? 'primary' : 'quiet'}
+      onClick={() => void copy()}
+      leadingIcon={
+        copied === 'ok' ? (
+          <Check size={12} aria-hidden className={lead ? undefined : 'text-ok'} />
+        ) : copied === 'fail' ? (
+          <X size={12} aria-hidden className={lead ? undefined : 'text-danger'} />
+        ) : (
+          <Copy size={12} aria-hidden />
+        )
+      }
+    >
+      Copy prompt
+    </Button>
+  );
+  const claudeLink = (lead: boolean) => (
+    <PromptLink href={claudePromptUrl(FIRST_PAGE_PROMPT)} primary={lead}>
+      {lead ? 'Ask Claude to write it' : 'Open in Claude'}
+    </PromptLink>
+  );
+  const chatGptLink = (lead: boolean) => (
+    <PromptLink href={chatGptPromptUrl(FIRST_PAGE_PROMPT)} primary={lead}>
+      {lead ? 'Ask ChatGPT to write it' : 'Open in ChatGPT'}
+    </PromptLink>
+  );
+
+  const lead = primary === 'claude' ? claudeLink(true) : primary === 'chatgpt' ? chatGptLink(true) : copyButton(true);
+  const quiet =
+    primary === 'claude'
+      ? [chatGptLink(false), copyButton(false)]
+      : primary === 'chatgpt'
+        ? [claudeLink(false), copyButton(false)]
+        : [claudeLink(false), chatGptLink(false)];
+
   return (
     <div className="grid justify-items-start gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <a
-          href={claudePromptUrl(FIRST_PAGE_PROMPT)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={buttonClasses({ variant: 'primary', size: 'sm' })}
-        >
-          Ask Claude to write it
-        </a>
+        {lead}
         {newPage && (
           <Button size="sm" variant="outline" onClick={newPage.onClick} disabled={newPage.disabled}>
             {newPage.label}
           </Button>
         )}
       </div>
+      {primary === 'copy' && (
+        <span className="text-meta text-ink-faint">Paste it into {agentName ?? 'your agent'}.</span>
+      )}
       <div className="flex items-center gap-1 text-meta">
-        <a
-          href={chatGptPromptUrl(FIRST_PAGE_PROMPT)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-ink-muted transition-colors hover:text-ink"
-        >
-          Open in ChatGPT
-        </a>
+        {quiet[0]}
         <span aria-hidden className="text-ink-faint">
           ·
         </span>
-        <Button
-          size="tiny"
-          variant="quiet"
-          onClick={() => void copy()}
-          leadingIcon={
-            copied === 'ok' ? (
-              <Check size={12} aria-hidden className="text-ok" />
-            ) : copied === 'fail' ? (
-              <X size={12} aria-hidden className="text-danger" />
-            ) : (
-              <Copy size={12} aria-hidden />
-            )
-          }
-        >
-          Copy prompt
-        </Button>
+        {quiet[1]}
         <span role="status" aria-live="polite" className="sr-only">
           {copied === 'ok' ? 'Prompt copied' : copied === 'fail' ? 'Couldn’t copy the prompt' : ''}
         </span>
