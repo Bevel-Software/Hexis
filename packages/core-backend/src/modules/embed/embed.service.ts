@@ -318,9 +318,20 @@ export class EmbedService implements IEmbedService {
    * bundle the app's "Propose changes" uses, so a reader who proposes from a
    * chat and from the app lands in one place.
    *
-   * No lock: nothing touches the default branch. The write goes to the
-   * suggestions branch's own workspace, where `writeFile` auto-commits, so
-   * the proposal survives the chat window closing.
+   * No lock: nothing touches the default branch, and the suggestions branch
+   * is this person's own.
+   *
+   * The write is COMMITTED here, synchronously, before the request is opened.
+   * `workspaceService.writeFile` only puts bytes on disk — the app's file
+   * routes commit by releasing the lock they took, which enqueues the commit
+   * for the background worker. Neither is usable here: without a commit the
+   * branch head never moves, and the request opens against a tree identical
+   * to its base — `changedFiles: 0`, and a reviewer told "this pull request
+   * has no file changes to approve" about a proposal that is sitting
+   * uncommitted on disk. An ENQUEUED commit has the same problem with a race
+   * on top of it. `commitChanges` commits and pushes before returning, which
+   * is what the one other server-side propose flow (the plugin join request)
+   * does for exactly this reason.
    */
   async propose(token: string, content: string): Promise<EmbedProposalResult> {
     const claims = this.verifyToken(token);
@@ -340,7 +351,17 @@ export class EmbedService implements IEmbedService {
         throw err;
       });
     const workspace = await this.workspaceService.getOrCreateForBranch(branch);
-    await this.workspaceService.writeFile(workspace.id, this.wsPathFor(claims.repoRelative), content);
+    const wsPath = this.wsPathFor(claims.repoRelative);
+    await this.workspaceService.writeFile(workspace.id, wsPath, content);
+    // Scoped to the one path this proposal is about: the suggestions branch
+    // is shared by everything this person has proposed, and a bare commit
+    // would sweep in another in-flight write of theirs under this message.
+    await this.workflowService.commitChanges(
+      workspace.id,
+      user,
+      `Propose changes to ${claims.repoRelative}`,
+      [wsPath],
+    );
     try {
       const created = await this.workflowService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,

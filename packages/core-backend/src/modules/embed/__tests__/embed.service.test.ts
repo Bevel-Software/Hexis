@@ -73,6 +73,7 @@ function build(opts: Opts = {}) {
     heartbeatLock: vi.fn(async () => undefined),
     releaseLock: vi.fn(async () => undefined),
     releaseLockNoCommit: vi.fn(async () => undefined),
+    commitChanges: vi.fn(async () => ({ sha: 'deadbee' })),
     openChangeRequest: opts.openChangeRequest ?? vi.fn(async () => ({ number: 42 })),
   };
   const gitService = { createBranch: opts.createBranch ?? vi.fn(async () => ({})) };
@@ -396,6 +397,27 @@ describe('EmbedService: proposing as a non-writer', () => {
     const branch = 'suggestions/alice-u-1/knowledge';
     expect(gitService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
     expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(branch), WS, 'proposed text');
+    /**
+     * COMMITTED, and committed BEFORE the request is opened.
+     *
+     * `writeFile` only puts bytes on disk. Without this the branch head never
+     * moved, and the request opened against a tree identical to its base:
+     * `changedFiles: 0`, `headSha === baseSha`, and a reviewer told "this pull
+     * request has no file changes to approve" about a proposal sitting
+     * uncommitted on disk. Found on a real boot, not by a stub.
+     */
+    expect(workflowService.commitChanges).toHaveBeenCalledWith(
+      encodeURIComponent(branch),
+      expect.objectContaining({ id: USER.id }),
+      expect.stringContaining(REPO),
+      // Scoped to this one path: the suggestions branch carries everything
+      // this person has proposed, and a bare commit would sweep another
+      // in-flight write of theirs in under this message.
+      [WS],
+    );
+    expect(workflowService.commitChanges.mock.invocationCallOrder[0]).toBeLessThan(
+      workflowService.openChangeRequest.mock.invocationCallOrder[0],
+    );
     expect(workflowService.openChangeRequest).toHaveBeenCalledWith(
       encodeURIComponent(branch),
       expect.objectContaining({ id: USER.id }),

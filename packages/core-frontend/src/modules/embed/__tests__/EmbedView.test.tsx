@@ -270,4 +270,22 @@ describe('the renderer', () => {
     // The markdown renderer's read view renders the heading as a heading.
     expect(await screen.findByRole('heading', { name: 'Thing' })).toBeTruthy();
   });
+
+  /**
+   * End to end for the link rule: the page the embed mounts must hand EVERY
+   * outgoing link to the host, never leave one as an anchor the sandbox will
+   * follow in place. An external link reaching the reader as
+   * `target="_blank"` is the shape that navigated the frame away on a real
+   * boot — `target` is ignored without `allow-popups`.
+   */
+  it('gives the app renderer the surface link policy, so no link navigates the frame', async () => {
+    api.loadEmbed.mockResolvedValue(
+      view({ content: '# Thing\n\n[docs](https://example.test/docs) and [other](Other.md)\n' }),
+    );
+    mount();
+    const external = await screen.findByRole('link', { name: 'docs' });
+    const internal = screen.getByRole('link', { name: 'other' });
+    expect(external.getAttribute('target')).toBeNull();
+    expect(internal.getAttribute('target')).toBeNull();
+  });
 });

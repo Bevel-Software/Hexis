@@ -115,6 +115,13 @@ interface KbMarkdownViewProps {
    * images render as plain `<img>` tags. See `KbImage` in the pipeline.
    */
   resolveImage?: KbImageResolver;
+  /**
+   * Which links `onOpenFile` gets — see `linkPolicy` in the pipeline. The
+   * app leaves external destinations to the browser; a surface inside
+   * somebody else's frame takes every one of them, because a plain anchor
+   * there navigates the frame rather than opening a tab.
+   */
+  linkPolicy?: 'browser' | 'surface';
   /** Optional container ref (used by the file viewer for deep-link scroll). */
   containerRef?: Ref<HTMLDivElement>;
   /**
@@ -139,7 +146,7 @@ interface KbMarkdownViewProps {
  * frontmatter panel, with navigation injected via `onOpenFile` so it carries no
  * dependency on workspace routing or context.
  */
-export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, resolveImage, containerRef, scroll = true, className }: KbMarkdownViewProps) {
+export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, resolveImage, linkPolicy, containerRef, scroll = true, className }: KbMarkdownViewProps) {
   const { data: frontmatter, body } = useMemo(() => parseFrontmatter(source), [source]);
   // CommonMark rejects unescaped spaces in link destinations, so a KB link like
   // `[Foo](Some File.md)` would render as plain text. Wrap space-bearing
@@ -147,7 +154,7 @@ export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, 
   // rule covers an image's `![alt](Some Shot.png)` tail.
   const normalizedBody = useMemo(() => escapeSpacesInLinkDestinations(body), [body]);
 
-  const components = useKbMarkdownComponents({ onOpenFile, onOpenNodeId, headingLink, resolveImage });
+  const components = useKbMarkdownComponents({ onOpenFile, onOpenNodeId, headingLink, resolveImage, linkPolicy });
 
   return (
     <div
