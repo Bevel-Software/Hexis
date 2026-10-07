@@ -43,8 +43,9 @@ Access to any path — reading it as much as writing it — is governed by
   shared. The same line in a file's FRONTMATTER only makes that one file
   visible — a plugin's `access.md` ships with `read: everyone` in its
   frontmatter so the plugin can be found and joined, and that admits nobody
-  to the plugin itself. A person's own space (`{{pluginsDir}}/personal-<id>/`)
-  denies `everyone` outright, so opening a parent folder never opens it.
+  to the plugin itself. A person's personal plugin
+  (`{{pluginsDir}}/personal-<id>/`) denies `everyone` outright, so opening a
+  parent folder never opens it.
   When a group and a role share a name, the bare name means the GROUP;
   `role/<Name>` (for example `deny role/Reviewer`) always means the role.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.

@@ -224,6 +224,57 @@ describe('what the guide tells an agent', () => {
     expect(placement).toMatch(/\bask\b/);
   });
 
+  /**
+   * The personal plugin, where the placement rule was being read backwards.
+   * Nothing under the plugins root is in the knowledge graph, and a personal
+   * plugin is readable only by its owner — so a note filed there is never found
+   * as knowledge again, by anyone. Agents asked to "save this for me" were
+   * taking "a personal space" as the place to put it.
+   */
+  it('says a personal plugin holds only skills and tools, and what to do when a user wants a note private', async () => {
+    const guide = await composeAgentGuide({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    const placement = section(guide, '## Where a new file goes').replace(/\s+/g, ' ');
+    expect(placement).toContain("A personal plugin holds only its owner's skills and tools");
+    expect(placement).toContain('Extensions/personal-<id>/');
+    // A skill's own bundled files are part of the skill and stay welcome, so the
+    // rule does not deter an agent from writing a COMPLETE skill.
+    expect(placement).toContain("each skill's own bundled files");
+    expect(placement).toContain("inside that skill's folder included");
+    expect(placement).toContain('never a note or any other document');
+    // A private request gets a question and the restrictable folder, in the
+    // deployment's own root name.
+    expect(placement).toContain('ask where under `Docs/` it should go');
+    expect(placement).toContain('restricted so only they can read it');
+    // And when the user insists, the agent declines, says why, and offers again.
+    expect(placement).toContain('If they insist on the personal plugin, decline');
+    expect(placement).toContain('sits outside the knowledge graph, where it is never found as knowledge again');
+    expect(placement).toContain('offer a place under `Docs/` once more');
+    // Nothing tells the agent to move or flag documents already filed there.
+    expect(placement).not.toMatch(/\bmove (them|it|any)\b/);
+  });
+
+  /**
+   * Every agent-facing mention of the folder calls it the "personal plugin" —
+   * the name the app itself shows. The three phrases the guide used instead are
+   * what an agent matched "keep this private" against, so they are pinned out
+   * of the WHOLE guide rather than out of one section.
+   */
+  it('calls the folder the "personal plugin" everywhere, and no longer a "space"', async () => {
+    for (const layout of [DEFAULT_KB_LAYOUT, { knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' }]) {
+      const guide = await composeAgentGuide(layout);
+      for (const retired of ['personal space', 'private space', 'own space']) {
+        expect(guide, retired).not.toContain(retired);
+      }
+      const plugins = 'pluginsDir' in layout ? layout.pluginsDir : DEFAULT_KB_LAYOUT.pluginsDir;
+      // The four places that introduce it: the `my_plugin` bullet, the sentence
+      // on moving a skill, the placement rule, and the `everyone` note.
+      expect(guide).toContain("`my_plugin` — your user's personal plugin, holding their own skills and\n  tools");
+      expect(guide).toContain('A skill\nmoves from a personal plugin into a shared plugin by moving its folder.');
+      expect(guide).toContain("A person's private skill goes in their personal plugin");
+      expect(guide).toContain(`A person's personal plugin\n  (\`${plugins}/personal-<id>/\`) denies \`everyone\` outright`);
+    }
+  });
+
   it('says that roles are pre-set and a "new role" is usually a group', async () => {
     const prose = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### Roles are pre-set').replace(/\s+/g, ' ');
     expect(prose).toContain('A role in `roles.yaml` is an app role');
