@@ -1,6 +1,7 @@
 import { useContext, useSyncExternalStore } from 'react';
 import { AuthContext } from '../../auth/state/auth.context';
 import { authFetch } from '../../../lib/api';
+import { resetAgentConnectionForTests } from './agent-connection';
 
 /**
  * The connect-your-agent onboarding, backed by ONE server-side field:
@@ -188,6 +189,9 @@ export function resetOnboardingForTests(): void {
   doneLocally.clear();
   welcomedLocally.clear();
   flagsLocally.clear();
+  // The remembered "your agent is connected" is session state of the same
+  // kind; a test that connects must not leave the next one connected.
+  resetAgentConnectionForTests();
   emit();
 }
 

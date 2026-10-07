@@ -121,6 +121,25 @@ export interface IAgentAuditService {
   revokeConnection(id: string, by: 'owner' | 'admin', ownerUserId?: string): Promise<void>;
 }
 
+/**
+ * The most recent use of any of one person's live agents: when, and what it
+ * calls itself (the agent's registered client name, or the key's label).
+ */
+export interface AgentUse {
+  at: Date;
+  client: string;
+}
+
+/**
+ * The onboarding's "is your agent connected yet?" — answered for ONE person,
+ * from the use stamps the auth paths already write, so it costs two indexed
+ * single-row reads and records nothing new.
+ */
+export interface IAgentConnectionStatus {
+  /** The newest use among the person's live agent connections and connection keys; null when none has been used. */
+  lastAgentUse(userId: string): Promise<AgentUse | null>;
+}
+
 export class AuditPrincipalNotFoundError extends Error {
   constructor() {
     super('No such agent or key');

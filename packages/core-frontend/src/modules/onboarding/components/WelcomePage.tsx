@@ -13,6 +13,7 @@ import { setSidebarCollapsed } from '../../layout/state/sidebar';
 import { ChatGptInstallLink, ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
 import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';
+import { useAgentConnection } from '../state/agent-connection';
 import { useWelcomeRouteState } from '../welcome-state';
 
 /**
@@ -205,6 +206,25 @@ export function WelcomePage() {
   const exitTo = returnTo ?? exit.path;
 
   /**
+   * The answer to "did it work?", without having to go and check.
+   *
+   * Asked every few seconds while this page is open (and visible), and never
+   * again once an agent has made its first call — which every client does on
+   * connecting. Connecting IS the onboarding, so it concludes it: the pill
+   * goes and the Get set up step ticks, without asking for Done as well.
+   * Once per visit — `markDone` drops its optimism again when the server
+   * refuses, and a refusal must not turn into a request on every render.
+   */
+  const agent = useAgentConnection({ poll: true });
+  const concluded = useRef(false);
+  const { showPill, markDone } = onboarding;
+  useEffect(() => {
+    if (!agent.connected || concluded.current) return;
+    concluded.current = true;
+    if (showPill) markDone();
+  }, [agent.connected, showPill, markDone]);
+
+  /**
    * Conclude the onboarding and leave. The toast says where the setup went,
    * because a page that disappears for good on one click owes you the way
    * back — and the pill is about to vanish with it.
@@ -317,7 +337,27 @@ export function WelcomePage() {
             linger on the next option's snippet. */}
         <SnippetBlock key={client.id} value={snippet} copyLabel="Copy" className="mt-3.5" />
 
-        <div className="mt-5 flex items-center gap-4">
+        {/* Quiet while it waits — a dot and a line, not a spinner demanding
+            attention while someone is busy in another window — and plain
+            about it when the agent arrives. Empty until the first answer is
+            in, so someone already connected never sees "Waiting" flash past.
+            The region exists from the start: a live region that appears
+            together with its text is often not announced at all. */}
+        <p role="status" aria-live="polite" className="mt-3.5 flex min-h-5 items-center gap-2 text-detail">
+          {agent.connected ? (
+            <>
+              <Check size={13} aria-hidden className="flex-none text-ok" />
+              <span className="text-ok">Connected. Your agent can now read and write this knowledge base.</span>
+            </>
+          ) : agent.settled ? (
+            <>
+              <span aria-hidden className="size-1.5 flex-none rounded-full bg-wait-dot motion-safe:animate-pulse" />
+              <span className="text-ink-faint">Waiting for your agent…</span>
+            </>
+          ) : null}
+        </p>
+
+        <div className="mt-4 flex items-center gap-4">
           <Button
             variant="primary"
             onClick={done}

@@ -55,6 +55,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createAuditRoutes } from '../modules/audit/audit.routes.js';
+import { createAgentConnectionRoutes } from '../modules/audit/agent-connection.routes.js';
 import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
 import { createSetupRoutes, isComplete } from '../modules/settings/setup.routes.js';
@@ -729,6 +730,9 @@ export async function createCoreServer(
     core.authMiddleware,
     createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
   );
+  // The onboarding's "is your agent connected yet?" — the caller's own
+  // agents only, read off the same connections and keys the Audit log lists.
+  app.use('/api', core.authMiddleware, createAgentConnectionRoutes(core.agentAuditService));
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists. The startup runner rides along for

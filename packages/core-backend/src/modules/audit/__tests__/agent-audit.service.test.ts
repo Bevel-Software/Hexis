@@ -355,6 +355,50 @@ describe('AgentAuditService.revokeConnection', () => {
   });
 });
 
+/**
+ * The onboarding's "is your agent connected yet?". The page polls it, so the
+ * contract worth pinning is what it reads (one person's LIVE, USED rows of
+ * each kind — never the event log) and how the two kinds are combined.
+ */
+describe('AgentAuditService.lastAgentUse', () => {
+  it('answers null when neither an agent connection nor a key has been used', async () => {
+    const { service, counts } = makeService([[] /* connections */, [] /* keys */]);
+    await expect(service.lastAgentUse(ALICE.id)).resolves.toBeNull();
+    expect(counts.select).toBe(2);
+  });
+
+  it("reads only the caller's live, used rows of each kind", async () => {
+    const { service, captured } = makeService([[], []]);
+    await service.lastAgentUse(ALICE.id);
+    const [connections, keys] = captured.where.map(render);
+    expect(connections!.sql).toContain('"agent_connections"."user_id" = $1');
+    expect(connections!.sql).toContain('"agent_connections"."revoked_at" is null');
+    expect(connections!.sql).toContain('"agent_connections"."last_used_at" is not null');
+    expect(connections!.params).toEqual([ALICE.id]);
+    expect(keys!.sql).toContain('"api_tokens"."user_id" = $1');
+    expect(keys!.sql).toContain('"api_tokens"."revoked_at" is null');
+    expect(keys!.sql).toContain('"api_tokens"."last_used_at" is not null');
+    expect(keys!.params).toEqual([ALICE.id]);
+  });
+
+  it("names an agent connection by its client, and an unnamed one as such", async () => {
+    const at = new Date(NOW - 60_000);
+    const named = makeService([[{ client: 'Claude', at }], []]);
+    await expect(named.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Claude' });
+    const unnamed = makeService([[{ client: null, at }], []]);
+    await expect(unnamed.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Unnamed agent' });
+  });
+
+  it('answers with the newer of the two when both kinds have been used', async () => {
+    const older = new Date(NOW - DAY);
+    const newer = new Date(NOW - 60_000);
+    const keyNewer = makeService([[{ client: 'Claude', at: older }], [{ client: 'Laptop', at: newer }]]);
+    await expect(keyNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Laptop' });
+    const agentNewer = makeService([[{ client: 'Claude', at: newer }], [{ client: 'Laptop', at: older }]]);
+    await expect(agentNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Claude' });
+  });
+});
+
 describe('retentionDaysFrom', () => {
   it('reads a positive whole number of days, and blank, zero or negative as forever', () => {
     expect(retentionDaysFrom('30')).toBe(30);
