@@ -1283,7 +1283,13 @@ export async function createCoreServices(
     loadActiveGroups,
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
+  // The branch every tool call runs on is resolved by the handler, before the
+  // tool: the default read live (a rename in the settings is the next call's
+  // default), the existence asked without cloning anything.
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess, {
+    defaultBranch: () => kb.defaultBranch,
+    isMissing: (branch) => workspaceService.isBranchMissing(branch),
+  });
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes

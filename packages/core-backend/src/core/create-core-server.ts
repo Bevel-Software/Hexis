@@ -86,6 +86,11 @@ type ExpressApp = ReturnType<typeof express>;
  * The context handed to {@link ServerExtensions.tools}: everything an overlay
  * needs to register its own tool defs + endpoint routes on the unified tool
  * surface, exactly like the core modules do.
+ *
+ * A tool that works on a branch declares it on its `toolDef` (`branch:
+ * 'required'` or, read-only tools only, `'defaults-to-default-branch'`), and
+ * `toolHandler` resolves the branch before the tool runs — see "The branch"
+ * in `modules/tool-helpers/index.ts`.
  */
 export interface ToolSurfaceCtx {
   registry: CoreServices['toolRegistry'];

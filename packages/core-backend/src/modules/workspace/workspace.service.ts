@@ -19,7 +19,7 @@ import {
   inspectDestination,
   renameNoReplace,
 } from '../../shared/rename-no-replace.js';
-import type { IGitRunner } from '../../shared/git.contract.js';
+import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
@@ -47,6 +47,7 @@ import { setAsideClone, setAsideRootFor, setAsideStamp } from './set-aside-clone
 import {
   cloneCredentialArgs,
   cloneCredentialConfigArgs,
+  credentialHelperValue,
   cloneTrackingConfigArgs,
   SAFE_IMPLICIT_FETCH_ARGS,
 } from '../kb-fs/clone-config.js';
@@ -426,6 +427,49 @@ export class WorkspaceService implements IWorkspaceService {
       // stays the 500 the operator reads.
       if (isAbsence(err)) return false;
       throw err;
+    }
+  }
+
+  /**
+   * Does `branch` certainly not exist? Asked by the tool handler before a tool
+   * runs, so a call naming a branch nobody ever pushed is answered 404 without
+   * a workspace being created for it.
+   *
+   * Never clones and never creates a directory. A branch this platform has a
+   * clone of, is cloning, or has ever heard of is NOT missing: one that origin
+   * has since deleted is left to the open, which answers its 410. Anything
+   * else is asked of origin with `ls-remote`, and only origin's "no such ref"
+   * makes it missing. A name that is malformed, or a remote that could not be
+   * asked, is `false` too: the open then answers for it, exactly as before.
+   */
+  async isBranchMissing(branch: string): Promise<boolean> {
+    try {
+      assertValidBranchName(branch);
+    } catch {
+      return false;
+    }
+    if (this.branchDirs.has(branch) || this.inFlightBootstraps.has(branch)) return false;
+    try {
+      if (await this.hasHeardOfBranch(branch)) return false;
+    } catch {
+      return false;
+    }
+    const helper = credentialHelperValue(this.gitRunner.credentials);
+    try {
+      await this.gitRunner.run(this.workspacesRoot, [
+        ...(helper ? ['-c', `credential.helper=${helper}`] : []),
+        'ls-remote',
+        '--exit-code',
+        '--heads',
+        '--end-of-options',
+        this.kbRepoUrl(),
+        `refs/heads/${branch}`,
+      ]);
+      return false;
+    } catch (err) {
+      // `--exit-code`: 2 is "the remote answered, and has no matching ref".
+      // Every other failure is a remote we could not ask.
+      return err instanceof GitRunError && err.exitCode === 2;
     }
   }
 

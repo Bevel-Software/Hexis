@@ -167,7 +167,12 @@ describe('workspace tools — a branch that cannot be opened', () => {
         } as ToolAuth;
         next();
       },
-      createToolHandlerFactory(resolve),
+      // Wired as the composition root wires it, so a missing branch is
+      // answered before the tool runs, as it is in production.
+      createToolHandlerFactory(resolve, undefined, {
+        defaultBranch: () => 'target-company-state',
+        isMissing: (branch) => workspaces!.isBranchMissing(branch),
+      }),
       new SpillStore(spillRoot),
       new DocExtractService(docCacheDir),
       allowAll,
@@ -271,6 +276,24 @@ describe('workspace tools — a branch that cannot be opened', () => {
         expect(await workspaceDirs()).toEqual([]);
       });
     }
+
+    /**
+     * The platform's file tools keep the refusal they had: `read_file` is
+     * still `required`, answered the same sentence by the tool handler that
+     * now answers it for every tool that takes a branch.
+     */
+    it('read_file refuses a call without a branch as before', async () => {
+      const base = await start();
+
+      const res = await callTool(base, 'read_file', { path: 'knowledge-base/a.md' });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        kind: 'branch-required',
+        error: '`branch` is required: pass the branch (draft) you are working on.',
+      });
+      expect(await workspaceDirs()).toEqual([]);
+    });
 
     it('never writes `undefined` or `null` as a branch name into the answer', async () => {
       const base = await start();
@@ -404,6 +427,25 @@ describe('workspace tools — a branch that cannot be opened', () => {
       branch: 'nobody/never-made-this',
       error: 'There is no branch named nobody/never-made-this.',
     });
+    expect(await workspaceDirs()).toEqual([]);
+  });
+
+  it('404s a branch that does not exist on every mounted tool that takes one, before the tool runs', async () => {
+    const base = await start({ source: 'internal', scope: 'write' });
+    const takesBranch = internalTools
+      .filter((t) => {
+        const body = (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body;
+        return (body?.required ?? []).includes('branch');
+      })
+      .map((t) => t.name)
+      // Resolves its own branch, and validates it itself first.
+      .filter((name) => name !== 'execute_command');
+
+    for (const tool of takesBranch) {
+      const res = await callTool(base, tool, { branch: 'nobody/never-made-this' });
+      expect(res.status, `${tool} must 404 a branch that does not exist`).toBe(404);
+      expect(res.body, tool).toMatchObject({ kind: 'branch-not-found', branch: 'nobody/never-made-this' });
+    }
     expect(await workspaceDirs()).toEqual([]);
   });
 
