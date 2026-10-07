@@ -8,6 +8,7 @@ import {
   createAgentUploadRoutes,
   isAgentUploadRawBodyPath,
 } from '../modules/workspace/agent-upload.routes.js';
+import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
@@ -462,7 +463,7 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore);
   // The guide on its own, beside the file tools that serve it by name.
   registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
   // The agent upload route, on the same router as the tool endpoints so it
@@ -472,6 +473,10 @@ export async function createCoreServer(
   // no workspace and writes into none; every access, platform-file and branch
   // rule is applied later by `apply_file_upload`.
   toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
+  // Its outgoing twin, mounted the same way and for the same reason: the
+  // one-time link is the whole credential an agent's `curl` carries. Every
+  // file behind it was judged when `request_file_download` issued it.
+  toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.

@@ -145,15 +145,15 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       // that take content as a JSON string names the route in one sentence of
       // its own; WHY a file should go that way, and how, is here.
       id: 'upload-route',
-      heading: 'Large, escape-heavy and binary content goes by upload',
+      heading: 'Large, escape-heavy and binary content: upload in, download out',
       body:
-        'write_file, write_files and edit_file take content as a JSON string you have to type out in full, so a long ' +
-        'file is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and ' +
-        'an image, a PDF or a zip cannot be sent at all. For any of those: call `request_file_upload`, POST the file — ' +
-        'or one zip holding many files — to the address it answers with any HTTP client ' +
-        '(`curl -X POST --data-binary @<file> "<uploadUrl>?filename=<name>"`), then `apply_file_upload` to land it on ' +
-        'a branch in one commit. The bytes never pass through the conversation, so nothing is cut or mangled on the ' +
-        'way. A person can also use Upload in the app.',
+        'write_file, write_files and edit_file take content as a JSON string you type out in full, so a long file ' +
+        'is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and an ' +
+        'image, a PDF or a zip cannot be sent at all. For those, call `request_file_upload`, POST the file (or one ' +
+        'zip of many) with any HTTP client (`curl -X POST --data-binary @<file> ' +
+        '"<uploadUrl>?filename=<name>"`), then `apply_file_upload` lands it in one commit. To take copies OUT, ' +
+        '`request_file_download` answers a one-time link per file and a zip per folder (`curl -o <name> ' +
+        '"<downloadUrl>"`). Either way the bytes never pass through the conversation.',
     },
     {
       id: 'dry-run-confirm',

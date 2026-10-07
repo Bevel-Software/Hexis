@@ -20,6 +20,13 @@ function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
 export interface ToolHandlerOptions {
   /** Mutating tool — refuse read-scoped callers up front (defense in depth). */
   write?: boolean;
+  /**
+   * Refuse read-scoped callers up front WITHOUT making the tool a write: the
+   * read-only-deployment gate below is not applied. For a tool a read-only
+   * credential may not use that is nonetheless a read — `request_file_download`
+   * takes bytes out, so a read-only deployment must still serve it.
+   */
+  writeScope?: boolean;
 }
 
 /**
@@ -38,7 +45,7 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
         res.status(401).json({ error: 'Unauthenticated' });
         return;
       }
-      if (opts.write && auth.scope === 'read') {
+      if ((opts.write || opts.writeScope) && auth.scope === 'read') {
         res.status(403).json({ error: 'This tool requires write access.' });
         return;
       }

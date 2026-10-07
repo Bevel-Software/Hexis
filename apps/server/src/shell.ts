@@ -10,6 +10,8 @@ export interface ShellGraph {
   pluginJoinRequestJobs?: ShutdownDeps['backgroundJobs'];
   /** The agent upload store, whose sweep stops with the graph. */
   agentUploadStore?: ShutdownDeps['agentUploadStore'];
+  /** The agent download store, whose sweep stops with the graph. */
+  agentDownloadStore?: ShutdownDeps['agentDownloadStore'];
   /** The startup phase's retry, when the boot left one asking. */
   startupRetry?: ShutdownDeps['startupRetry'];
 }
@@ -102,6 +104,7 @@ export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promi
       commitWorker: graph?.commitWorker ?? { stop: () => host?.stop() ?? Promise.resolve() },
       backgroundJobs: graph?.pluginJoinRequestJobs,
       agentUploadStore: graph?.agentUploadStore,
+      agentDownloadStore: graph?.agentDownloadStore,
       startupRetry: graph?.startupRetry,
       db: graph?.db ?? noPool,
     });

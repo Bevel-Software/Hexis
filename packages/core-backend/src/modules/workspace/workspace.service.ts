@@ -98,7 +98,7 @@ const UNZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500 MB across the whole arch
 // Folder-download cap. The whole zip is built in memory by adm-zip (no
 // streaming) so the cap also bounds peak heap usage for one download.
 // Reuses the unzip total as a single "fits in a workspace" budget.
-const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+export const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
 
 /**
  * Which of a folder's files a zip may pack: handed every file the walk found
@@ -1482,6 +1482,49 @@ export class WorkspaceService implements IWorkspaceService {
       zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
     }
     return zip.toBuffer();
+  }
+
+  /**
+   * What is at `wsPath`, for an agent download: nothing, one file, or a folder
+   * and every file the explorer shows under it (the folder download's walk —
+   * no `.git/`, no `.gitkeep`, no `.bevelignore`d path, no link). Files come
+   * back repository-relative, with their size on disk; nothing is read, and
+   * nothing is judged — the caller judges every path on its own.
+   *
+   * A path that reaches its target through a link, or names the git folder,
+   * is refused as the reads refuse it; a path with nothing at it is
+   * `missing`, which the caller answers exactly as a path it may not read.
+   */
+  async downloadCandidatesAt(
+    workspaceId: string,
+    wsPath: string,
+  ): Promise<{ kind: 'missing' } | { kind: 'file' | 'folder'; files: { path: string; bytes: number }[] }> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertNoGitInternalsSegment(relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
+    let stat;
+    try {
+      stat = await fs.lstat(absolutePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') {
+        return { kind: 'missing' };
+      }
+      throw err;
+    }
+    const inRepo = (relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1)).replace(/\/+$/, '');
+    if (stat.isFile()) return { kind: 'file', files: [{ path: inRepo, bytes: stat.size }] };
+    if (!stat.isDirectory()) return { kind: 'missing' };
+    const files: { path: string; bytes: number }[] = [];
+    await this.disk.walk(absolutePath, explorerWalk(), [
+      {
+        async onFile(dir, name) {
+          const size = (await fs.lstat(path.join(absolutePath, dir, name))).size;
+          files.push({ path: [inRepo, dir, name].filter(Boolean).join('/'), bytes: size });
+        },
+      },
+    ]);
+    return { kind: 'folder', files };
   }
 
   /**

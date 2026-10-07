@@ -5,7 +5,7 @@ import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
-import { ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
+import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
 import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
 import {
   notifyAgentRead,
@@ -27,6 +27,7 @@ import {
   assertRepoRootNameFreeArgs,
   isInsideRepo,
   normalizePathArgs,
+  normalizeWorkspacePath,
 } from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
@@ -73,6 +74,9 @@ import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
+import type { AgentDownloadStore } from './agent-download.store.js';
+import { buildDownload } from './agent-download.builder.js';
+import { ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
 import {
   isSymlinkZipEntry,
   isZipNoiseEntry,
@@ -83,6 +87,9 @@ import {
 } from './zip-entry-rules.js';
 
 const log = logger('workspace-tools');
+
+/** Types that run scripts wherever they are opened, sent by `request_file_download` as plain bytes. */
+const ACTIVE_CONTENT_TYPES = new Set(['image/svg+xml', 'text/html', 'application/xhtml+xml']);
 
 /** The caller's verdict per access verb on one path. */
 interface AccessVerbs {
@@ -875,6 +882,13 @@ export function registerWorkspaceTools(
    * tools read the disk and nothing else.
    */
   agentGuide?: AgentGuideReader,
+  /**
+   * The download-link store behind `request_file_download` — the way an agent
+   * takes files OUT without their content passing through the model. Optional
+   * for the harnesses about the file primitives; without it the tool is not
+   * mounted.
+   */
+  downloads?: AgentDownloadStore,
 ): void {
   const { kbDirName } = kb;
   /**
@@ -1481,6 +1495,12 @@ export function registerWorkspaceTools(
      */
     gated?: boolean;
     /**
+     * Refuse a read-only credential, as a write tool is refused, WITHOUT being
+     * a write: the read-only-deployment gate does not apply. For a read a
+     * read-only key may still not make (`request_file_download`).
+     */
+    writeScope?: boolean;
+    /**
      * This tool resolves `branch` ITSELF and must not be pre-checked here.
      * Only `execute_command` sets it: for an internal session that leaves the
      * argument off, it falls back to the caller's own focused branch (from its
@@ -1608,7 +1628,7 @@ export function registerWorkspaceTools(
             );
           }
         },
-        { write: spec.write },
+        { write: spec.write, writeScope: spec.writeScope },
       ),
     );
   };
@@ -3537,6 +3557,165 @@ export function registerWorkspaceTools(
       proposable: true,
       handler: async (a, ctx: ToolContext) => applyFileUpload(a, ctx, uploads),
     });
+  }
+
+  // ── downloads (bytes that never pass through the model, the other way) ──
+  // The twin of the upload pair: `read_file` answers content INTO the
+  // conversation, so an agent that needs exact bytes on its own disk had no
+  // way to get them. `request_file_download` judges every file on its own,
+  // captures the ones that pass, and answers a one-time link per file (and a
+  // zip per requested folder) that any HTTP client can fetch.
+
+  /** The type a file's link answers with: the reader's, as `file_stat` reports it — but never active content. */
+  const downloadContentType = (p: string, bytes: Buffer): string => {
+    const reader = readers.readerFor(p);
+    const mime = fileTypeOf(reader, p, needsContent(reader) ? bytes : undefined).mime;
+    // SVG and HTML run scripts wherever they are opened — saved to disk and
+    // re-opened under `file://`, too — so they go out as bytes, as the app's
+    // own Download button sends them.
+    return ACTIVE_CONTENT_TYPES.has(mime) ? 'application/octet-stream' : mime;
+  };
+
+  if (downloads) {
+    mount({
+      name: 'request_file_download',
+      gated: true,
+      description:
+        'Copy knowledge-base files onto your own disk without their content passing through the conversation — the ' +
+        'way out, as `request_file_upload` is the way in. Give `branch` and `paths` (files or folders). Every file, ' +
+        'each one inside a folder too, is included only if you may read AND download that file. Returns ' +
+        '`{ expiresAt, expiresInSeconds, files: [{ path, bytes, sha256, downloadUrl }], folders: [{ path, bytes, ' +
+        'downloadUrl, files }], refused: [{ path, reason }] }`: a link per file, with its own content type, and per ' +
+        `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
+        'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
+        '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
+        'Refused: `not found` (missing or unreadable), `download permission required`; no link when nothing is ' +
+        'included. At most 500 MB per request.',
+      inputs: {
+        type: 'object',
+        properties: {
+          branch: BRANCH_INPUT,
+          paths: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'string' },
+            description: `Files and folders to download, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\`.`,
+          },
+          sessionId: SESSION_ID_INPUT,
+        },
+        required: ['branch', 'paths'],
+        additionalProperties: false,
+      },
+      outputs: {
+        type: 'object',
+        properties: {
+          expiresAt: str('ISO-8601 instant after which every link of this answer is gone; null when no link was issued.'),
+          expiresInSeconds: int('Seconds until `expiresAt`; 0 when no link was issued.'),
+          files: {
+            type: 'array',
+            description: 'One entry per included file, each named once however many times it was asked for.',
+            items: {
+              type: 'object',
+              properties: {
+                path: str('The workspace path.'),
+                bytes: int('Size in bytes.'),
+                sha256: str('SHA-256 of the bytes the link serves, hex.'),
+                downloadUrl: str('One-time link to the file itself.'),
+              },
+              required: ['path', 'bytes', 'sha256', 'downloadUrl'],
+            },
+          },
+          folders: {
+            type: 'array',
+            description: 'One entry per requested folder that kept at least one file.',
+            items: {
+              type: 'object',
+              properties: {
+                path: str('The folder, as requested.'),
+                bytes: int('Uncompressed total of the files in its zip.'),
+                downloadUrl: str('One-time link to the zip.'),
+                files: { type: 'array', items: { type: 'string' }, description: 'The workspace paths the zip holds.' },
+              },
+              required: ['path', 'bytes', 'downloadUrl', 'files'],
+            },
+          },
+          refused: {
+            type: 'array',
+            description: 'Every path left out, with why.',
+            items: {
+              type: 'object',
+              properties: { path: str('The path left out.'), reason: str('Why: `not found`, `download permission required`, or the deployment\'s own words.') },
+              required: ['path', 'reason'],
+            },
+          },
+        },
+        required: ['expiresAt', 'expiresInSeconds', 'files', 'folders', 'refused'],
+      },
+      // A download is a READ: a read-only deployment still serves it. A
+      // read-only CREDENTIAL may not take bytes out, though.
+      write: false,
+      writeScope: true,
+      handler: async (a, ctx: ToolContext) => requestFileDownload(a, ctx, downloads),
+    });
+  }
+
+  /** `request_file_download`'s handler: judge, capture, and issue the links. */
+  async function requestFileDownload(
+    a: Record<string, unknown>,
+    ctx: ToolContext,
+    store: AgentDownloadStore,
+  ): Promise<unknown> {
+    const branch = a.branch as string;
+    const raw = a.paths;
+    if (!Array.isArray(raw) || raw.length === 0 || raw.some((p) => typeof p !== 'string' || p.trim() === '')) {
+      throw new ToolError('Name at least one path to download in `paths`: an array of file and folder paths.', 400);
+    }
+    // At the cap, say so before any work is spent on an answer that would be refused.
+    store.assertCanIssue(ctx.user);
+    // Resolves (clones, if need be) the branch's workspace, as a read does —
+    // so an unknown branch is the call's refusal, not every path's.
+    await ctx.getFilesystem(branch);
+    const workspaceId = workspaceIdForBranch(branch);
+    const refusedSpelling: { path: string; reason: string }[] = [];
+    const requested: string[] = [];
+    for (const p of raw as string[]) {
+      try {
+        requested.push(normalizeWorkspacePath(p.trim(), kbDirName));
+      } catch (err) {
+        if (!hasHttpStatus(err)) throw err;
+        refusedSpelling.push({ path: p, reason: err.message });
+      }
+    }
+    const built = await store.withBuildTurn(ctx.user.id, () =>
+      buildDownload(requested, {
+        kbDirName,
+        maxBytes: ZIP_DOWNLOAD_MAX_BYTES,
+        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p),
+        canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
+        canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
+        notifyRead: (p) => notifyAgentRead(agentAccessGate, ctx, branch, p),
+        readFile: (p) => ctx.workspaceService.readFileBinary(workspaceId, p),
+        contentTypeOf: downloadContentType,
+      }),
+    );
+    const refused = [...refusedSpelling, ...built.refused];
+    if (built.artifacts.length === 0) {
+      return { expiresAt: null, expiresInSeconds: 0, files: [], folders: [], refused };
+    }
+    const issued = await store.issue(ctx.user, built.artifacts);
+    const urls = issued.downloadUrls;
+    return {
+      expiresAt: issued.expiresAt,
+      expiresInSeconds: issued.expiresInSeconds,
+      files: built.files.map((f, i) => ({ ...f, downloadUrl: urls[i]! })),
+      folders: built.folders.map((f, i) => ({
+        path: f.path,
+        bytes: f.bytes,
+        downloadUrl: urls[built.files.length + i]!,
+        files: f.files,
+      })),
+      refused,
+    };
   }
 
   // ── shell (internal-only) ───────────────────────────────────────────────

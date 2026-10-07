@@ -55,6 +55,8 @@ function parseDomainList(raw: string): string[] {
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
+import { AgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
@@ -132,6 +134,7 @@ import {
 } from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
+  createTokenVerifier,
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
@@ -229,6 +232,14 @@ export interface CoreServices {
   spillStore: SpillStore;
   /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
   agentUploadStore: AgentUploadStore;
+  /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
+  agentDownloadStore: AgentDownloadStore;
+  /**
+   * The user a download fetch identifies itself as by its bearer credential,
+   * or null when it carries none that verifies — so the download route can
+   * refuse a link presented by someone it was not issued to.
+   */
+  agentDownloadFetcher: (req: Request) => Promise<string | null>;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -684,6 +695,17 @@ export async function createCoreServices(
     root: config.agentUploadsRoot,
     publicBaseUrl: config.publicBackendUrl,
     tokenPrefix: config.uploadTokenPrefix,
+  });
+  // The way OUT: bytes `request_file_download` captured, held beside the
+  // upload root — outside every workspace, for the same reason — until their
+  // one-time link is fetched or expires.
+  const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot);
+  const agentDownloadStore = new AgentDownloadStore({
+    root: agentDownloadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    // `<tenant>-down_`: recognisable by shape beside the upload token.
+    tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
   });
   // Office-document/PDF text extraction for `read_file`/`grep`, cached by
   // content hash beside the workspaces root (see `DocExtractionCache`).
@@ -1285,6 +1307,13 @@ export async function createCoreServices(
   const writeAccess = ports.writeAccess ?? alwaysWritable;
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
+  const agentDownloadFetcher = async (req: Request): Promise<string | null> => {
+    const header = req.headers.authorization;
+    if (!header || !header.toLowerCase().startsWith('bearer ')) return null;
+    const result = await verifyToolToken(header.slice(header.indexOf(' ') + 1).trim());
+    return result.ok ? result.auth.userId : null;
+  };
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
@@ -1452,6 +1481,8 @@ export async function createCoreServices(
     kbDirName,
     spillStore,
     agentUploadStore,
+    agentDownloadStore,
+    agentDownloadFetcher,
     docExtractService,
     accessControl,
     creatorAccess,

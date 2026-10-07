@@ -103,6 +103,10 @@ async function hexisTools(): Promise<UtcpTool[]> {
     // every real composition supplies one: without it they would be the two
     // descriptions this suite never measured.
     unused(),
+    // The guide reader, not needed to build defs; then the download store,
+    // mounted on the same terms as the upload one.
+    undefined,
+    unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
   registerPluginsTools(registry, kb);
