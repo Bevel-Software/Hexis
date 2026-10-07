@@ -44,8 +44,7 @@ export const POST_LOGIN_REDIRECT_KEY = 'bevel_post_login_redirect';
  * trying to open — password login keeps it (no navigation happens), but SSO
  * comes back to a fixed `/auth/<key>/callback` and the deep link someone
  * clicked in Slack would die in the round-trip. Stash it here; the far side
- * (`RootLanding`) puts them back — after the first-visit welcome, if this is
- * the one sign-in that shows it.
+ * (`RootLanding`) puts them back.
  */
 export function startSsoLogin(provider: SsoProvider): void {
   const { pathname, search, hash } = window.location;

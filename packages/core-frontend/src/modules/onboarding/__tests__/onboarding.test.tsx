@@ -22,9 +22,9 @@ import type { AgentConnection } from '../services/agent-connection.api';
 /**
  * The onboarding contract, end to end on the client:
  *
- *  - `/` redirects to the welcome page ONCE, on an account the server says is
- *    not onboarded — and never hijacks anything after that first greeting.
- *  - the pill outlives the redirect: it stays until × or Done, exactly two.
+ *  - `/` never redirects to the welcome page; it lands on Knowledge (or a
+ *    carried deep link), even for an account that is not onboarded.
+ *  - the pill is the reminder: it stays until × or Done, exactly two.
  *  - Done concludes (server write + navigation); the skip link and the copy
  *    button conclude NOTHING — leaving and copying are not promises.
  */
@@ -83,7 +83,10 @@ function LocationProbe() {
   );
 }
 
-/** The welcome page as the first-sign-in redirect leaves it: greeted. */
+/**
+ * The welcome page arrived at as a greeting. Nothing navigates like this
+ * since `/` stopped redirecting here, but the page still honours the state.
+ */
 const greeted = { pathname: WELCOME_PATH, state: { greeting: true } };
 
 /**
@@ -151,17 +154,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('RootLanding: the one-time greeting', () => {
-  it('sends a brand-new account to the welcome page', () => {
+/**
+ * `/` never sends anyone to the welcome page — not even a brand-new account.
+ * Choosing where the knowledge lives is the only step before the app;
+ * connecting an agent waits in the pill and the Get set up list.
+ */
+describe('RootLanding', () => {
+  it('sends a brand-new account straight to Knowledge, not the welcome page', () => {
     mount(landingRoutes);
-    expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
-  });
-
-  // The flag the page reads to know this arrival is a ceremony rather than a
-  // visit — the sidebar collapse hangs off it, and only this navigation sets it.
-  it('marks the automatic redirect as a greeting', () => {
-    mount(landingRoutes);
-    expect(screen.getByTestId('greeting')).toHaveTextContent('true');
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+    expect(screen.getByTestId('greeting')).toHaveTextContent('false');
   });
 
   it('sends everyone the server marked done straight to Knowledge', () => {
@@ -169,10 +171,13 @@ describe('RootLanding: the one-time greeting', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
-  // Optional-field semantics: an ABSENT flag (old fixture, cached session)
-  // must never resurrect the welcome flow. Only an explicit false onboards.
-  it('treats a missing flag as done, not as new', () => {
-    mount(landingRoutes, authValue());
+  it('lands signed out (or providerless) on Knowledge too', () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        {landingRoutes}
+        <LocationProbe />
+      </MemoryRouter>,
+    );
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
@@ -191,13 +196,11 @@ describe('RootLanding: the one-time greeting', () => {
     expect(sessionStorage.getItem(POST_LOGIN_REDIRECT_KEY)).toBeNull();
   });
 
-  it('greets a brand-new account first, handing the link to the welcome page', () => {
+  it('sends a brand-new account to the stashed deep link as well', () => {
     const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
     sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
     mount(landingRoutes);
-    expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
-    expect(screen.getByTestId('greeting')).toHaveTextContent('true');
-    expect(screen.getByTestId('returnTo')).toHaveTextContent(DEEP);
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
   });
 
   it('discards a stash that is not an in-app path — never an off-site redirect', () => {
@@ -206,20 +209,23 @@ describe('RootLanding: the one-time greeting', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
-  it('greets ONCE: after the welcome page has been seen, / goes to Knowledge', async () => {
+  /**
+   * The SSO callback scrubs its URL behind the router's back, so the router
+   * still matches `/auth/<key>/callback` — which the shell routes here. The
+   * carried link must survive that path just the same.
+   */
+  it('lands an /auth/* callback on the stashed deep link', () => {
+    const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
     mount(
       <Routes>
-        <Route path="/" element={<RootLanding />} />
-        <Route path={WELCOME_PATH} element={<WelcomePage />} />
-        <Route path="/workspace" element={<div>knowledge</div>} />
+        <Route path="/auth/*" element={<RootLanding />} />
+        <Route path="*" element={<div>elsewhere</div>} />
       </Routes>,
+      newUser(),
+      '/auth/microsoft/callback',
     );
-    // Landed on the real page, which marks `welcomed` on mount.
-    await screen.findByRole('heading', { name: /Welcome, Juan/ });
-    cleanup();
-    // A fresh visit to `/` — same account, same browser.
-    mount(landingRoutes);
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
   });
 });
 

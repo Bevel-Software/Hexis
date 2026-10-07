@@ -9,9 +9,11 @@ import { WelcomePage } from './WelcomePage';
 /**
  * Chooses the first welcome without changing what the permanent reminder does.
  *
- * Only RootLanding sends `greeting: true`. A later visit from the Connect your
- * agent reminder has no greeting state and must always reach its existing
- * instructions, even when the admin has not created anything yet.
+ * Only an arrival carrying `greeting: true` gets the creator welcome, and no
+ * navigation sends that today (`RootLanding` lands everyone on Knowledge). A
+ * visit from the Connect your agent reminder has no greeting state and must
+ * always reach its existing instructions, even when the admin has not created
+ * anything yet.
  */
 export function WelcomeRoute() {
   const { isAdmin, isAdminLoading = false } = useAdmin();

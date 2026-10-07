@@ -17,31 +17,19 @@ import { resetAgentConnectionForTests } from './agent-connection';
  * absent field must never resurrect the welcome flow for an account that
  * finished it.
  *
- * Two small client-side pieces around the server truth:
+ * One client-side piece around the server truth: `doneLocally`, an
+ * optimistic session override. The auth context's user object is a snapshot
+ * from sign-in; after POSTing we don't refetch it, we just remember the
+ * answer. A failed POST logs and DROPS the override at once, so the pill
+ * comes back immediately rather than reappearing at the next sign-in with no
+ * account of why it left.
  *
- *  - `doneLocally` — an optimistic session override. The auth context's user
- *    object is a snapshot from sign-in; after POSTing we don't refetch it,
- *    we just remember the answer. A failed POST logs and DROPS the override
- *    at once, so the pill comes back immediately rather than reappearing at
- *    the next sign-in with no account of why it left.
- *  - `welcomed` (localStorage, per account) — "the welcome page was shown
- *    once". The auto-redirect there happens on the FIRST sign-in only;
- *    the pill, not the router, is the standing reminder. Per-browser by
- *    nature, which is fine: being greeted once per new machine is a welcome,
- *    not a bug.
+ * Nothing here sends anyone to the welcome page. `/` lands on Knowledge for
+ * everyone (see `RootLanding`); the pill and the Get set up list are the
+ * reminder, and the page is theirs to open.
  */
-
-const WELCOMED_PREFIX = 'bevel.onboarding.welcomed.';
-
-/**
- * The storage key holding "this account has seen the welcome page", keyed by
- * lower-cased email so `Juan@…` and `juan@…` are one person rather than two
- * greetings.
- */
-const welcomedKey = (email: string) => `${WELCOMED_PREFIX}${email.toLowerCase()}`;
 
 const doneLocally = new Set<string>();
-const welcomedLocally = new Set<string>();
 /** Full storage keys set this session — see {@link setFlag}. */
 const flagsLocally = new Set<string>();
 const listeners = new Set<() => void>();
@@ -60,28 +48,18 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** Storage is best-effort: private-mode Safari throws, and a forgotten
- *  "welcomed" costs one extra greeting, not a failure. */
-function hasBeenWelcomed(email: string): boolean {
-  if (welcomedLocally.has(email)) return true;
-  try {
-    return window.localStorage.getItem(welcomedKey(email)) === '1';
-  } catch {
-    return false;
-  }
-}
-
 /**
  * The "Get set up" column's two per-account notes: the starter guide has been
- * opened, and the column was dismissed. Both are the same kind of thing as
- * `welcomed` — per-browser conveniences, not server truth — so they live in
- * the same store and wake the same listeners, but through one tiny flag pair
- * rather than a third hand-written copy of the read/write/try-catch dance.
+ * opened, and the column was dismissed. Both are per-browser conveniences,
+ * not server truth, so they live beside the session override and wake the
+ * same listeners, through one tiny flag pair rather than a hand-written copy
+ * of the read/write/try-catch dance per note.
  */
 const READ_GUIDE_PREFIX = 'bevel.onboarding.readGuide.';
 const SETUP_DISMISSED_PREFIX = 'bevel.onboarding.setupDismissed.';
 
-/** Storage is best-effort here too: a lost flag costs one extra row on screen. */
+/** Storage is best-effort: private-mode Safari throws, and a lost flag costs
+ *  one extra row on screen, not a failure. */
 function hasFlag(key: string): boolean {
   if (flagsLocally.has(key)) return true;
   try {
@@ -94,7 +72,8 @@ function hasFlag(key: string): boolean {
 /**
  * Raise a one-way flag. Remembered in memory as well as storage so a browser
  * that refuses the write still honours it for the rest of the session.
- * Idempotent, like {@link markWelcomed}.
+ * Idempotent: a raised flag returns without touching storage or waking
+ * listeners.
  */
 function setFlag(key: string): void {
   if (hasFlag(key)) return;
@@ -103,22 +82,6 @@ function setFlag(key: string): void {
     window.localStorage.setItem(key, '1');
   } catch {
     /* held in memory for this session */
-  }
-  emit();
-}
-
-/**
- * Note that this account has now been greeted, which is what makes the
- * welcome redirect one-time. Idempotent: already-welcomed returns without
- * touching storage or waking listeners.
- */
-export function markWelcomed(email: string): void {
-  if (hasBeenWelcomed(email)) return;
-  welcomedLocally.add(email);
-  try {
-    window.localStorage.setItem(welcomedKey(email), '1');
-  } catch {
-    /* one extra greeting next boot */
   }
   emit();
 }
@@ -162,21 +125,18 @@ export function markOnboardingDone(userId: string, email: string): void {
 }
 
 /**
- * Test seam: forget the session overrides and the welcomed notes.
+ * Test seam: forget the session overrides and the per-browser notes.
  *
- * Scans storage by PREFIX rather than walking `welcomedLocally`, because that
- * set is not a record of what is in storage. `markWelcomed` returns early when
- * the key is already there, so an email welcomed by an earlier test file — or
- * by an earlier run against the same jsdom `localStorage` — never enters the
- * set, and its key would survive a reset that only knew about the set. The
- * next "greets ONCE" assertion would then read "already welcomed" and fail on
- * a state no test put there.
+ * Scans storage by PREFIX rather than walking `flagsLocally`, because that
+ * set is not a record of what is in storage. `setFlag` returns early when the
+ * key is already there, so a flag raised by an earlier test file — or by an
+ * earlier run against the same jsdom `localStorage` — never enters the set,
+ * and its key would survive a reset that only knew about the set.
  */
 export function resetOnboardingForTests(): void {
   try {
     for (const key of Object.keys(window.localStorage)) {
       if (
-        key.startsWith(WELCOMED_PREFIX) ||
         key.startsWith(READ_GUIDE_PREFIX) ||
         key.startsWith(SETUP_DISMISSED_PREFIX)
       ) {
@@ -187,7 +147,6 @@ export function resetOnboardingForTests(): void {
     /* ignore */
   }
   doneLocally.clear();
-  welcomedLocally.clear();
   flagsLocally.clear();
   // The remembered "your agent is connected" is session state of the same
   // kind; a test that connects must not leave the next one connected.
@@ -198,20 +157,15 @@ export function resetOnboardingForTests(): void {
 export interface OnboardingController {
   /** The reminder is alive: the server says onboarding is not done. */
   showPill: boolean;
-  /** First sign-in, still unanswered: drives the ONE-TIME redirect to the welcome page. */
-  shouldWelcome: boolean;
-  markWelcomed(): void;
   markDone(): void;
 }
 
 /** The subscription's version counter: every override and note changes it. */
-const snapshot = () => `${doneLocally.size}:${welcomedLocally.size}:${flagsLocally.size}`;
-const serverSnapshot = () => '0:0:0';
+const snapshot = () => `${doneLocally.size}:${flagsLocally.size}`;
+const serverSnapshot = () => '0:0';
 
 const SIGNED_OUT: OnboardingController = {
   showPill: false,
-  shouldWelcome: false,
-  markWelcomed: () => {},
   markDone: () => {},
 };
 
@@ -225,16 +179,13 @@ const SIGNED_OUT: OnboardingController = {
 export function useOnboarding(): OnboardingController {
   const auth = useContext(AuthContext);
   const user = auth?.user ?? null;
-  // The subscription's version counter: overrides and welcomed notes change
-  // under it. The snapshot is a cheap string so identity comparison is exact.
+  // The subscription's version counter: overrides and notes change under it. The snapshot is a cheap string so identity comparison is exact.
   useSyncExternalStore(subscribe, snapshot, serverSnapshot);
   if (!user) return SIGNED_OUT;
   const email = user.email;
   const done = user.onboardingDone !== false || doneLocally.has(email);
   return {
     showPill: !done,
-    shouldWelcome: !done && !hasBeenWelcomed(email),
-    markWelcomed: () => markWelcomed(email),
     markDone: () => markOnboardingDone(user.id, email),
   };
 }
@@ -257,8 +208,9 @@ const NO_CHECKLIST: SetupChecklistState = {
 
 /**
  * The client-side half of the "Get set up" column: the two ticks the server
- * has no field for. Keyed by lower-cased email, like `welcomed`, and tolerant
- * of a missing auth provider for the same reason {@link useOnboarding} is.
+ * has no field for. Keyed by lower-cased email, so `Juan@…` and `juan@…` are
+ * one person, and tolerant of a missing auth provider for the same reason
+ * {@link useOnboarding} is.
  */
 export function useSetupChecklist(): SetupChecklistState {
   const auth = useContext(AuthContext);

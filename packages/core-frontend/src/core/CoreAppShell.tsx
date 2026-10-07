@@ -449,24 +449,21 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         <Route path="/connection-keys" element={<Navigate to="/audit-log" replace />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
       </Route>
-      {/* `/` consults the onboarding: a brand-new account's FIRST visit lands
-          on the welcome page, everyone else (and every later visit) goes to
-          Knowledge as always.
+      {/* `/` lands on Knowledge — or on the deep link an SSO sign-in carried
+          through its round-trip (see `RootLanding`).
 
           `/auth/*` lands the same way, and that is not decoration. The SSO
           callback scrubs its own URL with a RAW `history.replaceState`
           (`microsoft-oauth.ts`), which BrowserRouter never observes — react
           -router only re-reads location on its own navigations and on
           popstate. So after a Microsoft sign-in the address bar says `/`
-          while the router still matches `/auth/microsoft/callback`. Before
-          this feature that was invisible, because `/` and `*` both redirected
-          to Knowledge; the moment they differ, the first SSO sign-in — the
-          exact case onboarding exists for — would fall through the catch-all
-          and never be greeted. Routing the callback path here fixes it
-          without moving the token-scrub out of the service that owns it.
+          while the router still matches `/auth/microsoft/callback`, and the
+          catch-all would drop the stashed deep link on the floor. Routing the
+          callback path here keeps it without moving the token-scrub out of
+          the service that owns it.
 
-          The `*` catch-all stays a plain redirect: a mistyped URL is not a
-          reason to be onboarded.
+          The `*` catch-all stays a plain redirect: a mistyped URL carries no
+          intention to honour.
 
           OUTSIDE the settings layout, like `/connect` above: these are landing
           and redirect targets, not settings destinations. */}

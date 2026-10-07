@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Sparkles, Users } from 'lucide-react';
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
@@ -6,7 +6,6 @@ import { NewPluginDialog } from '../../library/components/NewPluginDialog';
 import { NewSkillPanel } from '../../library/components/NewSkillPanel';
 import { useLibrary } from '../../library/state/library-data';
 import { displayFirstName } from '../../library/utils/personal-plugin';
-import { useOnboarding } from '../state/onboarding';
 
 /**
  * The first useful screen in an empty deployment.
@@ -18,7 +17,6 @@ import { useOnboarding } from '../state/onboarding';
  */
 export function CreatorWelcomePage() {
   const { user } = useAuth();
-  const onboarding = useOnboarding();
   const data = useLibrary();
   const [newPluginOpen, setNewPluginOpen] = useState(false);
   const [newSkillOpen, setNewSkillOpen] = useState(false);
@@ -30,12 +28,6 @@ export function CreatorWelcomePage() {
    * you closed the door on".
    */
   const [newSkillBusy, setNewSkillBusy] = useState(false);
-
-  const { markWelcomed } = onboarding;
-  useEffect(() => {
-    markWelcomed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one idempotent welcome record per mount
-  }, []);
 
   const pluginNames = useMemo(
     () => [

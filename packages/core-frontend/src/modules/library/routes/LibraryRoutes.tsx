@@ -46,8 +46,8 @@ export function LibraryRoutes() {
 
             {/* The connect-your-agent welcome — inside the layout, so the
                 sidebar (and the pill's selected state) is on screen with it.
-                Auto-reached once, on first sign-in (see `RootLanding`);
-                reachable forever through the pill and by URL. */}
+                Never reached automatically (see `RootLanding`): opened from
+                the pill, the Get set up list, the profile menu and by URL. */}
             <Route path="welcome" element={<WelcomeRoute />} />
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />

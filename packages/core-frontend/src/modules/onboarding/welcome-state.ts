@@ -12,14 +12,16 @@ import { useLocation } from 'react-router-dom';
  */
 export interface WelcomeRouteState {
   /**
-   * How you got here. The automatic redirect at first sign-in is the ONE
-   * navigation that sets it (see `RootLanding`); the sidebar pill and a typed
-   * URL do not. Everything ceremonial on the welcome hangs off this flag.
+   * How you got here. Everything ceremonial on the welcome hangs off this
+   * flag. No navigation sets it today: `/` used to redirect a brand-new
+   * account here with it, and no longer redirects anyone (see `RootLanding`).
+   * The sidebar pill, the Get set up list and a typed URL are visits.
    */
   greeting: boolean;
   /**
    * Where the person was actually GOING when the sign-in interrupted them — a
-   * deep link that survived the SSO round-trip (see `RootLanding`).
+   * deep link that survived the SSO round-trip. `RootLanding` now sends that
+   * link straight to itself, so this too is only ever set by a greeting.
    *
    * Null unless this is the greeting arrival, and that condition is the rule
    * worth centralising: a `returnTo` on a later, non-greeting visit is not a

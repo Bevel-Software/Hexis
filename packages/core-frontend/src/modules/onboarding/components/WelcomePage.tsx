@@ -17,7 +17,7 @@ import { useAgentConnection } from '../state/agent-connection';
 import { useWelcomeRouteState } from '../welcome-state';
 
 /**
- * The welcome page — the first thing a new account sees, once.
+ * The welcome page: how to connect your agent.
  *
  * Three beats and nothing else (prototype `renderWelcome`): your name (so the
  * page is addressed, not broadcast), one sentence of what this place is, and
@@ -25,14 +25,14 @@ import { useWelcomeRouteState } from '../welcome-state';
  * the greeting, then everything else — and the client picker re-renders in
  * place, so neither ever replays as blinking.
  *
- * Mounting marks `welcomed`: the auto-redirect here happens on the FIRST
- * sign-in only. The page itself stays reachable forever — the sidebar pill
- * and a typed URL both land here — but the app never drags anyone back.
+ * Nobody is sent here: `/` lands on Knowledge (see `RootLanding`). The page
+ * is reached from the sidebar pill, the Get set up list, the profile menu and
+ * by URL, and stays reachable after the onboarding is done.
  *
  * "Done" concludes; it does not copy. A button whose word and act disagree
  * teaches people not to read buttons — the copy lives ON the snippet block,
  * and "Go to your skills →" is the honest exit for someone who leaves
- * without connecting (it ends the redirect, never the pill).
+ * without connecting (it concludes nothing; the pill stays).
  */
 export function WelcomePage() {
   const { user } = useAuth();
@@ -40,13 +40,6 @@ export function WelcomePage() {
   const toast = useLibraryToast();
   const navigate = useNavigate();
   const [clientId, setClientId] = useState<AgentClient['id']>('claude');
-
-  // Once, on arrival — this is what makes the welcome redirect one-time.
-  const { markWelcomed } = onboarding;
-  useEffect(() => {
-    markWelcomed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity changes per render (bound closure); the act is idempotent per account
-  }, []);
 
   /**
    * How you got here, and where you were going — read through the shared
