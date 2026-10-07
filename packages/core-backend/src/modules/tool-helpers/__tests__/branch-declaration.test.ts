@@ -130,14 +130,24 @@ describe('a tool declares how it treats its branch', () => {
     // Wired exactly as the composition root wires it.
     const toolHandler = createToolHandlerFactory(resolve, undefined, {
       defaultBranch: () => (defaultBranchUnset ? '' : kb.defaultBranch),
-      isMissing: (branch) => workspaces.isBranchMissing(branch),
+      // `storage-fault` stands for a workspaces root the probe cannot read.
+      isMissing: (branch) =>
+        branch === 'storage-fault'
+          ? Promise.reject(
+              Object.assign(new Error(`EACCES: permission denied, access '${workspacesRoot}/x'`), { code: 'EACCES' }),
+            )
+          : workspaces.isBranchMissing(branch),
     });
 
     const router = express.Router();
-    const toolAuth = (req: express.Request, _res: express.Response, next: express.NextFunction): void => {
-      req.toolAuth = { source: 'external', userId: 'u', scope: 'write' } as ToolAuth;
-      next();
-    };
+    // Read scope, as a read-only tool's caller has; only a route mounted as
+    // writing is called with write scope.
+    const toolAuth =
+      (scope: 'read' | 'write') =>
+      (req: express.Request, _res: express.Response, next: express.NextFunction): void => {
+        req.toolAuth = { source: 'external', userId: 'u', scope } as ToolAuth;
+        next();
+      };
     const mount = (
       spec: ToolDefSpec,
       answer: (branch: unknown) => unknown = () => ({ ok: true }),
@@ -146,7 +156,7 @@ describe('a tool declares how it treats its branch', () => {
       toolDef(spec);
       router.post(
         spec.path.slice('/api'.length),
-        toolAuth,
+        toolAuth(opts.write ? 'write' : 'read'),
         toolHandler(async (args, ctx) => {
           received.push({
             tool: spec.name,
@@ -258,6 +268,17 @@ describe('a tool declares how it treats its branch', () => {
       });
       expect(received).toEqual([]);
       expect(await workspaceDirs()).toEqual([]);
+    });
+
+    it('answers a storage fault while checking the branch as a 500 that carries no path, and runs nothing', async () => {
+      const base = await start();
+
+      const res = await call(base, 't_default', { branch: 'storage-fault' });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'Could not check whether branch storage-fault exists.' });
+      expect(JSON.stringify(res.body)).not.toContain(root);
+      expect(received).toEqual([]);
     });
 
     it('follows a default branch renamed in the settings on the next call', async () => {

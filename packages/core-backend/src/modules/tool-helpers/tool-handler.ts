@@ -50,6 +50,23 @@ export interface ToolBranchPort {
 }
 
 /**
+ * Refuse a branch that certainly does not exist. A fault while finding out —
+ * a storage error reading the workspaces root, say — is logged here in full
+ * and answered as a 500 that names the branch and nothing else: its message
+ * would carry the deployment's paths to the caller.
+ */
+async function assertBranchExists(branch: string, branches: ToolBranchPort | undefined): Promise<void> {
+  let missing: boolean | undefined;
+  try {
+    missing = await branches?.isMissing(branch);
+  } catch (err) {
+    log.error('branch existence check failed:', { branch, err });
+    throw new ToolError(`Could not check whether branch ${branch} exists.`, 500);
+  }
+  if (missing) throw new BranchNotFoundError(branch);
+}
+
+/**
  * The branch a call runs on, from the tool's handling and the call's
  * arguments — or the refusal. `defaulted` says the caller named none.
  */
@@ -64,7 +81,7 @@ async function resolveBranch(
     // The tool reads its optional branch itself, absence and all; only a
     // name it was given is ours to check, and only one that names something —
     // what the tool makes of a value that does not is the tool's to answer.
-    if (namesSomething(given) && (await branches?.isMissing(given))) throw new BranchNotFoundError(given);
+    if (namesSomething(given)) await assertBranchExists(given, branches);
     return null;
   }
   // ABSENT, and only absent, is defaulted. An empty or non-string value is a
@@ -76,7 +93,7 @@ async function resolveBranch(
     return { branch: fallback, defaulted: true };
   }
   assertBranchProvided(given);
-  if (await branches?.isMissing(given)) throw new BranchNotFoundError(given);
+  await assertBranchExists(given, branches);
   return { branch: given, defaulted: false };
 }
 
@@ -115,6 +132,7 @@ export function createToolHandlerFactory(
   branches?: ToolBranchPort,
 ) {
   return function toolHandler(handler: ToolHandler, opts: ToolHandlerOptions = {}) {
+    let warnedHeldToRequired = false;
     return async (req: Request, res: Response): Promise<void> => {
       const auth = req.toolAuth;
       if (!auth) {
@@ -173,11 +191,21 @@ export function createToolHandlerFactory(
         // A writing route never defaults, whatever was recorded for it:
         // `toolDef` refuses the declaration at startup for a tool it knows
         // writes, and one only mounted as writing is held to `required` here,
-        // so its write cannot land on the default branch unasked.
+        // so its write cannot land on the default branch unasked. Its
+        // published schema still calls `branch` optional — the tool's
+        // declaration is wrong, not the call — so the mismatch is logged,
+        // once per route, for the tool's author to fix by declaring `write`.
         const declared =
           opts.branch ?? branchHandlingFor(req.baseUrl + (req.route?.path ?? req.path)) ?? 'own';
-        const handling: BranchHandling =
-          declared === 'defaults-to-default-branch' && opts.write ? 'required' : declared;
+        const heldToRequired = declared === 'defaults-to-default-branch' && opts.write === true;
+        const handling: BranchHandling = heldToRequired ? 'required' : declared;
+        if (heldToRequired && !warnedHeldToRequired) {
+          warnedHeldToRequired = true;
+          log.warn(
+            `Tool route ${req.baseUrl + (req.route?.path ?? req.path)} is mounted as writing but declared ` +
+              `branch: 'defaults-to-default-branch'; it is held to 'required'. Declare \`write: true\` to its toolDef.`,
+          );
+        }
         const resolved = await resolveBranch(handling, args, branches);
         // The tool can read no other branch than the resolved one: `args`
         // carries it under the same name, and a tool that takes no branch
