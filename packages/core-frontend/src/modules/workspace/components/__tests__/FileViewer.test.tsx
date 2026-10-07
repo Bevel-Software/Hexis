@@ -126,7 +126,19 @@ vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
   };
 });
 
+// The starter-pack question the empty state asks a new knowledge base's
+// admin. Not offered unless a test says so.
+const starterPacksMock = vi.hoisted(() => ({
+  fetchStarterPacks: vi.fn(async () => ({ offered: false, chosen: null, packs: [], chosenPack: null }) as unknown),
+  chooseStarterPack: vi.fn(async () => ({}) as unknown),
+}));
+vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../onboarding/services/starter-packs.api')>()),
+  ...starterPacksMock,
+}));
+
 import { FileViewer } from '../FileViewer';
+import { resetStarterPacksForTests } from '../../../onboarding/state/starter-packs';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
 import { acquireLock as acquireLockMock, LockApiError } from '../../../workflow/services/lock.api';
@@ -1578,6 +1590,64 @@ describe('FileViewer: nothing open', () => {
       />,
     );
     expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
+  });
+});
+
+/**
+ * "What does your team do?" stands where the empty state would, for exactly
+ * as long as the server offers it, and hands back to the empty state with a
+ * line saying what was added.
+ */
+describe('FileViewer: the starter-pack question', () => {
+  const ADMIN = { id: 'u-admin', email: 'ada@example.com', name: 'Ada' };
+  const PACKS = [
+    { id: 'engineering', name: 'Engineering', description: 'How you build.', order: 1 },
+    { id: 'sales', name: 'Sales', description: 'What you sell.', order: 2 },
+  ];
+
+  afterEach(() => {
+    resetStarterPacksForTests();
+    starterPacksMock.fetchStarterPacks.mockReset().mockResolvedValue({
+      offered: false,
+      chosen: null,
+      packs: [],
+      chosenPack: null,
+    });
+  });
+
+  it('replaces the empty state while it is offered', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={ADMIN} />);
+    expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Engineering' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+  });
+
+  it('is not there when it is not offered — a member, or a question already answered', async () => {
+    render(<ViewerHarness filePath={null} authUser={ADMIN} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+  });
+
+  it('after a choice, says what was added above the ordinary empty state', async () => {
+    starterPacksMock.fetchStarterPacks
+      .mockResolvedValueOnce({ offered: true, chosen: null, packs: PACKS, chosenPack: null })
+      .mockResolvedValue({ offered: false, chosen: 'sales', packs: PACKS, chosenPack: null });
+    starterPacksMock.chooseStarterPack.mockResolvedValue({
+      id: 'sales',
+      name: 'Sales',
+      pages: 6,
+      skills: 37,
+      summary: 'Added 6 pages and 37 skills for Sales.',
+    });
+    render(<ViewerHarness filePath={null} authUser={ADMIN} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Sales' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Added 6 pages and 37 skills for Sales.');
+    expect(screen.getByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
   });
 });
 

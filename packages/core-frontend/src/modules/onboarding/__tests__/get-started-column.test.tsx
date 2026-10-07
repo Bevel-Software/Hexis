@@ -17,6 +17,8 @@ import type { AccountSummary } from '../../auth/services/account.api';
 import type { PluginSummary } from '../../library/services/plugins.api';
 import type { AgentConnection } from '../services/agent-connection.api';
 import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
+import type { StarterPacksAnswer } from '../services/starter-packs.api';
+import { resetStarterPacksForTests } from '../state/starter-packs';
 
 /**
  * The "Get set up" column: every tick is derived from state the app already
@@ -36,6 +38,13 @@ const { listAccountsMock, listPluginsMock, openWorkspacePathMock, fetchAgentConn
 
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
+const { fetchStarterPacksMock } = vi.hoisted(() => ({
+  fetchStarterPacksMock: vi.fn<() => Promise<StarterPacksAnswer>>(),
+}));
+vi.mock('../services/starter-packs.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/starter-packs.api')>()),
+  fetchStarterPacks: fetchStarterPacksMock,
+}));
 vi.mock('../../auth/services/account.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../auth/services/account.api')>()),
   listAccounts: listAccountsMock,
@@ -192,6 +201,8 @@ const isDone = (title: RegExp | string) => within(row(title)!).queryByText('(don
 
 beforeEach(() => {
   resetOnboardingForTests();
+  resetStarterPacksForTests();
+  fetchStarterPacksMock.mockReset().mockResolvedValue({ offered: false, chosen: null, packs: [], chosenPack: null });
   setViewportWidth(1400);
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software')]);
   listPluginsMock.mockReset().mockResolvedValue([]);
@@ -438,6 +449,63 @@ describe('GetStartedColumn: a connected agent', () => {
     expect(chatGpt).toHaveAttribute('rel', 'noopener noreferrer');
     expect(within(page).getByRole('button', { name: 'New page' })).toBeInTheDocument();
     expect(within(page).queryByText('Connect your agent and it can write pages for you.')).not.toBeInTheDocument();
+  });
+
+  /**
+   * A team that chose a starter pack gets the pack's own request, and the
+   * pack's pages — placeholders until someone fills one in — do not count as
+   * the first page.
+   */
+  describe('after a starter pack', () => {
+    const SALES_PAGES = [`${KB}/KnowledgeBase/Customers.md`, `${KB}/KnowledgeBase/Pricing.md`];
+    const SALES_PROMPT = 'Using our Hexis knowledge base, fill in the Customers page.';
+    const chosen = (starterPages: string[]): StarterPacksAnswer => ({
+      offered: false,
+      chosen: 'sales',
+      packs: [],
+      chosenPack: { id: 'sales', name: 'Sales', firstPagePrompt: `${SALES_PROMPT}\n`, starterPages },
+    });
+
+    it("asks the agent with the pack's prompt", async () => {
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+      fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
+      mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
+      const page = row('Write your first page')!;
+      await waitFor(() =>
+        expect(within(page).getByRole('link', { name: 'Ask Claude to write it' })).toHaveAttribute(
+          'href',
+          claudePromptUrl(SALES_PROMPT),
+        ),
+      );
+      expect(within(page).getByRole('link', { name: 'Open in ChatGPT' })).toHaveAttribute(
+        'href',
+        chatGptPromptUrl(SALES_PROMPT),
+      );
+    });
+
+    it("leaves the step open while the pack's pages are untouched, and ticks it once one is filled in", async () => {
+      fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
+      const files = [...STARTER_TREE, ...SALES_PAGES];
+      const { rerender } = mount({ files });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalledTimes(1));
+      expect(isDone('Write your first page')).toBe(false);
+
+      // Somebody fills in Customers: the tree is fetched again, and the
+      // server no longer lists the page as a placeholder.
+      fetchStarterPacksMock.mockResolvedValue(chosen([SALES_PAGES[1]!]));
+      rerender(columnUi({ files }));
+      await waitFor(() => expect(isDone('Write your first page')).toBe(true));
+      expect(fetchStarterPacksMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the generic prompt when the team skipped', async () => {
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+      fetchStarterPacksMock.mockResolvedValue({ offered: false, chosen: 'none', packs: [], chosenPack: null });
+      mount();
+      const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
+      expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
+    });
   });
 
   it('leads with "Ask ChatGPT to write it" for a ChatGPT connection, Claude quiet beside Copy prompt', async () => {

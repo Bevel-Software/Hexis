@@ -22,7 +22,8 @@ import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspace
 import { useFileNav } from '../../workspace/routing/kb-routes';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
-import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPageRoute } from '../first-page-prompt';
+import { chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
+import { useStarterPacks } from '../state/starter-packs';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
 
@@ -58,17 +59,24 @@ interface SetupItem {
  * Whether the Knowledge folder holds anything a person put there: any file
  * other than the starter guide, the repository's dot-files and the folder
  * access rules. A dropped PDF counts — "write your first page" is about the
- * knowledge base having the team's content in it, not about Markdown.
+ * knowledge base having the team's content in it, not about Markdown. A
+ * starter pack's page still as the pack wrote it (`placeholders`) is a task
+ * to fill in, not content, so it does not count either.
  */
-function hasOwnContent(entry: FileTreeEntry | null | undefined, guidePath: string): boolean {
+function hasOwnContent(
+  entry: FileTreeEntry | null | undefined,
+  guidePath: string,
+  placeholders: ReadonlySet<string> = new Set(),
+): boolean {
   if (!entry) return false;
   for (const child of entry.children ?? []) {
     if (child.name.startsWith('.')) continue;
     if (child.type === 'directory') {
-      if (hasOwnContent(child, guidePath)) return true;
+      if (hasOwnContent(child, guidePath, placeholders)) return true;
       continue;
     }
     if (child.relativePath === guidePath || child.name.toLowerCase() === 'access.md') continue;
+    if (placeholders.has(child.relativePath)) continue;
     return true;
   }
   return false;
@@ -241,6 +249,24 @@ export function GetStartedColumn() {
   const guideExists = guidePath !== null && findEntry(tree, guidePath) !== null;
 
   /**
+   * The starter pack the team chose, if any: its first-page request replaces
+   * the generic one, and its pages stay placeholders — not a first page —
+   * until someone fills one in. Which are still untouched is the server's
+   * answer (it compares them with the pack), asked again whenever the tree
+   * changes while any are left.
+   */
+  const starter = useStarterPacks({ enabled: !gone });
+  const chosenPack = starter.answer?.chosenPack ?? null;
+  const placeholders = new Set(chosenPack?.starterPages ?? []);
+  const { reload: reloadStarter } = starter;
+  const waitingOnPlaceholders = placeholders.size > 0;
+  const firstTree = useRef(tree);
+  useEffect(() => {
+    if (!waitingOnPlaceholders || tree === firstTree.current) return;
+    void reloadStarter();
+  }, [tree, waitingOnPlaceholders, reloadStarter]);
+
+  /**
    * "New page": create a Markdown page in the Knowledge folder and open it
    * already in the editor. The failure is kept here and shown on the step
    * because nothing else would say it — toasts only speak inside the
@@ -331,11 +357,20 @@ export function GetStartedColumn() {
   items.push({
     id: 'page',
     title: 'Write your first page',
-    done: knowledgeRoot !== null && guidePath !== null && hasOwnContent(findEntry(tree, knowledgeRoot), guidePath),
+    done:
+      knowledgeRoot !== null &&
+      guidePath !== null &&
+      hasOwnContent(findEntry(tree, knowledgeRoot), guidePath, placeholders),
     ...(agent.connected
       ? {
           hint: 'Have your agent write it, or start one here.',
-          extra: <FirstPagePromptActions client={agent.client} newPage={newPageAction} />,
+          extra: (
+            <FirstPagePromptActions
+              client={agent.client}
+              prompt={firstPagePromptFor(chosenPack)}
+              newPage={newPageAction}
+            />
+          ),
         }
       : {
           hint: 'Start one here, or drop files into the file tree.',
@@ -539,14 +574,23 @@ function PromptLink({ href, primary, children }: { href: string; primary?: boole
  * Copying answers on the button itself and in a live region; there is no
  * toast to fall back on out here (toasts speak inside the Library only).
  */
-function FirstPagePromptActions({ client, newPage }: { client?: string; newPage?: SetupAction }) {
+function FirstPagePromptActions({
+  client,
+  prompt,
+  newPage,
+}: {
+  client?: string;
+  /** The request: the chosen starter pack's, or the generic one. */
+  prompt: string;
+  newPage?: SetupAction;
+}) {
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
   const resetTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(resetTimer.current), []);
   const { primary, agentName } = firstPageRoute(client);
 
   async function copy() {
-    const ok = await copyToClipboard(FIRST_PAGE_PROMPT);
+    const ok = await copyToClipboard(prompt);
     window.clearTimeout(resetTimer.current);
     setCopied(ok ? 'ok' : 'fail');
     resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
@@ -571,12 +615,12 @@ function FirstPagePromptActions({ client, newPage }: { client?: string; newPage?
     </Button>
   );
   const claudeLink = (lead: boolean) => (
-    <PromptLink href={claudePromptUrl(FIRST_PAGE_PROMPT)} primary={lead}>
+    <PromptLink href={claudePromptUrl(prompt)} primary={lead}>
       {lead ? 'Ask Claude to write it' : 'Open in Claude'}
     </PromptLink>
   );
   const chatGptLink = (lead: boolean) => (
-    <PromptLink href={chatGptPromptUrl(FIRST_PAGE_PROMPT)} primary={lead}>
+    <PromptLink href={chatGptPromptUrl(prompt)} primary={lead}>
       {lead ? 'Ask ChatGPT to write it' : 'Open in ChatGPT'}
     </PromptLink>
   );

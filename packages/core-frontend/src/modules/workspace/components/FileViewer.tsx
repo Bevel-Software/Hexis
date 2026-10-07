@@ -44,6 +44,8 @@ import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
+import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
+import { useStarterPacks } from '../../onboarding/state/starter-packs';
 
 /**
  * How many pages the empty viewer offers. Enough to look like a starting
@@ -939,6 +941,14 @@ export function FileViewer() {
     () => suggestedPages(fileTree, kbDirName, SUGGESTION_LIMIT),
     [fileTree, kbDirName],
   );
+  // A new knowledge base's admin is asked "What does your team do?" here in
+  // place of the empty state, for as long as the server offers it (admins
+  // only, until somebody answers, while the knowledge base is still new).
+  // What the chosen pack added is said once, above the ordinary empty state
+  // that then suggests its pages.
+  const starterPacks = useStarterPacks();
+  const [starterNote, setStarterNote] = useState<string | null>(null);
+  const starterOffer = starterPacks.answer?.offered ? starterPacks.answer.packs : [];
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
   // refresh, share or back-press must land on the page — not on the empty
@@ -974,57 +984,68 @@ export function FileViewer() {
         <GitSyncFailedBanner />
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
-          <div className="w-full max-w-md text-center">
-            <h2 className="mb-2 text-head text-ink">Open a page to start reading.</h2>
-            <p className="mb-6 text-ui text-ink-muted">
-              {suggestions.length > 0
-                ? 'Pick anything from the file tree, or start with one of these.'
-                : 'Pick anything from the file tree.'}
-            </p>
-            {/* Real pages, not prompts. Whoever lands here has a file tree and
-                a blank pane, and "browse until something looks right" is the
-                one instruction the tree already gives — so the suggestions are
-                documents that open, drawn from the top of the knowledge the
-                deployment actually holds. */}
-            {suggestions.length > 0 && (
-              <div className="flex flex-col gap-2 text-left">
-                {suggestions.map((page) => {
-                  const folder = parentFolder(page.relativePath);
-                  return (
-                    <Surface
-                      key={page.relativePath}
-                      as="button"
-                      tone="sunken"
-                      radius="lg"
-                      elevation="none"
-                      interactive
-                      type="button"
-                      onClick={() => openWorkspacePath(page.relativePath)}
-                      disabled={!navReady}
-                      className="flex items-center gap-2.5 px-3 py-2"
-                    >
-                      <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
-                      <span className="min-w-0 flex-1 truncate text-ui text-ink">
-                        {pageTitle(page.name)}
-                      </span>
-                      {/* The folder it sits in — two pages can share a name,
-                          and the one thing that tells them apart is where they
-                          live. */}
-                      {/* Capped so a long folder name truncates instead of
-                          squeezing out the page title it is there to
-                          disambiguate — same contract as the comparison
-                          panel's path label. */}
-                      {folder && (
-                        <span className="max-w-[40%] shrink-0 truncate text-meta text-ink-faint">
-                          {folder}
+          {starterOffer.length > 0 ? (
+            <div className="w-full max-w-md">
+              <StarterPackCard packs={starterOffer} onDone={(applied) => setStarterNote(applied.summary || null)} />
+            </div>
+          ) : (
+            <div className="w-full max-w-md text-center">
+              {starterNote && (
+                <p role="status" className="mb-4 text-ui text-ok">
+                  {starterNote}
+                </p>
+              )}
+              <h2 className="mb-2 text-head text-ink">Open a page to start reading.</h2>
+              <p className="mb-6 text-ui text-ink-muted">
+                {suggestions.length > 0
+                  ? 'Pick anything from the file tree, or start with one of these.'
+                  : 'Pick anything from the file tree.'}
+              </p>
+              {/* Real pages, not prompts. Whoever lands here has a file tree and
+                  a blank pane, and "browse until something looks right" is the
+                  one instruction the tree already gives — so the suggestions are
+                  documents that open, drawn from the top of the knowledge the
+                  deployment actually holds. */}
+              {suggestions.length > 0 && (
+                <div className="flex flex-col gap-2 text-left">
+                  {suggestions.map((page) => {
+                    const folder = parentFolder(page.relativePath);
+                    return (
+                      <Surface
+                        key={page.relativePath}
+                        as="button"
+                        tone="sunken"
+                        radius="lg"
+                        elevation="none"
+                        interactive
+                        type="button"
+                        onClick={() => openWorkspacePath(page.relativePath)}
+                        disabled={!navReady}
+                        className="flex items-center gap-2.5 px-3 py-2"
+                      >
+                        <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
+                        <span className="min-w-0 flex-1 truncate text-ui text-ink">
+                          {pageTitle(page.name)}
                         </span>
-                      )}
-                    </Surface>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                        {/* The folder it sits in — two pages can share a name,
+                            and the one thing that tells them apart is where they
+                            live. */}
+                        {/* Capped so a long folder name truncates instead of
+                            squeezing out the page title it is there to
+                            disambiguate — same contract as the comparison
+                            panel's path label. */}
+                        {folder && (
+                          <span className="max-w-[40%] shrink-0 truncate text-meta text-ink-faint">
+                            {folder}
+                          </span>
+                        )}
+                      </Surface>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         {registeredPanels}
       </div>
