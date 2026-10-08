@@ -13,7 +13,7 @@
  *    allowed there — Claude pins the sandbox's `frame-src` to `'self'` and
  *    drops the `frameDomains` a view declares — so the view loads the
  *    deployment's embed bundle into ITS OWN document, tells it the
- *    deployment's origin and the token, and lends it the host's
+ *    deployment's address and the token, and lends it the host's
  *    `ui/open-link`.
  *
  * This module is that handoff, in one place. The API client, the host
@@ -24,43 +24,45 @@
 
 export interface EmbedRuntimeConfig {
   /**
-   * The deployment's origin (`https://hexis.example`), when the embed runs
-   * somewhere other than the deployment's own pages. Empty in the app, where
-   * every address is relative to the page.
+   * The deployment's public address — origin plus the path prefix it is
+   * served under, if any (`https://hexis.example`,
+   * `https://hexis.example/hexis`), with no trailing slash — when the embed
+   * runs somewhere other than the deployment's own pages. Empty in the app,
+   * where every address is relative to the page.
    */
-  origin: string;
+  baseUrl: string;
   /** The embed token, when it was handed over; null means "read the page URL". */
   token: string | null;
   /** How a link leaves the view, when the host lent a way; null means parent window or a new tab. */
   openLink: ((url: string) => void) | null;
 }
 
-const UNCONFIGURED: EmbedRuntimeConfig = { origin: '', token: null, openLink: null };
+const UNCONFIGURED: EmbedRuntimeConfig = { baseUrl: '', token: null, openLink: null };
 
 let current: EmbedRuntimeConfig = UNCONFIGURED;
 
-/** Hand the embed its runtime: called once by {@link mountEmbed} before anything renders. */
+/** Hand the embed its runtime: called by {@link mountEmbed} before anything renders. */
 export function configureEmbed(config: Partial<EmbedRuntimeConfig>): void {
   current = { ...current, ...config };
 }
 
-/** Back to the SPA page's own answers (tests). */
+/** Back to the SPA page's own answers — on unmount, and in tests. */
 export function resetEmbedConfig(): void {
   current = UNCONFIGURED;
 }
 
 /**
- * The prefix every embed API path gets. The deployment's origin when the
+ * The prefix every embed API path gets. The deployment's address when the
  * embed runs elsewhere, and empty — a relative address, this page's own
  * origin — in the app.
  */
 export function embedApiBase(): string {
-  return current.origin;
+  return current.baseUrl;
 }
 
-/** The deployment's origin, for the absolute app addresses a host opens. */
-export function embedOrigin(): string {
-  return current.origin || window.location.origin;
+/** The deployment's address, for the absolute app links a host opens. */
+export function embedBaseUrl(): string {
+  return current.baseUrl || window.location.origin;
 }
 
 /** The token this view was minted with: handed over, or read from the page URL. */
@@ -83,8 +85,8 @@ export const EMBED_HANDOFF_GLOBAL = '__HEXIS_EMBED__';
 
 /** What the view hands the bundle. */
 export interface EmbedHandoff {
-  /** The deployment's origin: where the API is and where app links point. */
-  origin: string;
+  /** The deployment's address, prefix included: where the API is and where app links point. */
+  baseUrl: string;
   /** The embed token `open_page` minted. */
   token: string;
   /** Opens an address in a new tab through the host (`ui/open-link`). */
@@ -94,24 +96,26 @@ export interface EmbedHandoff {
 /**
  * The handoff the view left on the window, or null when this bundle was not
  * loaded by the view (a developer opening the file directly). Only a
- * well-formed one counts: an `http(s)` origin and a non-empty token, with the
- * origin reduced to exactly that — a path or a credential in it would make
- * every API address wrong.
+ * well-formed one counts: an `http(s)` address and a non-empty token. The
+ * address is kept to its origin and path — a query, a fragment or a trailing
+ * slash in it would make every API address wrong — and the path stays,
+ * because a deployment served under a prefix has its API under that prefix.
  */
 export function readEmbedHandoff(): EmbedHandoff | null {
   const raw = (window as unknown as Record<string, unknown>)[EMBED_HANDOFF_GLOBAL];
   if (!raw || typeof raw !== 'object') return null;
-  const h = raw as { origin?: unknown; token?: unknown; openLink?: unknown };
-  if (typeof h.origin !== 'string' || !/^https?:\/\//i.test(h.origin)) return null;
+  const h = raw as { baseUrl?: unknown; token?: unknown; openLink?: unknown };
+  if (typeof h.baseUrl !== 'string' || !/^https?:\/\//i.test(h.baseUrl)) return null;
   if (typeof h.token !== 'string' || h.token === '') return null;
-  let origin: string;
+  let baseUrl: string;
   try {
-    origin = new URL(h.origin).origin;
+    const url = new URL(h.baseUrl);
+    baseUrl = `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
   } catch {
     return null;
   }
   return {
-    origin,
+    baseUrl,
     token: h.token,
     ...(typeof h.openLink === 'function' ? { openLink: h.openLink as (url: string) => void } : {}),
   };

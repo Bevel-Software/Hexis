@@ -30,7 +30,10 @@ export default defineConfig(({ mode }) => {
       // it loads this app's EMBED bundle into its own document instead. It
       // finds the bundle's hashed file names through this manifest, served
       // beside the assets at `/embed-manifest.json`, and looks the entry up
-      // by its name, `embed`.
+      // by its name, `embed`. Both are BUILD artifacts: the dev server emits
+      // neither, so a view pointed at `pnpm dev` says the page could not
+      // load — which costs nothing, because no chat host can reach a dev
+      // server anyway (the view needs the deployment's public https address).
       manifest: 'embed-manifest.json',
       rollupOptions: {
         input: {

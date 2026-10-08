@@ -20,7 +20,7 @@ import {
   type EmbedFileView,
 } from '../services/embed.api';
 import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
-import { embedOrigin, embedToken } from '../embed-config';
+import { embedBaseUrl, embedToken } from '../embed-config';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
@@ -41,11 +41,11 @@ function lockLostMessage(holder: string): string {
 
 /**
  * An app path as an absolute URL on the deployment, so a host can open it
- * cross-site — the deployment's origin, not this document's, which inside a
+ * cross-site — the deployment's address, not this document's, which inside a
  * chat host's sandbox is the sandbox's own.
  */
 function absolute(pathOrUrl: string): string {
-  return /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${embedOrigin()}${pathOrUrl}`;
+  return /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${embedBaseUrl()}${pathOrUrl}`;
 }
 
 /**

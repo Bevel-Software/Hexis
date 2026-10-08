@@ -1,6 +1,6 @@
 import { kbFileUrl, resolveKbHref } from '../workspace/routing/kb-routes';
 import { isOpenableExternalHref, normalizeHref } from '../../shared/markdown/hrefs';
-import { embedOpenLink, embedOrigin } from './embed-config';
+import { embedBaseUrl, embedOpenLink } from './embed-config';
 
 /**
  * What an expired, missing or rejected embed token shows. One sentence, no
@@ -90,7 +90,7 @@ export function resolveToAppUrl(
     // page. A root-relative path is this deployment's; anything absolute
     // still has to pass the scheme allowlist below, for the same reason.
     const url = normalizeHref(href);
-    if (url.startsWith('/') && !url.startsWith('//')) return `${embedOrigin()}${url}`;
+    if (url.startsWith('/') && !url.startsWith('//')) return `${embedBaseUrl()}${url}`;
     // A protocol-relative `//host/path` names another origin without saying
     // so; the embed never builds one, so it is refused rather than relayed.
     return !url.startsWith('//') && isOpenableExternalHref(url) ? url : null;
@@ -116,5 +116,5 @@ export function resolveToAppUrl(
   // A link that named its own branch keeps it; everything else opens on the
   // branch the embed rendered, which is the default branch.
   const branch = target.branch ?? kb.branch;
-  return `${embedOrigin()}${kbFileUrl(branch, target.path)}${target.hash}`;
+  return `${embedBaseUrl()}${kbFileUrl(branch, target.path)}${target.hash}`;
 }

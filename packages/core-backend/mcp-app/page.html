@@ -64,6 +64,14 @@
         var notice = document.getElementById('notice');
         var hostOrigin = null;
         var shown = false;
+        /**
+         * Whether a page is already on its way into #root. One view shows
+         * ONE page: a second tool result (a host re-delivering the first, or
+         * one for another call) must not load a second bundle into the same
+         * root, where whichever finished last would win. The first result
+         * owns the view; later ones are ignored.
+         */
+        var loading = false;
 
         /** The name the deployment's Vite build gives the embed entry. */
         var EMBED_ENTRY = 'embed';
@@ -166,6 +174,17 @@
         }
 
         /**
+         * The deployment's address — origin plus the path prefix it is served
+         * under, if any — from the embed address `open_page` answered with:
+         * `https://host/embed?token=…` names `https://host`, and
+         * `https://host/hexis/embed?token=…` names `https://host/hexis`. The
+         * manifest, the bundle and the API all live under it.
+         */
+        function baseOf(url) {
+          return url.origin + url.pathname.replace(/\/embed\/?$/, '').replace(/\/+$/, '');
+        }
+
+        /**
          * Load the deployment's embed bundle into this document and let it
          * draw the page. The deployment is whichever one minted the token —
          * read off the embed address `open_page` answered with, which is the
@@ -179,16 +198,18 @@
             sayWithLink(['The page address could not be read.'], data);
             return;
           }
-          var origin = url.origin;
+          var base = baseOf(url);
           var token = url.searchParams.get('token');
           if (!token) {
             sayWithLink(['The page address carries no token.'], data);
             return;
           }
+          if (loading) return;
+          loading = true;
           // The handoff, before the bundle: it reads this the moment it runs.
-          window[HANDOFF_GLOBAL] = { origin: origin, token: token, openLink: openLink };
+          window[HANDOFF_GLOBAL] = { baseUrl: base, token: token, openLink: openLink };
 
-          fetch(origin + MANIFEST_PATH, { credentials: 'omit' })
+          fetch(base + MANIFEST_PATH, { credentials: 'omit' })
             .then(function (res) {
               if (!res.ok) throw new Error('the build manifest answered HTTP ' + res.status);
               return res.json();
@@ -200,13 +221,13 @@
               for (var i = 0; i < styles.length; i++) {
                 var link = document.createElement('link');
                 link.rel = 'stylesheet';
-                link.href = origin + '/' + styles[i];
+                link.href = base + '/' + styles[i];
                 document.head.appendChild(link);
               }
               var script = document.createElement('script');
               script.type = 'module';
               script.crossOrigin = 'anonymous';
-              script.src = origin + '/' + entry.file;
+              script.src = base + '/' + entry.file;
               script.addEventListener('load', function () {
                 // A module's load fires after it ran, so the bundle has mounted.
                 root.classList.remove('hidden');

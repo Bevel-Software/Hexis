@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 import type { AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
-import { resetEmbedConfig } from '../embed-config';
+import { embedApiBase, resetEmbedConfig } from '../embed-config';
 
 /** The HTTP surface, stubbed — the mount is about wiring, not about the API. */
 const api = vi.hoisted(() => {
@@ -85,7 +85,7 @@ afterEach(() => {
  */
 describe('mountEmbed', () => {
   it('renders the page for the token it was handed, with the app renderer for the type', async () => {
-    handle = mountEmbed(el, { registry: EMPTY_REGISTRY, origin: ORIGIN, token: 'tok' });
+    handle = mountEmbed(el, { registry: EMPTY_REGISTRY, baseUrl: ORIGIN, token: 'tok' });
     expect(await screen.findByRole('heading', { name: 'Thing' })).toBeTruthy();
     expect(api.loadEmbed).toHaveBeenCalledWith('tok');
     // A reader who may not write is offered a proposal, as on the file page.
@@ -97,12 +97,37 @@ describe('mountEmbed', () => {
       ...EMPTY_REGISTRY,
       renderers: [{ extensions: ['.md'], Component: () => <div data-testid="deployment-md">the deployment renderer</div> }],
     } as unknown as AppRegistry;
-    handle = mountEmbed(el, { registry, origin: ORIGIN, token: 'tok' });
+    handle = mountEmbed(el, { registry, baseUrl: ORIGIN, token: 'tok' });
     expect(await screen.findByTestId('deployment-md')).toBeTruthy();
   });
 
+  /**
+   * The runtime the embed reads is per document, so one mount owns it at a
+   * time: a second mount takes the first down, and the one that owns the
+   * runtime hands it back on unmount — a replaced handle does not reset what
+   * its successor configured.
+   */
+  it('holds one embed per document, and hands the runtime back on unmount', async () => {
+    const first = mountEmbed(el, { registry: EMPTY_REGISTRY, baseUrl: ORIGIN, token: 'tok' });
+    await screen.findByRole('heading', { name: 'Thing' });
+    const second = document.createElement('div');
+    document.body.appendChild(second);
+    handle = mountEmbed(second, { registry: EMPTY_REGISTRY, baseUrl: 'https://other.example', token: 'tok2' });
+    await screen.findByRole('heading', { name: 'Thing' });
+    expect(el.textContent).toBe('');
+    expect(embedApiBase()).toBe('https://other.example');
+    expect(api.loadEmbed).toHaveBeenLastCalledWith('tok2');
+    // The replaced handle is inert.
+    first.unmount();
+    expect(embedApiBase()).toBe('https://other.example');
+    handle.unmount();
+    handle = null;
+    expect(embedApiBase()).toBe('');
+    second.remove();
+  });
+
   it('unmounts cleanly', async () => {
-    handle = mountEmbed(el, { registry: EMPTY_REGISTRY, origin: ORIGIN, token: 'tok' });
+    handle = mountEmbed(el, { registry: EMPTY_REGISTRY, baseUrl: ORIGIN, token: 'tok' });
     await screen.findByRole('heading', { name: 'Thing' });
     handle.unmount();
     handle = null;

@@ -7,7 +7,7 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MCP_APP_MIME_TYPE, MCP_APP_URI_SCHEME } from '@bevel-software/platform-mcp-core';
 import { OPEN_PAGE_TOOL } from '../embed.tools.js';
-import { isFrameableOrigin, McpAppService, OPEN_PAGE_VIEW_URI, originOf } from '../mcp-app.js';
+import { isSandboxReachableOrigin, McpAppService, OPEN_PAGE_VIEW_URI, originOf } from '../mcp-app.js';
 import { createMcpAppRoutes } from '../mcp-app.routes.js';
 
 let server: Server | null = null;
@@ -85,7 +85,7 @@ describe('the open_page view', () => {
   });
 });
 
-describe('originOf / isFrameableOrigin', () => {
+describe('originOf / isSandboxReachableOrigin', () => {
   it('reduces an address to its origin, and refuses one that does not parse', () => {
     expect(originOf(`${PUBLIC}/sub?x=1#y`)).toBe(PUBLIC);
     expect(originOf('not a url')).toBeNull();
@@ -93,16 +93,17 @@ describe('originOf / isFrameableOrigin', () => {
 
   /**
    * A host runs an app view in a sandboxed https iframe, and no browser lets
-   * an https document frame a plain-http one — so a deployment reached over
-   * http has no embedded view, and `open_page` says so.
+   * an https document load scripts from, or fetch from, a plain-http origin —
+   * so a deployment reached over http has no embedded view, and `open_page`
+   * says so.
    */
   it.each([
     ['https', 'https://hexis.example', true],
     ['plain http', 'http://hexis.example', false],
     ['localhost over http', 'http://localhost:3001', false],
     ['nonsense', 'not a url', false],
-  ])('%s is frameable: %s', (_label, url, expected) => {
-    expect(isFrameableOrigin(url)).toBe(expected);
+  ])('%s is reachable from a sandbox: %s', (_label, url, expected) => {
+    expect(isSandboxReachableOrigin(url)).toBe(expected);
   });
 });
 

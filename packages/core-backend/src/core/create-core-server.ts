@@ -82,7 +82,7 @@ import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/w
 import { createEmbedRoutes, createEmbedLinkRoutes } from '../modules/embed/embed.routes.js';
 import { registerEmbedTools } from '../modules/embed/embed.tools.js';
 import { createMcpAppRoutes } from '../modules/embed/mcp-app.routes.js';
-import { isFrameableOrigin } from '../modules/embed/mcp-app.js';
+import { isSandboxReachableOrigin } from '../modules/embed/mcp-app.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -475,9 +475,9 @@ export async function createCoreServer(
     embedService: core.embedService,
     kb: core.kb,
     readForTool: workspaceTools.readForTool,
-    // A plain-http deployment cannot be framed by any host's https sandbox,
-    // so the tool answers the text and the app address and says so.
-    canBeFramed: () => isFrameableOrigin(core.config.publicFrontendUrl),
+    // A host's https sandbox cannot load from a plain-http deployment, so
+    // the tool answers the text and the app address and says so.
+    canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
     appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
   });
   // The app manifest and the view bytes, for the LOCAL MCP server: it bridges

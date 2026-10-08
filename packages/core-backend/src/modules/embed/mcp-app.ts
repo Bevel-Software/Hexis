@@ -134,7 +134,7 @@ export function originOf(url: string): string | null {
  * `open_page` still answers the page's text and its address in the app, and
  * says why there is nothing rendered (see Decision 8).
  */
-export function isFrameableOrigin(url: string): boolean {
+export function isSandboxReachableOrigin(url: string): boolean {
   try {
     return new URL(url).protocol === 'https:';
   } catch {

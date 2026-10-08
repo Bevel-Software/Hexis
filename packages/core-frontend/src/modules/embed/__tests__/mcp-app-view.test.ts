@@ -45,7 +45,7 @@ const realParent = Object.getOwnPropertyDescriptor(window, 'parent');
  */
 const registered: EventListener[] = [];
 
-type Handoff = { origin: string; token: string; openLink: (url: string) => void };
+type Handoff = { baseUrl: string; token: string; openLink: (url: string) => void };
 const handoff = () => (window as unknown as { __HEXIS_EMBED__?: Handoff }).__HEXIS_EMBED__;
 
 beforeEach(() => {
@@ -162,10 +162,32 @@ describe('the MCP App view', () => {
     expect(document.querySelector('iframe')).toBeNull();
   });
 
-  it('hands the bundle the token, the deployment origin and the host way of opening a link, before it runs', async () => {
+  /**
+   * A deployment served under a path prefix has its manifest, its bundle and
+   * its API under that prefix — all of which the embed address names, since
+   * it is `<public frontend URL>/embed?token=…`.
+   */
+  it('keeps the path prefix a deployment is served under', async () => {
+    fromHost(pageResult({ embedUrl: `${ORIGIN}/hexis/embed?token=t` }));
+    await settled();
+    expect(fetchMock).toHaveBeenCalledWith(`${ORIGIN}/hexis/embed-manifest.json`, expect.anything());
+    expect(bundleScript()?.getAttribute('src')).toBe(`${ORIGIN}/hexis/assets/embed-9f.js`);
+    expect(handoff()).toMatchObject({ baseUrl: `${ORIGIN}/hexis`, token: 't' });
+  });
+
+  it('shows one page per view: a second tool result does not load a second bundle', async () => {
+    fromHost(pageResult());
+    fromHost(pageResult({ embedUrl: `${ORIGIN}/embed?token=t2` }));
+    await settled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.querySelectorAll('script[type="module"]')).toHaveLength(1);
+    expect(handoff()).toMatchObject({ token: 't' });
+  });
+
+  it('hands the bundle the token, the deployment address and the host way of opening a link, before it runs', async () => {
     fromHost(pageResult());
     await settled();
-    expect(handoff()).toMatchObject({ origin: ORIGIN, token: 't' });
+    expect(handoff()).toMatchObject({ baseUrl: ORIGIN, token: 't' });
     handoff()!.openLink(`${ORIGIN}/workspace/main/knowledge-base/Other.md`);
     const opened = host.postMessage.mock.calls.map((c) => c[0] as { method?: string; params?: { url?: string } });
     expect(opened.find((m) => m.method === 'ui/open-link')?.params?.url).toBe(

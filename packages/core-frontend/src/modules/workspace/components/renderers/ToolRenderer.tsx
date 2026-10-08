@@ -8,6 +8,7 @@ import { Markdown } from '../../../../shared/markdown/Markdown';
 import { ToolForm } from './ToolForm';
 import { ToolSecretsPanel } from '../../../secrets-vault/components/ToolSecretsPanel';
 import { listToolSecrets, type ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
+import { useRendererSurface } from './rendererSurface';
 
 /**
  * Whether the Form view can render this file: THE TOOL IS THE FRONTMATTER, so
@@ -118,6 +119,15 @@ export function ToolRenderer({
 
   const dirty = !readOnly && value !== savedValue;
 
+  // The three panels on the right — the Secrets Vault palette, this tool's
+  // secrets and the live Preview — act under the SIGNED-IN SESSION: they
+  // read the caller's vault and run the manual through the app's API. On a
+  // renderer surface (the embed, in a chat or an Atlassian panel) there is
+  // no session, only the embed token, which none of those routes take. So
+  // they are not drawn there, and their requests are not made: the file is
+  // still read and edited as text, and the rest belongs to the app.
+  const surface = useRendererSurface();
+
   useEffect(() => {
     setValue(content);
     setSavedValue(savedContent ?? content);
@@ -143,6 +153,7 @@ export function ToolRenderer({
 
   // Load the caller's Secrets Vault keys for the insert palette.
   useEffect(() => {
+    if (surface) return;
     let cancelled = false;
     (async () => {
       try {
@@ -157,7 +168,7 @@ export function ToolRenderer({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [surface]);
 
   // Load THIS tool's declared variables + their config status (for the per-tool
   // secrets panel). Matched from the default-branch catalog by file path (with a
@@ -184,8 +195,9 @@ export function ToolRenderer({
   }, [filePath]);
 
   useEffect(() => {
+    if (surface) return;
     void loadToolSecrets();
-  }, [loadToolSecrets]);
+  }, [loadToolSecrets, surface]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -344,7 +356,7 @@ export function ToolRenderer({
           </section>
         )}
 
-        {!readOnly && (
+        {!readOnly && !surface && (
           <section>
             <h3 className="mb-1 text-meta font-semibold uppercase tracking-wide text-ink-faint">Secret variables</h3>
             {secretKeys.length === 0 ? (
@@ -368,6 +380,7 @@ export function ToolRenderer({
           </section>
         )}
 
+        {!surface && (
         <section>
           <h3 className="mb-1 text-meta font-semibold uppercase tracking-wide text-ink-faint">Secrets for this tool</h3>
           {toolSecrets ? (
@@ -379,7 +392,9 @@ export function ToolRenderer({
             </p>
           )}
         </section>
+        )}
 
+        {!surface && (
         <section>
           <div className="mb-1 flex items-center gap-2">
             <h3 className="text-meta font-semibold uppercase tracking-wide text-ink-faint">Preview</h3>
@@ -416,6 +431,7 @@ export function ToolRenderer({
             </div>
           )}
         </section>
+        )}
       </aside>
     </Surface>
   );
