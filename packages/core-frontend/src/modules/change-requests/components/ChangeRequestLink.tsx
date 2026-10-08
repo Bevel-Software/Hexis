@@ -29,13 +29,25 @@ import { ChangeRequestDialog } from './ChangeRequestDialog';
 export function ChangeRequestLink() {
   const { number: raw } = useParams();
   const number = changeRequestNumber(raw);
-  return number === null ? <NoSuchRequest raw={raw ?? ''} /> : <OpenRequest number={number} />;
+  // Keyed by the number: the router reuses this element across a change of
+  // the parameter, and a lookup that had resolved would otherwise keep the
+  // previous request on screen under the new address until the new fetch
+  // settled. A new number is a fresh lookup from "loading".
+  return number === null ? (
+    <NoSuchRequest raw={raw ?? ''} />
+  ) : (
+    <OpenRequest key={number} number={number} />
+  );
 }
+
+/** The largest number a request can have: the database sequence is a 32-bit integer. */
+const MAX_CHANGE_REQUEST_NUMBER = 2_147_483_647;
 
 /** A positive integer, spelled plainly — the only thing the link helper ever puts in the path. */
 function changeRequestNumber(raw: string | undefined): number | null {
-  if (!raw || !/^[1-9]\d{0,8}$/.test(raw)) return null;
-  return Number(raw);
+  if (!raw || !/^[1-9]\d*$/.test(raw)) return null;
+  const number = Number(raw);
+  return number <= MAX_CHANGE_REQUEST_NUMBER ? number : null;
 }
 
 type Lookup =
@@ -71,7 +83,9 @@ function OpenRequest({ number }: { number: number }) {
     };
   }, [number]);
 
-  const leave = () => navigate(KB_ROUTE_PREFIX);
+  // `replace`: the link's entry leaves history with the view, so Back after
+  // closing does not land on the address again and reopen the request.
+  const leave = () => navigate(KB_ROUTE_PREFIX, { replace: true });
 
   if (lookup.kind === 'missing') return <NoSuchRequest raw={String(number)} />;
   if (lookup.kind === 'failed') {
