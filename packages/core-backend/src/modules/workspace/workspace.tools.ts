@@ -1767,7 +1767,19 @@ export function registerWorkspaceTools(
    * hook, the extraction and the not-found message all have to match, and a
    * copy drifts on the first change to any of them.
    */
-  const readForTool: ReadForTool = async (branch, p, ctx) => {
+  const readForTool: ReadForTool = async (branch, p, ctx) => (await readServed(branch, p, ctx)).result;
+
+  /**
+   * {@link readForTool}, also saying whether what answered is the platform's
+   * guide ALONE — no file of the knowledge base's own (or none this caller may
+   * read) at the guide's name — which nothing can be written at, so
+   * `read_file` reports `canWrite: false` there, as `file_stat` does.
+   */
+  const readServed = async (
+    branch: string,
+    p: string,
+    ctx: ToolContext,
+  ): Promise<{ result: ReadResult; guideOnly: boolean }> => {
     // The guide's name at the repository root answers with the platform's
     // guide, which is text the code owns and every agent may read: no gate
     // and no read hook for it. A file the knowledge base keeps under that
@@ -1776,7 +1788,8 @@ export function registerWorkspaceTools(
     // guide an earlier release wrote to disk (still on a draft, say) is
     // recognised by its header and not served a second time.
     if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
-      return { kind: 'text', text: await guideAt(branch, ctx, p) };
+      const { text, own } = await guideServed(branch, ctx, p);
+      return { result: { kind: 'text', text }, guideOnly: !own };
     }
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
     await assertCanRead(readGateFor(branch, ctx), p);
@@ -1785,7 +1798,7 @@ export function registerWorkspaceTools(
     // the access gate and the read hook above — a document read is still a
     // KB read. ONE registry dispatch picks the reader by extension.
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-    return readers.readerFor(p).read(bytes, p);
+    return { result: await readers.readerFor(p).read(bytes, p), guideOnly: false };
   };
 
   mount({
@@ -1839,11 +1852,13 @@ export function registerWorkspaceTools(
           ? content.slice(start, limit !== undefined ? start + limit : undefined)
           : content;
       };
-      const result = await readForTool(a.branch as string, p, ctx);
+      const { result, guideOnly } = await readServed(a.branch as string, p, ctx);
       // Judged after the read, so a path the caller may not read is refused
       // before anything is said about writing it. At the guide's name this is
-      // the knowledge base's own file there, as for any path.
-      const canWrite = (await canWriteAt(ctx, [p])).get(p) === true;
+      // the knowledge base's own file there, as for any path; the platform's
+      // guide served alone is not on disk and cannot be written — the same
+      // `false` whether nothing is there or a file the caller may not read.
+      const canWrite = !guideOnly && (await canWriteAt(ctx, [p])).get(p) === true;
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1885,10 +1900,14 @@ export function registerWorkspaceTools(
    * node is indistinguishable from an absent one on every other read.
    */
   /** What a read of the guide's path answers: the guide, after the knowledge base's own readable file when it has one. */
-  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> => {
+  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> =>
+    (await guideServed(branch, ctx, p)).text;
+
+  /** {@link guideAt}, also saying whether a file of the knowledge base's own came first. */
+  const guideServed = async (branch: string, ctx: ToolContext, p: string): Promise<{ text: string; own: boolean }> => {
     const guide = await agentGuide!();
     const own = await ownGuideFile(branch, ctx, p);
-    return own === null ? guide : withPlatformGuideAppended(own, guide);
+    return own === null ? { text: guide, own: false } : { text: withPlatformGuideAppended(own, guide), own: true };
   };
 
   const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {

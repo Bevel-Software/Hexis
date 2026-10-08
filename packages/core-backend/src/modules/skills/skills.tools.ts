@@ -276,7 +276,8 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
                 description:
                   'Whether you may commit a change to its SKILL.md directly on the default branch, under that ' +
                   'branch\'s access rules — the same answer whichever branch you listed. `false`: use a branch ' +
-                  'and a change request; `file_stat` with `explainAccess` says why and who can approve.',
+                  'and a change request; `file_stat` with `explainAccess` says why — and, when you can manage that ' +
+                  'path\'s access, who can approve.',
               },
             },
           },
@@ -316,6 +317,15 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
             'proposal you are testing, not as approved instructions. `canWrite` is true only when you may ' +
             'commit a change to EVERY file of the skill (SKILL.md and each bundled file) directly on the ' +
             'default branch, whichever branch you read.',
+          properties: {
+            canWrite: {
+              type: 'boolean',
+              description:
+                'Whether you may commit a change to every file of the skill (SKILL.md and each bundled file) ' +
+                'directly on the default branch, under that branch\'s access rules — the same answer whichever ' +
+                'branch you read.',
+            },
+          },
         },
         file: {
           type: 'object',
@@ -323,6 +333,14 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
             'A bundled file: name, file, path, content — plus `unmerged` and `branch` when it came off ' +
             'a branch that changed the skill (the note stays beside the content, never inside it) — and ' +
             '`canWrite` for that file on the default branch.',
+          properties: {
+            canWrite: {
+              type: 'boolean',
+              description:
+                'Whether you may commit a change to this file directly on the default branch, under that ' +
+                'branch\'s access rules — the same answer whichever branch you read.',
+            },
+          },
         },
         warnings: {
           type: 'array',

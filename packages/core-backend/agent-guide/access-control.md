@@ -221,8 +221,8 @@ File-level write access decides how a change lands on the default branch:
   commit that change directly on the default branch, under its current access
   rules — the same answer on a draft, where anyone who can read may write.
   `canWrite: false` means use a branch and a change request; do not offer a
-  direct write. `file_stat` with `explainAccess: true` says why, and who can
-  approve.
+  direct write. `file_stat` with `explainAccess: true` says why, and — when
+  you can manage that path's access — who holds each verb: who can approve.
 
 ### An agent proposes and syncs; a person merges
 
