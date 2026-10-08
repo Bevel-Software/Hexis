@@ -1350,7 +1350,13 @@ export async function createCoreServices(
     loadActiveGroups,
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
+  // The branch every tool call runs on is resolved by the handler, before the
+  // tool: the default read live (a rename in the settings is the next call's
+  // default), the existence asked without cloning anything.
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess, {
+    defaultBranch: () => kb.defaultBranch,
+    isMissing: (branch) => workspaceService.isBranchMissing(branch),
+  });
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
   // Every credential kind this server issues — connection keys, internal

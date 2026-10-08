@@ -13,7 +13,7 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
+import { createToolHandlerFactory, type ToolBranchPort } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
@@ -90,6 +90,8 @@ interface StartOptions {
   maxOpenPerUser?: number;
   /** Paths the deployment's read hook refuses. */
   hookRefuses?: (wsPath: string) => boolean;
+  /** The branch port the composition root wires; absent, no existence check. */
+  branches?: ToolBranchPort;
 }
 
 let servers: HttpServer[] = [];
@@ -160,10 +162,7 @@ async function start(options: StartOptions = {}): Promise<Started> {
     events: {} as never,
     getFilesystem: async () => fs,
   });
-  const toolHandler =
-    options.writeAccess !== undefined
-      ? createToolHandlerFactory(resolve, options.writeAccess)
-      : createToolHandlerFactory(resolve);
+  const toolHandler = createToolHandlerFactory(resolve, options.writeAccess, options.branches);
   const fakeAuth = (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     req.toolAuth = { source: 'external', userId: ANA.id, scope: options.scope ?? 'write' };
     next();
@@ -665,6 +664,31 @@ describe('credentials, deployments and the read hook', () => {
     const { status, body } = await request(h.base, [`${KB}/Shared/Open.md`]);
     expect(status).toBe(200);
     expect(body.code).not.toBe(READ_ONLY_CODE);
+    expect(body.files).toHaveLength(1);
+  });
+
+  it('refuses a call that names no branch, or one that does not exist, before anything is captured', async () => {
+    const h = await start({
+      branches: { defaultBranch: () => BRANCH, isMissing: async (b) => b !== BRANCH },
+    });
+    const call = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/agent/tools/request_file_download`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    // `branch` is required in the tool's inputs: no default-branch fallback.
+    const none = await call({ paths: [`${KB}/Shared/Open.md`] });
+    expect(none.status).toBe(400);
+    const missing = await call({ branch: 'nobody/never-made-this', paths: [`${KB}/Shared/Open.md`] });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ kind: 'branch-not-found', branch: 'nobody/never-made-this' });
+    expect(await readdir(h.downloadsRoot)).toEqual([]);
+    expect(h.readsHooked).toEqual([]);
+
+    const { status, body } = await request(h.base, [`${KB}/Shared/Open.md`]);
+    expect(status).toBe(200);
     expect(body.files).toHaveLength(1);
   });
 
