@@ -181,6 +181,10 @@ export function ProfileMenu() {
   // taken as one; signed out there is nobody to be.
   if (!user) return null;
 
+  // Rows offered to this person right now (see `AdminMenuItem.isShown`).
+  const shownDefaultItems = defaultItems.filter((item) => item.isShown?.(user) ?? true);
+  const shownAdminItems = adminItems.filter((item) => item.isShown?.(user) ?? true);
+
   return (
     <div className="relative">
       <button
@@ -265,12 +269,12 @@ export function ProfileMenu() {
             </span>
           </div>
 
-          {defaultItems.filter((item) => item.isShown?.(user) ?? true).map(renderRow)}
+          {shownDefaultItems.map(renderRow)}
 
-          {isAdmin && adminItems.length > 0 && (
+          {isAdmin && shownAdminItems.length > 0 && (
             <div role="group" aria-labelledby="profile-menu-admin-section-label">
               <MenuLabel id="profile-menu-admin-section-label">Admin only</MenuLabel>
-              {adminItems.filter((item) => item.isShown?.(user) ?? true).map(renderRow)}
+              {shownAdminItems.map(renderRow)}
             </div>
           )}
 

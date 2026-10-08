@@ -2,7 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useRef,
   type ReactNode,
 } from 'react';
@@ -74,9 +74,10 @@ const missingProvider: AskFn = () =>
 export function useConfirm(): ConfirmFn {
   const ask = useContext(ConfirmContext) ?? missingProvider;
   const lifeRef = useRef<AbortController | null>(null);
-  useEffect(() => {
-    // Made in the effect, not during render, so a StrictMode remount gets a
-    // fresh one rather than one already aborted.
+  useLayoutEffect(() => {
+    // Made in an effect, not during render, so a StrictMode remount gets a
+    // fresh one rather than one already aborted. A LAYOUT effect, so it is in
+    // place before the asker's own layout effects, which may already ask.
     const life = new AbortController();
     lifeRef.current = life;
     return () => life.abort();

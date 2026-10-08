@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import { useLayoutEffect, type ReactNode } from 'react';
 import { ConfirmProvider, useConfirm, type ConfirmAnswer } from '..';
 
 /**
@@ -103,6 +103,26 @@ describe('ConfirmProvider', () => {
     expect(within(dialog).getByText('From the view that stays?')).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
     await expect(stays).resolves.toEqual({ confirmed: true, dontAskAgain: false });
+  });
+
+  it("withdraws a question asked from the asker's own first layout effect when it goes away", async () => {
+    let answer!: Promise<ConfirmAnswer>;
+    function AsksOnMount() {
+      const confirm = useConfirm();
+      useLayoutEffect(() => {
+        answer = confirm({ title: 'Early', message: 'Asked on mount?' });
+      }, [confirm]);
+      return null;
+    }
+    const { rerender } = render(
+      <ConfirmProvider>
+        <AsksOnMount />
+      </ConfirmProvider>,
+    );
+    expect(await screen.findByText('Asked on mount?')).toBeInTheDocument();
+    rerender(<ConfirmProvider>{null}</ConfirmProvider>);
+    await expect(answer).resolves.toEqual({ confirmed: false, dontAskAgain: false });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('asks one question at a time, in order', async () => {
