@@ -26,6 +26,7 @@ describe('KbSyncService', () => {
     const workflow: SyncWorkflowPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
@@ -34,6 +35,8 @@ describe('KbSyncService', () => {
     expect(all.status).toBe('synced');
     expect(all.results.map((r) => r.branch)).toEqual(['main', 'ali/x']);
     expect(all.changeRequests.closedDeletedBranch).toBe(1);
+    // Every sweep for deleted branches is followed by the leftover cleanup.
+    expect(workflow.retireLeftoverMergedBranches).toHaveBeenCalledTimes(1);
     expect(workflow.syncWorkspaceFromRemote).toHaveBeenCalledWith('ali%2Fx');
 
     const some = await svc.sync({ branches: ['ali/x', 'juan/other'] });
@@ -48,6 +51,7 @@ describe('KbSyncService', () => {
           : updated(decodeURIComponent(id)),
       ),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
@@ -62,6 +66,7 @@ describe('KbSyncService', () => {
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => {
         throw new Error('origin down');
       }),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main']));
@@ -91,6 +96,7 @@ describe('KbSyncService', () => {
         return updated(branch);
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
@@ -121,6 +127,7 @@ describe('KbSyncService', () => {
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
@@ -141,6 +148,7 @@ describe('KbSyncService.lastSync', () => {
     const workflow: SyncWorkflowPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     let clock = 1_000;
@@ -168,6 +176,7 @@ describe('KbSyncService.lastSync', () => {
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
@@ -188,6 +197,7 @@ describe('KbSyncService — a throwing branch step', () => {
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
@@ -208,6 +218,7 @@ describe('KbSyncService — clones the host no longer has, and clones that canno
         id === 'ali%2Fx' ? { branch: 'ali/x', outcome: 'remote-gone' } : updated(decodeURIComponent(id)),
       ),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['ali/x', 'main']));
@@ -222,6 +233,7 @@ describe('KbSyncService — clones the host no longer has, and clones that canno
     const workflow: SyncWorkflowPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const port: SyncWorkspacePort = {
@@ -251,6 +263,7 @@ describe('KbSyncService — a coalesced caller is judged by its own branches', (
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
@@ -278,6 +291,7 @@ describe('KbSyncService — a waiter keeps the branches it asked for', () => {
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireLeftoverMergedBranches: vi.fn(async () => 0),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));

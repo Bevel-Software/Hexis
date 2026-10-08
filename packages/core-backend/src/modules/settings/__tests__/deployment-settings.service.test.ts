@@ -5,6 +5,7 @@ import {
   SettingsValidationError,
   CORE_SETTINGS,
   LEGACY_LAYOUT_ENV_VARS,
+  retireMergedBranchesOn,
 } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 
@@ -116,6 +117,40 @@ describe('DeploymentSettingsService — a blank that means the default', () => {
     for (const ok of ['3650', '0', '-1', '99999']) {
       await expect(settings.save({ auditRetentionDays: ok }, null)).resolves.toBeDefined();
     }
+  });
+});
+
+describe('DeploymentSettingsService — the leftover-branch cleanup switch', () => {
+  /**
+   * On by default; an admin switches it off on the Deployment page, and the
+   * environment variable wins over the page, as for every setting.
+   */
+  it('is on by default, off once saved as false, and on again when cleared', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    const on = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
+    expect(on()).toBe(true);
+    await settings.save({ retireMergedBranches: 'false' }, null);
+    expect(on()).toBe(false);
+    await settings.save({ retireMergedBranches: '' }, null);
+    expect(on()).toBe(true);
+  });
+
+  it('lets RETIRE_MERGED_BRANCHES win over the page', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ retireMergedBranches: 'true' }, null);
+    process.env.RETIRE_MERGED_BRANCHES = 'false';
+    expect(settings.sourceOf('retireMergedBranches')).toBe('env');
+    expect(retireMergedBranchesOn(settings.resolve('retireMergedBranches'))).toBe(false);
+  });
+
+  it('saves only true or false, and reads the ways a person writes "off" as off', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await expect(settings.save({ retireMergedBranches: 'maybe' }, null)).rejects.toBeInstanceOf(SettingsValidationError);
+    for (const off of ['false', 'FALSE', '0', 'off', 'no']) expect(retireMergedBranchesOn(off), off).toBe(false);
+    for (const on of ['', 'true', '1', 'yes']) expect(retireMergedBranchesOn(on), on).toBe(true);
   });
 });
 

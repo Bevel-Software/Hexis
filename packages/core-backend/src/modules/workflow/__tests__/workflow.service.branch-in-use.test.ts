@@ -137,7 +137,7 @@ describe('post-merge branch retirement', () => {
     const deleted: string[] = [];
     const { db, statements } = fakeDb([MERGED_23, OPEN_24_INTO_RFI]);
     const svc = makeService(db, {
-      deleteBranch: vi.fn(async (_ws: string, name: string) => void deleted.push(name)),
+      deleteBranch: vi.fn(async (_ws: string, name: string) => (deleted.push(name), { lastCommit: null })),
     });
 
     await retire(svc, 23, 'target-company-state');
@@ -153,7 +153,7 @@ describe('post-merge branch retirement', () => {
     // #24 is gone; only the merged request remains, so nothing needs the branch.
     const { db } = fakeDb([MERGED_23]);
     const svc = makeService(db, {
-      deleteBranch: vi.fn(async (_ws: string, name: string) => void deleted.push(name)),
+      deleteBranch: vi.fn(async (_ws: string, name: string) => (deleted.push(name), { lastCommit: null })),
     });
 
     await retire(svc, 23, 'target-company-state');
@@ -168,7 +168,7 @@ describe('post-merge branch retirement', () => {
       { number: 25, source_branch: 'juan/rfi', target_branch: 'other', state: 'open' },
     ]);
     const svc = makeService(db, {
-      deleteBranch: vi.fn(async (_ws: string, name: string) => void deleted.push(name)),
+      deleteBranch: vi.fn(async (_ws: string, name: string) => (deleted.push(name), { lastCommit: null })),
     });
 
     await retire(svc, 23, 'target-company-state');
@@ -180,7 +180,7 @@ describe('post-merge branch retirement', () => {
 describe('deleteBranch', () => {
   it('refuses a branch an open request proposes INTO, naming who can act', async () => {
     const { db } = fakeDb([OPEN_24_INTO_RFI]);
-    const svc = makeService(db, { deleteBranch: vi.fn() });
+    const svc = makeService(db, { deleteBranch: vi.fn(async () => ({ lastCommit: null })) });
 
     // Not "withdraw or decline it": the request belongs to someone else, and
     // the branch owner may be authorized to do neither. The message has to
@@ -194,7 +194,7 @@ describe('deleteBranch', () => {
     const { db } = fakeDb([
       { number: 26, source_branch: 'juan/rfi', target_branch: 'target-company-state', state: 'open' },
     ]);
-    const svc = makeService(db, { deleteBranch: vi.fn() });
+    const svc = makeService(db, { deleteBranch: vi.fn(async () => ({ lastCommit: null })) });
 
     await expect(svc.deleteBranch('ws', 'juan/rfi', USER)).rejects.toThrow(
       /open change request \(#26\)\. Withdraw or decline it/,
@@ -205,7 +205,7 @@ describe('deleteBranch', () => {
     const deleted: string[] = [];
     const { db } = fakeDb([OPEN_24_INTO_RFI]);
     const svc = makeService(db, {
-      deleteBranch: vi.fn(async (_ws: string, name: string) => void deleted.push(name)),
+      deleteBranch: vi.fn(async (_ws: string, name: string) => (deleted.push(name), { lastCommit: null })),
     });
 
     await svc.deleteBranch('ws', 'juan/unrelated', USER);

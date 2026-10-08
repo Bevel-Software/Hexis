@@ -27,6 +27,9 @@ const syncLog = logger('sync');
 const lockLog = logger('lock');
 const crLog = logger('cr');
 const mergeLog = logger('merge');
+
+/** Who the leftover cleanup deletes as. Its deletions skip the authorship check, and the log names them `system`. */
+const SYSTEM_ACTOR: AuthUser = { id: 'system', email: 'system', name: 'system' };
 import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -46,6 +49,8 @@ import type {
   ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
+  DeleteBranchPreview,
+  DeleteBranchResult,
   FileApproval,
   FileLock,
   FolderChangeRequest,
@@ -81,11 +86,16 @@ import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
+  BranchAuthorshipError,
+  BranchDeleteBlockedError,
+  BranchNotFoundError,
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
   OpenChangeRequestBlocksMergeError,
+  ProtectedBranchError,
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
@@ -510,9 +520,14 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     name: string,
     user: AuthUser,
-    opts?: { onlyIfNoRemote?: boolean; systemCleanup?: boolean },
-  ): Promise<void> {
-    await this.git.deleteBranch(workspaceId, name, user, opts);
+    opts?: { onlyIfNoRemote?: boolean; systemCleanup?: boolean; expectTip?: string },
+  ): Promise<{ lastCommit: string | null }> {
+    const { lastCommit } = await this.git.deleteBranch(workspaceId, name, user, opts);
+    // One line per deletion, whoever asked: the commit is what a restore
+    // starts from, and for a deletion made in the app or by the cleanup this
+    // line is the only trace there is.
+    const actor = opts?.systemCleanup ? 'system' : user.email;
+    log.info(`branch deleted by ${actor}: "${name}" at ${lastCommit ?? '(no commit)'}`);
     // Retire the deleted branch's own workspace clone, best-effort. A stale
     // clone left on disk would be silently REUSED if the branch name is ever
     // recreated (the workspace bootstrap short-circuits on an existing
@@ -525,6 +540,158 @@ export class WorkflowService implements IWorkflowService {
     } catch (err) {
       log.warn(`could not retire workspace clone of deleted branch "${name}":`, { err });
     }
+    return { lastCommit };
+  }
+
+  /**
+   * Every open change request naming `branch`, at either end — the preview's
+   * list. `openChangeRequestOn` answers the first one, which is all a refusal
+   * needs.
+   */
+  private async openChangeRequestsOn(
+    branch: string,
+  ): Promise<{ number: number; end: 'source' | 'target' }[]> {
+    const rows = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(
+        and(
+          or(
+            eq(changeRequests.sourceBranch, branch),
+            eq(changeRequests.targetBranch, branch),
+          ),
+          eq(changeRequests.state, 'open'),
+        ),
+      );
+    return rows.map((row) => ({
+      number: row.number,
+      end: row.sourceBranch === branch ? ('source' as const) : ('target' as const),
+    }));
+  }
+
+  /**
+   * The default branch's workspace, freshly fetched — where an agent's
+   * deletion and the leftover cleanup both decide and act. Never the
+   * branch's own checkout (which git refuses to delete from), and always
+   * after a strict, forced fetch: the refs are about to authorize a
+   * deletion, and a fetch that failed proves nothing about them.
+   */
+  private async freshDefaultWorkspace(): Promise<string> {
+    const ws = await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
+    await this.workspaceService.ensureRemotesFetched(ws.id, { strict: true, force: true });
+    return ws.id;
+  }
+
+  async deleteBranchChecked(
+    user: AuthUser,
+    name: string,
+    opts: { dryRun?: boolean; discardUnmerged?: boolean } = {},
+  ): Promise<DeleteBranchPreview | DeleteBranchResult> {
+    assertValidBranchName(name);
+    // Under the lock `deleteBranch`, `createBranch` and `openChangeRequest`
+    // take, so nothing this answer depends on — a request being opened, the
+    // branch being recreated — can change between the checks and the delete.
+    // A preview takes it too: it is short, and it then answers a settled state.
+    return this.branchLifecycle.run(`branch:${name}`, async () => {
+      const isProtected = this.kb.isProtectedBranch(name);
+      if (isProtected && !opts.dryRun) throw new ProtectedBranchError(name, 'deleting a protected branch');
+
+      let wsId: string;
+      try {
+        wsId = await this.freshDefaultWorkspace();
+      } catch (err) {
+        log.warn(`delete_branch "${name}": could not fetch the shared repository — deleting nothing:`, { err });
+        throw new BranchDeleteBlockedError(
+          'state-unconfirmed',
+          name,
+          `Could not reach the shared repository to confirm the current state of "${name}", so nothing was deleted. Try again shortly.`,
+        );
+      }
+
+      const state = await this.git.branchState(wsId, name, this.kb.defaultBranch);
+      if (!state.exists) {
+        if (!opts.dryRun) throw new BranchNotFoundError(name);
+        return {
+          kind: 'preview',
+          branch: name,
+          exists: false,
+          canDelete: false,
+          refusals: [new BranchNotFoundError(name).message],
+          unmergedCommits: 0,
+          openChangeRequests: [],
+          lastCommit: null,
+        };
+      }
+
+      // Every refusal, in the order a deletion meets them. The preview lists
+      // them all; a deletion throws the first.
+      const refusals: Error[] = [];
+      if (isProtected) refusals.push(new ProtectedBranchError(name, 'deleting a protected branch'));
+      if (!(await this.git.mayDeleteBranch(wsId, name, user))) refusals.push(new BranchAuthorshipError(name));
+      const open = await this.openChangeRequestsOn(name);
+      const first = open[0];
+      if (first) {
+        refusals.push(
+          new BranchDeleteBlockedError(
+            'open-change-request',
+            name,
+            first.end === 'source'
+              ? `Change request #${first.number} is open from "${name}". Ask the user to withdraw or decline it in the app; then the branch can be deleted.`
+              : `Change request #${first.number} is open into "${name}". Ask the user to withdraw or decline it in the app; then the branch can be deleted.`,
+            { number: first.number },
+          ),
+        );
+      }
+      // Not coverable by `discardUnmerged`: these are a person's saves on
+      // their way into the branch, not work already on it.
+      if (await this.savesInFlight(workspaceIdForBranch(name))) {
+        refusals.push(
+          new BranchDeleteBlockedError(
+            'saves-landing',
+            name,
+            `"${name}" still has saves waiting to be committed or a file held for editing. Try again once they have landed.`,
+          ),
+        );
+      }
+      if (state.unmergedCommits > 0 && !opts.discardUnmerged) {
+        const n = state.unmergedCommits;
+        refusals.push(
+          new BranchDeleteBlockedError(
+            'unmerged-commits',
+            name,
+            `"${name}" holds ${n} commit${n === 1 ? '' : 's'} that ${n === 1 ? 'is' : 'are'} not on ${this.kb.defaultBranch}; ` +
+              `deleting it would lose ${n === 1 ? 'it' : 'them'}. Pass discardUnmerged: true to delete it anyway.`,
+            { unmergedCommits: n },
+          ),
+        );
+      }
+
+      if (opts.dryRun) {
+        return {
+          kind: 'preview',
+          branch: name,
+          exists: true,
+          canDelete: refusals.length === 0,
+          refusals: refusals.map((r) => r.message),
+          unmergedCommits: state.unmergedCommits,
+          openChangeRequests: open,
+          lastCommit: state.lastCommit,
+        };
+      }
+      if (refusals[0]) throw refusals[0];
+
+      // Leased on the tip the checks above were made against, so a commit
+      // pushed since is refused by the host instead of deleted unseen.
+      const { lastCommit } = await this.deleteBranchUnlocked(wsId, name, user, {
+        ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
+      });
+      return {
+        kind: 'deleted',
+        branch: name,
+        lastCommit: lastCommit ?? state.lastCommit ?? '',
+        discardedCommits: state.unmergedCommits,
+      };
+    });
   }
 
   // No `switchBranch` here on purpose. Under the per-branch workspace model,
@@ -3244,9 +3411,110 @@ export class WorkflowService implements IWorkflowService {
         }
       })
       .catch((err) => crLog.warn('on-demand deleted-branch sweep failed:', { err }))
+      // Every sweep is followed by the leftover cleanup, which never throws.
+      .then(() => this.retireLeftoverMergedBranches())
+      .then(() => undefined)
       .finally(() => {
         this.sweepKick = null;
       });
+  }
+
+  /**
+   * Whether the leftover cleanup below runs — the `retireMergedBranches`
+   * deployment setting, read at every round so the Deployment page applies
+   * without a restart. Set by the composition root; on by default.
+   */
+  leftoverCleanupEnabled: () => boolean = () => true;
+
+  private leftoverRound: Promise<number> | null = null;
+
+  /**
+   * Remove the branches merged change requests left behind: sources of a
+   * merge from before the post-merge retirement existed (core-backend 0.5.0),
+   * and ones whose retirement failed. What `retireMergedSourceBranch` does
+   * after a merge, applied to every merge on record.
+   *
+   * A branch goes only when ALL hold: it is not protected; it was the source
+   * of a merged request; it has no commit that is not on the default branch;
+   * no request is open from or into it; its tip is contained in the merge
+   * commit recorded for one of those requests — a branch recreated under the
+   * same name after the merge is somebody's new draft, and a request with no
+   * recorded merge commit proves nothing; and its checkout has no saves
+   * landing and no file held. Each is decided and deleted under the branch's
+   * lifecycle lock, like the post-merge retirement.
+   *
+   * Fails SAFE, like the deleted-branch sweep it runs beside: a round whose
+   * fetch fails removes nothing, and a branch whose state cannot be read is
+   * left. The switch covers this round only; the post-merge retirement is not
+   * asked. Never throws. Coalesced, because boot, the remote sync and the
+   * on-demand sweep can all start one. Returns how many it removed.
+   */
+  retireLeftoverMergedBranches(): Promise<number> {
+    if (this.leftoverRound) return this.leftoverRound;
+    this.leftoverRound = this.retireLeftoverMergedBranchesOnce()
+      .catch((err) => {
+        log.warn('leftover branch cleanup failed:', { err });
+        return 0;
+      })
+      .finally(() => {
+        this.leftoverRound = null;
+      });
+    return this.leftoverRound;
+  }
+
+  private async retireLeftoverMergedBranchesOnce(): Promise<number> {
+    if (!this.leftoverCleanupEnabled()) return 0;
+    const merged = await this.db
+      .select({ sourceBranch: changeRequests.sourceBranch, mergedSha: changeRequests.mergedSha })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'merged'));
+    const mergeCommits = new Map<string, string[]>();
+    for (const row of merged) {
+      if (this.kb.isProtectedBranch(row.sourceBranch)) continue;
+      const shas = mergeCommits.get(row.sourceBranch) ?? [];
+      if (row.mergedSha) shas.push(row.mergedSha);
+      mergeCommits.set(row.sourceBranch, shas);
+    }
+    if (mergeCommits.size === 0) return 0;
+
+    let wsId: string;
+    try {
+      wsId = await this.freshDefaultWorkspace();
+    } catch (err) {
+      log.warn('leftover branch cleanup skipped — could not fetch the shared repository:', { err });
+      return 0;
+    }
+
+    let removed = 0;
+    for (const [branch, shas] of mergeCommits) {
+      if (shas.length === 0) continue;
+      try {
+        const done = await this.branchLifecycle.run(`branch:${branch}`, async () => {
+          const state = await this.git.branchState(wsId, branch, this.kb.defaultBranch);
+          if (!state.exists || state.lastCommit === null || state.unmergedCommits > 0) return false;
+          if ((await this.openChangeRequestOn(branch)) !== null) return false;
+          let contained = false;
+          for (const sha of shas) {
+            if (await this.git.isAncestor(wsId, state.lastCommit, sha).catch(() => false)) {
+              contained = true;
+              break;
+            }
+          }
+          if (!contained) return false;
+          if (await this.savesInFlight(workspaceIdForBranch(branch))) return false;
+          await this.deleteBranchUnlocked(wsId, branch, SYSTEM_ACTOR, {
+            systemCleanup: true,
+            expectTip: state.lastCommit,
+          });
+          return true;
+        });
+        if (done) removed++;
+      } catch (err) {
+        log.warn(`leftover branch cleanup could not remove "${branch}":`, { err });
+      }
+    }
+    if (removed > 0) log.info(`removed ${removed} branch${removed === 1 ? '' : 'es'} left over from merged change requests`);
+    return removed;
   }
 
 

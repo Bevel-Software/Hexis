@@ -1,0 +1,9 @@
+---
+'@bevel-software/platform-shared': minor
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/platform-core-frontend': minor
+---
+
+Agents can delete a branch with the new `delete_branch` tool, on every surface. It applies the app's rule (the branch's author or an Admin) and refuses a protected branch, a name that is not a branch ("no branch named …"), a branch a change request is open from or into (naming the request, for the user to withdraw or decline in the app), a branch whose checkout still has saves landing or a file held, and — unless `discardUnmerged: true` — a branch holding commits that are not on the default branch, saying how many. It fetches first and refuses when the shared repository cannot be reached. `dryRun: true` changes nothing and reports whether the branch exists, whether it may be deleted and why not, its unmerged commits, its open change requests and its last commit; every check runs again on delete. A deletion removes the branch from the shared repository and the server, and answers its last commit.
+
+The server now also removes, at startup and with every sweep for deleted branches, the branches merged change requests left behind: a non-protected source of a merged request whose last commit is contained in that request's recorded merge commit, with no commits outside the default branch, no open request from or into it, and no saves landing. A round whose fetch fails removes nothing. Admins can switch this off on the Deployment page ("Remove branches left over from merged change requests", or `RETIRE_MERGED_BRANCHES=false`); it is on by default, and the removal of a branch when its request is merged is unaffected. Every branch deletion — by an agent, in the app, or by this cleanup — writes one server log line naming who did it (or `system`), the branch and its last commit.

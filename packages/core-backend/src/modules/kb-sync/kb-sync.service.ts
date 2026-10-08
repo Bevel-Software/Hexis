@@ -187,6 +187,9 @@ export class KbSyncService implements IKbSyncService {
     } catch (err) {
       log.warn('deleted-branch sweep failed:', { err });
     }
+    // Then the branches merged change requests left behind — the same
+    // cleanup boot runs, behind its own setting. Never throws.
+    await this.workflow.retireLeftoverMergedBranches();
 
     const result: SyncResult = {
       status: KbSyncService.statusOf(results),

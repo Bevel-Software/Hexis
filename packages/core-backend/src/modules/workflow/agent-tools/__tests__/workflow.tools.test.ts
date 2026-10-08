@@ -9,7 +9,13 @@ import { createToolContextResolver } from '../../../tool-helpers/tool-context.js
 import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
 import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
 import { registerWorkflowTools } from '../workflow.tools.js';
-import { ChangeRequestConflictsError, OpenChangeRequestBlocksMergeError } from '../../../../shared/domain-errors.js';
+import {
+  BranchAuthorshipError,
+  BranchDeleteBlockedError,
+  BranchNotFoundError,
+  ChangeRequestConflictsError,
+  OpenChangeRequestBlocksMergeError,
+} from '../../../../shared/domain-errors.js';
 
 const WS = 'target-company-state';
 
@@ -144,6 +150,29 @@ const workflowService = {
     }
     return { kind: 'merged', sha: 'merge-sha' };
   },
+  deleteBranchChecked: async (user: { id: string }, name: string, opts: unknown) => {
+    calls.push(['deleteBranchChecked', user.id, name, opts]);
+    if (name === 'me/missing') throw new BranchNotFoundError(name);
+    if (name === 'ali/theirs') throw new BranchAuthorshipError(name);
+    if (name === 'me/proposed') {
+      throw new BranchDeleteBlockedError(
+        'open-change-request',
+        name,
+        'Change request #12 is open from "me/proposed". Ask the user to withdraw or decline it in the app; then the branch can be deleted.',
+        { number: 12 },
+      );
+    }
+    if (name === 'me/unmerged' && !(opts as { discardUnmerged?: boolean }).discardUnmerged) {
+      throw new BranchDeleteBlockedError('unmerged-commits', name, '"me/unmerged" holds 3 commits…', { unmergedCommits: 3 });
+    }
+    if (name === 'me/offline') {
+      throw new BranchDeleteBlockedError('state-unconfirmed', name, 'Could not reach the shared repository…');
+    }
+    if ((opts as { dryRun?: boolean }).dryRun) {
+      return { kind: 'preview', branch: name, exists: true, canDelete: true, refusals: [], unmergedCommits: 0, openChangeRequests: [], lastCommit: 'tip-1' };
+    }
+    return { kind: 'deleted', branch: name, lastCommit: 'tip-1', discardedCommits: name === 'me/unmerged' ? 3 : 0 };
+  },
   postComment: async (number: number, _user: unknown, input: { path?: string }) => {
     calls.push(['postComment', number, input.path]);
     return { id: 'c-1' };
@@ -248,6 +277,69 @@ describe('registerWorkflowTools', () => {
     );
     // Nothing was written: the refusal happens before the service is asked.
     expect(calls.some((c) => c[0] === 'postComment')).toBe(false);
+  });
+
+  describe('delete_branch', () => {
+    it('is on both catalogs, takes name, dryRun and discardUnmerged, and is a write tool', async () => {
+      await start();
+      for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+        const tool = tools.find((t) => t.name === 'delete_branch');
+        expect(tool).toBeDefined();
+        // `toolDef` wraps a tool's own inputs under `body`.
+        const inputs = (tool!.inputs as { properties: { body: { properties: Record<string, unknown>; required: string[] } } })
+          .properties.body;
+        expect(Object.keys(inputs.properties).sort()).toEqual(['discardUnmerged', 'dryRun', 'name']);
+        expect(inputs.required).toEqual(['name']);
+        expect(tool!.tags).toContain('write');
+      }
+    });
+
+    it('deletes as the caller and answers the last commit', async () => {
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/delete_branch`, writeTok(), { name: 'me/draft' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ kind: 'deleted', branch: 'me/draft', lastCommit: 'tip-1', discardedCommits: 0 });
+      expect(calls).toContainEqual(['deleteBranchChecked', 'user-A', 'me/draft', { dryRun: false, discardUnmerged: false }]);
+    });
+
+    it('passes dryRun and discardUnmerged through', async () => {
+      const base = await start();
+      const preview = await post(`${base}/api/agent/tools/delete_branch`, writeTok(), { name: 'me/draft', dryRun: true });
+      expect(await preview.json()).toMatchObject({ kind: 'preview', canDelete: true, lastCommit: 'tip-1' });
+      const discarded = await post(`${base}/api/agent/tools/delete_branch`, writeTok(), { name: 'me/unmerged', discardUnmerged: true });
+      expect(await discarded.json()).toMatchObject({ kind: 'deleted', discardedCommits: 3 });
+      expect(calls).toContainEqual(['deleteBranchChecked', 'user-A', 'me/draft', { dryRun: true, discardUnmerged: false }]);
+      expect(calls).toContainEqual(['deleteBranchChecked', 'user-A', 'me/unmerged', { dryRun: false, discardUnmerged: true }]);
+    });
+
+    it('answers each refusal with its status and message', async () => {
+      const base = await start();
+      const ask = async (name: string) => {
+        const res = await post(`${base}/api/agent/tools/delete_branch`, writeTok(), { name });
+        return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      };
+      const missing = await ask('me/missing');
+      expect(missing.status).toBe(404);
+      expect(missing.body.error).toMatch(/no branch named me\/missing/);
+      const theirs = await ask('ali/theirs');
+      expect(theirs.status).toBe(403);
+      expect(theirs.body.error).toBe('Only the author of "ali/theirs" can delete it.');
+      const proposed = await ask('me/proposed');
+      expect(proposed.status).toBe(409);
+      expect(proposed.body).toMatchObject({ reason: 'open-change-request', number: 12 });
+      expect(proposed.body.error).toMatch(/#12.*withdraw or decline it in the app/);
+      const unmerged = await ask('me/unmerged');
+      expect(unmerged.status).toBe(409);
+      expect(unmerged.body).toMatchObject({ reason: 'unmerged-commits', unmergedCommits: 3 });
+      expect((await ask('me/offline')).status).toBe(503);
+    });
+
+    it('requires a name', async () => {
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/delete_branch`, writeTok(), {});
+      expect(res.status).toBe(400);
+      expect(calls.some((c) => c[0] === 'deleteBranchChecked')).toBe(false);
+    });
   });
 
   // An agent proposes and syncs; a person merges.

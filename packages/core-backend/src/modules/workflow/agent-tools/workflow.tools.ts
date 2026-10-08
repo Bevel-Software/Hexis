@@ -608,6 +608,73 @@ export function registerWorkflowTools(
     },
   });
 
+  mount({
+    name: 'delete_branch',
+    description:
+      'Delete branch `name` for everyone: from the shared repository and from the server. Allowed for the ' +
+      'branch\'s author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
+      'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
+      '(retry once they land), and a branch a change request is open from or into (naming it): ask the user ' +
+      'to withdraw or decline that request in the app. Refuses a branch holding commits that are not on the ' +
+      'default branch, saying how many; `discardUnmerged: true` deletes it anyway and reports them as ' +
+      '`discardedCommits`. Refuses when the shared repository cannot be reached. Preview first with ' +
+      '`dryRun: true`: it changes nothing and answers `exists`, `canDelete`, `refusals`, `unmergedCommits`, ' +
+      '`openChangeRequests` and `lastCommit`. A preview grants nothing; every check runs again on delete. ' +
+      'Answers the deleted branch\'s `lastCommit`.',
+    // Names its branch itself; the deletion runs in the default branch's workspace.
+    skipBranch: true,
+    refusesItself: ['name'],
+    inputs: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', minLength: 1, description: 'The branch to delete.' },
+        dryRun: { type: 'boolean', description: 'Report what deleting would do, and change nothing.' },
+        discardUnmerged: {
+          type: 'boolean',
+          description: 'Delete even though the branch holds commits that are not on the default branch. They are lost.',
+        },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['preview', 'deleted'] },
+        branch: { type: 'string' },
+        lastCommit: { type: ['string', 'null'], description: 'The branch\'s tip — what a restore starts from. Null in a preview of a branch that does not exist.' },
+        discardedCommits: { type: 'integer', description: 'When `kind` is `deleted`: commits not on the default branch that went with it.' },
+        exists: { type: 'boolean', description: 'When `kind` is `preview`.' },
+        canDelete: { type: 'boolean', description: 'When `kind` is `preview`: whether a delete asked for now would go through.' },
+        refusals: { type: 'array', items: { type: 'string' }, description: 'When `kind` is `preview`: why it would not.' },
+        unmergedCommits: { type: 'integer', description: 'When `kind` is `preview`: commits not on the default branch.' },
+        openChangeRequests: {
+          type: 'array',
+          description: 'When `kind` is `preview`: open change requests from (`source`) or into (`target`) the branch.',
+          items: {
+            type: 'object',
+            properties: { number: { type: 'integer' }, end: { type: 'string', enum: ['source', 'target'] } },
+            required: ['number', 'end'],
+          },
+        },
+      },
+      required: ['kind', 'branch', 'lastCommit'],
+    },
+    write: true,
+    handler: async (args, ctx: ToolContext) => {
+      const name = args.name;
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new ToolError('`name` is required: pass the name of the branch to delete.', 400, {
+          kind: 'name-required',
+        });
+      }
+      return ctx.workflowService.deleteBranchChecked(ctx.user, name, {
+        dryRun: args.dryRun === true,
+        discardUnmerged: args.discardUnmerged === true,
+      });
+    },
+  });
+
   // `merge_change_request` is retired: a change request is merged by a person
   // in the app. It is in no catalog, but a caller holding an old manual still
   // posts to its path — answer with who merges now, not a bare 404.
