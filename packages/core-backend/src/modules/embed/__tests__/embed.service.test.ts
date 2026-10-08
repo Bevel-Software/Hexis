@@ -126,6 +126,18 @@ describe('EmbedService: minting', () => {
     });
   });
 
+  /**
+   * The token rides in the tool result and so in the chat transcript;
+   * whoever holds it acts on that one file as its user until it expires.
+   * One hour (Razvan, 2026-10-09), down from the two the embed used before.
+   */
+  it('mints a token that lives one hour', async () => {
+    const { service } = build();
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
+    expect(exp - iat).toBe(60 * 60);
+  });
+
   it('mints for an outside account — the connector path, unchanged', async () => {
     const { service } = build();
     const { token } = await service.mintToken({

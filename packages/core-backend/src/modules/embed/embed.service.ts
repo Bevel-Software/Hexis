@@ -35,10 +35,15 @@ const log = logger('embed');
 
 /**
  * Token lifetime — long enough for a view left open in a chat, short enough
- * that a token copied out of a transcript stops working on its own. Two hours
- * is what the embed has always used.
+ * that a token copied out of a transcript stops working on its own. The
+ * token rides in `open_page`'s result, so it sits in the chat transcript, and
+ * whoever holds it reads and edits that one file as the token's user until
+ * it expires. One hour (Razvan, 2026-10-09; the embed used two before): a
+ * page left open in a chat is still covered, and the window is halved. A
+ * view older than that shows the expired sentence and the agent opens the
+ * page again.
  */
-export const EMBED_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+export const EMBED_TOKEN_TTL_SECONDS = 60 * 60;
 
 /** What the embed's config needs from the deployment's. */
 export interface EmbedConfig {
@@ -579,7 +584,7 @@ export class EmbedService implements IEmbedService {
       throw new EmbedTokenError();
     }
     // A token minted by the release BEFORE the subject was generalised keyed
-    // the identity on `accountId` alone. Those live two hours, so an upgrade
+    // the identity on `accountId` alone. Those were minted for two hours, so an upgrade
     // would otherwise expire every open Atlassian panel on the spot; reading
     // the old spelling costs one branch and keeps them working.
     if (typeof c.accountId === 'string' && c.accountId) {

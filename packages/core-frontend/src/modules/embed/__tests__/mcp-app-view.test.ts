@@ -207,6 +207,34 @@ describe('the MCP App view', () => {
     expect(getComputedStyle(notice()).display).toBe('none');
   });
 
+  /**
+   * A host starts an app view a few lines tall and grows it only when the
+   * view asks. The page scrolls inside the view, so the ask is a reading
+   * height, sent once the page is on screen — a notice needs no room.
+   */
+  it('asks the host for a reading height once the page is on screen, and not before', async () => {
+    const sizeRequests = () =>
+      host.postMessage.mock.calls
+        .map((c) => c[0] as { method?: string; params?: { height?: unknown } })
+        .filter((m) => m.method === 'ui/notifications/size-changed');
+    fromHost(pageResult());
+    await settled();
+    expect(sizeRequests()).toHaveLength(0);
+    bundleScript()!.dispatchEvent(new Event('load'));
+    // The one height the view asks for, pinned: a document pane's reading
+    // height, and the number the changeset documents.
+    expect(sizeRequests()).toEqual([
+      { jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height: 640 } },
+    ]);
+  });
+
+  it('asks for no room when there is only a sentence to show', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    fromHost(pageResult());
+    await settled();
+    expect(sentMethods()).not.toContain('ui/notifications/size-changed');
+  });
+
   it.each([
     ['the manifest cannot be fetched', () => fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))],
     ['the manifest answers an error', () => fetchMock.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) })],
