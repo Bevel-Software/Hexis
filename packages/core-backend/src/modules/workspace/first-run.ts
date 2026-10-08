@@ -155,10 +155,16 @@ export async function knowledgeFolderIsNew(
       if (pages.length >= JUDGE_CHUNK && (await anyReadable())) return false;
     }
     if (await anyReadable()) return false;
-    const enter = mayRead && folders.length > 0 ? await mayRead(folders.map((f) => f.rel)) : null;
-    for (const child of folders) {
-      if (enter && enter.get(child.rel) !== true) continue;
-      if (!(await holdsNothing(child.abs, child.rel))) return false;
+    // The subfolders, asked about a chunk at a time — a root holding a great
+    // many of them is still one bounded ask after another — and entered only
+    // as the caller may.
+    for (let at = 0; at < folders.length; at += JUDGE_CHUNK) {
+      const chunk = folders.slice(at, at + JUDGE_CHUNK);
+      const enter = mayRead ? await mayRead(chunk.map((f) => f.rel)) : null;
+      for (const child of chunk) {
+        if (enter && enter.get(child.rel) !== true) continue;
+        if (!(await holdsNothing(child.abs, child.rel))) return false;
+      }
     }
     return true;
   };
@@ -169,7 +175,7 @@ export async function knowledgeFolderIsNew(
   }
 }
 
-/** How many of a folder's pages are judged in one ask of `mayRead`. */
+/** How many of a folder's pages, or subfolders, are judged in one ask of `mayRead`. */
 const JUDGE_CHUNK = 200;
 
 /**

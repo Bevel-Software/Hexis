@@ -144,6 +144,18 @@ describe('knowledgeFolderIsNew', () => {
     expect(await knowledgeFolderIsNew(dir, undefined, justOne)).toBe(false);
   });
 
+  it('asks about a great many subfolders a chunk at a time, entering none it may not', async () => {
+    await Promise.all(Array.from({ length: 450 }, (_, i) => mkdir(join(dir, `Team-${i}`), { recursive: true })));
+    const asked: number[] = [];
+    const nobody = async (rels: string[]) => {
+      asked.push(rels.length);
+      return new Map(rels.map((rel) => [rel, false]));
+    };
+    expect(await knowledgeFolderIsNew(dir, undefined, nobody)).toBe(true);
+    expect(asked.reduce((n, k) => n + k, 0)).toBe(450);
+    expect(Math.max(...asked)).toBeLessThanOrEqual(200);
+  });
+
   it('passes a link over by kind: not a page, never read through, never asked about', async () => {
     try {
       await symlink(join(tmpdir(), 'elsewhere.md'), join(dir, 'Alias.md'));
