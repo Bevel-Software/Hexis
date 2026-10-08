@@ -1,3 +1,10 @@
+/**
+ * The product's name and its maker's: BRANDING, which is the app shell's
+ * to own. It lives beside the shell rather than among the shared components
+ * because those are domain-agnostic building blocks (a button, a dialog) and
+ * this is the one thing in the frontend that says which product this is.
+ */
+
 /** The product's own name, before its maker's: the first half of {@link PRODUCT_NAME}. */
 const PRODUCT = 'Hexis';
 

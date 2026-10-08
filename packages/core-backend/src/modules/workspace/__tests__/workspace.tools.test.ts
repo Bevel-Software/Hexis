@@ -2552,6 +2552,19 @@ describe('start_session', () => {
       expect(res).toEqual({ sessionId: 'thread-xyz' });
     });
 
+    it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
+      await mkdir(join(knowledge(), 'Leadership'), { recursive: true });
+      await writeFile(join(knowledge(), 'Leadership', 'Plan.md'), '# Plan\n');
+      const planClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Plan.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, planClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+    });
+
     it('says nothing of a pack whose page the caller may not read, in the checkout or gone from it', async () => {
       // Absent from the checkout, so the folder reads as new — and the note
       // would still name the pack and its suggestions.

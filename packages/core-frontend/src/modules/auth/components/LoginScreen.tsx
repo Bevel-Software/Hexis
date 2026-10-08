@@ -1,6 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useAuth } from '../state/auth.context';
-import { ProductName } from '../../../shared/components';
+import { ProductName } from '../../../core/ProductName';
 import {
   startSsoLogin,
   fetchLoginProviders,

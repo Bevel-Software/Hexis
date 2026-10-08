@@ -79,21 +79,38 @@ const FOLDER_BUDGET = 200;
 export const ENTRY_BUDGET = 1000;
 
 /**
+ * Which of some pages (paths below the knowledge folder) the caller may
+ * read — `canReadBatch` for them, with the folder's prefix put on and taken
+ * off again.
+ */
+export type MayRead = (relPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
+
+/**
  * Whether the knowledge folder at `dir` (absolute) holds nothing but the
  * starter guide: no file in it or below it other than that guide at its top,
- * folder placeholders, dot-files and access rules. Stops at the first page it
- * finds. A folder that is not there answers false: that is a knowledge base in
- * a shape the template never made, and greeting it as new would be a guess.
+ * folder placeholders, dot-files and access rules. A folder that is not
+ * there answers false: that is a knowledge base in a shape the template
+ * never made, and greeting it as new would be a guess.
  *
  * `starterPages` are a starter pack's pages (path below `dir` → the text the
  * pack wrote): one still holding exactly that text is not a page either.
+ *
+ * With `mayRead`, the answer is the CALLER'S: a page they may not read is
+ * not theirs to know of, so it does not make the folder old for them — the
+ * walk collects what it finds and asks once at the end, instead of stopping
+ * at the first page. Without it the first page found ends the walk. The
+ * budgets answer "not new" either way on a tree too large to walk, naming
+ * nothing.
  */
 export async function knowledgeFolderIsNew(
   dir: string,
   starterPages?: ReadonlyMap<string, string>,
+  mayRead?: MayRead,
 ): Promise<boolean> {
   let opened = 0;
   let read = 0;
+  /** The pages the disk holds, to be judged by `mayRead` once the walk is done. */
+  const found: string[] = [];
   const holdsNothing = async (folder: string, rel: string): Promise<boolean> => {
     if (++opened > FOLDER_BUDGET) return false;
     // `for await` closes the handle however the loop ends, an early return included.
@@ -108,13 +125,20 @@ export async function knowledgeFolderIsNew(
         continue;
       }
       if (entry.isFile() && (await isUntouchedStarterPage(join(folder, name), starterPages?.get(childRel)))) continue;
-      // A file, a link, anything else: something someone put there.
+      if (entry.isFile() && mayRead) {
+        found.push(childRel);
+        continue;
+      }
+      // A link, anything else — or a file, with nobody to ask: something someone put there.
       return false;
     }
     return true;
   };
   try {
-    return await holdsNothing(dir, '');
+    if (!(await holdsNothing(dir, ''))) return false;
+    if (found.length === 0) return true;
+    const verdicts = await mayRead!(found);
+    return !found.some((rel) => verdicts.get(rel) === true);
   } catch {
     return false;
   }

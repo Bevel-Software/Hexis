@@ -40,7 +40,6 @@ export type { MenuPanelProps, MenuItemProps } from './Menu';
 
 /* Pre-existing components that are part of the same surface. */
 export { Dialog } from './Dialog';
-export { ProductName, PRODUCT_NAME, MAKER_URL } from './ProductName';
 export type { DialogSize } from './Dialog';
 export { PageShell } from './PageShell';
 export type { PageShellWidth } from './PageShell';

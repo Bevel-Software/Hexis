@@ -5,7 +5,7 @@ import { activeAppId, useActiveAppId, useAppRegistry, type AppDef } from '../../
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 import { cn } from '../../../lib/utils';
-import { PRODUCT_NAME, ProductName } from '../../../shared/components';
+import { PRODUCT_NAME, ProductName } from '../../../core/ProductName';
 
 const MENU_ID = 'app-switcher-menu';
 

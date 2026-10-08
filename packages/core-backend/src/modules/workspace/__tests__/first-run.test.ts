@@ -87,6 +87,24 @@ describe('knowledgeFolderIsNew', () => {
     expect(await knowledgeFolderIsNew(dir, new Map([['About us.md', '# About us\n']]))).toBe(false);
   });
 
+  it("answers for the caller when asked to: a page they may not read does not make the folder old for them", async () => {
+    await mkdir(join(dir, 'Leadership'), { recursive: true });
+    await writeFile(join(dir, 'Leadership', 'Plan.md'), '# Plan\n');
+    const seen: string[][] = [];
+    const nobody = async (rels: string[]) => {
+      seen.push(rels);
+      return new Map(rels.map((rel) => [rel, false]));
+    };
+    expect(await knowledgeFolderIsNew(dir, undefined, nobody)).toBe(true);
+    // Asked once, for every page the disk holds, by its path below the folder.
+    expect(seen).toEqual([['Leadership/Plan.md']]);
+
+    const everyone = async (rels: string[]) => new Map(rels.map((rel) => [rel, true]));
+    expect(await knowledgeFolderIsNew(dir, undefined, everyone)).toBe(false);
+    // Without anyone to ask, a page is a page.
+    expect(await knowledgeFolderIsNew(dir)).toBe(false);
+  });
+
   it('stops reading at its entry budget: that many entries and no page is not a new knowledge base', async () => {
     // Entries that are never pages, so only the budget can end the walk.
     await Promise.all(Array.from({ length: ENTRY_BUDGET }, (_, i) => writeFile(join(dir, `.note-${i}`), '')));

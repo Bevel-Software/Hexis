@@ -1759,23 +1759,26 @@ export function registerWorkspaceTools(
       const knowledgeDir = kb.layout.knowledgeBaseDir;
       // GATED LIKE A READ. The note says what the knowledge folder holds —
       // nothing, or a pack's pages still as the pack wrote them — so it goes
-      // only to a caller who may read that folder, and names only the pack
-      // pages they may read. A pack page the caller may not read is judged
-      // as anybody's page: the note stays silent about it rather than tell
-      // them it is a placeholder.
+      // only to a caller who may read that folder, and judges the folder as
+      // THEY may see it: a page they may not read does not make it old for
+      // them (`mayRead` below), since reading the folder is no leave to learn
+      // what restricted pages sit in it.
       if (!(await accessControl.canRead(workspaceId, ctx.user.email, knowledgeDir))) return null;
       const root = await ctx.workspaceService.getWorkspacePath(workspaceId);
+      const mayRead = async (rels: string[]) => {
+        const verdicts = await accessControl.canReadBatch(workspaceId, ctx.user.email, rels.map((rel) => `${knowledgeDir}/${rel}`));
+        return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));
+      };
       // A starter pack's pages, still as the pack wrote them, are tasks to
       // fill in rather than pages anyone wrote: they leave the note standing,
-      // and the note names what the pack suggests drafting first.
+      // and the note names what the pack suggests drafting first. A pack
+      // page the caller may not read keeps the note away altogether: it
+      // names the pack and what it suggests drafting, which is about pages
+      // this caller is not to know of — in the checkout or gone from it.
       const starter = (await starterPacks?.firstRunStarter()) ?? null;
       const pages = starter ? await readableStarterPages(ctx, workspaceId, knowledgeDir, starter.pages) : undefined;
-      // A pack page the caller may not read keeps the note away altogether:
-      // the note names the pack and what it suggests drafting, which is
-      // about pages this caller is not to know of — whether the page is in
-      // the checkout (judged as anybody's above) or gone from it.
       if (starter && pages && pages.size < starter.pages.size) return null;
-      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), pages))) return null;
+      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), pages, mayRead))) return null;
       return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
     } catch (err) {
       log.debug('start_session: could not tell whether the knowledge base is new', {

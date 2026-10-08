@@ -1,6 +1,7 @@
 import { useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Check, GitBranch, Server } from 'lucide-react';
-import { Badge, Banner, Button, ProductName, TextField } from '../../../shared/components';
+import { Badge, Banner, Button, TextField } from '../../../shared/components';
+import { ProductName } from '../../../core/ProductName';
 import { cn } from '../../../lib/utils';
 import { useAppRegistry } from '../../../core/registry';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
