@@ -100,6 +100,29 @@ export function registerSkillsTools(
       ? defaultBranchWriteVerdicts(writeVerdicts, ctx, paths)
       : Promise.resolve(new Map(paths.map((p) => [p, false])));
 
+  /**
+   * Every repo-relative file `get_skill`'s `canWrite` covers: the skill's
+   * `SKILL.md` and bundled files as the DEFAULT branch has them. `loaded` is
+   * reused when it already is the default branch's latest copy; otherwise the
+   * released skill is looked up, and the loaded copy stands in only when the
+   * default branch has no such skill (one that exists only on a draft). Null —
+   * judged `false` — when that lookup fails or refuses (fail closed), and
+   * without a lookup when the verdict cannot be anything but `false`.
+   */
+  const skillFilesOnDefault = async (
+    ctx: ToolContext,
+    name: string,
+    loaded: { path: string; files: string[] },
+    loadedElsewhere: boolean,
+  ): Promise<string[] | null> => {
+    if (!writeVerdicts || ctx.scope !== 'write') return null;
+    if (!loadedElsewhere) return [skillMdOf(loaded), ...loaded.files];
+    const released = await skillService.getSkill(ctx.user.email, name).catch(() => null);
+    if (released?.ok && released.kind === 'skill') return [skillMdOf(released.skill), ...released.skill.files];
+    if (released?.ok === false && released.error === 'not_found') return [skillMdOf(loaded), ...loaded.files];
+    return null;
+  };
+
   registry.registerExternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
   registry.registerExternalTool((ctx) => buildGetSkillDef(skillService, ctx.userEmail));
@@ -149,10 +172,14 @@ export function registerSkillsTools(
         const verdicts = await verdictsFor(ctx, [result.file.path]);
         return { ...result, file: { ...result.file, canWrite: verdicts.get(result.file.path) === true } };
       }
-      // The whole skill: true only when every one of its files may be written.
-      const paths = [skillMdOf(result.skill), ...result.skill.files];
-      const verdicts = await verdictsFor(ctx, paths);
-      const skill = { ...result.skill, canWrite: paths.every((p) => verdicts.get(p) === true) };
+      // The whole skill: true only when every one of its files may be written —
+      // the files the skill has ON THE DEFAULT BRANCH, so a draft (or an older
+      // version) that drops a write-denied bundled file does not turn the
+      // verdict true. A skill only on the draft is judged by its draft files,
+      // where they would land.
+      const paths = await skillFilesOnDefault(ctx, name, result.skill, branch !== undefined || version !== undefined);
+      const verdicts = paths === null ? new Map<string, boolean>() : await verdictsFor(ctx, paths);
+      const skill = { ...result.skill, canWrite: paths !== null && paths.every((p) => verdicts.get(p) === true) };
       if (!allowedTools) return { ...result, skill };
       return { ...result, skill, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
     }),

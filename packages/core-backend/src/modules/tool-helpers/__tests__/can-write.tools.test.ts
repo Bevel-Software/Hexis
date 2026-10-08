@@ -268,6 +268,27 @@ describe('get_skill carries canWrite for the whole skill', () => {
     expect(writeChecks).toHaveLength(1);
     expect(writeChecks[0].workspaceId).toBe(workspaceIdForBranch(MAIN));
   });
+
+  it('judges the files the skill has on the default branch, so a draft that drops a denied file stays false', async () => {
+    const onDraft = join(wsDir(DRAFT), KB, 'Plugins/Shared/deck/reference.md');
+    await rm(onDraft);
+    try {
+      const draft = await call<Got>('get_skill', { name: 'deck', branch: DRAFT }, ENG);
+      // The draft's copy no longer bundles reference.md, but the default branch's does, and its rules refuse Eng.
+      expect(draft.skill.files.some((f) => f.endsWith('reference.md'))).toBe(false);
+      expect(draft.skill.canWrite).toBe(false);
+      expect((await call<Got>('get_skill', { name: 'deck', branch: MAIN }, ENG)).skill.canWrite).toBe(false);
+      expect(writeChecks.filter((c) => c.method === 'canWriteBatch')).toHaveLength(2);
+    } finally {
+      await writeFile(onDraft, MAIN_TREE['Plugins/Shared/deck/reference.md']);
+    }
+  });
+
+  it('judges a skill only the draft has by its draft files, where they would land', async () => {
+    expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ENG)).skill.canWrite).toBe(false);
+    expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ADMIN)).skill.canWrite).toBe(true);
+    expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
+  });
 });
 
 describe('list_files carries canWrite per entry', () => {
@@ -326,6 +347,7 @@ describe('read_file carries canWrite for the file read', () => {
         const draft = await call<Read>('read_file', { branch: DRAFT, path: `${KB}/AGENTS.md` }, as);
         // The draft serves the platform's guide alone; what lands is still the default branch's file.
         expect(draft.content).not.toContain('Our conventions');
+        expect(draft.content).toBe('THE PLATFORM GUIDE\n');
         expect(main.canWrite, as).toBe(true);
         expect(draft.canWrite, as).toBe(true);
       }
