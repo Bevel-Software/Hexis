@@ -47,3 +47,8 @@ export {
 } from './tool-def.js';
 export { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from './tool.contract.js';
 export type { JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
+export {
+  CAN_WRITE_CLAUSE,
+  defaultBranchWriteVerdicts,
+  type DefaultBranchWriteDeps,
+} from './default-branch-write.js';

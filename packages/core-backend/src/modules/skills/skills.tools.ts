@@ -10,7 +10,7 @@ import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { ISkillService } from './skills.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
-import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/default-branch-write.js';
+import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/index.js';
 
 /**
  * The optional `branch` both skill tools declare. Optional on purpose, unlike

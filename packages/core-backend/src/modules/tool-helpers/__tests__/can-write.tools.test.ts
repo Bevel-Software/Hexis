@@ -299,6 +299,30 @@ describe('get_skill carries canWrite for the whole skill', () => {
       loads.mockRestore();
     }
   });
+
+  it('fails closed when the default branch\'s copy cannot be looked up: rejected or refused', async () => {
+    const draftRead = { name: 'html-knowledge-view', branch: DRAFT };
+    // The baseline: the admin may write every file of it on the default branch.
+    expect((await call<Got>('get_skill', draftRead, ADMIN)).skill.canWrite).toBe(true);
+    const real = skills.getSkill.bind(skills);
+    for (const lookup of [
+      async () => { throw new Error('the catalog is unavailable'); },
+      async () => ({ ok: false as const, error: 'forbidden' as const }),
+    ]) {
+      // The draft read itself goes through; the released-skill lookup after it fails.
+      const loads = vi.spyOn(skills, 'getSkill').mockImplementationOnce(real).mockImplementationOnce(lookup);
+      writeChecks = [];
+      try {
+        const got = await call<Got>('get_skill', draftRead, ADMIN);
+        expect(got.skill.canWrite).toBe(false);
+        expect(loads).toHaveBeenCalledTimes(2);
+        // Nothing to judge, so the access layer is not asked.
+        expect(writeChecks).toEqual([]);
+      } finally {
+        loads.mockRestore();
+      }
+    }
+  });
 });
 
 describe('list_files carries canWrite per entry', () => {

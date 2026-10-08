@@ -15,7 +15,7 @@ import {
 } from './agent-access.gate.js';
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/default-branch-write.js';
+import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
