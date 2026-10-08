@@ -13,7 +13,7 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
-import { McpAppService, MCP_APP_SANDBOX_DOMAIN, OPEN_PAGE_VIEW_URI } from '../../embed/mcp-app.js';
+import { McpAppService, OPEN_PAGE_VIEW_URI } from '../../embed/mcp-app.js';
 import { OPEN_PAGE_TOOL } from '../../embed/embed.tools.js';
 
 /**
@@ -128,11 +128,11 @@ describe('the hosted MCP endpoint serves the open_page view', () => {
     expect(view).toBeDefined();
     expect(view!.mimeType).toBe(MCP_APP_MIME_TYPE);
     expect(view!._meta).toMatchObject({
-      [MCP_APP_UI_META_KEY]: { domain: MCP_APP_SANDBOX_DOMAIN },
+      [MCP_APP_UI_META_KEY]: { csp: { frameDomains: [PUBLIC] } },
     });
   }, 30_000);
 
-  it('reads the view, framing exactly the deployment own origin under a stable domain', async () => {
+  it('reads the view, framing exactly the deployment own origin and asking for no sandbox domain', async () => {
     const host = await connect();
     const read = await host.readResource({ uri: OPEN_PAGE_VIEW_URI });
     expect(read.contents).toHaveLength(1);
@@ -141,8 +141,11 @@ describe('the hosted MCP endpoint serves the open_page view', () => {
     expect(content.text).toContain('ui/initialize');
     expect(content._meta[MCP_APP_UI_META_KEY]).toMatchObject({
       csp: { frameDomains: [PUBLIC] },
-      domain: MCP_APP_SANDBOX_DOMAIN,
+      prefersBorder: false,
     });
+    // The host's default sandbox: the field's format is each host's own, and
+    // a value a host rejects is a view that never renders.
+    expect(content._meta[MCP_APP_UI_META_KEY]).not.toHaveProperty('domain');
   }, 30_000);
 
   it('refuses a resource it does not serve, naming the ones it does', async () => {

@@ -7,13 +7,7 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MCP_APP_MIME_TYPE, MCP_APP_URI_SCHEME } from '@bevel-software/platform-mcp-core';
 import { OPEN_PAGE_TOOL } from '../embed.tools.js';
-import {
-  isFrameableOrigin,
-  McpAppService,
-  MCP_APP_SANDBOX_DOMAIN,
-  OPEN_PAGE_VIEW_URI,
-  originOf,
-} from '../mcp-app.js';
+import { isFrameableOrigin, McpAppService, OPEN_PAGE_VIEW_URI, originOf } from '../mcp-app.js';
 import { createMcpAppRoutes } from '../mcp-app.routes.js';
 
 let server: Server | null = null;
@@ -47,17 +41,15 @@ describe('the open_page view', () => {
   });
 
   /**
-   * A host derives the view's opaque origin from the sandbox domain, so a
-   * value that changed per render would throw the sandbox's storage away on
-   * every call.
+   * The sandbox `domain` field's format is each host's own to define and
+   * validate, and a value a host rejects is a view that never renders. The
+   * view keeps no storage and has no OAuth callback, so it asks for no
+   * dedicated origin and takes the host's default sandbox.
    */
-  it('sets a STABLE sandbox domain — the same for two deployments and two reads', async () => {
-    const a = await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest();
-    const b = await new McpAppService({ publicFrontendUrl: 'https://other.example' }).manifest();
-    expect(a.resources[0].ui.domain).toBe(MCP_APP_SANDBOX_DOMAIN);
-    expect(b.resources[0].ui.domain).toBe(MCP_APP_SANDBOX_DOMAIN);
-    const again = await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest();
-    expect(again.resources[0].ui.domain).toBe(MCP_APP_SANDBOX_DOMAIN);
+  it('asks the host for no sandbox domain of its own', async () => {
+    const manifest = await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest();
+    expect(manifest.resources[0].ui).not.toHaveProperty('domain');
+    expect(manifest.resources[0].ui.prefersBorder).toBe(false);
   });
 
   it('is the HTML that frames the embed and relays a link, and nothing that renders content', async () => {
@@ -128,7 +120,8 @@ describe('the manifest route the local MCP server reads', () => {
     expect(body.tools[OPEN_PAGE_TOOL].resourceUri).toBe(OPEN_PAGE_VIEW_URI);
     expect(body.resources[0].mimeType).toBe(MCP_APP_MIME_TYPE);
     expect(body.resources[0].text).toContain('ui/initialize');
-    expect(body.resources[0].ui).toMatchObject({ domain: MCP_APP_SANDBOX_DOMAIN });
+    expect(body.resources[0].ui).toMatchObject({ csp: { frameDomains: [PUBLIC] }, prefersBorder: false });
+    expect(body.resources[0].ui).not.toHaveProperty('domain');
   });
 
   it('is behind the agent credential, like the rest of that surface', async () => {

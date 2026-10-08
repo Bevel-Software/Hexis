@@ -83,11 +83,14 @@ export class McpAppService {
             // deployment that served the view — so a wider list would buy
             // nothing and widen what a host's sandbox permits.
             csp: { frameDomains: origin ? [origin] : [] },
-            // A STABLE sandbox domain: the host derives the view's opaque
-            // origin from it, so a value that changed per render would throw
-            // away the sandbox's storage on every call. Derived from the
-            // view's identity, never from the request.
-            domain: MCP_APP_SANDBOX_DOMAIN,
+            // Deliberately NO `domain`. The field asks the host for a
+            // dedicated sandbox origin, and the specification leaves its
+            // format and validation to each host ("servers MUST consult
+            // host-specific documentation") — a value one host accepts,
+            // another may reject, and a rejected resource is a view that
+            // never renders. This view keeps no storage and has no OAuth
+            // callback, so it needs no stable origin of its own; the host's
+            // default sandbox is the right one.
             // The framed page draws its own surface; a second border around
             // it reads as a box inside a box.
             prefersBorder: false,
@@ -97,13 +100,6 @@ export class McpAppService {
     };
   }
 }
-
-/**
- * The sandbox domain the host gives this view. A constant: "stable" is the
- * whole requirement, and anything derived from a deployment, a user or a call
- * would be stable only by accident.
- */
-export const MCP_APP_SANDBOX_DOMAIN = 'hexis-knowledge-page.mcp-app.invalid';
 
 /**
  * `url`'s origin, or null when it does not parse. Only the origin: a
