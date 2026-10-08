@@ -1,4 +1,4 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('settings');
@@ -772,6 +772,38 @@ export class DeploymentSettingsService {
       .onConflictDoNothing({ target: deploymentSettings.key })
       .returning({ key: deploymentSettings.key });
     if (inserted.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
+  /**
+   * Replace a plain setting's value ONLY IF it still reads `expected` —
+   * with `next`, or with nothing when `next` is null — and say whether it
+   * was this call that did it. One statement, so of two replicas acting on
+   * what they both read, the database lets exactly one through: the other
+   * finds the value gone or changed and answers false. For the claim flows
+   * that {@link recordIfAbsent} opens: taking over a claim that expired, and
+   * releasing one's own without touching a successor's. Plain settings only;
+   * `next` is validated as {@link record} would.
+   */
+  async swapIfValue(key: string, expected: string, next: string | null, updatedBy: string | null): Promise<boolean> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return false;
+    const same = and(eq(deploymentSettings.key, key), eq(deploymentSettings.value, expected));
+    if (next === null) {
+      const gone = await this.db.delete(deploymentSettings).where(same).returning({ key: deploymentSettings.key });
+      if (gone.length === 0) return false;
+      this.stored.delete(key);
+      return true;
+    }
+    const write = this.plan({ [key]: next }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const swapped = await this.db
+      .update(deploymentSettings)
+      .set({ value: write.value, updatedBy, updatedAt: new Date() })
+      .where(same)
+      .returning({ key: deploymentSettings.key });
+    if (swapped.length === 0) return false;
     this.stored.set(key, write.value);
     return true;
   }

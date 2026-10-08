@@ -150,9 +150,14 @@ export interface StarterPackServiceDeps {
   workspaceService: Pick<WorkspaceService, 'getOrCreateForBranch' | 'getWorkspacePath' | 'hasBootstrappedWorkspace'>;
   workflow: IWorkflowService;
   adminAccess: IAdminAccessService;
-  /** `recordIfAbsent` takes the claim (see the module doc), `clear` releases it, `record` keeps the answer. */
-  settings: Pick<DeploymentSettingsService, 'reload' | 'record' | 'recordIfAbsent' | 'clear'>;
-  accessControl: Pick<IAccessControl, 'invalidate'>;
+  /**
+   * `recordIfAbsent` takes the claim (see the module doc), `swapIfValue`
+   * takes over an expired one and releases one's own, `record` keeps the
+   * answer.
+   */
+  settings: Pick<DeploymentSettingsService, 'reload' | 'record' | 'recordIfAbsent' | 'swapIfValue'>;
+  /** `canReadBatch`: which of a pack's pages the caller may know about at all (see `untouchedPages`). */
+  accessControl: Pick<IAccessControl, 'invalidate' | 'canReadBatch'>;
   /** Plugin discovery over the checkout: what "a plugin by that name is already there" means, at any depth. */
   pluginSource: Pick<PluginSource, 'discover'>;
   /** The plugin creation's identity lock, held over the name check and the commit of the pack's plugins. */
@@ -187,7 +192,12 @@ export class StarterPackService implements FirstRunStarterSource {
       chosen,
       packs: isAdmin ? packs.map(({ id, name, description, order }) => ({ id, name, description, order })) : [],
       chosenPack: pack
-        ? { id: pack.id, name: pack.name, firstPagePrompt: pack.firstPagePrompt, starterPages: await this.untouchedPages(pack) }
+        ? {
+            id: pack.id,
+            name: pack.name,
+            firstPagePrompt: pack.firstPagePrompt,
+            starterPages: await this.untouchedPages(pack, user.email),
+          }
         : null,
     };
   }
@@ -209,14 +219,14 @@ export class StarterPackService implements FirstRunStarterSource {
       }
       const pack = id === NO_STARTER_PACK ? null : (await loadStarterPacks(this.deps.packsDir)).find((p) => p.id === id);
       if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
-      await this.claim(user);
+      const claim = await this.claim(user);
       let added: string[] = [];
       try {
         if (pack) added = await this.apply(user, pack);
         else await this.deps.settings.record({ [STARTER_PACK_SETTING]: id }, user.id);
       } catch (err) {
         // Nothing landed: the claim goes, and the question is open again.
-        await this.release();
+        await this.release(claim);
         throw err;
       }
       if (pack) {
@@ -228,7 +238,7 @@ export class StarterPackService implements FirstRunStarterSource {
           log.error(`starter pack "${id}" was added, but the choice could not be recorded`, { err });
         });
       }
-      await this.release();
+      await this.release(claim);
       if (!pack) return { id, name: null, pages: 0, skills: 0, summary: '' };
       const pages = added.filter((p) => this.isPage(p)).length;
       const skills = added.filter((p) => path.posix.basename(p) === 'SKILL.md').length;
@@ -262,21 +272,28 @@ export class StarterPackService implements FirstRunStarterSource {
    * same insert-if-absent, so two take-overs at once still end with one
    * holder.
    */
-  private async claim(user: AuthUser): Promise<void> {
+  private async claim(user: AuthUser): Promise<string> {
     const { settings } = this.deps;
     const value = `${user.id} ${Date.now()}`;
-    if (await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id)) return;
+    if (await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id)) return value;
     const held = await settings.reload(STARTER_PACK_CLAIM_SETTING);
     const since = Number(held.split(' ').pop());
     if (Number.isFinite(since) && Date.now() - since < CLAIM_TTL_MS) throw beingAdded();
+    // The take-over replaces THAT claim, in one statement: two replicas that
+    // both read it expired cannot both succeed, since the second finds the
+    // first's claim where the expired one was and is refused.
     log.warn('taking over a starter-pack claim nobody released', { held });
-    await settings.clear(STARTER_PACK_CLAIM_SETTING);
-    if (!(await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id))) throw beingAdded();
+    if (!(await settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, held, value, user.id))) throw beingAdded();
+    return value;
   }
 
-  /** Release the claim; one that cannot be released now expires on its own. */
-  private async release(): Promise<void> {
-    await this.deps.settings.clear(STARTER_PACK_CLAIM_SETTING).catch((err: unknown) => {
+  /**
+   * Release one's OWN claim — never a successor's: a claim taken over after
+   * it expired is somebody else's now, and a late release must leave it. One
+   * that cannot be released expires on its own.
+   */
+  private async release(claim: string): Promise<void> {
+    await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, claim, null, null).catch((err: unknown) => {
       log.error('the starter-pack claim could not be released; it expires on its own', { err });
     });
   }
@@ -309,16 +326,28 @@ export class StarterPackService implements FirstRunStarterSource {
     return rel.startsWith(`${layout.knowledgeBaseDir}/`) && path.posix.basename(rel) !== 'access.md';
   }
 
-  /** The pack's pages still as it wrote them, workspace-relative. Never clones. */
-  private async untouchedPages(pack: StarterPack): Promise<string[]> {
-    const { kb, workspaceService } = this.deps;
+  /**
+   * The pack's pages still as it wrote them, workspace-relative, and only
+   * those the caller may read: the list says a page exists and holds what
+   * the pack wrote, which is nothing to tell someone the page's access rules
+   * keep out — the same verdict the file routes give. Never clones.
+   */
+  private async untouchedPages(pack: StarterPack, userEmail: string): Promise<string[]> {
+    const { kb, workspaceService, accessControl } = this.deps;
     try {
       if (!kb.isBranchModelConfigured()) return [];
       const workspaceId = kb.defaultWorkspaceId();
       if (!(await workspaceService.hasBootstrappedWorkspace(workspaceId))) return [];
       const root = await workspaceService.getWorkspacePath(workspaceId);
+      const pages = await this.pagesOf(pack);
+      const readable = await accessControl.canReadBatch(
+        workspaceId,
+        userEmail,
+        pages.map((p) => p.repoPath),
+      );
       const out: string[] = [];
-      for (const page of await this.pagesOf(pack)) {
+      for (const page of pages) {
+        if (!readable.get(page.repoPath)) continue;
         const wsPath = `${kb.kbDirName}/${page.repoPath}`;
         if (await isUntouchedStarterPage(path.join(root, ...wsPath.split('/')), page.content as string)) out.push(wsPath);
       }

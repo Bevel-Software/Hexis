@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import {
   DeploymentSettingsService,
   SettingsValidationError,
@@ -37,9 +39,43 @@ function makeDb() {
         }),
       }),
     }),
-    delete: () => ({ where: () => Promise.resolve() }),
+    // `delete … where … returning` / `update … set … where … returning`: the
+    // conditional swap. The fake applies the one predicate the service sends,
+    // key AND value, by reading the bound parameters off the drizzle `where`.
+    delete: () => ({
+      where: (predicate: unknown) => {
+        const done = Promise.resolve();
+        return Object.assign(done, {
+          returning: () => {
+            const [key, value] = boundParams(predicate);
+            const at = rows.findIndex((r) => r.key === key && r.value === value);
+            if (at === -1) return Promise.resolve([]);
+            rows.splice(at, 1);
+            return Promise.resolve([{ key }]);
+          },
+        });
+      },
+    }),
+    update: () => ({
+      set: (v: { value: string }) => ({
+        where: (predicate: unknown) => ({
+          returning: () => {
+            const [key, value] = boundParams(predicate);
+            const row = rows.find((r) => r.key === key && r.value === value);
+            if (!row) return Promise.resolve([]);
+            row.value = v.value;
+            return Promise.resolve([{ key }]);
+          },
+        }),
+      }),
+    }),
   } as unknown as Database;
   return { db, rows };
+}
+
+/** The parameters a drizzle predicate binds, in order — what the fake table matches on. */
+function boundParams(predicate: unknown): unknown[] {
+  return new PgDialect().sqlToQuery(predicate as SQL).params;
 }
 
 let saved: NodeJS.ProcessEnv;
@@ -563,5 +599,30 @@ describe('DeploymentSettingsService — recordIfAbsent', () => {
     await settings.load();
     expect(await settings.recordIfAbsent('starterPack', '', null)).toBe(false);
     expect(rows).toEqual([]);
+  });
+
+  /**
+   * The conditional swap the claim flows rest on: a value is replaced, or
+   * removed, only while it still reads what the caller saw — so two
+   * replicas acting on one read cannot both succeed.
+   */
+  it('swaps a value only while it still reads what was expected, and removes it the same way', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    expect(await settings.recordIfAbsent('starterPackClaim', 'u-a 1', 'u-a')).toBe(true);
+
+    // The value moved under the second caller: refused, untouched.
+    expect(await settings.swapIfValue('starterPackClaim', 'u-z 0', 'u-b 2', 'u-b')).toBe(false);
+    expect(await settings.swapIfValue('starterPackClaim', 'u-a 1', 'u-b 2', 'u-b')).toBe(true);
+    expect(rows.find((r) => r.key === 'starterPackClaim')?.value).toBe('u-b 2');
+    expect(settings.resolve('starterPackClaim')).toBe('u-b 2');
+
+    // A release names its own claim: the holder's row stays for a stale one.
+    expect(await settings.swapIfValue('starterPackClaim', 'u-a 1', null, null)).toBe(false);
+    expect(rows.find((r) => r.key === 'starterPackClaim')?.value).toBe('u-b 2');
+    expect(await settings.swapIfValue('starterPackClaim', 'u-b 2', null, null)).toBe(true);
+    expect(rows.find((r) => r.key === 'starterPackClaim')).toBeUndefined();
+    expect(settings.resolve('starterPackClaim')).toBe('');
   });
 });

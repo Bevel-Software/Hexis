@@ -51,8 +51,11 @@ function harness({
       store[key] = value;
       return true;
     }),
-    clear: vi.fn(async (key: string) => {
-      delete store[key];
+    swapIfValue: vi.fn(async (key: string, expected: string, next: string | null) => {
+      if (store[key] !== expected) return false;
+      if (next === null) delete store[key];
+      else store[key] = next;
+      return true;
     }),
   };
   const kb = testKbContext({ kbDirName: KB, layout });
@@ -75,7 +78,14 @@ function harness({
     commitChanges: vi.fn(async () => ({ sha: 'abc' })),
   };
   const events = { emit: vi.fn() };
-  const accessControl = { invalidate: vi.fn() };
+  /** Who may read what: everything, unless a test narrows it by repo-relative path. */
+  const unreadable = new Set<string>();
+  const accessControl = {
+    invalidate: vi.fn(),
+    canReadBatch: vi.fn(async (_ws: string, _email: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, !unreadable.has(p)])),
+    ),
+  };
   const svc = new StarterPackService({
     packsDir,
     kb,
@@ -92,7 +102,7 @@ function harness({
     accessControl,
     events,
   });
-  return { svc, store, settings, locks, lockRequests, workflow, events, accessControl };
+  return { svc, store, settings, locks, lockRequests, workflow, events, accessControl, unreadable };
 }
 
 beforeEach(async () => {
@@ -326,6 +336,38 @@ describe('choosing a pack', () => {
     expect(store.starterPack).toBe('sales');
   });
 
+  it('takes over an expired claim by replacing THAT claim, so two replicas cannot both take it', async () => {
+    const stale = `u-other ${Date.now() - CLAIM_TTL_MS - 1}`;
+    const store: Record<string, string> = { starterPackClaim: stale };
+    const { svc, settings, workflow } = harness({ store });
+    // Another replica took the expired claim over between this one's read and its take-over.
+    settings.reload.mockImplementation(async (key: string) => {
+      const held = store[key] ?? '';
+      if (key === 'starterPackClaim') store[key] = `u-fast ${Date.now()}`;
+      return held;
+    });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow(/being added right now/);
+    expect(settings.swapIfValue).toHaveBeenCalledWith('starterPackClaim', stale, expect.stringMatching(/^u-admin /), ADMIN.id);
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(store.starterPackClaim).toMatch(/^u-fast /);
+  });
+
+  it('releases only its own claim: one taken over after it expired is left to its new holder', async () => {
+    const store: Record<string, string> = {};
+    const { svc, settings, workflow } = harness({ store });
+    workflow.commitChanges.mockRejectedValueOnce(new Error('disk full'));
+    // While this write was failing, its claim expired and another replica took it over.
+    settings.recordIfAbsent.mockImplementationOnce(async (key: string, value: string) => {
+      store[key] = value;
+      queueMicrotask(() => {
+        store[key] = `u-other ${Date.now()}`;
+      });
+      return true;
+    });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('disk full');
+    expect(store.starterPackClaim).toMatch(/^u-other /);
+  });
+
   it('waits for a plugin creation of the same name, on the lock creations take', async () => {
     const { svc, locks, lockRequests, workflow } = harness();
     let released = false;
@@ -381,7 +423,7 @@ describe('choosing a pack', () => {
     workflow.commitChanges.mockRejectedValueOnce(new Error('disk full'));
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('disk full');
     expect(settings.recordIfAbsent).toHaveBeenCalledTimes(1);
-    expect(settings.clear).toHaveBeenCalledWith('starterPackClaim');
+    expect(settings.swapIfValue).toHaveBeenCalledWith('starterPackClaim', expect.stringMatching(/^u-admin /), null, null);
     expect(store.starterPack).toBeUndefined();
     expect(store.starterPackClaim).toBeUndefined();
   });
@@ -399,6 +441,19 @@ describe('after the choice', () => {
       firstPagePrompt: 'Fill in the Customers page.',
       starterPages: [`${KB}/KnowledgeBase/About us.md`],
     });
+  });
+
+  it('names no untouched page the caller may not read: the list would say the page exists and what it holds', async () => {
+    const { svc, unreadable, accessControl } = harness();
+    await svc.choose(ADMIN, 'sales');
+    unreadable.add('KnowledgeBase/About us.md');
+
+    expect((await svc.status(MEMBER)).chosenPack?.starterPages).toEqual([`${KB}/KnowledgeBase/Customers.md`]);
+    // Asked for the caller, by the pages' repo-relative paths, on the default branch's workspace.
+    expect(accessControl.canReadBatch).toHaveBeenLastCalledWith(expect.any(String), MEMBER.email, [
+      'KnowledgeBase/About us.md',
+      'KnowledgeBase/Customers.md',
+    ]);
   });
 
   it("the agent's first-run note learns the pack's suggestions and its pages", async () => {
