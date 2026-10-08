@@ -17,7 +17,7 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { assertBranchProvided, GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
@@ -1549,12 +1549,6 @@ export function registerWorkspaceTools(
     // description from the END, where what is specific to the tool sits. The
     // rules themselves are in the handshake instructions and in the managed
     // guide (see `shared-file-rules.ts`), stated once and from one text.
-    // Whether a call to this tool MUST name a branch, read off the tool's own
-    // declaration rather than assumed of the family. Every tool mounted here
-    // requires `branch` today; keying on the schema means a tool that declares
-    // it optional (and resolves absence itself, as `list_tool_setup` does on its
-    // own route) is not handed a refusal it never asked for.
-    const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
       (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');
@@ -1567,6 +1561,11 @@ export function registerWorkspaceTools(
       refusesItself: spec.refusesItself,
       tags: spec.write ? ['workspace', 'write'] : ['workspace'],
     });
+    // Every tool here declares `branch` required in its inputs, which is how
+    // `toolDef` records it: the tool handler refuses a branch-less call before
+    // the path work below and before any handler. Most of these tools would
+    // meet the same refusal one layer down at `getFilesystem`, but not all —
+    // `unzip` hands `branch` straight to the workspace service by id.
     registry.registerInternalTool(def);
     if (!spec.internalOnly) registry.registerExternalTool(def);
     /**
@@ -1615,16 +1614,6 @@ export function registerWorkspaceTools(
       // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
-          // FIRST, before the path work and before any handler: every tool
-          // mounted here declares `branch` as a required, non-empty string, and
-          // nothing enforced that, so a call that named none was carried down
-          // until `workspaceIdForBranch` made a workspace directory out of the
-          // missing value. Most of these tools would meet the same refusal one
-          // layer down at `getFilesystem`, but not all of them do — `unzip`
-          // hands `branch` straight to the workspace service by id — so the
-          // check belongs on the mount every one of them shares rather than on
-          // the resolver only some of them reach.
-          if (requiresBranch && !spec.resolvesBranchItself) assertBranchProvided(args.branch);
           // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
           if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
           const normalized = normalizePathArgs(
@@ -1658,7 +1647,8 @@ export function registerWorkspaceTools(
             );
           }
         },
-        { write: spec.write },
+        // `execute_command` resolves its own branch (see `resolvesBranchItself`).
+        { write: spec.write, ...(spec.resolvesBranchItself ? { branch: 'own' as const } : {}) },
       ),
     );
   };

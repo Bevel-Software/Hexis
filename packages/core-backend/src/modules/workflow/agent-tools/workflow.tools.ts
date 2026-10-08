@@ -1,11 +1,10 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
-import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
+import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { KbContext } from '../../../shared/kb-context.js';
-import { assertBranchProvided } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
@@ -196,17 +195,17 @@ export function registerWorkflowTools(
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
-    const inputs = spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs);
-    // The tool's OWN declaration is the only honest answer to "must this call
-    // name a branch": the injected input and a hand-declared one (the fork
-    // base, the draft to switch to) are equally required, and a tool that adds
-    // or drops the input later moves this with it.
-    const requiresBranch = ((inputs as { required?: string[] }).required ?? []).includes('branch');
+    // Every workflow tool that takes a branch REQUIRES it — the injected input
+    // and a hand-declared one (the fork base, the draft to switch to) alike.
+    // A hand-declared one is required by its own schema, which `toolDef`
+    // reads as `required` too; the tool handler refuses a call without it.
     const def = toolDef({
       name: spec.name,
       description: spec.description,
       path,
-      inputs,
+      inputs: spec.inputs,
+      branch: spec.skipBranch ? undefined : 'required',
+      write: spec.write,
       outputs: spec.outputs,
       refusesItself: spec.refusesItself,
       tags: spec.write ? ['workflow', 'write'] : ['workflow'],
@@ -226,24 +225,12 @@ export function registerWorkflowTools(
       // workspace path, and a path with no prefix is placed under
       // `<kbDirName>/` rather than refused.
       toolHandler(
-        (args, ctx) => {
-          // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
-          // they address a workspace by id rather than going through
-          // `getFilesystem`, so the choke point that guards the file tools
-          // never sees them. Without this, a branch-less `commit_change`
-          // commits to a workspace id literally named "undefined", and a
-          // branch-less `create_branch` forks from one: it clones a branch of
-          // that name, fails, and answers `There is no branch named undefined.`
-          //
-          // Keyed on whether the SCHEMA requires `branch`, not on whether the
-          // input was injected. `create_branch` and `switch_branch` declare
-          // their own required `branch`; a check keyed on the injection skipped
-          // exactly those two, which is how the reported bug survived on
-          // `create_branch` — the one tool whose `branch` is a branch the
-          // caller must already have.
-          if (requiresBranch) assertBranchProvided(args.branch);
-          return spec.handler(normalizePathArgs(args, kbDirName), ctx);
-        },
+        // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
+        // they address a workspace by id rather than going through
+        // `getFilesystem` — so the branch-less call the tool handler refuses
+        // before this runs would otherwise commit to, or fork from, a
+        // workspace literally named "undefined".
+        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx),
         { write: spec.write },
       ),
     );

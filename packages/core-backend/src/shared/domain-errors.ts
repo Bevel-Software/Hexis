@@ -256,6 +256,23 @@ export class BranchNotFoundError extends WorkflowDomainError {
 }
 
 /**
+ * A tool that defaults its branch was called without one, and the deployment
+ * has no default branch configured to fall back on. Not `BranchRequiredError`:
+ * the tool's schema says the branch is optional, so "you must pass one" would
+ * misdescribe the call — the caller did nothing wrong, the deployment is not
+ * set up. 503 with kind `default-branch-unset`; passing a branch works.
+ */
+export class DefaultBranchUnsetError extends WorkflowDomainError {
+  readonly kind = 'default-branch-unset' as const;
+  constructor() {
+    super('This deployment has no default branch configured: pass `branch` to name the one to use.', 503, {
+      kind: 'default-branch-unset',
+    });
+    this.name = 'DefaultBranchUnsetError';
+  }
+}
+
+/**
  * The clone's branch no longer exists on origin: the fetch that refreshes
  * `refs/remotes/origin/<branch>` found no such ref. Distinct from an
  * unreachable remote — the host answered, and the answer was "gone" — so a

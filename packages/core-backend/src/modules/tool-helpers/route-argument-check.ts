@@ -9,6 +9,7 @@ import { branchProvided } from '../../shared/domain-errors.js';
 import { logger } from '../../shared/logging.js';
 import { ToolError } from './tool.contract.js';
 import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
+import { DEFAULTED_BRANCH_INPUT } from './tool-def.js';
 
 const log = logger('tools');
 
@@ -56,6 +57,11 @@ function declaredNames(flat: unknown): string[] {
 function requiresBranch(flat: unknown): boolean {
   const required = (flat as { required?: unknown }).required;
   return Array.isArray(required) && required.includes('branch');
+}
+
+/** Does this tool declare `defaults-to-default-branch`? Its `branch` is then the defaulted input. */
+function defaultsBranch(flat: unknown): boolean {
+  return (flat as { properties?: Record<string, unknown> }).properties?.branch === DEFAULTED_BRANCH_INPUT;
 }
 
 /**
@@ -107,7 +113,12 @@ export function argumentsRefusal(
   // second fault ahead of it would replace an answer the caller can act on
   // with one it has to read twice. Whatever else is wrong with such a call is
   // reported on the next one, which at least names its workspace.
-  if (!cameAsQuery && requiresBranch(schemas.flat) && !branchProvided(args.branch)) return null;
+  // A tool that defaults its branch is defaulted only when the branch is
+  // ABSENT; an empty or non-string one gets the same refusal by name.
+  if (!cameAsQuery && !branchProvided(args.branch)) {
+    if (requiresBranch(schemas.flat)) return null;
+    if (args.branch !== undefined && defaultsBranch(schemas.flat)) return null;
+  }
   // A mismatch about an argument the tool refuses itself is dropped, so the
   // tool's own message — which says what that argument is FOR — is the one the
   // caller reads. Every mismatch line opens with the argument it is about.
