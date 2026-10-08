@@ -258,10 +258,14 @@ describe('md-links — scanning', () => {
       'Prose with `<a href="in-span.md">` and an escaped \\<a href="in-escape.md"> tag, and src = in-prose.md.\n\n' +
       '```html\n<a href="in-fence.md">f</a>\n```\n\n' +
       '    <img src="in-indent.md">\n\n' +
-      '> [def]: in-def.md\n\nLive <a href="live.md">x</a> and <img src=\'pic.png\' alt="p"/> and <a href=bare.md>b</a>\n';
-    expect(scanMarkdownHtmlLinks(page)).toEqual(['live.md', 'pic.png', 'bare.md']);
+      '> [def]: in-def.md\n\nLive <a href="live.md">x</a> and <img src=\'pic.png\' alt="p"/> and <a href=bare.md>b</a>\n' +
+      // A `>` inside a quoted attribute does not end the tag; a backslash
+      // inside a raw tag is not an escape, so the value keeps it.
+      '<a title="a > b" href="quoted.md">q</a> <a href="Plan\\_v2.md">e</a>\n';
+    const live = ['live.md', 'pic.png', 'bare.md', 'quoted.md', 'Plan\\_v2.md'];
+    expect(scanMarkdownHtmlLinks(page)).toEqual(live);
     expect(htmlLinksAffectedByMove(page, { oldPath: OUTSIDE, newPath: `${KB}/Moved/Index.md`, mapPath: () => null, kbDirName: KB, branch: 'main' }, scanMarkdownHtmlLinks(page)))
-      .toEqual(['live.md', 'pic.png', 'bare.md']);
+      .toEqual(live);
   });
 });
 

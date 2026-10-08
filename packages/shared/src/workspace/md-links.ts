@@ -82,10 +82,12 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
 }
 
 /**
- * `text` with everything that is not live prose blanked to spaces — fenced
- * and indented code blocks, inline code spans, the frontmatter, and a
- * backslash-escaped punctuation character (`\<` is a literal `<`, not a tag)
- * — every kept character at its offset. For a scan that must see prose only.
+ * `text` with everything that cannot start a live HTML tag blanked to spaces
+ * — fenced and indented code blocks, inline code spans, the frontmatter, and
+ * an escaped `\<`, which is a literal `<` — every kept character at its
+ * offset. It locates tag spans and nothing else: inside a raw tag a backslash
+ * is not an escape, so every other escape is kept as the two characters it
+ * is, and the attribute values are read from the original text.
  */
 function maskMarkdownCode(text: string): string {
   const chars: string[] = Array.from({ length: text.length }, (_, i) => (text[i] === '\n' ? '\n' : ' '));
@@ -94,9 +96,7 @@ function maskMarkdownCode(text: string): string {
     while (i < to) {
       const c = text[i];
       if (c === '\\') {
-        // An escape of ASCII punctuation is that character as text; any
-        // other backslash is just a backslash.
-        if (i + 1 < to && /[!-/:-@[-`{-~]/.test(text[i + 1])) {
+        if (i + 1 < to && text[i + 1] === '<') {
           i += 2;
           continue;
         }
@@ -137,9 +137,13 @@ function maskMarkdownCode(text: string): string {
  */
 export function scanMarkdownHtmlLinks(text: string): string[] {
   const out: string[] = [];
-  const tag = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?>/g;
+  // A tag ends at the first `>` outside a quoted attribute value.
+  const tag = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s+(?:"[^"]*"|'[^']*'|[^<>"'])*)?>/g;
   const masked = maskMarkdownCode(text);
-  for (let m = tag.exec(masked); m !== null; m = tag.exec(masked)) out.push(...scanHtmlLinks(m[0]));
+  for (let m = tag.exec(masked); m !== null; m = tag.exec(masked)) {
+    // The span located on the mask, the attributes read from the page itself.
+    out.push(...scanHtmlLinks(text.slice(m.index, m.index + m[0].length)));
+  }
   return out;
 }
 
