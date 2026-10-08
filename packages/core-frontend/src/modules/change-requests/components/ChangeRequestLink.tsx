@@ -130,9 +130,10 @@ function Quiet({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** The way out of the quiet page. `replace`, like the dialog's exits: the link's entry leaves with the page. */
 function BackToKnowledge() {
   return (
-    <Link to={KB_ROUTE_PREFIX} className="underline hover:text-ink">
+    <Link to={KB_ROUTE_PREFIX} replace className="underline hover:text-ink">
       Back to the knowledge base
     </Link>
   );

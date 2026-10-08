@@ -101,6 +101,16 @@ describe('ChangeRequestLink', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  // The page's own way out behaves the same as the dialog's.
+  it('leaves no history entry behind through "Back to the knowledge base" either', async () => {
+    api.getPullRequest.mockRejectedValue(new GitApiError(404, 'nope'));
+    renderAt('/change-requests/276');
+    await userEvent.click(await screen.findByRole('link', { name: 'Back to the knowledge base' }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/workspace$/);
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/somewhere-before$/);
+  });
+
   // A request that is not there and one the viewer may not see read the
   // same: the address must not tell someone a request they may not see
   // exists.
