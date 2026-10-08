@@ -283,8 +283,12 @@ export class StarterPackService implements FirstRunStarterSource {
     // both read it expired cannot both succeed, since the second finds the
     // first's claim where the expired one was and is refused.
     log.warn('taking over a starter-pack claim nobody released', { held });
-    if (!(await settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, held, value, user.id))) throw beingAdded();
-    return value;
+    if (await settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, held, value, user.id)) return value;
+    // The claim moved under this read: another replica took it over — or
+    // its holder finished and released it, and the row is gone. One more
+    // try at an empty row before saying a choice is in progress.
+    if (await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id)) return value;
+    throw beingAdded();
   }
 
   /**

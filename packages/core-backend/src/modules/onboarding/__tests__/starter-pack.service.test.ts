@@ -352,6 +352,22 @@ describe('choosing a pack', () => {
     expect(store.starterPackClaim).toMatch(/^u-fast /);
   });
 
+  it('claims an expired claim whose holder finished and released it meanwhile, rather than refusing', async () => {
+    const stale = `u-other ${Date.now() - CLAIM_TTL_MS - 1}`;
+    const store: Record<string, string> = { starterPackClaim: stale };
+    const { svc, settings, workflow } = harness({ store });
+    // Between this replica's read and its take-over, the holder finished and released: the row is gone.
+    settings.reload.mockImplementation(async (key: string) => {
+      const held = store[key] ?? '';
+      if (key === 'starterPackClaim') delete store[key];
+      return held;
+    });
+    await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
+    expect(settings.recordIfAbsent).toHaveBeenCalledTimes(2);
+    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(store.starterPack).toBe('sales');
+  });
+
   it('releases only its own claim: one taken over after it expired is left to its new holder', async () => {
     const store: Record<string, string> = {};
     const { svc, settings, workflow } = harness({ store });
