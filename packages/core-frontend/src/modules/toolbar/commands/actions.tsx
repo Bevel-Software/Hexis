@@ -61,10 +61,10 @@ export interface CommandAction {
    * sequence of two. Shown on the row as its hint AND bound by
    * `useCommandShortcuts`, under the same guards as core's, so a hint is
    * never a key that does nothing. Core's are filled in from
-   * {@link COMMAND_SHORTCUTS}. A registry command's is dropped at merge time,
-   * hint and all, and said so in the console, when it is longer than two keys
-   * or would collide with keys already bound — the same keys, or a sequence
-   * one of them begins: give it other keys.
+   * {@link COMMAND_SHORTCUTS}. A registry command's shortcut is dropped at
+   * merge time, hint and all, and said so in the console, when it is longer
+   * than two keys or would collide with keys already bound — the same keys,
+   * or a sequence one of them begins: give it other keys.
    */
   shortcut?: string[];
   /** The row's icon; a generic arrow when absent. */
