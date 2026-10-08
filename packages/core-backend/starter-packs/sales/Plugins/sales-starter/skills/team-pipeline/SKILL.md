@@ -91,7 +91,7 @@ total row; deals that decide the quarter (the three-line blocks); risk
 flags (pushed dates, stale 14d+, past close date); Monday questions per
 rep; and dig-deeper pointers (per-rep detail via `rep-context`, full
 at-risk list via `pipeline-review` with team scope). This skill only
-reads; any fix hands off to the the skills that make changes (update-opportunity, log-activity and others).
+reads; any fix hands off to the skills that make changes (update-opportunity, log-activity and others).
 
 ## How it adapts (guidance for the agent; never show these labels to the user)
 

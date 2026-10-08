@@ -164,7 +164,9 @@ AUTO-FIX (agent fixes without asking):     ASK (needs human judgment):
 without discussion, it's AUTO-FIX. If reasonable engineers could disagree about
 the fix, it's ASK.
 
-**Critical findings default toward ASK** (they're inherently riskier).
+**Critical findings default toward ASK** (they're inherently riskier) — unless
+the fix is mechanical, as with the N+1 and missing-LLM-output-validation rows
+above, which stay AUTO-FIX whatever their category.
 **Informational findings default toward AUTO-FIX** (they're more mechanical).
 
 ---

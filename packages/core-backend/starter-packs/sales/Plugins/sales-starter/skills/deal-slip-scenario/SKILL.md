@@ -50,8 +50,11 @@ activity, owner) plus closed-won this quarter. Compute:
 - **Booked** (closed won)
 - **Commit total** (booked + commit-bucket open deals)
 - **Best case total**
-- **Open pipeline total** and **coverage ratio** (open pipeline / 
-  remaining gap to quota)
+- **Open pipeline total** and **coverage ratio** (open pipeline /
+  remaining gap to quota). When the gap is zero or negative - quota
+  already met - there is no ratio: report "already on plan" and, in
+  Steps 4-5, how much cushion the scenario leaves rather than what
+  would fill a gap.
 
 If quota isn't in the crm or org context, ask the user for it - the
 scenario is meaningless without the target.

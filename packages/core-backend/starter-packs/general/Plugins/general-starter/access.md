@@ -8,11 +8,12 @@ read:
 # THIS BLOCK (the body) governs the PLUGIN FOLDER - its skills, tools and
 # manifest. A starter plugin is for the whole team, so everyone may use it
 # and admins change it. To narrow it, replace `everyone` under `read:` with a
-# role from roles.yaml, a group from groups.yaml, or a person as
+# role from roles.yaml (as `role/<Name>`, so a group of the same name can
+# never stand in for it), a group from groups.yaml, or a person as
 # `Name <email>`. Keep this block pure YAML; explanations go in `#` lines.
 read:
   - everyone
 write:
-  - Admin
+  - role/Admin
 owner:
-  - Admin
+  - role/Admin

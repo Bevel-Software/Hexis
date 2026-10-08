@@ -94,7 +94,7 @@ After presenting the triage:
 - "Want me to draft a full response to the customer?"
 - "Should I search for more context on this issue?"
 - "Want me to check if this is a known bug in the tracker?"
-- "Should I escalate this? I can package it with /customer-escalation."
+- "Should I escalate this? I can package it with the customer-escalation skill."
 
 ---
 

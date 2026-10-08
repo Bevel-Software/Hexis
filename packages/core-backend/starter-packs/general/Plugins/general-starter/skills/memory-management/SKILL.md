@@ -52,7 +52,7 @@ Knowledge base (Hexis, shared with your team)
 - Rich detail when needed for execution
 - Full profiles, history, context
 
-The knowledge base lives in the knowledge folder (`KnowledgeBase/` unless your workspace renamed it). Search it with the Hexis tools (`grep`, `find_node`, `read_file`) and write to it with `write_file` or `edit_file`. If the team already keeps these pages under other names, use theirs.
+The knowledge base lives in the knowledge folder (`KnowledgeBase/` unless your workspace renamed it). Search it with the Hexis tools (`grep`, `list_files`, `read_file`) and write to it with `write_file` or `edit_file`. If the team already keeps these pages under other names, use theirs.
 
 ## Shared vs personal
 

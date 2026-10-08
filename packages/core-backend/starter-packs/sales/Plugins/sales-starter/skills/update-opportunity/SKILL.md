@@ -64,8 +64,9 @@ assumed ones.
 Show a before/after table for only the fields that would change, with
 warnings for anything notable: stage advancing past unmet exit
 criteria, close date moving into a closed period, amount changing by
->25% (thresholds tunable per org). If a value came from untrusted
-content (a transcript line, an email), cite that source line explicitly.
+more than 25% (thresholds tunable per org). If a value came from
+untrusted content (a transcript line, an email), cite that source line
+explicitly.
 
 When the user asked for this change (in their own words, or by accepting
 another skill's proposal), apply it. When the change is only a

@@ -36,4 +36,4 @@ Ask these **ONE AT A TIME**. The goal is to brainstorm and sharpen the idea, not
 
 **STOP** after each question. Wait for the response before asking the next.
 
-**Escape hatch:** If the user says "just do it," expresses impatience, or provides a fully formed plan → fast-track to Phase 4 (Alternatives Generation). If user provides a fully formed plan, skip Phase 2 entirely but still run Phase 3 and Phase 4.
+**Escape hatch:** If the user says "just do it" or expresses impatience, ask only the two most important remaining questions, then proceed to Phase 3 (as Phase 2a does — Phase 3's premise challenge is what Phase 5's design doc draws on, so it is never skipped). If the user provides a fully formed plan, skip Phase 2 entirely but still run Phase 3 and Phase 4.

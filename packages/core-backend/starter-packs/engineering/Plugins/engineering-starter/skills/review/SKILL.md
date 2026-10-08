@@ -16,8 +16,9 @@ Use the pull request's base if there is one (`gh pr view --json baseRefName -q .
 
 ## Step 1: Check the branch
 
-1. `git branch --show-current`. On the base branch, say **"Nothing to review — you're on the base branch or have no changes against it."** and stop.
-2. `git fetch origin <base> --quiet`, then `git diff "$(git merge-base origin/<base> HEAD)" --stat`. No diff: say the same and stop. If the fetch failed, carry on against the base you have and say the review is against a stale base.
+1. `git status --porcelain` for uncommitted work (staged, unstaged and new files). Keep the list: it is part of the diff in Step 3.
+2. `git branch --show-current`. On the base branch with nothing uncommitted, say **"Nothing to review — you're on the base branch or have no changes against it."** and stop. On the base branch with uncommitted changes, review those alone.
+3. `git fetch origin <base> --quiet`, then `git diff "$(git merge-base origin/<base> HEAD)" --stat`. No diff and nothing uncommitted: say the same and stop. If the fetch failed, carry on against the base you have and say the review is against a stale base.
 
 ## Step 1.5: Scope drift
 
@@ -29,7 +30,7 @@ Read `checklist.md` beside this file. If it cannot be read, stop and say so — 
 
 ## Step 3: Read the diff
 
-Read the **full** diff against the merge base, including uncommitted and new files on the branch. Do not comment on anything before you have read all of it, and never flag something the diff already addresses.
+Read the **full** diff: `git diff "$(git merge-base origin/<base> HEAD)"` for what the branch committed, plus `git diff` and `git diff --cached` for uncommitted work, and each new file Step 1 listed in full. Do not comment on anything before you have read all of it, and never flag something the diff already addresses.
 
 ## Step 4: Critical pass
 

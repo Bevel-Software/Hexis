@@ -47,8 +47,8 @@ matches an account the user owns or follows.
 ## Step 1 - Ground and learn the voice
 
 Check which tools are connected (plus any org facts the user gave or the knowledge base already holds - search it before asking), and take the internal domain from the signed-in mailbox so internal
-mail is excluded. Voice: use the voice learned in setup or from pasted sent emails if available; otherwise read 30-40 recent sent emails (external recipients only) and build an implicit style profile; files-only: use pasted sent emails or an uploaded style guide when provided, else a neutral, concise tone, and say which -
-greeting, length, sign-off, formality - used silently so drafts sound
+mail is excluded. Voice: use the voice learned in setup or from pasted sent emails if available; otherwise read 30-40 recent sent emails (external recipients only) and build an implicit style profile; files-only: use pasted sent emails or an uploaded style guide when provided, else a neutral, concise tone. Note for yourself, without saying so,
+which greeting, length, sign-off and formality you use, so drafts sound
 like the rep.
 
 ## Step 2 - Find candidate emails

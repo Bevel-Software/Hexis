@@ -58,6 +58,7 @@ Present the draft with metadata:
 **Category:** [Product area or topic]
 **Tags:** [Searchable tags]
 **Audience:** [All users / Admins / Developers / Specific plan]
+**Last updated:** [Date]
 
 ---
 

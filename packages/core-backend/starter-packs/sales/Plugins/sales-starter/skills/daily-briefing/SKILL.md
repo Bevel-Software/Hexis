@@ -25,9 +25,9 @@ description: Morning rundown - today's meetings with account context, opps closi
 | transcripts | "last call said" context per meeting | no (enriches when present) |
 | chat | deal-channel highlights | no |
 
-No tool is required. That is the pattern: the briefing an Outlook-and-
-Excel org gets from an uploaded book and a calendar export is a complete
-deliverable - the same skill, thinner inputs.
+No tool is required. That is the pattern: the briefing an
+Outlook-and-Excel org gets from an uploaded book and a calendar export
+is a complete deliverable - the same skill, thinner inputs.
 
 ## Flow
 

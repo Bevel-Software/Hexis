@@ -95,5 +95,5 @@ tiers:
   files-only:   research brief from web search where available + the uploaded book for the dedup check. No web and no enrichment: say so at the top, fill sections only from uploaded or pasted material, mark the rest not verified, and offer to use pasted site copy or articles
   read-only:    adds the live crm dedup/owner check and richer
                 enrichment tools
-  gated-writes: none (record creation/logging hands off to the the skills that make changes (update-opportunity, log-activity and others))
+  gated-writes: none - record creation and logging hand off to the skills that make changes (update-opportunity, log-activity and others)
 ```

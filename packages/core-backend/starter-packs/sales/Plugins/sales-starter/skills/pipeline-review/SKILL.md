@@ -25,7 +25,7 @@ much is where, what's aging, what's at risk.
 |---|---|---|
 | crm | open pipeline + 2 quarters of closed for baselines | no (files fallback: uploaded pipeline export) |
 
-Read-only throughout; fixes hand off to the the skills that make changes (update-opportunity, log-activity and others).
+Read-only throughout; fixes hand off to the skills that make changes (update-opportunity, log-activity and others).
 
 ## Inputs
 

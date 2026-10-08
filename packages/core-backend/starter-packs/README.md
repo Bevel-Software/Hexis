@@ -39,8 +39,9 @@ skip.
 `KnowledgeBase/`, `Plugins/` and `Skills/` use the default layout's names and
 are written under the names the deployment chose for those folders. Text files
 may use the layout placeholders (`{{knowledgeBaseDir}}`, `{{skillsDir}}`,
-`{{pluginsDir}}`). Anything else in a pack folder (like this README) is never
-copied. Dot-files are never copied.
+`{{pluginsDir}}` and `{{agentsFile}}`, the agent guide's file name). Anything
+else in a pack folder (like this README) is never copied. Dot-files are never
+copied.
 
 Pages are short tasks rather than finished documents: a heading, a line or two
 of placeholders, and "Ask your agent: _…_". While a page still holds exactly

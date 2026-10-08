@@ -68,7 +68,7 @@ If the issue is a bug, follow the reproduction step best practices below to docu
 ## ESCALATION: [One-line summary]
 
 **Severity:** [Critical / High / Medium]
-**Target team:** [Engineering / Product / Security / Leadership]
+**Target team:** [L2 Support / Engineering / Product / Security / Leadership]
 **Reported by:** [Your name/team]
 **Date:** [Today's date]
 
