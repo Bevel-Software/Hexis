@@ -104,7 +104,9 @@ export function Toolbar() {
           </button>
         )}
 
-        <InviteButton />
+        {/* Icon-only below `md`, where its word would crowd the profile menu
+            off the row. */}
+        <InviteButton compact={isCompact} />
 
         {/* One button for who you are and everything that follows you around.
             It used to be three things in a row here — a name that was not a

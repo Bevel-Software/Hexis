@@ -76,8 +76,8 @@ function renderPalette({ compact = false }: { compact?: boolean } = {}) {
   );
 }
 
-const trigger = () => screen.getByRole('button', { name: /search pages, skills and tools/i });
-const input = () => screen.getByRole('combobox', { name: /search pages, skills and tools/i });
+const trigger = () => screen.getByRole('button', { name: /search pages, skills, tools and plugins/i });
+const input = () => screen.getByRole('combobox', { name: /search pages, skills, tools and plugins/i });
 const options = () => within(screen.getByRole('listbox')).queryAllByRole('option');
 
 beforeEach(() => {
@@ -188,7 +188,7 @@ describe('SearchPalette', () => {
     const row = await screen.findByRole('option', { name: /linear/i });
     await user.click(row);
     expect(screen.getByTestId('location')).toHaveTextContent(
-      `/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/GTM/linear.tool`,
+      `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/${KB}/Plugins/GTM/linear.tool`,
     );
   });
 
@@ -200,6 +200,53 @@ describe('SearchPalette', () => {
     await user.type(input(), 'zzz');
     expect(options()).toHaveLength(0);
     expect(screen.getByRole('status')).toHaveTextContent('No pages or items match “zzz”');
+  });
+
+  it('says the catalog failed, not that nothing matched, when every catalog request fails', async () => {
+    api.listSkills.mockRejectedValue(new Error('down'));
+    api.listToolSecrets.mockRejectedValue(new Error('down'));
+    api.listPlugins.mockRejectedValue(new Error('down'));
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Couldn’t load skills, tools and plugins.'));
+
+    await user.type(input(), 'zzz');
+    expect(options()).toHaveLength(0);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'No pages match “zzz”, and skills, tools and plugins couldn’t be loaded.',
+    );
+    expect(screen.getByRole('status')).not.toHaveTextContent('No pages or items match');
+  });
+
+  it('groups plugins with skills and tools', async () => {
+    api.listPlugins.mockResolvedValue([
+      { name: 'gtm', displayName: 'GTM', folders: ['Plugins/GTM'], canRead: true, canWrite: false, isOwner: false, skillCount: 0, toolCount: 0 },
+    ]);
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    await user.type(input(), 'gtm');
+    const group = await screen.findByRole('group', { name: 'Skills, tools & plugins' });
+    expect(within(group).getByRole('option', { name: /GTM/ })).toBeInTheDocument();
+  });
+
+  it('keeps focus in the input when the panel around the rows is pressed, so the keyboard still drives it', async () => {
+    const user = userEvent.setup();
+    const elsewhere = () => screen.getByRole('button', { name: 'Elsewhere' });
+    renderPalette();
+    elsewhere().focus();
+    await user.keyboard('{Control>}k{/Control}');
+    await screen.findByRole('option', { name: /linear/i });
+
+    await user.click(screen.getByRole('status'));
+    await user.click(screen.getByRole('listbox'));
+    expect(input()).toHaveFocus();
+
+    // Escape is still the input's, so focus goes back to where it was.
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(elsewhere()).toHaveFocus();
   });
 
   it('closes on Tab with focus on the search box, for the Tab to move on from', async () => {

@@ -124,12 +124,16 @@ describe('useWorkspaceState createFile', () => {
   it('rejects with the refusal, and leaves the tree and revision alone', async () => {
     const result = await mountReady();
     const start = result.current.fsRevision;
+    const tree = result.current.fileTree;
     const listCalls = vi.mocked(api.listFiles).mock.calls.length;
     vi.mocked(api.writeFile).mockRejectedValueOnce(new api.WorkspaceApiError(409, '"a.md" already exists.'));
     await act(async () => {
       await expect(result.current.createFile('a.md', '', { ifAbsent: true })).rejects.toMatchObject({ status: 409 });
     });
     expect(result.current.fsRevision).toBe(start);
+    // No refresh (the list count) AND no local edit (the same tree object):
+    // the refused file was never added to the tree on screen.
     expect(vi.mocked(api.listFiles).mock.calls.length).toBe(listCalls);
+    expect(result.current.fileTree).toBe(tree);
   });
 });

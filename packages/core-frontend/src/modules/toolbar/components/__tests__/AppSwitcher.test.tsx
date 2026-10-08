@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { AppSwitcher } from '../AppSwitcher';
@@ -151,6 +151,18 @@ describe('AppSwitcher as a segmented toggle (few apps, wide toolbar)', () => {
   it('stays put when the current app is clicked from a deep link inside it', async () => {
     renderSwitcher({ path: '/workspace/main/Skills' });
     await userEvent.click(within(nav()).getByRole('link', { name: 'Knowledge' }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/main/Skills');
+  });
+
+  it('leaves a modified or middle click on the current app to the browser, for a new tab', () => {
+    renderSwitcher({ path: '/workspace/main/Skills' });
+    const link = within(nav()).getByRole('link', { name: 'Knowledge' });
+    // `fireEvent` answers whether the default action survived: false means cancelled.
+    expect(fireEvent.click(link)).toBe(false);
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(true);
+    expect(fireEvent.click(link, { metaKey: true })).toBe(true);
+    expect(fireEvent.click(link, { shiftKey: true })).toBe(true);
+    expect(fireEvent.click(link, { button: 1 })).toBe(true);
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/main/Skills');
   });
 

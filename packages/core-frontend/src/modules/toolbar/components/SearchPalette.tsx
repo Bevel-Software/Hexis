@@ -32,7 +32,7 @@ import {
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;
 
-const PLACEHOLDER = 'Search pages, skills and tools';
+const PLACEHOLDER = 'Search pages, skills, tools and plugins';
 
 /**
  * The shortcut belongs to ⌘ on Apple platforms and to Ctrl everywhere else —
@@ -210,6 +210,15 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           id={panelId}
           role="dialog"
           aria-label="Search"
+          // A press anywhere in the panel but the input keeps focus IN the
+          // input, as the rows already do for themselves: every key the
+          // palette answers — the arrows, Enter, and Escape back to where
+          // the reader was — is handled there, and a press on the padding,
+          // the status line or the list's scroll area would otherwise blur it
+          // and leave the open palette deaf to the keyboard.
+          onMouseDown={(e) => {
+            if (e.target !== inputRef.current) e.preventDefault();
+          }}
           className={cn(
             'z-40',
             compact ? 'fixed inset-x-3 top-[52px]' : 'absolute top-[calc(100%+6px)] left-0 w-full min-w-[320px]',
@@ -359,14 +368,19 @@ function SearchPanel({
   // One line under the rows for whatever they cannot say themselves: the
   // catalog still on its way, the catalog unreachable, or no match at all.
   // Outside the listbox, which holds options and nothing else.
+  // The failure comes before "no match": with the catalog unreachable, only
+  // the pages were searched, and "No pages or items match" would claim the
+  // skills, tools and plugins were searched too.
   const status = loadingItems
-    ? 'Loading skills and tools…'
-    : flat.length === 0
-      ? trimmed
-        ? `No pages or items match “${trimmed}”`
-        : 'Nothing to search yet.'
-      : catalogState.failed && !catalogState.catalog
-        ? 'Couldn’t load skills and tools.'
+    ? 'Loading skills, tools and plugins…'
+    : catalogState.failed && !catalogState.catalog
+      ? flat.length === 0 && trimmed
+        ? `No pages match “${trimmed}”, and skills, tools and plugins couldn’t be loaded.`
+        : 'Couldn’t load skills, tools and plugins.'
+      : flat.length === 0
+        ? trimmed
+          ? `No pages or items match “${trimmed}”`
+          : 'Nothing to search yet.'
         : null;
 
   return (
@@ -393,7 +407,7 @@ function SearchPanel({
       />
       <div id={listboxId} role="listbox" aria-label="Search results" className="min-h-0 overflow-y-auto">
         {renderGroup('Pages', pageHits, 0)}
-        {renderGroup('Skills & tools', itemHits, pageHits.length)}
+        {renderGroup('Skills, tools & plugins', itemHits, pageHits.length)}
       </div>
       <div role="status" className={cn('flex-none px-2 text-ui text-ink-muted', status && 'py-2')}>
         {status}

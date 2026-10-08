@@ -21,6 +21,12 @@ describe('matchTier', () => {
     expect(matchTier('Notes (draft)', 'draft')).toBe(1);
   });
 
+  it('reads a letter outside the Basic Multilingual Plane as a letter, not a word boundary', () => {
+    // `𝐀` (U+1D400) is two UTF-16 code units; its trailing half alone is no letter.
+    expect(matchTier('𝐀bc', 'bc')).toBe(2);
+    expect(matchTier('𝐀 bc', 'bc')).toBe(1);
+  });
+
   it('ignores case, accents and repeated whitespace', () => {
     expect(matchTier('Café Menu', 'cafe')).toBe(0);
     expect(matchTier('How to   get started', 'TO GET')).toBe(1);
@@ -41,6 +47,8 @@ describe('rankByName', () => {
       'Enterprise plan',
     ]);
     expect(names(['beta', 'Alfa', 'gamma'], 'a')).toEqual(['Alfa', 'beta', 'gamma']);
+    // Same tier, same length: only the alphabet puts them in order, whatever order they came in.
+    expect(names(['Coda', 'Bora'], 'o')).toEqual(['Bora', 'Coda']);
   });
 
   it('keeps the caller’s order for equal names', () => {

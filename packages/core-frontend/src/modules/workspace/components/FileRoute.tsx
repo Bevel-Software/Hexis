@@ -13,7 +13,7 @@ import {
   fetchNodeWorkspacePath,
   fetchNodeId,
 } from '../routing/kb-routes';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
 
 type SyncError =
@@ -129,6 +129,12 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // Guarded by `segmentIsId` so an already-canonical id URL no-ops and this can't
   // ping-pong; gated on `openFilePath === segment` so the subsequent id→path
   // load reuses the already-open tab instead of racing a second fetch.
+  //
+  // The swap is the SAME history entry under its canonical name, so it keeps
+  // the entry's router state — a `startEditing` request (or `rawFile`) not yet
+  // acted on must survive it. Read through a ref, at the moment of the swap,
+  // so a request the viewer has consumed in the meantime is not put back.
+  const routerStateRef = useLatestRef<unknown>(location.state);
   useEffect(() => {
     if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
     if (openFilePath !== segment) return;
@@ -136,13 +142,13 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
       if (!cancelled && nodeId) {
-        navigate(kbNodeUrl(branchFromUrl, nodeId) + location.hash, { replace: true });
+        navigate(kbNodeUrl(branchFromUrl, nodeId) + location.hash, { replace: true, state: routerStateRef.current });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 

@@ -429,11 +429,13 @@ export function useFileNav() {
    * It travels as router state (`startEditing`, the key the skill page
    * already answers to), not in the URL, so a shared or bookmarked link never
    * drops anyone into the editor; `FileViewer` honours it once and clears it.
+   * The path rides along (`startEditingPath`) because the URL does not keep
+   * naming it: `FileRoute` swaps a node's path URL for its id URL.
    */
   const openWorkspacePath = useCallback(
     (path: string, options?: { edit?: boolean }) => {
       if (!branch) return;
-      if (options?.edit) navigate(kbFileUrl(branch, path), { state: { startEditing: true } });
+      if (options?.edit) navigate(kbFileUrl(branch, path), { state: { startEditing: true, startEditingPath: path } });
       else navigate(kbFileUrl(branch, path));
     },
     [branch, navigate],
