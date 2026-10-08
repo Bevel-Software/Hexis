@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, act, waitFor, screen, within, fireEvent } from '@testing-library/react';
+import { ConfirmProvider } from '../../../../shared/components';
 
 // Build a single error class shared between the mock module and the tests.
 // Hoisted so vi.mock can reach it during module initialization, before the
@@ -102,7 +103,10 @@ describe('useWorkspaceState multi-tab', () => {
   });
 
   async function mountReady() {
-    const { result } = renderHook(() => useWorkspaceState());
+    // The unsaved-work questions are the app's own dialog, hosted here.
+    const { result } = renderHook(() => useWorkspaceState(), {
+      wrapper: ({ children }: { children: ReactNode }) => <ConfirmProvider>{children}</ConfirmProvider>,
+    });
     await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
     return result;
   }
@@ -143,29 +147,67 @@ describe('useWorkspaceState multi-tab', () => {
     expect(tabA?.isDirty).toBe(true);
   });
 
-  it('closeTab prompts when the tab is dirty', async () => {
+  /** Answer the app's open dialog by pressing one of its buttons. */
+  async function answer(button: string, text?: RegExp) {
+    const dialog = await screen.findByRole('dialog');
+    if (text) expect(dialog.textContent).toMatch(text);
+    // A per-tab question is never one you can switch off.
+    expect(within(dialog).queryByText("Don't ask again")).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: button }));
+  }
+
+  it("closeTab asks in the app's dialog when the tab is dirty; Cancel keeps it, Close closes it", async () => {
+    // The browser's dialogs suppressed: a stubbed confirm that always says no
+    // must never be what answers.
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const result = await mountReady();
     await act(async () => { await result.current.addTab('Knowledge/A.md'); });
     await act(async () => { result.current.setHasUnsavedFileChanges?.(true); });
 
     const tabA = result.current.openTabs[0];
-    await act(async () => {
-      const result1 = await result.current.closeTab(tabA);
-      expect(result1.closed).toBe(false);
-    });
-    expect(confirmSpy).toHaveBeenCalledWith(
-      'You have unsaved changes in A.md. Close anyway?',
-    );
+    let closing!: Promise<{ closed: boolean }>;
+    act(() => { closing = result.current.closeTab(tabA); });
+    await answer('Cancel', /You have unsaved changes in A\.md\. Close anyway\?/);
+    await act(async () => { expect((await closing).closed).toBe(false); });
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(result.current.openTabs).toHaveLength(1);
 
-    confirmSpy.mockReturnValue(true);
-    await act(async () => {
-      const result2 = await result.current.closeTab(tabA);
-      expect(result2.closed).toBe(true);
-    });
+    act(() => { closing = result.current.closeTab(tabA); });
+    await answer('Close anyway');
+    await act(async () => { expect((await closing).closed).toBe(true); });
     expect(result.current.openTabs).toHaveLength(0);
     expect(result.current.activeTab).toBeNull();
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it('closeTab counts Escape as Cancel', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.addTab('Knowledge/A.md'); });
+    await act(async () => { result.current.setHasUnsavedFileChanges?.(true); });
+    let closing!: Promise<{ closed: boolean }>;
+    act(() => { closing = result.current.closeTab(result.current.openTabs[0]); });
+    await screen.findByRole('dialog');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => { expect((await closing).closed).toBe(false); });
+    expect(result.current.openTabs).toHaveLength(1);
+  });
+
+  it('closeTab asks once when the same dirty tab is closed twice while asking', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.addTab('Knowledge/A.md'); });
+    await act(async () => { result.current.setHasUnsavedFileChanges?.(true); });
+    const tabA = result.current.openTabs[0];
+    let first!: Promise<{ closed: boolean }>;
+    let second!: Promise<{ closed: boolean }>;
+    act(() => {
+      first = result.current.closeTab(tabA);
+      second = result.current.closeTab(tabA);
+    });
+    await act(async () => { expect((await second).closed).toBe(false); });
+    await answer('Close anyway');
+    await act(async () => { expect((await first).closed).toBe(true); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(result.current.openTabs).toHaveLength(0);
   });
 
   it('closeTab activates the left neighbor when closing the active tab', async () => {
@@ -202,20 +244,38 @@ describe('useWorkspaceState multi-tab', () => {
     expect(result.current.openTabs.map((t) => t.path)).toEqual(['keep.md']);
   });
 
-  it('deleteEntry sweeps tabs under a deleted directory and prompts once for dirty', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  it('deleteEntry sweeps tabs under a deleted directory and asks once for dirty', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const result = await mountReady();
     await act(async () => { await result.current.addTab('Knowledge/keep.md'); });
     await act(async () => { await result.current.addTab('OldDir/a.md'); });
     await act(async () => { result.current.setHasUnsavedFileChanges?.(true); });
     await act(async () => { await result.current.addTab('OldDir/b.md'); });
 
-    await act(async () => { await result.current.deleteEntry('OldDir'); });
+    let deleting!: Promise<unknown>;
+    act(() => { deleting = result.current.deleteEntry('OldDir'); });
+    // Today's bulk question, by basename, not full path.
+    await answer('Close anyway', /You have unsaved changes in:\n {2}- a\.md\nClose anyway\?/);
+    await act(async () => { await deleting; });
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    // Bulk-confirm message uses basename, not full path.
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/a\.md/);
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0);
+    expect(apiMocks.deleteFile).toHaveBeenCalledWith('ws-1', 'OldDir');
     expect(result.current.openTabs.map((t) => t.path)).toEqual(['Knowledge/keep.md']);
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it('deleteEntry keeps everything when the unsaved-tabs question is cancelled', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.addTab('OldDir/a.md'); });
+    await act(async () => { result.current.setHasUnsavedFileChanges?.(true); });
+
+    let deleting!: Promise<unknown>;
+    act(() => { deleting = result.current.deleteEntry('OldDir'); });
+    await answer('Cancel');
+    await act(async () => { expect(await deleting).toBe(false); });
+
+    expect(apiMocks.deleteFile).not.toHaveBeenCalled();
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['OldDir/a.md']);
   });
 
   it('moveEntry rewrites tab paths in place', async () => {

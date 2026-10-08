@@ -248,7 +248,7 @@ export interface WorkspaceContextValue {
    */
   addTab: (relativePath: string) => Promise<boolean>;
   /**
-   * Close a tab. Prompts via `window.confirm` if the tab has unsaved edits;
+   * Close a tab. Asks in the app's own dialog if the tab has unsaved edits;
    * pass `{ skipConfirm: true }` from bulk-close paths that have already
    * collected one consolidated confirm. If the closed tab was active,
    * activates the tab to its left (or right) and returns its path so the

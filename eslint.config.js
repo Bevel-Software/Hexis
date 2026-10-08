@@ -26,6 +26,36 @@ export default defineConfig([
     extends: [reactHooks.configs.flat.recommended, reactRefresh.configs.vite],
   },
   {
+    // The browser's own `confirm()` can be silenced by the browser: after a
+    // few dialogs it offers to stop the page creating more, and from then on
+    // every `confirm()` answers false without showing anything — the page
+    // reads that as Cancel, and the action it guarded stops without a word.
+    // The app asks through its own dialog instead (`useConfirm()`, from the
+    // shared components). A local function that happens to be called
+    // `confirm` (the file tree's, `useConfirm()`'s result) is not the global
+    // and is not flagged. `alert()` stays allowed: it refuses nothing.
+    // `pnpm test` runs this rule over core-frontend's source
+    // (`shared/__tests__/no-builtin-confirm.test.ts`), so CI fails on a new use.
+    files: ['packages/core-frontend/**/*.{ts,tsx}', 'apps/web/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'confirm',
+          message: "The browser can silence its own confirm(); ask with useConfirm() from the shared components.",
+        },
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...['window', 'globalThis', 'self'].map((object) => ({
+          object,
+          property: 'confirm',
+          message: "The browser can silence its own confirm(); ask with useConfirm() from the shared components.",
+        })),
+      ],
+    },
+  },
+  {
     // The backend logs through one port (`shared/logging.ts`), so that a
     // deployment's shell decides where lines go and what shape they take. A
     // bare `console.*` in a module bypasses that decision; the sink itself is

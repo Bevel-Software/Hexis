@@ -448,6 +448,37 @@ describe('Toolbar', () => {
       expect(logout).toHaveBeenCalledTimes(1);
     });
 
+    // The way back from the branch delete's "Don't ask again": there exactly
+    // while THIS person's question is off in this browser.
+    describe('Ask before deleting branches', () => {
+      const KEY = 'hexis.skipBranchDeleteConfirm:user@example.com';
+      afterEach(() => localStorage.clear());
+
+      it('is not offered while the question is on', async () => {
+        renderToolbar();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+
+      it("is not offered for someone else's choice", async () => {
+        localStorage.setItem('hexis.skipBranchDeleteConfirm:someone@example.com', '1');
+        renderToolbar();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+
+      it('is offered while the question is off, and turns it back on', async () => {
+        localStorage.setItem(KEY, '1');
+        renderToolbar();
+        await openMenu();
+        await userEvent.click(row('Ask before deleting branches'));
+        expect(localStorage.getItem(KEY)).toBeNull();
+        expect(panelGone()).toBeNull();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+    });
+
     // Nothing in the menu means anything without a person, and the trigger is
     // that person — so signed out there is no button at all.
     it('renders nothing when there is no signed-in user', () => {

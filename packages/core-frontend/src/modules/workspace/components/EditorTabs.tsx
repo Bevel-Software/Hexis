@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem } from '../../../shared/components';
-import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
+import { useConfirm, useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
@@ -33,6 +33,7 @@ export function EditorTabs() {
     reorderTab,
   } = useWorkspace();
   const { openFile: navigateToFile, closeFile: navigateToBranchRoot } = useFileNav();
+  const confirm = useConfirm();
 
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
@@ -144,10 +145,13 @@ export function EditorTabs() {
           onCloseMany={async (tabs) => {
             const dirty = tabs.filter((t) => t.isDirty);
             if (dirty.length > 0) {
-              const ok = window.confirm(
-                UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))),
-              );
-              if (!ok) return;
+              const { confirmed } = await confirm({
+                title: 'Unsaved changes',
+                message: UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))),
+                confirmLabel: 'Close anyway',
+                destructive: true,
+              });
+              if (!confirmed) return;
             }
             // Pass skipConfirm so the per-tab dirty prompt doesn't fire again
             // (we already collected one bulk confirm). Run each close in a
