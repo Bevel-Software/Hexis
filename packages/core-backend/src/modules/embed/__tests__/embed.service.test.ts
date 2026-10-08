@@ -425,12 +425,25 @@ describe('EmbedService: saving as a writer', () => {
     expect(workflowService.releaseLock).not.toHaveBeenCalled();
   });
 
-  it('refuses to keep a lock alive for a viewer who lost write access', async () => {
+  /**
+   * The lock is let go on the SERVER at that moment, not left to the view's
+   * cancel or the TTL: a frame that is gone, or a host that never delivers
+   * the refusal, would otherwise keep the file shut to the writers who still
+   * have access.
+   */
+  it('refuses to keep a lock alive for a viewer who lost write access, and releases it', async () => {
     const { service, accessControl, workflowService } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     accessControl.canWrite.mockResolvedValue(false);
     await expect(service.heartbeat(token)).rejects.toThrow(EmbedAccessError);
     expect(workflowService.heartbeatLock).not.toHaveBeenCalled();
+    expect(workflowService.releaseLockNoCommit).toHaveBeenCalledWith(
+      expect.any(String),
+      BRANCH,
+      `${KB}/${REPO}`,
+      expect.objectContaining({ id: USER.id }),
+    );
+    expect(workflowService.releaseLock).not.toHaveBeenCalled();
   });
 
   it('releases the lock WITHOUT committing when the write fails, and rethrows', async () => {

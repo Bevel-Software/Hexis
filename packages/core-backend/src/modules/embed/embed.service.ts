@@ -280,16 +280,20 @@ export class EmbedService implements IEmbedService {
     const claims = this.verifyToken(token);
     const { user, canWrite } = await this.resolveIdentity(claims);
     if (!user) return; // nothing held — nothing to keep alive
+    const workspaceId = this.defaultWorkspaceId();
+    const wsPath = this.wsPathFor(claims.repoRelative);
     // Write access is asked again on every renewal: the token outlives the
     // permission it was minted under, and a writer who lost it must not keep
-    // a lock alive that shuts out the people who still have it.
-    if (!canWrite) throw new EmbedAccessError();
-    await this.workflowService.heartbeatLock(
-      this.defaultWorkspaceId(),
-      this.kb.defaultBranch,
-      this.wsPathFor(claims.repoRelative),
-      user,
-    );
+    // a lock alive that shuts out the people who still have it. The lock
+    // goes HERE, not only when the view hears the refusal: a frame that is
+    // gone, or a host that never delivers the 403, would otherwise leave the
+    // file shut to the writers who still have access until the TTL. Letting
+    // go takes no access — the workflow releases only a lock this user holds.
+    if (!canWrite) {
+      await this.workflowService.releaseLockNoCommit(workspaceId, this.kb.defaultBranch, wsPath, user);
+      throw new EmbedAccessError();
+    }
+    await this.workflowService.heartbeatLock(workspaceId, this.kb.defaultBranch, wsPath, user);
   }
 
   async cancel(token: string): Promise<void> {
