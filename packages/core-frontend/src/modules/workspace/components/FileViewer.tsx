@@ -57,8 +57,8 @@ import { useStarterPacks } from '../../onboarding/state/starter-packs';
 const SUGGESTION_LIMIT = 4;
 
 /** What a page is called, without the extension the reader did not choose. */
-function pageTitle(path: string): string {
-  return displayFileName(path).replace(/\.(md|markdown)$/i, '');
+function pageTitle(path: string, kbDirName: string | null): string {
+  return displayFileName(path, kbDirName).replace(/\.(md|markdown)$/i, '');
 }
 
 /**
@@ -1078,7 +1078,7 @@ export function FileViewer() {
                       >
                         <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
                         <span className="min-w-0 flex-1 truncate text-ui text-ink">
-                          {pageTitle(page.relativePath)}
+                          {pageTitle(page.relativePath, kbDirName)}
                         </span>
                         {/* The folder it sits in — two pages can share a name,
                             and the one thing that tells them apart is where they
@@ -1127,7 +1127,7 @@ export function FileViewer() {
   // because the bar is the technical label (`SKILL.md`, `How to get
   // started.md`) exactly as the skill page's file bar renders it. A platform
   // file is the exception: it reads by its plain name, its real one on hover.
-  const fileBaseName = displayFileName(openFilePath);
+  const fileBaseName = displayFileName(openFilePath, kbDirName);
 
   // The repo-relative path (kbDirName stripped) — what the change-request
   // machinery speaks. Null for files outside the KB clone, which cannot have
@@ -1333,6 +1333,7 @@ export function FileViewer() {
         header={
           <KbPageHeader
             path={openFilePath}
+            kbDirName={kbDirName}
             canWrite={access.canWrite}
             editMode={editMode}
             entering={isEnteringEdit}
@@ -1599,7 +1600,7 @@ export function FileViewer() {
           >
             {shellVariant === 'prose' ? (
               <>
-                <FilePaneCard file={fileBaseName} fileTitle={fileNameTooltip(openFilePath)} actions={paneActions}>
+                <FilePaneCard file={fileBaseName} fileTitle={fileNameTooltip(openFilePath, kbDirName)} actions={paneActions}>
                   {rendererElement}
                 </FilePaneCard>
                 {/* Every open proposal on this file, under the file it is

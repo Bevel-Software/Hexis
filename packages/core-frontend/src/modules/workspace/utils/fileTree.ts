@@ -5,6 +5,7 @@ import {
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
+import { isAccessRulesFile as isAccessRulesPath } from '../../../shared/display-file-name';
 
 // RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
 // KnowledgeBase/, Skills/ and Plugins/, but every reserved name renders as its
@@ -93,8 +94,7 @@ const READABLE_PAGE = /\.(md|markdown)$/i;
  * and any governed folder carries one), so the root-file exclusion below
  * never reaches it. Nobody opens a knowledge base to read who may edit it.
  */
-const ACCESS_RULES_FILE = 'access.md';
-const isAccessRulesFile = (entry: FileTreeEntry): boolean => entry.name.toLowerCase() === ACCESS_RULES_FILE;
+const isAccessRulesFile = (entry: FileTreeEntry): boolean => isAccessRulesPath(entry.relativePath);
 
 /**
  * Pages worth offering to someone who has nothing open: the documents nearest

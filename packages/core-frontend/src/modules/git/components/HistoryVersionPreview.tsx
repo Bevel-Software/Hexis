@@ -166,7 +166,7 @@ export interface HistoryVersionPreviewProps {
 
 export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPreviewProps) {
   const { fetchFileDiff, fetchFileAtChange, status } = useGit();
-  const { workspaceId } = useWorkspace();
+  const { workspaceId, kbDirName } = useWorkspace();
   const ext = extensionOf(filePath);
 
   /**
@@ -369,7 +369,7 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
         // div is what stays mounted around it for focus to land on. See
         // `RetryReadButton`.
         <div {...READ_PANE} className="flex-1 overflow-auto p-3">
-          <FilePaneCard file={displayFileName(filePath)} fileTitle={fileNameTooltip(filePath)}>
+          <FilePaneCard file={displayFileName(filePath, kbDirName)} fileTitle={fileNameTooltip(filePath, kbDirName)}>
             {viewer}
           </FilePaneCard>
         </div>

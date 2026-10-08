@@ -41,8 +41,8 @@ export interface SearchResult {
 }
 
 /** What a page is called, without the extension the reader did not choose. */
-function pageTitle(path: string): string {
-  return displayFileName(path).replace(/\.(md|markdown)$/i, '');
+function pageTitle(path: string, kbDirName: string | null): string {
+  return displayFileName(path, kbDirName).replace(/\.(md|markdown)$/i, '');
 }
 
 /**
@@ -75,7 +75,7 @@ export function pageResults(
     .map((f) => ({
       key: `page:${f.relativePath}`,
       kind: 'page',
-      name: pageTitle(f.relativePath),
+      name: pageTitle(f.relativePath, kbDirName),
       location: pageLocation(f.relativePath, kbDirName),
       target: { kind: 'workspace', path: f.relativePath },
     }));

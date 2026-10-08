@@ -11,7 +11,7 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
-import { displayFileName } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
 
 export interface FileChangeBoxesProps {
   /** Repo-root-relative path of the open file (kbDirName stripped). */
@@ -130,6 +130,7 @@ export function FileChangeBoxes({
           <ChangeBox
             key={cr.number}
             file={displayFileName(repoRelativePath)}
+            fileTitle={fileNameTooltip(repoRelativePath)}
             author={changeAuthorName(cr)}
             when={formatWhen(cr.createdAt)}
             mine={mine}

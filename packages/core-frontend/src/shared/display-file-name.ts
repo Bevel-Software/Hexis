@@ -1,4 +1,4 @@
-import { PLUGIN_MANIFEST_FILE, currentKbLayout } from '@bevel-software/platform-shared';
+import { PLUGIN_MANIFEST_FILE, PLUGIN_SKILLS_DIR, currentKbLayout } from '@bevel-software/platform-shared';
 
 /**
  * What the app CALLS a file, wherever it names one: a row in the tree, a tab,
@@ -15,45 +15,78 @@ import { PLUGIN_MANIFEST_FILE, currentKbLayout } from '@bevel-software/platform-
  * reads keep the real name; {@link fileNameTooltip} hands it to whoever
  * hovers, so it is never hidden from someone who needs it.
  *
- * Paths, not bare names: a `plugin.json` is the plugin's settings only directly
- * inside a plugin's folder (`<kb>/Plugins/<plugin>/plugin.json`, or the same
- * path repo-relative). One bundled deeper — a skill's example — is just a file
- * called `plugin.json`, and a bare name cannot say which it is. An `access.md`
- * governs its folder at any depth, so its name alone is enough.
+ * Paths, not bare names: a `plugin.json` is the plugin's settings only in a
+ * plugin's own folder under the plugins root, and the plugins root is the one
+ * at the top of the repository — a folder a person happened to call `Plugins`
+ * inside the knowledge tree holds no plugins. So a caller says what its path
+ * is relative to: `kbDirName` for a workspace path (`<kbDirName>/Plugins/…`),
+ * null for one that is already repository-relative (a change request's file
+ * list). A plugin may sit under grouping folders, so its depth is not fixed;
+ * what is fixed is that a `plugin.json` inside a plugin's `skills/` is a
+ * skill's bundled example and nothing more. An `access.md` governs its folder
+ * at any depth, so its name alone is enough.
  */
 
-/** The access rules file's name — a platform file at any depth. */
+/** The access rules file's name — a platform file at any depth, in any case. */
 const ACCESS_RULES_FILE = 'access.md';
 
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
 }
 
-/** The plain name of a platform file, or null for every other file. */
-function plainName(path: string): string | null {
+/**
+ * The path's segments from the repository root, or null for a workspace path
+ * that does not start with the clone folder: that file is outside the
+ * repository and under no root at all.
+ */
+function repoSegments(path: string, kbDirName: string | null): string[] | null {
   const segments = path.split('/').filter(Boolean);
-  const name = segments[segments.length - 1];
-  if (name === PLUGIN_MANIFEST_FILE && segments[segments.length - 3] === currentKbLayout().pluginsDir) {
-    return 'Plugin settings';
-  }
-  if (name === ACCESS_RULES_FILE) return 'Who has access';
-  return null;
+  if (kbDirName === null) return segments;
+  return segments[0] === kbDirName ? segments.slice(1) : null;
 }
 
-/** Whether `path` is a folder's access rules — the file "Who has access" names. */
+/**
+ * Whether repository-relative `segments` name a plugin's own manifest: a
+ * `plugin.json` under the plugins root, in a plugin's folder at any depth
+ * (plugins sit under grouping folders too), and not inside a plugin's
+ * `skills/`, where one is a skill's bundled example.
+ */
+function isPluginManifest(segments: string[]): boolean {
+  if (segments.length < 3) return false;
+  if (segments[0] !== currentKbLayout().pluginsDir) return false;
+  if (segments[segments.length - 1] !== PLUGIN_MANIFEST_FILE) return false;
+  return !segments.slice(1, -1).includes(PLUGIN_SKILLS_DIR);
+}
+
+/** The plain name of a platform file, or null for every other file. */
+function plainName(path: string, kbDirName: string | null): string | null {
+  if (isAccessRulesFile(path)) return 'Who has access';
+  const segments = repoSegments(path, kbDirName);
+  return segments && isPluginManifest(segments) ? 'Plugin settings' : null;
+}
+
+/**
+ * Whether `path` is a folder's access rules — the file "Who has access" names.
+ * The one rule for it, wherever the app asks: the tree's suggestions and the
+ * file page both read it from here.
+ */
 export function isAccessRulesFile(path: string): boolean {
-  return baseName(path) === ACCESS_RULES_FILE;
+  return baseName(path).toLowerCase() === ACCESS_RULES_FILE;
 }
 
-/** The name to show for the file at `path`. */
-export function displayFileName(path: string): string {
-  return plainName(path) ?? baseName(path);
+/**
+ * The name to show for the file at `path`. `kbDirName` is the clone folder a
+ * workspace path starts with; null (the default) says the path is already
+ * repository-relative.
+ */
+export function displayFileName(path: string, kbDirName: string | null = null): string {
+  return plainName(path, kbDirName) ?? baseName(path);
 }
 
 /**
  * The file's real name, for a `title` — set only when {@link displayFileName}
  * shows something else, so an ordinary file keeps whatever tooltip it had.
  */
-export function fileNameTooltip(path: string): string | undefined {
-  return plainName(path) === null ? undefined : baseName(path);
+export function fileNameTooltip(path: string, kbDirName: string | null = null): string | undefined {
+  return plainName(path, kbDirName) === null ? undefined : baseName(path);
 }

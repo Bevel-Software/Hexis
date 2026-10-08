@@ -38,8 +38,8 @@ const KNOWN_EXTENSIONS =
   /\.(md|markdown|txt|csv|tsv|json|yaml|yml|html|htm|pdf|docx|xlsx|pptx|doc|ppt|xls|odt|odp|ods|eml|msg|tool|png|jpe?g|gif|webp|svg)$/i;
 
 /** A platform file keeps its plain name whole: "Plugin settings", not a stripped file name. */
-function titleOf(path: string): string {
-  if (fileNameTooltip(path) !== undefined) return displayFileName(path);
+function titleOf(path: string, kbDirName: string | null): string {
+  if (fileNameTooltip(path, kbDirName) !== undefined) return displayFileName(path, kbDirName);
   const base = path.slice(path.lastIndexOf('/') + 1);
   return base.replace(KNOWN_EXTENSIONS, '');
 }
@@ -47,6 +47,8 @@ function titleOf(path: string): string {
 export interface KbPageHeaderProps {
   /** Workspace-relative. */
   path: string;
+  /** The clone folder `path` starts with; what tells a plugin's own manifest from any other `plugin.json`. */
+  kbDirName: string | null;
   /**
    * `boolean | null` — NOT boolean. `useFileAccess` returns null while the
    * lookup is in flight, null when there is no path / kbDirName / workspaceId,
@@ -148,6 +150,7 @@ const COPY_FEEDBACK_MS = 1800;
 
 export function KbPageHeader({
   path,
+  kbDirName,
   canWrite,
   editMode,
   entering,
@@ -248,10 +251,10 @@ export function KbPageHeader({
           // `title` because `truncate` hides the rest of a long file name, and
           // a heading you cannot finish reading needs somewhere to say it. A
           // platform file shown by its plain name hovers its real one.
-          title={fileNameTooltip(path) ?? titleOf(path)}
+          title={fileNameTooltip(path, kbDirName) ?? titleOf(path, kbDirName)}
           className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
         >
-          {titleOf(path)}
+          {titleOf(path, kbDirName)}
         </h1>
 
         {/* The three chips the deleted strip used to carry. */}

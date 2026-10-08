@@ -43,6 +43,7 @@ import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
 import { traceFiles } from '../utils/file-trace';
+import { displayFileName } from '../../../shared/display-file-name';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git
@@ -511,7 +512,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     options?: { skipConfirm?: boolean },
   ): Promise<{ closed: boolean; newActivePath: string | null }> => {
     if (tab.isDirty && !options?.skipConfirm) {
-      const confirmed = window.confirm(UNSAVED_TAB_WARNING(basename(tab.path)));
+      // The name the tab shows, so this prompt and the bulk one agree.
+      const confirmed = window.confirm(UNSAVED_TAB_WARNING(displayFileName(tab.path, kbDirName)));
       if (!confirmed) return { closed: false, newActivePath: activeTabPathRef.current };
     }
     const tabs = openTabsRef.current;
@@ -527,7 +529,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       setActiveTabPath(newActivePath);
     }
     return { closed: true, newActivePath };
-  }, []);
+  }, [kbDirName]);
 
   const closeAllTabs = useCallback(() => {
     setOpenTabs([]);
@@ -1232,7 +1234,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     );
     const dirty = toClose.filter((t) => t.isDirty);
     if (dirty.length > 0) {
-      const confirmed = window.confirm(UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))));
+      const confirmed = window.confirm(
+        UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path, kbDirName))),
+      );
       if (!confirmed) return false;
     }
     // Optimistic tree removal. A folder delete on the server takes 2-3s
@@ -1276,7 +1280,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // server state. The backend's end-of-batch `fs-tree-changed` SSE
     // event triggers a refresh anyway as belt-and-suspenders. No second
     // `bumpFs()` either — the optimistic bump above already counted.
-  }, [workspaceId, refreshFileTree, bumpFs]);
+  }, [workspaceId, kbDirName, refreshFileTree, bumpFs]);
 
   const reloadTabFromDisk = useCallback(async (relativePath: string) => {
     if (!workspaceId) return;

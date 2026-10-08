@@ -6,6 +6,7 @@ import { KbPageHeader, type KbPageHeaderProps } from '../KbPageHeader';
 function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
   const props: KbPageHeaderProps = {
     path: 'knowledge-base/Knowledge/Invariant.md',
+    kbDirName: 'knowledge-base',
     canWrite: true,
     editMode: false,
     entering: false,

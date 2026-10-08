@@ -27,6 +27,7 @@ export function EditorTabs() {
     activeTab,
     closeTab,
     reorderTab,
+    kbDirName,
   } = useWorkspace();
   const { openFile: navigateToFile, closeFile: navigateToBranchRoot } = useFileNav();
 
@@ -141,7 +142,7 @@ export function EditorTabs() {
             const dirty = tabs.filter((t) => t.isDirty);
             if (dirty.length > 0) {
               const ok = window.confirm(
-                UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path))),
+                UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path, kbDirName))),
               );
               if (!ok) return;
             }
@@ -175,7 +176,7 @@ export function EditorTabs() {
               console.error('[EditorTabs] Failed to close tabs', failures);
               window.alert(
                 `Failed to close ${failures.length} tab(s): ${failures
-                  .map((f) => displayFileName(f.path))
+                  .map((f) => displayFileName(f.path, kbDirName))
                   .join(', ')}`,
               );
             }
@@ -219,7 +220,8 @@ function TabPill(props: TabPillProps) {
     onDragEnd,
   } = props;
 
-  const filename = displayFileName(tab.path);
+  const { kbDirName } = useWorkspace();
+  const filename = displayFileName(tab.path, kbDirName);
   const hasPending = tab.pendingFileContent !== null;
   const hasChangeRequest = useOpenChangeRequests().paths.has(tab.path);
   const ref = useRef<HTMLDivElement>(null);
