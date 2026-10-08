@@ -110,7 +110,7 @@ async function hexisTools(): Promise<UtcpTool[]> {
     undefined,
     unused(),
   );
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
+  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true);
   registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, emptySkills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {

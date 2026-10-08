@@ -91,12 +91,14 @@ export interface IWorkflowService {
    * refused deletion. Fetches first, strictly: when the shared repository
    * cannot be reached it refuses. Runs from the default branch's workspace,
    * whichever workspace the caller is in. `dryRun` reports what a deletion
-   * would do and changes nothing.
+   * would do and changes nothing. `maySee` is the caller's view of change
+   * requests: one it answers no for is left out of the preview and refused on
+   * without its number or link. Absent, every request is visible.
    */
   deleteBranchChecked(
     user: AuthUser,
     name: string,
-    opts?: { dryRun?: boolean; discardUnmerged?: boolean },
+    opts?: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (number: number) => Promise<boolean> },
   ): Promise<DeleteBranchPreview | DeleteBranchResult>;
   // `switchBranch` removed: under the per-branch workspace model the active
   // branch is the workspace's identity. Switching branches is a workspace

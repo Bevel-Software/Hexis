@@ -494,16 +494,19 @@ export class WorkflowService implements IWorkflowService {
       // request has to be withdrawn or declined first. `systemCleanup` does
       // its own open-request check under this same lock, and the legacy
       // `onlyIfNoRemote` prune only fires when origin no longer has the ref.
+      // A request that proposes nothing any more is closed first, and then
+      // blocks nothing. Only for a caller the deletion would go ahead for: a
+      // refused deletion changes nothing, a closed request included — so one
+      // that fails after the close reopens what it closed.
+      let closed: number[] = [];
       if (!opts?.systemCleanup && !opts?.onlyIfNoRemote) {
         let open = await this.openChangeRequestOn(name);
-        // A request that proposes nothing any more is closed first, and then
-        // blocks nothing. Only for a caller the deletion would go ahead for:
-        // a refused deletion changes nothing, a closed request included.
         if (open !== null && !this.kb.isProtectedBranch(name) && (await this.mayDelete(workspaceId, name, user))) {
-          await this.closeEmptyRequestsOn(name, user.email, { workspaceId, fresh: false });
+          closed = await this.closeEmptyRequestsOn(name, user.email, { workspaceId, fresh: false });
           open = await this.openChangeRequestOn(name);
         }
         if (open !== null) {
+          await this.reopenAfterFailedDelete(closed, name, user.email);
           // Two different situations, two different actors. A request FROM
           // this branch is the deleter's own to withdraw; a request INTO it
           // belongs to someone else, and telling the branch owner to
@@ -518,7 +521,12 @@ export class WorkflowService implements IWorkflowService {
           );
         }
       }
-      await this.deleteBranchUnlocked(workspaceId, name, user, opts);
+      try {
+        await this.deleteBranchUnlocked(workspaceId, name, user, opts);
+      } catch (err) {
+        await this.reopenAfterFailedDelete(closed, name, user.email);
+        throw err;
+      }
     });
   }
 
@@ -645,19 +653,49 @@ export class WorkflowService implements IWorkflowService {
    * `branch` that proposes nothing is closed. Best effort per request — one
    * that cannot be judged or closed stays open, and the open-request check
    * after this refuses on it. Never retires a branch: the caller holds
-   * `branch`'s lifecycle lock, and the deletion itself removes it.
+   * `branch`'s lifecycle lock, and the deletion itself removes it. Answers
+   * the numbers it closed, so a deletion that then fails can reopen them
+   * ({@link reopenAfterFailedDelete}).
    */
   private async closeEmptyRequestsOn(
     branch: string,
     actor: string,
     opts: { workspaceId?: string; fresh?: boolean },
-  ): Promise<void> {
+  ): Promise<number[]> {
+    const closed: number[] = [];
     for (const cr of await this.openChangeRequestsOn(branch)) {
       try {
-        await this.closeIfEmpty(cr.number, { ...opts, actor, reason: `empty when "${branch}" was deleted` });
+        if (await this.closeIfEmpty(cr.number, { ...opts, actor, reason: `empty when "${branch}" was deleted` })) {
+          closed.push(cr.number);
+        }
       } catch (err) {
         crLog.warn(`could not close empty change request #${cr.number} before deleting "${branch}":`, { err });
       }
+    }
+    return closed;
+  }
+
+  /**
+   * Undo {@link closeEmptyRequestsOn} for a deletion that failed after it: a
+   * refused deletion changes nothing, and the requests it closed are open
+   * again. Still under the branch's lifecycle lock, so nothing can have
+   * merged, withdrawn or declined them in between; guarded on `closed` all
+   * the same. Best effort: a request that cannot be reopened is logged.
+   */
+  private async reopenAfterFailedDelete(numbers: number[], branch: string, actor: string): Promise<void> {
+    if (numbers.length === 0) return;
+    try {
+      const reopened = await this.db
+        .update(changeRequests)
+        .set({ state: 'open', closedAt: null, updatedAt: new Date() })
+        .where(and(inArray(changeRequests.number, numbers), eq(changeRequests.state, 'closed')))
+        .returning({ number: changeRequests.number });
+      for (const { number } of reopened) {
+        this.prs.invalidateDetailCache(number);
+        crLog.info(`reopened change request #${number} for ${actor}: deleting "${branch}" failed after it was closed`);
+      }
+    } catch (err) {
+      crLog.warn(`could not reopen change requests ${numbers.map((n) => `#${n}`).join(', ')} after deleting "${branch}" failed:`, { err });
     }
   }
 
@@ -678,7 +716,18 @@ export class WorkflowService implements IWorkflowService {
   private openRequestRefusal(
     branch: string,
     cr: { number: number; end: 'source' | 'target'; url: string },
+    visible = true,
   ): BranchDeleteBlockedError {
+    // One the caller may not see is not named, linked or placed at an end:
+    // `get_change_request` answers it as not found, and so does this.
+    if (!visible) {
+      return new BranchDeleteBlockedError(
+        'open-change-request',
+        branch,
+        `An open change request you cannot see still proposes changes from or into "${branch}". ` +
+          `An Admin can decline it in the app; then the branch can be deleted.`,
+      );
+    }
     return new BranchDeleteBlockedError(
       'open-change-request',
       branch,
@@ -704,9 +753,14 @@ export class WorkflowService implements IWorkflowService {
   async deleteBranchChecked(
     user: AuthUser,
     name: string,
-    opts: { dryRun?: boolean; discardUnmerged?: boolean } = {},
+    opts: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (number: number) => Promise<boolean> } = {},
   ): Promise<DeleteBranchPreview | DeleteBranchResult> {
     assertValidBranchName(name);
+    // The caller's view of a request, as `get_change_request` gives it: one
+    // they may not see is never named, linked or judged in an answer. Absent,
+    // every request is visible. A verdict that fails is a no.
+    const maySee = async (number: number): Promise<boolean> =>
+      opts.maySee ? opts.maySee(number).catch(() => false) : true;
     // Under the lock `deleteBranch`, `createBranch` and `openChangeRequest`
     // take, so nothing this answer depends on — a request being opened, the
     // branch being recreated — can change between the checks and the delete.
@@ -750,14 +804,21 @@ export class WorkflowService implements IWorkflowService {
       // Every open request at either end, each judged now: one that proposes
       // nothing is closed by the deletion and blocks nothing; one that still
       // proposes something — or whose changes cannot be determined — blocks.
-      const open: DeleteBranchPreview['openChangeRequests'] = [];
+      // A request the caller may not see still blocks or is closed like any
+      // other, but is left out of the preview and refused on without a name.
+      const open: (DeleteBranchPreview['openChangeRequests'][number] & { visible: boolean })[] = [];
       for (const cr of await this.openChangeRequestsOn(name)) {
         const summary = await this.prs.getPr(cr.number).catch(() => null);
         const empty = summary ? await this.proposesNothing(summary, { workspaceId: wsId, fresh: true }) : false;
-        open.push({ ...cr, url: summary?.url ?? `/change-requests/${cr.number}`, proposesNothing: empty });
+        open.push({
+          ...cr,
+          url: summary?.url ?? `/change-requests/${cr.number}`,
+          proposesNothing: empty,
+          visible: await maySee(cr.number),
+        });
       }
       const blocking = open.find((cr) => !cr.proposesNothing);
-      if (blocking) refusals.push(this.openRequestRefusal(name, blocking));
+      if (blocking) refusals.push(this.openRequestRefusal(name, blocking, blocking.visible));
       // Not coverable by `discardUnmerged`: these are a person's saves on
       // their way into the branch, not work already on it.
       if (await this.savesInFlight(workspaceIdForBranch(name))) {
@@ -784,34 +845,46 @@ export class WorkflowService implements IWorkflowService {
           canDelete: refusals.length === 0,
           refusals: refusals.map((r) => r.message),
           unmergedCommits: state.unmergedCommits,
-          openChangeRequests: open,
+          openChangeRequests: open
+            .filter((cr) => cr.visible)
+            .map(({ number, end, url, proposesNothing }) => ({ number, end, url, proposesNothing })),
           lastCommit: state.lastCommit,
         };
       }
       // A refused deletion changes nothing: no request is closed either.
       if (refusals[0]) throw refusals[0];
 
-      // Every open request proposes nothing: close them, each re-judged at the
-      // moment of closing. Nothing here takes this branch's lifecycle lock —
-      // the deletion below is what removes the branch — so a request whose
-      // source IS this branch cannot make the deletion wait on itself.
-      await this.closeEmptyRequestsOn(name, user.email, { workspaceId: wsId, fresh: true });
-      const still = (await this.openChangeRequestsOn(name))[0];
-      if (still) {
-        const summary = await this.prs.getPr(still.number).catch(() => null);
-        throw this.openRequestRefusal(name, { ...still, url: summary?.url ?? `/change-requests/${still.number}` });
-      }
-
       // The saves check above is a snapshot; a save could take its file lock
       // since. With no lock grantable on the branch, it is made again and
       // nothing can start landing between it and the deletion.
       const { lastCommit } = await this.fileLocks.whileNoneAcquired(name, async () => {
         if (await this.savesInFlight(workspaceIdForBranch(name))) throw this.savesLandingRefusal(name);
-        // Leased on the tip the checks above were made against, so a commit
-        // pushed since is refused by the host instead of deleted unseen.
-        return this.deleteBranchUnlocked(wsId, name, user, {
-          ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
-        });
+        // Every open request proposes nothing: close them, each re-judged at
+        // the moment of closing — the last step before the deletion, so no
+        // later check can refuse after it. Nothing here takes this branch's
+        // lifecycle lock, so a request whose source IS this branch cannot make
+        // the deletion wait on itself. Should the deletion still fail (the
+        // leased push below), the requests closed here are reopened.
+        const closed = await this.closeEmptyRequestsOn(name, user.email, { workspaceId: wsId, fresh: true });
+        try {
+          const still = (await this.openChangeRequestsOn(name))[0];
+          if (still) {
+            const summary = await this.prs.getPr(still.number).catch(() => null);
+            throw this.openRequestRefusal(
+              name,
+              { ...still, url: summary?.url ?? `/change-requests/${still.number}` },
+              await maySee(still.number),
+            );
+          }
+          // Leased on the tip the checks above were made against, so a commit
+          // pushed since is refused by the host instead of deleted unseen.
+          return await this.deleteBranchUnlocked(wsId, name, user, {
+            ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
+          });
+        } catch (err) {
+          await this.reopenAfterFailedDelete(closed, name, user.email);
+          throw err;
+        }
       });
       return {
         kind: 'deleted',

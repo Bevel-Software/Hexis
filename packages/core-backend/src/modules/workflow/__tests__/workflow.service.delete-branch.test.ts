@@ -48,9 +48,20 @@ interface CrRow {
 
 /** The guarded closes the fake table applied, as `{ number, params }`. */
 const closes: { number: number; params: unknown[] }[] = [];
+/** The requests a failed deletion reopened. */
+const reopens: number[] = [];
 
 function fakeDb(rows: CrRow[]): Database {
   return drizzle(async (sql: string, params: unknown[]) => {
+    if (/^\s*update/i.test(sql) && /"number"\s+in\s*\(/i.test(sql)) {
+      // The reopen: `update … set state = 'open', closed_at = null … where number in (…) and state = 'closed'`.
+      const hit = rows.filter((r) => r.state === 'closed' && params.includes(r.number) && params.includes('closed'));
+      for (const row of hit) {
+        row.state = 'open';
+        reopens.push(row.number);
+      }
+      return { rows: hit.map((r) => [r.number]) };
+    }
     if (/^\s*update/i.test(sql)) {
       // The guarded close: `update … set state, closed_at … where number = $n and state = 'open'`.
       const at = /"number"\s*=\s*\$(\d+)/.exec(sql);
@@ -121,6 +132,8 @@ function harness(opts: {
   fetchFails?: boolean;
   /** The changes each open request proposes, by its source branch; absent, one file. `error`: undeterminable. */
   changes?: Record<string, string[] | 'error'>;
+  /** Branches whose deletion fails at the host (the leased push is refused). */
+  deleteFails?: string[];
 }): Harness {
   const deleted: string[] = [];
   const rows = opts.rows ?? [];
@@ -141,11 +154,16 @@ function harness(opts: {
       return c;
     }),
     deleteBranch: vi.fn(async (_ws: string, name: string) => {
+      if (opts.deleteFails?.includes(name)) throw new Error(`stale info: "${name}" moved since it was checked`);
       deleted.push(name);
       const tip = branches[name]?.lastCommit ?? null;
       delete branches[name];
       return { lastCommit: tip };
     }),
+    // What a merge touches besides the branch: the roles.yaml check and the target's pull.
+    fetch: vi.fn(async () => {}),
+    readFileAtRef: vi.fn(async () => 'roles: {}'),
+    pull: vi.fn(async () => ({ treeChanged: false })),
   };
   const fetch = vi.fn(async () => {
     if (opts.fetchFails) throw new Error('git fetch origin failed — remote refs could not be refreshed');
@@ -167,7 +185,14 @@ function harness(opts: {
           : null;
       }),
     } as unknown as PullRequestService,
-    {} as IReviewWorkflowService,
+    {
+      // The merge itself: the request's row is marked merged, as the review workflow records it.
+      mergePr: vi.fn(async (n: number) => {
+        const row = rows.find((r) => r.number === n)!;
+        row.state = 'merged';
+        return { sha: `m${n}` };
+      }),
+    } as unknown as IReviewWorkflowService,
     {
       getOrCreateForBranch: vi.fn(async (b: string) => ({ id: workspaceIdForBranch(b) })),
       ensureRemotesFetched: fetch,
@@ -491,6 +516,62 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     expect(h.deleted).toEqual([]);
   });
 
+  it('closes empty requests only after the last saves check: a save landing by then closes nothing', async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/sync': [] } });
+    // Clear at the first check; landing by the one made inside the lock gate.
+    h.hasAnyActive.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/sync'));
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'saves-landing' });
+    expect(rows[0]!.state).toBe('open');
+    expect(closes).toEqual([]);
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('reopens the empty requests it closed when the deletion itself then fails', async () => {
+    reopens.length = 0;
+    const rows = [open(21, 'ali/sync', DEFAULT), open(22, 'ali/feature', 'ali/sync')];
+    const h = harness({
+      rows,
+      branches: { 'ali/sync': clean('s1') },
+      changes: { 'ali/sync': [], 'ali/feature': [] },
+      deleteFails: ['ali/sync'],
+    });
+    await expect(h.svc.deleteBranchChecked(ADMIN, 'ali/sync')).rejects.toThrow(/stale info/);
+    expect(closes.map((c) => c.number)).toEqual([21, 22]);
+    expect(reopens.sort()).toEqual([21, 22]);
+    expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+    // The app's path, the same.
+    reopens.length = 0;
+    await expect(h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ali/sync', ADMIN)).rejects.toThrow(/stale info/);
+    expect(reopens.sort()).toEqual([21, 22]);
+    expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+  });
+
+  it('a request the caller may not see is left out of the preview and refused on without its number or link', async () => {
+    // #21 is empty and #25 live; the caller can see neither.
+    const rows = [open(21, 'bob/sync', DEFAULT), open(25, 'ali/secret', 'bob/sync')];
+    const h = harness({ rows, branches: { 'bob/sync': clean('s1') }, changes: { 'bob/sync': [] } });
+    const maySee = vi.fn(async () => false);
+    const preview = (await h.svc.deleteBranchChecked(BOB, 'bob/sync', { dryRun: true, maySee })) as DeleteBranchPreview;
+    expect(preview.openChangeRequests).toEqual([]);
+    expect(preview.canDelete).toBe(false);
+    expect(preview.refusals.join(' ')).not.toMatch(/#2[15]|change-requests\//);
+    expect(preview.refusals.join(' ')).toMatch(/open change request you cannot see/);
+    const err = await refusal(h.svc.deleteBranchChecked(BOB, 'bob/sync', { maySee }));
+    const payload = (err as BranchDeleteBlockedError).payload as Record<string, unknown>;
+    expect(payload).toMatchObject({ reason: 'open-change-request' });
+    expect(payload.number).toBeUndefined();
+    expect(payload.url).toBeUndefined();
+    expect(err.message).not.toMatch(/#25|change-requests\//);
+    expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+    // One the caller may see is still listed and named.
+    maySee.mockImplementation(async (n: number) => n === 25);
+    const seen = (await h.svc.deleteBranchChecked(BOB, 'bob/sync', { dryRun: true, maySee })) as DeleteBranchPreview;
+    expect(seen.openChangeRequests.map((cr) => cr.number)).toEqual([25]);
+    expect(seen.refusals.join(' ')).toContain('https://hexis.test/change-requests/25');
+  });
+
   it("the app's delete closes an empty request too, and goes ahead", async () => {
     const rows = [open(21, 'ana/sync', DEFAULT)];
     const h = harness({ rows, branches: { 'ana/sync': clean('s1') }, changes: { 'ana/sync': [] } });
@@ -710,12 +791,12 @@ describe('retireLeftoverMergedBranches — the server removes what merged change
   });
 
   it('switching it off leaves the removal of a branch when its change request is merged alone', async () => {
-    const h = harness({ rows: [merged(3, 'ali/just-merged', 'm3')], branches: { 'ali/just-merged': clean('t3') } });
+    const h = harness({ rows: [open(3, 'ali/just-merged', DEFAULT)], branches: { 'ali/just-merged': clean('t3') } });
     h.svc.leftoverCleanupEnabled = () => false;
-    const retire = (h.svc as unknown as {
-      retireMergedSourceBranch(n: number, base: string, u: AuthUser): Promise<void>;
-    }).retireMergedSourceBranch.bind(h.svc);
-    await retire(3, DEFAULT, ADMIN);
+    await expect(
+      h.svc.mergeChangeRequest(3, ADMIN, 't3', [], {} as never, 'Just merged', DEFAULT, workspaceIdForBranch(DEFAULT)),
+    ).resolves.toMatchObject({ kind: 'merged' });
+    await h.svc.drainTidy();
     expect(h.deleted).toEqual(['ali/just-merged']);
   });
 
@@ -734,13 +815,15 @@ describe('retireLeftoverMergedBranches — the server removes what merged change
     expect(h.deleted).toEqual(['ali/fine']);
   });
 
-  it('runs after every on-demand sweep for deleted branches', async () => {
-    const h = harness({});
+  it('runs after the sweep for deleted branches that every merge starts', async () => {
+    const h = harness({ rows: [open(3, 'ali/just-merged', DEFAULT)], branches: { 'ali/just-merged': clean('t3') } });
     const cleanup = vi.spyOn(h.svc, 'tidyAfterSweep').mockResolvedValue({ closedEmpty: 0, removedLeftovers: 0 });
-    vi.spyOn(h.svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
-    (h.svc as unknown as { kickDeletedBranchSweep(): void }).kickDeletedBranchSweep();
-    await (h.svc as unknown as { sweepKick: Promise<void> }).sweepKick;
+    const sweep = vi.spyOn(h.svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
+    await h.svc.mergeChangeRequest(3, ADMIN, 't3', [], {} as never, 'Just merged', DEFAULT, workspaceIdForBranch(DEFAULT));
+    await h.svc.drainTidy();
+    expect(sweep).toHaveBeenCalledTimes(1);
     expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(cleanup.mock.invocationCallOrder[0]).toBeGreaterThan(sweep.mock.invocationCallOrder[0]!);
   });
 });
 

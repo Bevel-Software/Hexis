@@ -170,6 +170,12 @@ export function registerWorkflowTools(
   toolHandler: ToolHandlerFactory,
   /** The clone folder at the workspace root (`save_file` refuses a path outside it) and the branch model. */
   kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'protectedBranches'>,
+  /**
+   * Whether the caller may see change request `number` — `get_change_request`'s
+   * own gate (`changeRequestScope(...).maySee`). `delete_branch` neither names
+   * nor links a request it answers no for.
+   */
+  maySeeChangeRequest: (ctx: ToolContext, number: number) => Promise<boolean>,
 ): void {
   const { kbDirName } = kb;
   const mount = (spec: {
@@ -651,7 +657,7 @@ export function registerWorkflowTools(
         unmergedCommits: { type: 'integer', description: 'When `kind` is `preview`: commits not on the default branch.' },
         openChangeRequests: {
           type: 'array',
-          description: 'When `kind` is `preview`: open change requests from (`source`) or into (`target`) the branch.',
+          description: 'When `kind` is `preview`: open change requests from (`source`) or into (`target`) the branch that you can see.',
           items: {
             type: 'object',
             properties: {
@@ -677,6 +683,7 @@ export function registerWorkflowTools(
       return ctx.workflowService.deleteBranchChecked(ctx.user, name, {
         dryRun: args.dryRun === true,
         discardUnmerged: args.discardUnmerged === true,
+        maySee: (number) => maySeeChangeRequest(ctx, number),
       });
     },
   });

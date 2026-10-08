@@ -150,8 +150,13 @@ const workflowService = {
     }
     return { kind: 'merged', sha: 'merge-sha' };
   },
-  deleteBranchChecked: async (user: { id: string }, name: string, opts: unknown) => {
+  deleteBranchChecked: async (
+    user: { id: string },
+    name: string,
+    { maySee, ...opts }: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (n: number) => Promise<boolean> },
+  ) => {
     calls.push(['deleteBranchChecked', user.id, name, opts]);
+    if (maySee) calls.push(['maySee', 12, await maySee(12)], ['maySee', 13, await maySee(13)]);
     if (name === 'me/missing') throw new BranchNotFoundError(name);
     if (name === 'ali/theirs') throw new BranchAuthorshipError(name);
     if (name === 'me/proposed') {
@@ -198,7 +203,11 @@ async function start(): Promise<string> {
   const toolHandler = createToolHandlerFactory(resolve);
 
   const router = express.Router();
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, testKbContext());
+  // Request #13 is one the caller may not see.
+  registerWorkflowTools(registry, router, toolAuth, toolHandler, testKbContext(), async (ctx, number) => {
+    calls.push(['maySeeAs', ctx.user.id, number]);
+    return number !== 13;
+  });
   router.use(createManualRoutes(registry, toolAuth));
 
   const app = express();
@@ -342,6 +351,14 @@ describe('registerWorkflowTools', () => {
       const res = await post(`${base}/api/agent/tools/delete_branch`, writeTok(), {});
       expect(res.status).toBe(400);
       expect(calls.some((c) => c[0] === 'deleteBranchChecked')).toBe(false);
+    });
+
+    it("hands the service the caller's view of change requests, as get_change_request gates it", async () => {
+      const base = await start();
+      await post(`${base}/api/agent/tools/delete_branch`, writeTok(), { name: 'me/draft', dryRun: true });
+      expect(calls).toContainEqual(['maySeeAs', 'user-A', 12]);
+      expect(calls).toContainEqual(['maySee', 12, true]);
+      expect(calls).toContainEqual(['maySee', 13, false]);
     });
   });
 
