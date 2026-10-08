@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
@@ -7,7 +7,13 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MCP_APP_MIME_TYPE, MCP_APP_URI_SCHEME } from '@bevel-software/platform-mcp-core';
 import { OPEN_PAGE_TOOL } from '../embed.tools.js';
-import { isSandboxReachableOrigin, McpAppService, OPEN_PAGE_VIEW_URI, originOf } from '../mcp-app.js';
+import {
+  isSandboxReachableOrigin,
+  McpAppService,
+  OPEN_PAGE_VIEW_URI_PREFIX,
+  openPageViewUri,
+  originOf,
+} from '../mcp-app.js';
 import { createMcpAppRoutes } from '../mcp-app.routes.js';
 
 let server: Server | null = null;
@@ -21,13 +27,37 @@ const PUBLIC = 'https://hexis.example';
 describe('the open_page view', () => {
   it('is named by the tool and served under the MCP App media type', async () => {
     const manifest = await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest();
-    expect(manifest.tools[OPEN_PAGE_TOOL]).toEqual({ resourceUri: OPEN_PAGE_VIEW_URI });
-    expect(OPEN_PAGE_VIEW_URI.startsWith(MCP_APP_URI_SCHEME)).toBe(true);
     expect(manifest.resources).toHaveLength(1);
-    expect(manifest.resources[0]).toMatchObject({
-      uri: OPEN_PAGE_VIEW_URI,
-      mimeType: MCP_APP_MIME_TYPE,
-    });
+    const { uri } = manifest.resources[0];
+    expect(manifest.tools[OPEN_PAGE_TOOL]).toEqual({ resourceUri: uri });
+    expect(uri.startsWith(MCP_APP_URI_SCHEME)).toBe(true);
+    expect(uri.startsWith(OPEN_PAGE_VIEW_URI_PREFIX)).toBe(true);
+    expect(manifest.resources[0]).toMatchObject({ uri, mimeType: MCP_APP_MIME_TYPE });
+  });
+
+  /**
+   * A host caches a view by its URI, so a changed view under an unchanged
+   * URI is served stale until the host happens to refetch — Claude kept
+   * rendering the cached, pre-#391 view, the one that goes blank. Naming the
+   * view by its content makes every change a new URI.
+   */
+  it('is named by its content, so a changed view is a new resource and the same view the same one', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'mcp-app-view-'));
+    try {
+      const at = async (html: string) => {
+        writeFileSync(path.join(dir, 'page.html'), html);
+        return (await new McpAppService({ publicFrontendUrl: PUBLIC, viewDir: dir }).manifest()).resources[0].uri;
+      };
+      const first = await at('<!doctype html><p>one</p>');
+      const same = await at('<!doctype html><p>one</p>');
+      const changed = await at('<!doctype html><p>two</p>');
+      expect(first).toMatch(/^ui:\/\/hexis\/page-[0-9a-f]{12}\.html$/);
+      expect(same).toBe(first);
+      expect(changed).not.toBe(first);
+      expect(first).toBe(openPageViewUri('<!doctype html><p>one</p>'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   /**
@@ -74,8 +104,12 @@ describe('the open_page view', () => {
 
   it('serves the view by URI, and nothing else', async () => {
     const apps = new McpAppService({ publicFrontendUrl: PUBLIC });
-    expect(await apps.resource(OPEN_PAGE_VIEW_URI)).not.toBeNull();
+    const { uri } = (await apps.manifest()).resources[0];
+    expect(await apps.resource(uri)).not.toBeNull();
     expect(await apps.resource('ui://hexis/not-a-view.html')).toBeNull();
+    // The unversioned name the view had before #391 is not served either: a
+    // host still asking for it gets "no such resource", not a stale view.
+    expect(await apps.resource('ui://hexis/page.html')).toBeNull();
   });
 
   it('reads the view once and caches it — resources/read is on a handshake path', async () => {
@@ -125,7 +159,8 @@ describe('the manifest route the local MCP server reads', () => {
       tools: Record<string, { resourceUri: string }>;
       resources: Array<{ uri: string; mimeType: string; text: string; ui: Record<string, unknown> }>;
     };
-    expect(body.tools[OPEN_PAGE_TOOL].resourceUri).toBe(OPEN_PAGE_VIEW_URI);
+    expect(body.tools[OPEN_PAGE_TOOL].resourceUri).toBe(body.resources[0].uri);
+    expect(body.resources[0].uri.startsWith(OPEN_PAGE_VIEW_URI_PREFIX)).toBe(true);
     expect(body.resources[0].mimeType).toBe(MCP_APP_MIME_TYPE);
     expect(body.resources[0].text).toContain('ui/initialize');
     expect(body.resources[0].ui).toMatchObject({
@@ -164,7 +199,7 @@ describe('a view that cannot be read', () => {
       const manifest = await service.manifest();
       expect(manifest.tools).toEqual({});
       expect(manifest.resources).toEqual([]);
-      expect(await service.resource(OPEN_PAGE_VIEW_URI)).toBeNull();
+      expect(await service.resource(openPageViewUri(''))).toBeNull();
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
