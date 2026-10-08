@@ -83,13 +83,15 @@ export interface IWorkflowService {
    * guards an agent needs and a person in the branch switcher does not.
    * Refuses a protected branch, a name that is not a branch, a branch an open
    * change request that still proposes something (or whose changes cannot be
-   * determined) comes from or goes into — open requests that propose nothing
-   * are closed first, and block nothing — a branch whose checkout still has
+   * determined) comes from or goes into, a branch whose checkout still has
    * saves landing or a file held, and — unless `discardUnmerged` — one holding
-   * commits that are not on the default branch. Fetches first, strictly: when
-   * the shared repository cannot be reached it refuses. Runs from the default
-   * branch's workspace, whichever workspace the caller is in. `dryRun`
-   * reports what a deletion would do and changes nothing.
+   * commits that are not on the default branch. Open requests that propose
+   * nothing block nothing: they are closed only once every other check has
+   * passed, just before the branch is removed — never by a preview or a
+   * refused deletion. Fetches first, strictly: when the shared repository
+   * cannot be reached it refuses. Runs from the default branch's workspace,
+   * whichever workspace the caller is in. `dryRun` reports what a deletion
+   * would do and changes nothing.
    */
   deleteBranchChecked(
     user: AuthUser,

@@ -549,7 +549,7 @@ describe('closeEmptyOpenChangeRequests — the background close', () => {
     expect(h.deleted).toEqual([]);
   });
 
-  it('does nothing once the graph has stopped it, and drains what was running', async () => {
+  it('starts no round once the graph has stopped it', async () => {
     const rows = [open(31, 'ali/empty', DEFAULT), merged(32, 'ali/done', 'm1')];
     const h = harness({
       rows,
@@ -561,6 +561,35 @@ describe('closeEmptyOpenChangeRequests — the background close', () => {
     await expect(h.svc.tidyAfterSweep()).resolves.toEqual({ closedEmpty: 0, removedLeftovers: 0 });
     await h.svc.drainTidy();
     expect(h.fetch).not.toHaveBeenCalled();
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('drains the round under way: waits for it to settle, and it stops at its next request or branch', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT), merged(32, 'ali/done', 'm1')];
+    const h = harness({
+      rows,
+      branches: { 'ali/empty': clean('e1'), 'ali/done': clean('d1') },
+      ancestry: [['d1', 'm1']],
+      changes: { 'ali/empty': [] },
+    });
+    // The round is held at its fetch until released.
+    let release = (): void => undefined;
+    h.fetch.mockImplementationOnce(() => new Promise<void>((resolve) => (release = resolve)));
+    const round = h.svc.tidyAfterSweep();
+    await vi.waitFor(() => expect(h.fetch).toHaveBeenCalledTimes(1));
+
+    h.svc.stopTidying();
+    let drained = false;
+    const drain = h.svc.drainTidy().then(() => {
+      drained = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(drained).toBe(false);
+
+    release();
+    await drain;
+    await expect(round).resolves.toEqual({ closedEmpty: 0, removedLeftovers: 0 });
     expect(rows[0]!.state).toBe('open');
     expect(h.deleted).toEqual([]);
   });

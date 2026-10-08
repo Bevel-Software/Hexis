@@ -245,5 +245,6 @@ File-level write access decides how a change lands on the default branch:
   `lastCommit` it answers, so the branch can be restored. The server removes a
   draft on its own once its change request was merged, but only while nothing
   has happened to it since: no commit that is not on the default branch, no
-  request open from or into it, no save still landing, and its last commit
+  request open from or into it, no save still landing, no file held for
+  editing, and its last commit
   the one that was merged. Any other draft stays until someone deletes it.
