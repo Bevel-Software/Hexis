@@ -206,6 +206,7 @@ describe('GitSyncFailedBanner — remote-sync conflict', () => {
     // This one IS the author's to act on — no "check the server logs".
     expect(alert.textContent).toContain('changed both here and there');
     expect(alert.textContent).not.toContain('server logs');
+    expect(alert.textContent).toContain('open each one, keep the content you want');
     expect(screen.getByRole('button', { name: 'Plugins/x/SKILL.md' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Docs/a.md' })).toBeTruthy();
   });
@@ -241,5 +242,56 @@ describe('GitSyncFailedBanner — a conflict that arrives before the workspace h
     bus.emit(early);
     expect(screen.getByText('Docs/a.md')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Docs/a.md' })).toBeNull();
+  });
+});
+
+describe('GitSyncFailedBanner — for a named workspace (the change-request view)', () => {
+  function renderFor(workspaceId: string, focused: Partial<WorkspaceContextValue> | null) {
+    const bus = makeBus();
+    const banner = <GitSyncFailedBanner workspaceId={workspaceId} />;
+    render(
+      <EventBusContext.Provider value={bus.ctx}>
+        {focused ? (
+          <WorkspaceContext.Provider value={makeWorkspaceFixture(focused)}>{banner}</WorkspaceContext.Provider>
+        ) : (
+          banner
+        )}
+      </EventBusContext.Provider>,
+    );
+    return bus;
+  }
+
+  it('follows the named workspace, not the focused one', () => {
+    const bus = renderFor('ali%2Fx', { workspaceId: 'main' });
+    bus.emit({ ...FAILED, workspaceId: 'main', branch: 'main' });
+    expect(screen.queryByRole('alert')).toBeNull();
+    bus.emit({ ...FAILED, workspaceId: 'ali/x', branch: 'ali/x' });
+    expect(screen.getByRole('alert').textContent).toContain('ali/x');
+    bus.emit({ kind: 'git-sync-recovered', workspaceId: 'ali/x', branch: 'ali/x' });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('needs no workspace context at all', () => {
+    const bus = renderFor('ali%2Fx', null);
+    bus.emit({ ...FAILED, workspaceId: 'ali/x', branch: 'ali/x' });
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+
+  it("lists another branch's conflicted files as text — a link would open the focused branch's copy", () => {
+    const bus = renderFor('ali%2Fx', { workspaceId: 'main', kbDirName: 'knowledge-base' });
+    const conflict = {
+      kind: 'git-sync-failed',
+      workspaceId: 'ali/x',
+      branch: 'ali/x',
+      reason: 'conflict',
+      conflictedPaths: ['Docs/a.md'],
+    };
+    bus.emit(conflict);
+    expect(screen.getByText('Docs/a.md').tagName).toBe('SPAN');
+    expect(screen.queryByRole('button', { name: 'Docs/a.md' })).toBeNull();
+    // Nothing here opens, so the copy sends the person to the branch first.
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('switch to that branch, open each file there');
+    expect(text).not.toContain('open each one');
   });
 });

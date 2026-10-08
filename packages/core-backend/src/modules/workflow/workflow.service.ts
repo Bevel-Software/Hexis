@@ -77,7 +77,7 @@ import { FileLockService } from './file-lock.service.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
-import { sanitizeError } from './sanitize-error.js';
+import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
@@ -545,7 +545,7 @@ export class WorkflowService implements IWorkflowService {
   // to discard.
 
   shareCurrentBranch(workspaceId: string, user: AuthUser): Promise<void> {
-    return this.trackedPush(workspaceId, user);
+    return this.pushWithRecovery(workspaceId, branchForWorkspaceId(workspaceId), '(share)', user);
   }
 
   refreshRemotes(workspaceId: string): Promise<void> {
@@ -695,7 +695,7 @@ export class WorkflowService implements IWorkflowService {
       }
       const message = sanitizeError(err);
       syncLog.warn(`pull failed for branch "${branch}": ${message}`);
-      this.noteGitSyncFailed(gitId, branch, err);
+      this.noteGitSyncFailed(gitId, branch, err, undefined, 'pull');
       return { branch, outcome: 'error', error: message };
     }
     // A clean pull is proof origin is reachable and this clone rebases onto
@@ -1183,7 +1183,8 @@ export class WorkflowService implements IWorkflowService {
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
           try {
-            await this.pullWorkspace(workspaceId);
+            // Same as `pushWithRecovery`: keep a stranded merge a merge.
+            await this.pullWorkspace(workspaceId, { preserveMerges: true });
             await this.git.push(workspaceId, user);
             recovered = true;
             this.noteGitSyncOk(workspaceId, branch);
@@ -1444,6 +1445,12 @@ export class WorkflowService implements IWorkflowService {
      * hold the sentence pass it; otherwise it is derived below.
      */
     explicitConflict?: { paths: string[]; message: string },
+    /**
+     * Which side of the sync failed. A 403 or "Repository not found" on a
+     * pull means the credentials cannot READ the repository, and telling the
+     * operator to grant push access would send them to the wrong setting.
+     */
+    operation: 'push' | 'pull' = 'push',
   ): void {
     // A rebase conflict is a conflict whichever path ran into it. The remote
     // sync names its files on purpose; the push-recovery paths (autosave, the
@@ -1466,42 +1473,13 @@ export class WorkflowService implements IWorkflowService {
       kind: 'git-sync-failed',
       workspaceId: id,
       branch,
-      // Git stderr can quote a credentialed URL; the banner is user-facing and
-      // the string also lands in client logs, so sanitize before it leaves.
-      reason: conflict ? conflict.message : sanitizeError(err),
+      // Never the git output itself — not even sanitised: stderr quotes the
+      // host's own error text and URLs, and the banner is user-facing. A
+      // fixed sentence says what kind of failure it was; the raw text is in
+      // the server log, where the banner points whoever can act on it.
+      reason: conflict ? conflict.message : describeSyncFailure(err, operation),
       ...(conflict ? { conflictedPaths: conflict.paths } : {}),
     });
-  }
-
-  /**
-   * A bare push wrapped in the sync tracker: a failure raises the banner, a
-   * success clears it. For the workflow paths that push directly — sharing a
-   * branch, publishing a CR's source, update-from-base, the decline revert,
-   * the roles.yaml restore — rather than through `pushWithRecovery`'s
-   * cooperative ladder. Behaviour is otherwise unchanged: the error still
-   * propagates to the caller exactly as the bare push's did. Without this,
-   * those pushes could fail invisibly (no banner) and, worse, a successful
-   * share could not CLEAR a banner an earlier save had raised.
-   *
-   * The branch is derived from the workspace id (they are the same string,
-   * URL-encoding aside) so call sites cannot pass a mismatched pair.
-   */
-  private async trackedPush(
-    workspaceId: string,
-    user: AuthUser,
-    opts?: { systemAuthorized?: boolean },
-  ): Promise<void> {
-    const branch = branchForWorkspaceId(workspaceId);
-    try {
-      // Preserve the exact call shape of the bare pushes this replaces — an
-      // explicit `undefined` third argument is a different call signature to
-      // every spy that asserts on it.
-      await (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user));
-      this.noteGitSyncOk(workspaceId, branch);
-    } catch (err) {
-      this.noteGitSyncFailed(workspaceId, branch, err);
-      throw err;
-    }
   }
 
   /**
@@ -1509,6 +1487,14 @@ export class WorkflowService implements IWorkflowService {
    * cooperative pull-rebase + retry, then hand off to the agent if that
    * still fails." The full rationale lives at the call site in
    * `releaseLock`; this method is the de-duplicated body.
+   *
+   * EVERY workflow push goes through here — saves, sharing a branch, opening
+   * a request, update-from-target, the decline revert, the roles.yaml
+   * restore — so a push the host refuses answers one way everywhere: the
+   * commit stays local, the sync banner goes up, and the caller gets the
+   * 409 saved-locally sentence instead of a raw git error (which a route
+   * would turn into a 500). A later successful push of the branch carries
+   * the commits and clears the banner.
    */
   private async pushWithRecovery(
     workspaceId: string,
@@ -1517,8 +1503,12 @@ export class WorkflowService implements IWorkflowService {
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
   ): Promise<void> {
+    // No explicit `undefined` third argument when there are no options: the
+    // call shape stays the bare `push(workspaceId, user)` every caller made.
+    const push = () =>
+      opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user);
     try {
-      await this.git.push(workspaceId, user, opts);
+      await push();
       this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
       const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
@@ -1526,10 +1516,24 @@ export class WorkflowService implements IWorkflowService {
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
       let recoveryError: unknown = null;
+      // The retry push's own rejection, when the pull got that far: the
+      // divergence is cured by then, so it — not the first rejection — says
+      // whether the host is refusing.
+      let retryDetail: string | null = null;
       if (looksLikeNonFastForward) {
         try {
-          await this.pullWorkspace(workspaceId);
-          await this.git.push(workspaceId, user, opts);
+          // `preserveMerges` on every push, not only the ones that make a
+          // merge: a merge stranded by a refused open or update rides along
+          // with whatever push of the branch comes next — a save, a share —
+          // and a plain rebase would flatten it into cherry-picks. With no
+          // merge among the local commits the two spellings replay the same.
+          await this.pullWorkspace(workspaceId, { preserveMerges: true });
+          try {
+            await push();
+          } catch (retryErr) {
+            retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            throw retryErr;
+          }
           recovered = true;
           this.noteGitSyncOk(workspaceId, branch);
           log.info(
@@ -1552,12 +1556,31 @@ export class WorkflowService implements IWorkflowService {
         // When recovery RAN, its error is the current state of the world (the
         // first rejection may be a stale non-fast-forward the pull already
         // cured); when it was skipped, the first error is all there is.
-        this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? firstPushErr);
+        // A recovery that failed before its retry push failed in the PULL.
+        const failedInPull = recoveryError !== null && retryDetail === null;
+        this.noteGitSyncFailed(
+          workspaceId,
+          branch,
+          recoveryError ?? firstPushErr,
+          undefined,
+          failedInPull ? 'pull' : 'push',
+        );
         log.warn(
           `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           { detail: firstDetail },
         );
-        throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail);
+        throw new PushNeedsAgentResolutionError(
+          branch,
+          targetPath,
+          firstDetail,
+          recoveryDetail,
+          // `rejected` above also matches the host's own `[remote rejected]`
+          // (an outage, a hook): worth the cooperative try, but only a real
+          // divergence is described as one.
+          /non-fast-forward|fetch first|updates were rejected|! \[rejected\]/i.test(retryDetail ?? firstDetail)
+            ? 'diverged'
+            : 'refused',
+        );
       }
     }
   }
@@ -1877,10 +1900,24 @@ export class WorkflowService implements IWorkflowService {
       );
     }
 
-    // Push the source — `gh pr create` against an unpushed branch returns
-    // "head branch does not exist on remote". Push *after* the auto-merge
-    // so the remote sees the merge commit too.
-    await this.trackedPush(workspaceId, user);
+    // Push the source *after* the auto-merge so the remote sees the merge
+    // commit too. A push the host refuses does not undo the open: the merge
+    // is committed locally, the request is a DB row, and the next push of
+    // the branch carries the commits — so the row is still created below and
+    // the refusal (409, the saved-locally sentence, the sync banner) is
+    // answered once it exists.
+    let pushRefused: PushNeedsAgentResolutionError | null = null;
+    try {
+      await this.pushWithRecovery(
+        workspaceId,
+        branchForWorkspaceId(workspaceId),
+        '(opening a change request)',
+        user,
+      );
+    } catch (err) {
+      if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+      pushRefused = err;
+    }
 
     const workspacePath = await this.workspaceService.getWorkspacePath(workspaceId);
     const cwd = path.join(workspacePath, this.kbDirName);
@@ -1969,6 +2006,21 @@ export class WorkflowService implements IWorkflowService {
       );
     }
     this.prs.invalidateDetailCache(prNumber);
+    const opened = {
+      kind: 'change-request-opened',
+      number: prNumber,
+      source: input.sourceBranch,
+      target: input.targetBranch,
+      authorIdHash: hashEmail(user.email),
+      title: input.title,
+    } as const;
+    if (pushRefused) {
+      // The request exists; its detail reads the published refs, which the
+      // refused push never moved — answering the refusal is what the caller
+      // needs, not a detail read that may fail on a branch the host lacks.
+      this.events?.emit(opened);
+      throw pushRefused;
+    }
 
     const detail = await this.prs.getPrDetail(prNumber, {
       fresh: true,
@@ -1980,14 +2032,7 @@ export class WorkflowService implements IWorkflowService {
         `Created change request #${prNumber} but could not fetch its detail`,
       );
     }
-    this.events?.emit({
-      kind: 'change-request-opened',
-      number: prNumber,
-      source: input.sourceBranch,
-      target: input.targetBranch,
-      authorIdHash: hashEmail(user.email),
-      title: input.title,
-    });
+    this.events?.emit(opened);
     return detail;
     });
   }
@@ -2119,7 +2164,7 @@ export class WorkflowService implements IWorkflowService {
     // do. Asking git what is unpushed retries it instead.
     //
     // A failed probe falls back to the old gate rather than to "push
-    // anyway": `trackedPush` on a clone with nothing to push is a wasted
+    // anyway": a push on a clone with nothing to push is a wasted
     // round trip on every single update.
     const hasUnpushed = await this.git
       .hasUnpushedCommits(workspaceId)
@@ -2131,7 +2176,15 @@ export class WorkflowService implements IWorkflowService {
         return !outcome.alreadyUpToDate;
       });
     if (hasUnpushed) {
-      await this.trackedPush(workspaceId, user);
+      // A refusal answers 409 with the saved-locally sentence and leaves the
+      // merge applied in the clone; the probe above makes the next update
+      // (or any save on the branch) push it.
+      await this.pushWithRecovery(
+        workspaceId,
+        branchForWorkspaceId(workspaceId),
+        `(update from ${detail.base})`,
+        user,
+      );
     }
     // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
     // detail read. Everything below needs only the sha, and the detail that
@@ -2382,8 +2435,10 @@ export class WorkflowService implements IWorkflowService {
     // Best-effort freshen of the source checkout: the diff below reads origin
     // refs, but the restore commits from the working tree — a stale tree
     // would push non-fast-forward and fail loudly anyway; this just makes
-    // that rare.
-    await this.pullWorkspace(ws.id).catch(() => undefined);
+    // that rare. `preserveMerges`: the branch may carry a merge a refused open
+    // or update stranded locally, and a plain rebase would flatten it before
+    // the revert's push publishes the branch.
+    await this.pullWorkspace(ws.id, { preserveMerges: true }).catch(() => undefined);
 
     // The verb acts on the request as it is NOW — never a cached file list.
     const paths = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2416,6 +2471,10 @@ export class WorkflowService implements IWorkflowService {
     // save must not race the restore between write and commit.
     const held: string[] = [];
     let revertError: { reason: unknown } | null = null;
+    // A push the host refuses leaves the revert committed on the branch
+    // locally; it is answered (409, the saved-locally sentence) only after
+    // the locks are released and the request's caches reflect the new head.
+    let pushRefused: PushNeedsAgentResolutionError | null = null;
     try {
       for (const p of reverted) {
         const lockPath = `${this.kbDirName}/${p}`;
@@ -2440,7 +2499,12 @@ export class WorkflowService implements IWorkflowService {
           true, // skipValidator — this restores an already-validated base version
         );
       }
-      await this.trackedPush(ws.id, user);
+      try {
+        await this.pushWithRecovery(ws.id, headBranch, repoRelPath, user);
+      } catch (err) {
+        if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+        pushRefused = err;
+      }
     } catch (err) {
       revertError = { reason: err };
     }
@@ -2455,9 +2519,14 @@ export class WorkflowService implements IWorkflowService {
     if (revertError) throw revertError.reason;
     const failedRelease = released.find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failedRelease) throw failedRelease.reason;
+    this.prs.invalidateDetailCache(number);
+    // A refused push moved nothing the request is judged on. A recorded
+    // apply failure describes the published head, which is still where it
+    // was, so it stays; and the file list reads the published refs, so
+    // closing an "empty" request is decided once the push lands.
+    if (pushRefused) throw pushRefused;
     // The source head moved: the refusal described a revision that is gone.
     await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
-    this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
     if (remaining.length > 0) {
@@ -2598,7 +2667,9 @@ export class WorkflowService implements IWorkflowService {
       if (!summary || summary.state !== 'open') continue;
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
       try {
-        await this.pullWorkspace(ws.id);
+        // `preserveMerges`: a merge a refused open or update stranded on the
+        // request's branch must survive until the branch's next push.
+        await this.pullWorkspace(ws.id, { preserveMerges: true });
       } catch (err) {
         log.warn(
           `pull failed for #${summary.number} before removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
@@ -3887,8 +3958,9 @@ export class WorkflowService implements IWorkflowService {
         // sweep those unrelated edits into our "preserve roles.yaml" commit under the
         // wrong author/message. Feature branch → the protected-branch gate doesn't
         // fire, so this commits cleanly. Then publish so the merge sees the
-        // neutralised source. A non-fast-forward push (the source advanced under us)
-        // throws → RolesYamlPreservationError → the merge aborts, fail-closed.
+        // neutralised source. A push that still fails after the cooperative
+        // pull-rebase throws PushNeedsAgentResolutionError → the merge aborts,
+        // fail-closed, with the restore kept locally for the next push.
         const committed = await this.git.commitFile(
           ws.id,
           user,
@@ -3904,12 +3976,29 @@ export class WorkflowService implements IWorkflowService {
         // with origin/<head>), then origin/<head> STILL carries the divergent
         // roles.yaml and the merge would land it. Treat that as a hard failure —
         // returning false here would fail OPEN. Fail closed instead.
-        if (!committed) {
+        //
+        // One shape of "nothing to commit" is not out of sync: a restore an
+        // earlier merge attempt committed, whose push the host refused. The
+        // clone's HEAD already carries the base version — that is why there
+        // was nothing new to commit — and only the push is owed. Without this,
+        // the retry the refusal promises could never succeed: every attempt
+        // would find the file already restored and stop here, and the merge
+        // would stay refused until some unrelated save pushed the branch.
+        //
+        // The question is NOT "does the clone hold unpushed commits" — any
+        // queued save answers yes. It is whether HEAD already holds all of
+        // origin/<head>, so that the push fast-forwards origin to a head whose
+        // roles.yaml is the base version. A clone BEHIND origin would have
+        // origin's divergent copy rebased into HEAD by the cooperative pull on
+        // the way to the push, and the merge would land it: that clone is the
+        // out-of-sync one this guard refuses. A probe that cannot answer
+        // throws, and the guard fails closed with it.
+        if (!committed && !(await this.git.headContainsOrigin(ws.id))) {
           throw new Error(
             'roles.yaml restore produced no commit while origin still diverges from base — source workspace out of sync; refusing to merge',
           );
         }
-        await this.trackedPush(ws.id, user);
+        await this.pushWithRecovery(ws.id, headBranch, ROLES_YAML, user);
         this.accessControl.invalidate(ws.id);
         return true;
       } finally {
@@ -3918,6 +4007,12 @@ export class WorkflowService implements IWorkflowService {
         await this.fileLocks.release(ws.id, headBranch, rolesLockPath, user);
       }
     } catch (err) {
+      // A refused push: the restore is committed on the source locally and the
+      // merge does not run (origin still carries the divergent roles.yaml).
+      // Answer it like every other refused push — 409, the saved-locally
+      // sentence, the banner already raised — so the merge can be retried
+      // once the host accepts the push.
+      if (err instanceof PushNeedsAgentResolutionError) throw err;
       const detail = err instanceof Error ? err.message : String(err);
       // Log the raw git/push detail server-side; the thrown error keeps it OFF
       // the client-facing 502 message (see RolesYamlPreservationError).

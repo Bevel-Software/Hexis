@@ -352,6 +352,39 @@ describe('GitService.pull', () => {
     await runGit(repo, ['push', 'origin', 'target-company-state']);
     await expect(svc.hasUnpushedCommits(workspaceId)).resolves.toBe(false);
   });
+
+  /**
+   * The question the roles.yaml preservation asks before pushing a restore it
+   * finds already committed: not "is there unpushed work" but "would the push
+   * fast-forward origin to HEAD". A clone behind origin answers no, and one
+   * whose tracking ref git cannot even resolve answers with an error — the
+   * guard that asks must fail closed on it, so the probe may not swallow it.
+   */
+  it('headContainsOrigin: true in sync and ahead, false behind origin, an error without a tracking ref', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
+      stubWorkflowHooks(),
+      testKbContext(),
+    );
+
+    await expect(svc.headContainsOrigin(workspaceId)).resolves.toBe(true);
+
+    // Ahead: a local commit on top of origin's tip.
+    await fs.writeFile(path.join(repo, 'new.txt'), 'x\n');
+    await runGit(repo, ['add', '.']);
+    await runGit(repo, ['commit', '-m', 'unpushed']);
+    await expect(svc.headContainsOrigin(workspaceId)).resolves.toBe(true);
+
+    // Behind: publish it, then step the clone back before it.
+    await runGit(repo, ['push', 'origin', 'target-company-state']);
+    await runGit(repo, ['reset', '--hard', 'HEAD~1']);
+    await expect(svc.headContainsOrigin(workspaceId)).resolves.toBe(false);
+
+    // No tracking ref at all: not "false", an error.
+    await runGit(repo, ['checkout', '-b', 'never-pushed']);
+    await expect(svc.headContainsOrigin(workspaceId)).rejects.toThrow();
+  });
 });
 
 /**
@@ -411,7 +444,10 @@ describe('GitService.pull — an unpushed merge commit', () => {
     const workspaceDir = path.join(root, workspaceId);
     const repo = path.join(workspaceDir, 'knowledge-base');
     await fs.mkdir(workspaceDir, { recursive: true });
-    await runGit(root, ['clone', '-b', 'alice/deal', upstream, repo]);
+    // `core.autocrlf=false` on the clone itself, not only afterwards: a
+    // Windows git would otherwise check the files out with CRLF, and the
+    // rebase's autostash of that "dirty" tree conflicts on reapply.
+    await runGit(root, ['-c', 'core.autocrlf=false', 'clone', '-b', 'alice/deal', upstream, repo]);
     await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
     await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
     await runGit(repo, ['config', 'core.autocrlf', 'false']);
@@ -454,6 +490,17 @@ describe('GitService.pull — an unpushed merge commit', () => {
       'merge-base', '--is-ancestor', targetTip, 'HEAD',
     ]).then(() => true, () => false);
     expect(contains).toBe(false);
+  });
+
+  it('survives the background sync, which may reach the branch before any push does', async () => {
+    const { repo, targetTip } = await seedUnpushedMerge();
+    await svcFor().syncFromRemote(workspaceId);
+
+    expect(await gitOut(repo, ['rev-list', '--count', '--merges', 'HEAD'])).toBe('1');
+    const contains = await gitOut(repo, [
+      'merge-base', '--is-ancestor', targetTip, 'HEAD',
+    ]).then(() => true, () => false);
+    expect(contains).toBe(true);
   });
 
   it('survives `preserveMerges`, and the branch still contains the target', async () => {
