@@ -825,4 +825,20 @@ describe('toCallToolResult with structured content', () => {
   ])('adds none for %s, which is not an object', (_label, v) => {
     expect(toCallToolResult(v, { structured: true })).not.toHaveProperty('structuredContent');
   });
+
+  it('attaches the JSON-safe reading, so a value the serializer would choke on completes', () => {
+    const cyclic: Record<string, unknown> = { path: 'a.md' };
+    cyclic.self = cyclic;
+    const result = toCallToolResult(cyclic, { structured: true });
+    expect(result.content[0]).toMatchObject({ type: 'text' });
+    // Whatever the text made of the cycle, the structured copy is plain JSON
+    // of it — never the original object with its cycle.
+    expect(JSON.stringify(result.structuredContent ?? null)).toBe(
+      JSON.stringify(JSON.parse((result.content[0] as { text: string }).text)),
+    );
+    expect(() => JSON.stringify(result)).not.toThrow();
+
+    const big = { n: 10n } as unknown as Record<string, unknown>;
+    expect(() => JSON.stringify(toCallToolResult(big, { structured: true }))).not.toThrow();
+  });
 });

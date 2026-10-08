@@ -138,6 +138,16 @@ describe('withoutBodyOnGet', () => {
     expect(withoutBodyOnGet(undefined)).toBeUndefined();
   });
 
+  it('names a field no manual can write into its own template ahead of time', () => {
+    // The documented prefix alone is not the name: a per-process tail follows
+    // it, so a template carrying the bare prefix is rewritten like any other.
+    expect(NO_BODY_FIELD).toMatch(/^__utcp_get_sends_no_body_[0-9a-f]{32}__$/);
+    expect(withoutBodyOnGet({ http_method: 'GET', body_field: '__utcp_get_sends_no_body__' })).toEqual({
+      http_method: 'GET',
+      body_field: NO_BODY_FIELD,
+    });
+  });
+
   it('is idempotent', () => {
     const once = withoutBodyOnGet({ http_method: 'GET' });
     expect(withoutBodyOnGet(once)).toBe(once);
