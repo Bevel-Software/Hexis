@@ -88,6 +88,40 @@ export class MoveLockedError extends Error {
 }
 
 /**
+ * `moveWithEdits` found a file in the folder that was not there when the
+ * locks were planned: somebody saved into the folder meanwhile. Nothing was
+ * moved; the caller plans again against the folder as it is now.
+ */
+export class MoveRacedError extends Error {
+  constructor(readonly path: string) {
+    super(`"${path}" was added to the folder while the move was being prepared, so nothing was moved. Run the move again.`);
+    this.name = 'MoveRacedError';
+  }
+}
+
+/**
+ * `moveWithEdits` failed after the rename and could not put the folder back.
+ * The locks were released with the discard, so the working tree is reset to
+ * the last commit rather than left half-moved; the error carries both
+ * failures for the log.
+ */
+export class MoveUndoError extends Error {
+  constructor(
+    readonly src: string,
+    readonly dest: string,
+    readonly cause: unknown,
+    readonly undoFailure: unknown,
+  ) {
+    super(
+      `Moving "${src}" to "${dest}" failed (${cause instanceof Error ? cause.message : String(cause)}), and the move ` +
+        `could not be undone (${undoFailure instanceof Error ? undoFailure.message : String(undoFailure)}). ` +
+        'The working copy has been reset to the last commit; check the folder before trying again.',
+    );
+    this.name = 'MoveUndoError';
+  }
+}
+
+/**
  * A pre-disk write validator: called with the (workspace-relative path, full
  * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
  * names the paths it guards — only a validator that declares it is also run
@@ -502,6 +536,21 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Judged again under the locks, on the bytes that land: a validator that
     // reads the current file must see the state each edit replaces.
     try {
+      // The folder's files, listed again now that every lock is held: a file
+      // saved into it between the listing above and the locks would ride
+      // this move's commit without its lock — refused, and the caller tries
+      // again against the folder as it is now.
+      if (src !== dest) {
+        const locked = new Set(paths);
+        const arrived = (await this.filesBelow(src)).find((f) => !locked.has(f));
+        if (arrived !== undefined) throw new MoveRacedError(arrived);
+      }
+      // Placement, re-judged where the rename happens: a link introduced on
+      // the way to either end since the caller's preflight would carry the
+      // rename outside the repository.
+      await this.assertNoLinkBelowBase(src);
+      await this.assertNoLinkBelowBase(path.posix.dirname(dest));
+      for (const e of edits) await this.assertNoLinkBelowBase(path.posix.dirname(e.path));
       await this.validateResultingWrite(dest, () => this.readFile(src));
       if (this.lockContext.validateWrite) {
         for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
@@ -562,11 +611,41 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         try {
           await this.moveNoReplace(dest, src);
         } catch (undoErr) {
+          // The folder is still at its new place, holding bytes this move
+          // wrote. Nothing may release that as "untouched": every locked path
+          // is let go with the discard, so the half-done move is reset rather
+          // than left for a later writer to publish, and the failure says so.
           log.warn(`could not undo the move of "${src}" after a failure:`, { err: undoErr });
+          for (const p of acquired) dirtyLeft.add(p);
+          await release('untouched');
+          throw new MoveUndoError(src, dest, err, undoErr);
         }
       }
       await release('untouched');
       throw err;
+    }
+  }
+
+  /**
+   * Refuse a path when any folder between this filesystem's root and it is a
+   * link — judged by `lstat` on each ancestor, under the locks, right before
+   * the rename that would otherwise follow the link out of the repository.
+   */
+  private async assertNoLinkBelowBase(inputPath: string): Promise<void> {
+    const absolute = this.resolveAbsolutePath(inputPath);
+    if (!absolute) return;
+    const base = path.resolve(this.basePath);
+    let current = path.resolve(absolute);
+    const ancestors: string[] = [];
+    while (current.startsWith(base) && current !== base) {
+      ancestors.push(current);
+      current = path.dirname(current);
+    }
+    for (const ancestor of ancestors) {
+      const stat = await lstatOrNull(ancestor);
+      if (stat?.isSymbolicLink()) {
+        throw new Error(`"${inputPath}" is reached through a link, so nothing was moved.`);
+      }
     }
   }
 

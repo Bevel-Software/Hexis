@@ -9,7 +9,7 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import { GitService } from '../../workflow/git/git.service.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { LockingFilesystem, MoveLockedError } from '../locking-filesystem.js';
+import { LockingFilesystem, MoveLockedError, MoveRacedError, MoveUndoError } from '../locking-filesystem.js';
 
 /**
  * `LockingFilesystem.moveWithEdits` — `move_file` with link rewriting: the
@@ -153,6 +153,48 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
   }, 20_000);
+
+  it('a file saved into the folder while the locks were being taken refuses the move, nothing moved', async () => {
+    const acquire = workflow.acquireLock as ReturnType<typeof vi.fn>;
+    let arrived = false;
+    acquire.mockImplementation(async () => {
+      // The first lock is the moment somebody else's save lands in the folder.
+      if (!arrived) {
+        arrived = true;
+        await put('Projects/A/Late.md', 'late\n');
+      }
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    const err = await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MoveRacedError);
+    expect((err as Error).message).toContain(`"${KB}/Projects/A/Late.md" was added`);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(await read('Projects/A/Late.md')).toBe('late\n');
+    expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(released(workflow.releaseLockUntouched).length).toBeGreaterThan(0);
+  });
+
+  it('a move that fails and cannot be undone releases every lock with the discard, and says both', async () => {
+    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      // Something takes the old place while the move is in flight, so the
+      // undo's rename finds its destination occupied.
+      await put('Projects/A/Taken.md', 'x\n');
+      throw new Error('commit exploded');
+    });
+    const err = await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MoveUndoError);
+    expect((err as Error).message).toContain('commit exploded');
+    expect((err as Error).message).toContain('could not be undone');
+    // Nothing is handed back as untouched: every path goes with the discard.
+    expect(workflow.releaseLockUntouched).not.toHaveBeenCalled();
+    const discarded = released(workflow.releaseLockNoCommit);
+    expect(discarded).toContain(`${KB}/Projects/A`);
+    expect(discarded).toContain(`${KB}/Topics/Deep/A/One.md`);
+    expect(discarded).toContain(`${KB}/Index.md`);
+  });
 
   it('locks every file of a moved folder at its old and its new path', async () => {
     await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A');
