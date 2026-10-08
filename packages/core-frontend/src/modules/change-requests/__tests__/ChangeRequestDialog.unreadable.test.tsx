@@ -136,6 +136,49 @@ beforeEach(() => {
   detailMock.fetchPrDetail.mockResolvedValue(detail);
 });
 
+describe('ChangeRequestDialog: a file the request removes', () => {
+  /**
+   * The request's branch does not have the file — that is what removing it
+   * means — so reading it there answers 404. The pane used to take that 404
+   * for a broken read and say "couldn't be read right now (HTTP 404). Try
+   * again.", with nothing to show and a retry that could never succeed. The
+   * 404 is the proposal: the current copy, every line of it deleted.
+   */
+  it('shows the current copy as deleted, not a failed read', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detail,
+      files: [{ ...detail.files[0], status: 'removed' as const, additions: 0, deletions: 2 }],
+    });
+    reads({ [MAIN]: 'bands:\n  - L3\n' });
+
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    await waitFor(() =>
+      expect([...document.querySelectorAll('del')].map((n) => n.textContent)).toEqual([
+        'bands:',
+        '  - L3',
+      ]),
+    );
+    expect(document.querySelectorAll('ins')).toHaveLength(0);
+    expect(screen.queryByText(/couldn't be read right now/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+
+  /** Only the 404 is the deletion; any other failure on a removed file is still a failure. */
+  it('still reports a read of a removed file that merely broke', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detail,
+      files: [{ ...detail.files[0], status: 'removed' as const, additions: 0, deletions: 2 }],
+    });
+    reads({ [CR_BRANCH]: new WorkspaceApiError(500), [MAIN]: 'bands:\n  - L3\n' });
+
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    const note = await screen.findByText(/couldn't be read right now/);
+    expect(note).toHaveTextContent("This file couldn't be read right now (HTTP 500). Try again.");
+  });
+});
+
 describe("ChangeRequestDialog: a file the viewer may not read", () => {
   it('says it is an access decision, and names the folder to ask an owner of', async () => {
     reads({ [CR_BRANCH]: new WorkspaceApiError(403), [MAIN]: 'bands:\n  - L3\n' });
