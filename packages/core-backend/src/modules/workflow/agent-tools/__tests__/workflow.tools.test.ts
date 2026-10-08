@@ -291,6 +291,9 @@ describe('registerWorkflowTools', () => {
         expect(Object.keys(inputs.properties).sort()).toEqual(['discardUnmerged', 'dryRun', 'name']);
         expect(inputs.required).toEqual(['name']);
         expect(tool!.tags).toContain('write');
+        // An empty request is closed by the delete; a live one refuses it, linked.
+        expect(tool!.description).toContain('proposes nothing is closed');
+        expect(tool!.description).toContain('its author withdraws it or an Admin declines it');
       }
     });
 

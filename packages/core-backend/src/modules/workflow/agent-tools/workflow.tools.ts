@@ -613,9 +613,10 @@ export function registerWorkflowTools(
     description:
       'Delete branch `name` for everyone: from the shared repository and from the server. Allowed for the ' +
       'branch\'s author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
-      'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
-      '(retry once they land), and a branch a change request is open from or into (naming it): ask the user ' +
-      'to withdraw or decline that request in the app. Refuses a branch holding commits that are not on the ' +
+      'protected branch, a name that is not a branch, and a branch with saves still landing or a file held ' +
+      '(retry once they land). An open change request from or into it that proposes nothing is closed and the ' +
+      'delete goes ahead; one that still proposes something refuses it, naming and linking it: its author ' +
+      'withdraws it or an Admin declines it, in the app. Refuses a branch holding commits that are not on the ' +
       'default branch, saying how many; `discardUnmerged: true` deletes it anyway and reports them as ' +
       '`discardedCommits`. Refuses when the shared repository cannot be reached. Preview first with ' +
       '`dryRun: true`: it changes nothing and answers `exists`, `canDelete`, `refusals`, `unmergedCommits`, ' +
@@ -653,8 +654,13 @@ export function registerWorkflowTools(
           description: 'When `kind` is `preview`: open change requests from (`source`) or into (`target`) the branch.',
           items: {
             type: 'object',
-            properties: { number: { type: 'integer' }, end: { type: 'string', enum: ['source', 'target'] } },
-            required: ['number', 'end'],
+            properties: {
+              number: { type: 'integer' },
+              end: { type: 'string', enum: ['source', 'target'] },
+              url: { type: 'string', description: 'Link to the request in the app.' },
+              proposesNothing: { type: 'boolean', description: 'True when the delete would close it rather than be refused by it.' },
+            },
+            required: ['number', 'end', 'url', 'proposesNothing'],
           },
         },
       },

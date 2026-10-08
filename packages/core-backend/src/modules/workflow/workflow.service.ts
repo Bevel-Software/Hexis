@@ -495,7 +495,14 @@ export class WorkflowService implements IWorkflowService {
       // its own open-request check under this same lock, and the legacy
       // `onlyIfNoRemote` prune only fires when origin no longer has the ref.
       if (!opts?.systemCleanup && !opts?.onlyIfNoRemote) {
-        const open = await this.openChangeRequestOn(name);
+        let open = await this.openChangeRequestOn(name);
+        // A request that proposes nothing any more is closed first, and then
+        // blocks nothing. Only for a caller the deletion would go ahead for:
+        // a refused deletion changes nothing, a closed request included.
+        if (open !== null && !this.kb.isProtectedBranch(name) && (await this.mayDelete(workspaceId, name, user))) {
+          await this.closeEmptyRequestsOn(name, user.email, { workspaceId, fresh: false });
+          open = await this.openChangeRequestOn(name);
+        }
         if (open !== null) {
           // Two different situations, two different actors. A request FROM
           // this branch is the deleter's own to withdraw; a request INTO it
@@ -570,6 +577,118 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * Whether open change request `summary` proposes nothing at this moment:
+   * its changes, recomputed now, are empty, and no save to its source branch
+   * is still landing (a save under a held lock or queued for the commit
+   * worker is on disk but not yet in the diff). Anything that cannot be
+   * determined is a no — a request is never closed on a guess.
+   *
+   * `workspaceId` is the clone to compute in (any clone will do: the diff is
+   * between origin's refs); absent, the source branch's own, as the app's
+   * lazy close always did. `fresh` says that clone was just fetched, so the
+   * refs are read as they are instead of fetched again per request.
+   */
+  private async proposesNothing(
+    summary: { number: number; branch: string; base: string },
+    opts: { workspaceId?: string; fresh?: boolean } = {},
+  ): Promise<boolean> {
+    try {
+      const wsId = opts.workspaceId ?? (await this.workspaceService.getOrCreateForBranch(summary.branch)).id;
+      const paths = await this.git.changedPathsForPr(
+        wsId,
+        summary.base,
+        summary.branch,
+        opts.fresh ? { fetch: false } : {},
+      );
+      if (paths.length > 0) return false;
+    } catch (err) {
+      crLog.warn(`empty-check for change request #${summary.number} failed — leaving it open:`, { err });
+      return false;
+    }
+    return !(await this.savesInFlight(workspaceIdForBranch(summary.branch)));
+  }
+
+  /**
+   * Close open change request `number` if it proposes nothing right now
+   * ({@link proposesNothing}), recorded as today's empty-close: closed state
+   * and closing time, guarded on `state = 'open'` so a concurrent merge or
+   * withdrawal wins. Writes the log line every such close owes. Does NOT
+   * retire the source branch — the caller decides that, and a caller holding
+   * that branch's lifecycle lock must not. Answers the request's target when
+   * this call closed it, else null.
+   */
+  private async closeIfEmpty(
+    number: number,
+    opts: { reason: string; actor: string; workspaceId?: string; fresh?: boolean },
+  ): Promise<{ base: string } | null> {
+    const summary = await this.prs.getPr(number);
+    if (!summary || summary.state !== 'open') return null;
+    if (!(await this.proposesNothing(summary, opts))) return null;
+    const now = new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({ state: 'closed', closedAt: now, updatedAt: now })
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .returning({ id: changeRequests.id });
+    if (updated.length === 0) return null;
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-rejected', number });
+    crLog.info(
+      `closed change request #${number} ("${summary.branch}" into "${summary.base}") by ${opts.actor}: ` +
+        `it proposes nothing (${opts.reason})`,
+    );
+    return { base: summary.base };
+  }
+
+  /**
+   * The deletion's close-empty move: every open request from or into
+   * `branch` that proposes nothing is closed. Best effort per request — one
+   * that cannot be judged or closed stays open, and the open-request check
+   * after this refuses on it. Never retires a branch: the caller holds
+   * `branch`'s lifecycle lock, and the deletion itself removes it.
+   */
+  private async closeEmptyRequestsOn(
+    branch: string,
+    actor: string,
+    opts: { workspaceId?: string; fresh?: boolean },
+  ): Promise<void> {
+    for (const cr of await this.openChangeRequestsOn(branch)) {
+      try {
+        await this.closeIfEmpty(cr.number, { ...opts, actor, reason: `empty when "${branch}" was deleted` });
+      } catch (err) {
+        crLog.warn(`could not close empty change request #${cr.number} before deleting "${branch}":`, { err });
+      }
+    }
+  }
+
+  /** The author-or-Admin rule, as a yes/no; a rule that cannot be read is a no. */
+  private async mayDelete(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
+    try {
+      return await this.git.mayDeleteBranch(workspaceId, name, user);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The refusal for an open request that still proposes something: names it,
+   * links to it, and says who can act — its author withdraws it, an Admin can
+   * decline it.
+   */
+  private openRequestRefusal(
+    branch: string,
+    cr: { number: number; end: 'source' | 'target'; url: string },
+  ): BranchDeleteBlockedError {
+    return new BranchDeleteBlockedError(
+      'open-change-request',
+      branch,
+      `Change request #${cr.number} (${cr.url}) is open ${cr.end === 'source' ? 'from' : 'into'} "${branch}" and still ` +
+        `proposes changes. Its author can withdraw it, or an Admin can decline it, in the app; then the branch can be deleted.`,
+      { number: cr.number, url: cr.url },
+    );
+  }
+
+  /**
    * The default branch's workspace, freshly fetched — where an agent's
    * deletion and the leftover cleanup both decide and act. Never the
    * branch's own checkout (which git refuses to delete from), and always
@@ -628,20 +747,17 @@ export class WorkflowService implements IWorkflowService {
       const refusals: Error[] = [];
       if (isProtected) refusals.push(new ProtectedBranchError(name, 'deleting a protected branch'));
       if (!(await this.git.mayDeleteBranch(wsId, name, user))) refusals.push(new BranchAuthorshipError(name));
-      const open = await this.openChangeRequestsOn(name);
-      const first = open[0];
-      if (first) {
-        refusals.push(
-          new BranchDeleteBlockedError(
-            'open-change-request',
-            name,
-            first.end === 'source'
-              ? `Change request #${first.number} is open from "${name}". Ask the user to withdraw or decline it in the app; then the branch can be deleted.`
-              : `Change request #${first.number} is open into "${name}". Ask the user to withdraw or decline it in the app; then the branch can be deleted.`,
-            { number: first.number },
-          ),
-        );
+      // Every open request at either end, each judged now: one that proposes
+      // nothing is closed by the deletion and blocks nothing; one that still
+      // proposes something — or whose changes cannot be determined — blocks.
+      const open: DeleteBranchPreview['openChangeRequests'] = [];
+      for (const cr of await this.openChangeRequestsOn(name)) {
+        const summary = await this.prs.getPr(cr.number).catch(() => null);
+        const empty = summary ? await this.proposesNothing(summary, { workspaceId: wsId, fresh: true }) : false;
+        open.push({ ...cr, url: summary?.url ?? `/change-requests/${cr.number}`, proposesNothing: empty });
       }
+      const blocking = open.find((cr) => !cr.proposesNothing);
+      if (blocking) refusals.push(this.openRequestRefusal(name, blocking));
       // Not coverable by `discardUnmerged`: these are a person's saves on
       // their way into the branch, not work already on it.
       if (await this.savesInFlight(workspaceIdForBranch(name))) {
@@ -678,7 +794,19 @@ export class WorkflowService implements IWorkflowService {
           lastCommit: state.lastCommit,
         };
       }
+      // A refused deletion changes nothing: no request is closed either.
       if (refusals[0]) throw refusals[0];
+
+      // Every open request proposes nothing: close them, each re-judged at the
+      // moment of closing. Nothing here takes this branch's lifecycle lock —
+      // the deletion below is what removes the branch — so a request whose
+      // source IS this branch cannot make the deletion wait on itself.
+      await this.closeEmptyRequestsOn(name, user.email, { workspaceId: wsId, fresh: true });
+      const still = (await this.openChangeRequestsOn(name))[0];
+      if (still) {
+        const summary = await this.prs.getPr(still.number).catch(() => null);
+        throw this.openRequestRefusal(name, { ...still, url: summary?.url ?? `/change-requests/${still.number}` });
+      }
 
       // Leased on the tip the checks above were made against, so a commit
       // pushed since is refused by the host instead of deleted unseen.
@@ -3140,33 +3268,9 @@ export class WorkflowService implements IWorkflowService {
    * Returns true when THIS call closed it.
    */
   async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
-    const summary = await this.prs.getPr(number);
-    if (!summary || summary.state !== 'open') return false;
-    let paths: string[];
-    let wsId: string;
-    try {
-      const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
-      wsId = ws.id;
-      paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
-    } catch (err) {
-      crLog.warn(`empty-check for change request #${number} failed — leaving it open:`, { err });
-      return false;
-    }
-    if (paths.length > 0) return false;
-    if (await this.savesInFlight(wsId)) return false;
-
-    // Guard on `state = 'open'` so a concurrent merge or withdraw wins the
-    // race and this becomes a no-op.
-    const now = new Date();
-    const updated = await this.db
-      .update(changeRequests)
-      .set({ state: 'closed', closedAt: now, updatedAt: now })
-      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
-      .returning({ id: changeRequests.id });
-    if (updated.length === 0) return false;
-    this.prs.invalidateDetailCache(number);
-    this.events?.emit({ kind: 'change-request-rejected', number });
-    await this.retireMergedSourceBranch(number, summary.base, user);
+    const closed = await this.closeIfEmpty(number, { reason: 'found empty', actor: user.email });
+    if (!closed) return false;
+    await this.retireMergedSourceBranch(number, closed.base, user);
     return true;
   }
 
@@ -3411,12 +3515,81 @@ export class WorkflowService implements IWorkflowService {
         }
       })
       .catch((err) => crLog.warn('on-demand deleted-branch sweep failed:', { err }))
-      // Every sweep is followed by the leftover cleanup, which never throws.
-      .then(() => this.retireLeftoverMergedBranches())
+      // Every sweep is followed by the tidy-up, which never throws.
+      .then(() => this.tidyAfterSweep())
       .then(() => undefined)
       .finally(() => {
         this.sweepKick = null;
       });
+  }
+
+  private tidyRound: Promise<{ closedEmpty: number; removedLeftovers: number }> | null = null;
+
+  /**
+   * What follows every sweep for deleted branches — at startup, on a remote
+   * sync, after a merge and on demand: first the open requests that propose
+   * nothing are closed and their source branch removed
+   * ({@link closeEmptyOpenChangeRequests}), then the branches merged requests
+   * left behind ({@link retireLeftoverMergedBranches}, behind its own
+   * setting). In that order, because closing an empty request is what can
+   * free a branch for the second. Never throws; coalesced.
+   */
+  tidyAfterSweep(): Promise<{ closedEmpty: number; removedLeftovers: number }> {
+    if (this.tidyRound) return this.tidyRound;
+    this.tidyRound = (async () => {
+      const closedEmpty = await this.closeEmptyOpenChangeRequests().catch((err: unknown) => {
+        crLog.warn('background close of empty change requests failed:', { err });
+        return 0;
+      });
+      const removedLeftovers = await this.retireLeftoverMergedBranches();
+      return { closedEmpty, removedLeftovers };
+    })().finally(() => {
+      this.tidyRound = null;
+    });
+    return this.tidyRound;
+  }
+
+  /**
+   * Close every open change request that proposes nothing, and remove its
+   * source branch — what opening such a request's page in the app does
+   * (`closeEmptyChangeRequest`), done without anyone opening it. Each is
+   * judged from the default branch's workspace against origin's refs, after
+   * ONE strict fetch, so no request's branch is cloned for the question; a
+   * round whose fetch fails closes nothing. A request whose changes cannot be
+   * determined, or with a save still landing on its branch, stays open.
+   * Returns how many it closed.
+   */
+  async closeEmptyOpenChangeRequests(): Promise<number> {
+    const open = await this.db
+      .select({ number: changeRequests.number })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    if (open.length === 0) return 0;
+    let wsId: string;
+    try {
+      wsId = await this.freshDefaultWorkspace();
+    } catch (err) {
+      crLog.warn('background close of empty change requests skipped — could not fetch the shared repository:', { err });
+      return 0;
+    }
+    let closed = 0;
+    for (const { number } of open) {
+      try {
+        const done = await this.closeIfEmpty(number, {
+          workspaceId: wsId,
+          fresh: true,
+          actor: 'system',
+          reason: 'empty in the background sweep',
+        });
+        if (!done) continue;
+        closed++;
+        // Outside any lock: this takes the source branch's lifecycle lock itself.
+        await this.retireMergedSourceBranch(number, done.base, SYSTEM_ACTOR);
+      } catch (err) {
+        crLog.warn(`background close of change request #${number} failed — leaving it open:`, { err });
+      }
+    }
+    return closed;
   }
 
   /**
@@ -3692,6 +3865,9 @@ export class WorkflowService implements IWorkflowService {
     // AFTER the event: the applying UI is waiting on `change-request-merged`,
     // and branch retirement is git IO it must never wait behind.
     await this.retireMergedSourceBranch(number, baseBranch, user);
+    // A merge can empty OTHER open requests into the same target; the sweep's
+    // tidy-up closes those. Detached and coalesced, like every kick.
+    this.kickDeletedBranchSweep();
     return { kind: 'merged', result };
   }
 
@@ -3944,6 +4120,8 @@ export class WorkflowService implements IWorkflowService {
       // `sha` is its unchanged tip. Reported as such — a `merged` that applied
       // nothing is what sent agents on as if their write had landed.
       if (result.mergeCommit === null) return { kind: 'nothing-to-merge', sha: result.sha };
+      // What landed on the target may have emptied open requests into it.
+      this.kickDeletedBranchSweep();
       return { kind: 'merged', sha: result.sha };
     });
   }

@@ -291,7 +291,7 @@ export interface BootableCore {
   config: { workspacesRoot: string };
   kbDirName: string;
   kbStartupRunner: Pick<KbStartupRunner, 'runAll' | 'retryUntilMaintained'>;
-  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches' | 'retireLeftoverMergedBranches'>;
+  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches' | 'tidyAfterSweep'>;
   pluginJoinRequestJobs: Pick<PluginJoinRequestJobs, 'startSweeping'>;
   /**
    * The startup phase's retry, when the boot survived an unreachable remote
@@ -391,9 +391,10 @@ export async function startCore<C extends BootableCore>(
       }
     })
     .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }))
-    // Then the branches merged change requests left behind. Gated by its own
-    // deployment setting, fails safe on a failed fetch, and never throws.
-    .then(() => core.workflowService.retireLeftoverMergedBranches());
+    // Then the tidy-up: open requests that propose nothing are closed, and the
+    // branches merged requests left behind removed (behind its own setting).
+    // Fails safe on a failed fetch, and never throws.
+    .then(() => core.workflowService.tidyAfterSweep());
 
   // Recorded join requests that are still owed, resumed — now, and then on a
   // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep

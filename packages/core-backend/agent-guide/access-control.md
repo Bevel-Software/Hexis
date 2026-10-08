@@ -237,8 +237,10 @@ File-level write access decides how a change lands on the default branch:
   Admin may. Preview with `dryRun: true` first: it changes nothing and says
   whether the delete would go through, how many commits are not on the default
   branch, and the last commit. A branch holding such commits is refused unless
-  you pass `discardUnmerged: true` — only when the user wants that work gone. A
-  branch with an open change request from or into it is refused: ask the user
-  to withdraw or decline that request in the app. Hand the user the
+  you pass `discardUnmerged: true` — only when the user wants that work gone. An
+  open change request from or into the branch that proposes nothing is closed
+  by the delete. One that still proposes something refuses it, with a link:
+  its author can withdraw it, or an Admin can decline it, in the app — hand the
+  user that link. Hand the user the
   `lastCommit` it answers, so the branch can be restored. Drafts whose change
   request was merged are removed by the server on its own.

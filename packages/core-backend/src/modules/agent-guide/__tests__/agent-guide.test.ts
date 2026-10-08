@@ -306,7 +306,8 @@ describe('what the guide tells an agent', () => {
     expect(prose).toContain('Only its author');
     expect(prose).toContain('`dryRun: true`');
     expect(prose).toContain('`discardUnmerged: true`');
-    expect(prose).toContain('withdraw or decline that request in the app');
+    expect(prose).toContain('that proposes nothing is closed by the delete');
+    expect(prose).toContain('its author can withdraw it, or an Admin can decline it, in the app');
     expect(prose).toContain('`lastCommit`');
   });
 

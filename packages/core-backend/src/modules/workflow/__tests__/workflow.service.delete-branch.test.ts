@@ -46,8 +46,21 @@ interface CrRow {
   merged_sha: string | null;
 }
 
+/** The guarded closes the fake table applied, as `{ number, params }`. */
+const closes: { number: number; params: unknown[] }[] = [];
+
 function fakeDb(rows: CrRow[]): Database {
   return drizzle(async (sql: string, params: unknown[]) => {
+    if (/^\s*update/i.test(sql)) {
+      // The guarded close: `update … set state, closed_at … where number = $n and state = 'open'`.
+      const at = /"number"\s*=\s*\$(\d+)/.exec(sql);
+      const number = at ? params[Number(at[1]) - 1] : undefined;
+      const row = rows.find((r) => r.number === number && r.state === 'open');
+      if (!row || !/"closed_at"/.test(sql)) return { rows: [] };
+      row.state = 'closed';
+      closes.push({ number: row.number, params });
+      return { rows: [['row-id']] };
+    }
     if (!/^\s*select/i.test(sql)) return { rows: [['row-id']] };
     const projection = (/^\s*select\s+(.+?)\s+from\s/is.exec(sql)?.[1] ?? '')
       .split(',')
@@ -82,6 +95,7 @@ interface Harness {
     branchState: ReturnType<typeof vi.fn>;
     mayDeleteBranch: ReturnType<typeof vi.fn>;
     isAncestor: ReturnType<typeof vi.fn>;
+    changedPathsForPr: ReturnType<typeof vi.fn>;
     deleteBranch: ReturnType<typeof vi.fn>;
   };
   fetch: ReturnType<typeof vi.fn>;
@@ -101,8 +115,11 @@ function harness(opts: {
   admins?: string[];
   savesLanding?: string[];
   fetchFails?: boolean;
+  /** The changes each open request proposes, by its source branch; absent, one file. `error`: undeterminable. */
+  changes?: Record<string, string[] | 'error'>;
 }): Harness {
   const deleted: string[] = [];
+  const rows = opts.rows ?? [];
   const branches = { ...(opts.branches ?? {}) };
   const git = {
     branchState: vi.fn(async (_ws: string, name: string): Promise<State> =>
@@ -114,6 +131,11 @@ function harness(opts: {
     isAncestor: vi.fn(async (_ws: string, a: string, d: string) =>
       (opts.ancestry ?? []).some(([x, y]) => x === a && y === d),
     ),
+    changedPathsForPr: vi.fn(async (_ws: string, _base: string, head: string) => {
+      const c = opts.changes?.[head] ?? ['KnowledgeBase/f.md'];
+      if (c === 'error') throw new Error('unknown branch');
+      return c;
+    }),
     deleteBranch: vi.fn(async (_ws: string, name: string) => {
       deleted.push(name);
       const tip = branches[name]?.lastCommit ?? null;
@@ -126,9 +148,17 @@ function harness(opts: {
   });
   const landing = new Set((opts.savesLanding ?? []).map(workspaceIdForBranch));
   const svc = new WorkflowService(
-    fakeDb(opts.rows ?? []),
+    fakeDb(rows),
     git as unknown as GitService,
-    { invalidateDetailCache: vi.fn() } as unknown as PullRequestService,
+    {
+      invalidateDetailCache: vi.fn(),
+      getPr: vi.fn(async (n: number) => {
+        const row = rows.find((r) => r.number === n);
+        return row
+          ? { number: n, branch: row.source_branch, base: row.target_branch, state: row.state, url: `https://hexis.test/change-requests/${n}` }
+          : null;
+      }),
+    } as unknown as PullRequestService,
     {} as IReviewWorkflowService,
     {
       getOrCreateForBranch: vi.fn(async (b: string) => ({ id: workspaceIdForBranch(b) })),
@@ -212,7 +242,10 @@ describe('deleteBranchChecked — an agent deletes a branch', () => {
     expect((err as BranchDeleteBlockedError).status).toBe(409);
     expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'open-change-request', number: 12 });
     expect(err.message).toContain('#12');
-    expect(err.message).toContain('Ask the user to withdraw or decline it in the app');
+    // It links to the request and says who can act on it.
+    expect(err.message).toContain('https://hexis.test/change-requests/12');
+    expect(err.message).toContain('Its author can withdraw it, or an Admin can decline it, in the app');
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ url: 'https://hexis.test/change-requests/12' });
     expect(h.deleted).toEqual([]);
   });
 
@@ -289,8 +322,8 @@ describe('deleteBranchChecked — an agent deletes a branch', () => {
       canDelete: false,
       unmergedCommits: 2,
       openChangeRequests: [
-        { number: 12, end: 'source' },
-        { number: 14, end: 'target' },
+        { number: 12, end: 'source', url: 'https://hexis.test/change-requests/12', proposesNothing: false },
+        { number: 14, end: 'target', url: 'https://hexis.test/change-requests/14', proposesNothing: false },
       ],
       lastCommit: 'a2',
     });
@@ -331,6 +364,160 @@ describe('deleteBranchChecked — an agent deletes a branch', () => {
     expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'unmerged-commits', unmergedCommits: 1 });
     expect(h.fetch).toHaveBeenCalledTimes(2);
     expect(h.deleted).toEqual([]);
+  });
+});
+
+describe('a change request that proposes nothing never blocks a deletion', () => {
+  beforeEach(() => {
+    closes.length = 0;
+  });
+
+  it('closes an empty request FROM the branch and one INTO it, then deletes — without waiting on its own lock', async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT), open(22, 'ali/feature', 'ali/sync')];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/sync': [], 'ali/feature': [] } });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      // The request's source IS the branch being deleted: a self-wait would hang here.
+      await expect(h.svc.deleteBranchChecked(ADMIN, 'ali/sync')).resolves.toMatchObject({ kind: 'deleted', lastCommit: 's1' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(rows.map((r) => r.state)).toEqual(['closed', 'closed']);
+    expect(h.deleted).toEqual(['ali/sync']);
+    // Recorded as today's empty-close: closed, with a closing time.
+    expect(closes.map((c) => c.number)).toEqual([21, 22]);
+    const isTime = (v: unknown) => v instanceof Date || (typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v));
+    for (const c of closes) expect(c.params.some(isTime), String(c.params)).toBe(true);
+    // One log line per close, naming the request, its branches and why.
+    const closeLines = lines.filter((l) => l.includes('closed change request #'));
+    expect(closeLines).toEqual([
+      '[cr] closed change request #21 ("ali/sync" into "target-company-state") by ana@example.com: it proposes nothing (empty when "ali/sync" was deleted)',
+      '[cr] closed change request #22 ("ali/feature" into "ali/sync") by ana@example.com: it proposes nothing (empty when "ali/sync" was deleted)',
+    ]);
+  });
+
+  it('a request that still proposes something refuses, with the link, and closes nothing — not even the empty one beside it', async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT), open(23, 'ali/other', 'ali/sync')];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/sync': [] } });
+    const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/sync'));
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'open-change-request', number: 23 });
+    expect(err.message).toContain('https://hexis.test/change-requests/23');
+    expect(err.message).toContain('Its author can withdraw it, or an Admin can decline it');
+    expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('a request whose changes cannot be determined counts as proposing something', async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/sync': 'error' } });
+    const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/sync'));
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'open-change-request', number: 21 });
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('a request with a save still landing on its branch counts as proposing something', async () => {
+    // The request comes INTO the branch being deleted; the save lands on its source.
+    const rows = [open(22, 'ali/feature', 'ali/sync')];
+    const h = harness({
+      rows,
+      branches: { 'ali/sync': clean('s1') },
+      changes: { 'ali/feature': [] },
+      savesLanding: ['ali/feature'],
+    });
+    const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/sync'));
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'open-change-request', number: 22 });
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('a deletion refused for another reason closes nothing', async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/sync': [] } });
+    await expect(h.svc.deleteBranchChecked(BOB, 'ali/sync')).rejects.toBeInstanceOf(BranchAuthorshipError);
+    expect(rows[0]!.state).toBe('open');
+  });
+
+  it('the preview reports an empty request as one the delete would close, and closes nothing', async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/sync': [] } });
+    await expect(h.svc.deleteBranchChecked(ADMIN, 'ali/sync', { dryRun: true })).resolves.toMatchObject({
+      canDelete: true,
+      refusals: [],
+      openChangeRequests: [{ number: 21, end: 'source', url: 'https://hexis.test/change-requests/21', proposesNothing: true }],
+    });
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it("the app's delete closes an empty request too, and goes ahead", async () => {
+    const rows = [open(21, 'ana/sync', DEFAULT)];
+    const h = harness({ rows, branches: { 'ana/sync': clean('s1') }, changes: { 'ana/sync': [] } });
+    await h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ana/sync', ADMIN);
+    expect(rows[0]!.state).toBe('closed');
+    expect(h.deleted).toEqual(['ana/sync']);
+    // No fetch-first in the app's path.
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("the app's delete still refuses on a request that proposes something, and closes nothing for a non-author", async () => {
+    const rows = [open(21, 'ali/sync', DEFAULT), open(24, 'ana/live', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/sync': clean('s1'), 'ana/live': clean('l1') }, changes: { 'ali/sync': [] } });
+    await expect(h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ana/live', ADMIN)).rejects.toThrow(/open change request \(#24\)/);
+    await expect(h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ali/sync', BOB)).rejects.toThrow(/open change request \(#21\)/);
+    expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+    expect(h.deleted).toEqual([]);
+  });
+});
+
+describe('closeEmptyOpenChangeRequests — the background close', () => {
+  it('closes the open requests that propose nothing and removes their source branch; leaves the rest open', async () => {
+    const rows = [
+      open(31, 'ali/empty', DEFAULT),
+      open(32, 'ali/live', DEFAULT),
+      open(33, 'ali/unknown', DEFAULT),
+      open(34, 'ali/saving', DEFAULT),
+    ];
+    const h = harness({
+      rows,
+      admins: [],
+      branches: { 'ali/empty': clean('e1'), 'ali/live': clean('l1') },
+      changes: { 'ali/empty': [], 'ali/unknown': 'error', 'ali/saving': [] },
+      savesLanding: ['ali/saving'],
+    });
+    await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(1);
+    expect(rows.map((r) => r.state)).toEqual(['closed', 'open', 'open', 'open']);
+    // Judged from the default branch's workspace after one fetch, not by cloning each request's branch.
+    expect(h.fetch).toHaveBeenCalledTimes(2); // the round's fetch, then the retirement's own
+    expect(h.git.changedPathsForPr).toHaveBeenCalledWith(workspaceIdForBranch(DEFAULT), DEFAULT, 'ali/empty', { fetch: false });
+    // The source branch is removed as opening the page would, by `system`.
+    expect(h.deleted).toEqual(['ali/empty']);
+    expect(h.git.deleteBranch).toHaveBeenCalledWith(
+      workspaceIdForBranch(DEFAULT),
+      'ali/empty',
+      expect.objectContaining({ email: 'system' }),
+      { systemCleanup: true },
+    );
+  });
+
+  it('closes nothing in a round whose fetch fails', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/empty': clean('e1') }, changes: { 'ali/empty': [] }, fetchFails: true });
+    await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(0);
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('runs before the leftover cleanup, and even with that cleanup switched off', async () => {
+    const h = harness({});
+    const order: string[] = [];
+    vi.spyOn(h.svc, 'closeEmptyOpenChangeRequests').mockImplementation(async () => (order.push('empty'), 2));
+    h.svc.leftoverCleanupEnabled = () => false;
+    const leftover = vi.spyOn(h.svc, 'retireLeftoverMergedBranches');
+    leftover.mockImplementation(async () => (order.push('leftover'), 0));
+    await expect(h.svc.tidyAfterSweep()).resolves.toEqual({ closedEmpty: 2, removedLeftovers: 0 });
+    expect(order).toEqual(['empty', 'leftover']);
   });
 });
 
@@ -464,7 +651,7 @@ describe('retireLeftoverMergedBranches — the server removes what merged change
 
   it('runs after every on-demand sweep for deleted branches', async () => {
     const h = harness({});
-    const cleanup = vi.spyOn(h.svc, 'retireLeftoverMergedBranches').mockResolvedValue(0);
+    const cleanup = vi.spyOn(h.svc, 'tidyAfterSweep').mockResolvedValue({ closedEmpty: 0, removedLeftovers: 0 });
     vi.spyOn(h.svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
     (h.svc as unknown as { kickDeletedBranchSweep(): void }).kickDeletedBranchSweep();
     await (h.svc as unknown as { sweepKick: Promise<void> }).sweepKick;
@@ -552,5 +739,58 @@ describe('deleteBranchChecked over real git — a delete made from another works
     await expect(fs.stat(wsDir(draftId))).rejects.toThrow();
     // Asked again, it is not a branch.
     await expect(svc.deleteBranchChecked(BOB, 'bob/draft')).rejects.toBeInstanceOf(BranchNotFoundError);
+  });
+});
+
+describe('emptiness over real git — judged from the default workspace as from the branch’s own', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-empty-request-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  it('answers the same changed paths from either clone, before and after the change lands on the default branch', async () => {
+    const upstream = path.join(root, 'upstream.git');
+    await git(root, ['init', '--bare', '-b', DEFAULT, upstream]);
+    const seed = path.join(root, '.seed');
+    await git(root, ['clone', upstream, seed]);
+    await git(seed, ['checkout', '-b', DEFAULT]);
+    await fs.mkdir(path.join(seed, 'KnowledgeBase'));
+    await fs.writeFile(path.join(seed, 'KnowledgeBase', 'f.md'), 'one\n');
+    await git(seed, ['add', '.']);
+    await git(seed, ['commit', '-m', 'init']);
+    await git(seed, ['push', 'origin', DEFAULT]);
+    await git(seed, ['checkout', '-b', 'ali/sync']);
+    await fs.writeFile(path.join(seed, 'KnowledgeBase', 'f.md'), 'two\n');
+    await git(seed, ['commit', '-am', 'change']);
+    await git(seed, ['push', 'origin', 'ali/sync']);
+
+    const wsDir = (id: string) => path.join(root, 'workspaces', id);
+    const defaultId = workspaceIdForBranch(DEFAULT);
+    const ownId = workspaceIdForBranch('ali/sync');
+    await git(root, ['clone', '-b', DEFAULT, upstream, path.join(wsDir(defaultId), 'knowledge-base')]);
+    await git(root, ['clone', '-b', 'ali/sync', upstream, path.join(wsDir(ownId), 'knowledge-base')]);
+    const gitService = new GitService(
+      { getWorkspacePath: async (id: string) => wsDir(id) } as unknown as WorkspaceService,
+      new WorkflowHooks(),
+      testKbContext(),
+    );
+    const fetchDefault = () => git(path.join(wsDir(defaultId), 'knowledge-base'), ['fetch', '--prune', 'origin']);
+    const fromDefault = () => gitService.changedPathsForPr(defaultId, DEFAULT, 'ali/sync', { fetch: false });
+    const fromOwn = () => gitService.changedPathsForPr(ownId, DEFAULT, 'ali/sync');
+
+    await fetchDefault();
+    expect(await fromDefault()).toEqual(await fromOwn());
+    expect(await fromDefault()).not.toEqual([]);
+
+    // The change lands on the default branch another way: the request now proposes nothing.
+    await git(seed, ['checkout', DEFAULT]);
+    await git(seed, ['merge', '--no-ff', '-m', 'landed elsewhere', 'ali/sync']);
+    await git(seed, ['push', 'origin', DEFAULT]);
+    await fetchDefault();
+    expect(await fromDefault()).toEqual([]);
+    expect(await fromOwn()).toEqual([]);
   });
 });

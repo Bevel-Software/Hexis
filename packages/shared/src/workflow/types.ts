@@ -243,7 +243,9 @@ export type MergeBranchOutcome =
  * - `canDelete`          — a deletion asked for now, by this caller, would go
  *                          through; `refusals` says why not when it would not.
  * - `unmergedCommits`    — commits on the branch that are not on the default branch.
- * - `openChangeRequests` — open change requests from (`source`) or into (`target`) it.
+ * - `openChangeRequests` — open change requests from (`source`) or into (`target`) it,
+ *                          with their link; one that `proposesNothing` would be
+ *                          closed by the deletion and blocks nothing.
  * - `lastCommit`         — the branch's tip; null when it does not exist.
  */
 export interface DeleteBranchPreview {
@@ -253,7 +255,7 @@ export interface DeleteBranchPreview {
   canDelete: boolean;
   refusals: string[];
   unmergedCommits: number;
-  openChangeRequests: { number: number; end: 'source' | 'target' }[];
+  openChangeRequests: { number: number; end: 'source' | 'target'; url: string; proposesNothing: boolean }[];
   lastCommit: string | null;
 }
 
