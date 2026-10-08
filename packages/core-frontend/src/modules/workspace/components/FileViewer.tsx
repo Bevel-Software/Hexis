@@ -1,6 +1,11 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History, Users } from 'lucide-react';
-import { KNOWLEDGE_BASE_DIR, type FileTreeEntry, type PullRequestSummary } from '@bevel-software/platform-shared';
+import {
+  KNOWLEDGE_BASE_DIR,
+  currentBranchModel,
+  type FileTreeEntry,
+  type PullRequestSummary,
+} from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { publishEditablePage, withdrawEditablePage } from '../state/editable-page';
 import { EditorTabs } from './EditorTabs';
@@ -83,6 +88,7 @@ export function FileViewer() {
     workspaceId,
     kbDirName,
     fileTree,
+    workspaceBranch,
     openFilePath,
     openFileContent,
     openFileSavedContent,
@@ -1020,9 +1026,16 @@ export function FileViewer() {
   // only, until somebody answers, while the knowledge base is still new).
   // What the chosen pack added is said once, above the ordinary empty state
   // that then suggests its pages.
+  //
+  // Only on the default branch: the server lands the pack on the default
+  // branch whatever branch the viewer shows, so asked from a draft the card
+  // would promise pages here and put them somewhere else. The ordinary empty
+  // state stands in on every other branch, and the question waits on the
+  // default one.
   const starterPacks = useStarterPacks();
   const [starterNote, setStarterNote] = useState<string | null>(null);
-  const starterOffer = starterPacks.answer?.offered ? starterPacks.answer.packs : [];
+  const onDefaultBranch = workspaceBranch !== null && workspaceBranch === currentBranchModel().defaultBranch;
+  const starterOffer = starterPacks.answer?.offered && onDefaultBranch ? starterPacks.answer.packs : [];
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
   // refresh, share or back-press must land on the page — not on the empty
