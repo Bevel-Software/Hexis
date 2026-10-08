@@ -560,16 +560,22 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
   });
 
-  it('a request the caller may not see is left out of the preview and refused on without its number or link', async () => {
+  it('a request the caller may not see is not in the preview at all, and is refused on without its number or link', async () => {
     // #21 is empty and #25 live; the caller can see neither.
     const rows = [open(21, 'bob/sync', DEFAULT), open(25, 'ali/secret', 'bob/sync')];
     const h = harness({ rows, branches: { 'bob/sync': clean('s1') }, changes: { 'bob/sync': [] } });
     const maySee = vi.fn(async () => false);
     const preview = (await h.svc.deleteBranchChecked(BOB, 'bob/sync', { dryRun: true, maySee })) as DeleteBranchPreview;
-    expect(preview.openChangeRequests).toEqual([]);
-    expect(preview.canDelete).toBe(false);
-    expect(preview.refusals.join(' ')).not.toMatch(/#2[15]|change-requests\//);
-    expect(preview.refusals.join(' ')).toMatch(/open change request you cannot see/);
+    // The same answer as for a branch with no request on it, live or empty:
+    // the preview tells nothing about a request the caller cannot see.
+    const none = harness({ branches: { 'bob/sync': clean('s1') } });
+    const onlyEmpty = harness({ rows: [open(21, 'bob/sync', DEFAULT)], branches: { 'bob/sync': clean('s1') }, changes: { 'bob/sync': [] } });
+    for (const other of [none, onlyEmpty]) {
+      await expect(other.svc.deleteBranchChecked(BOB, 'bob/sync', { dryRun: true, maySee })).resolves.toEqual(preview);
+    }
+    expect(preview).toMatchObject({ canDelete: true, refusals: [], openChangeRequests: [] });
+    // Never judged, either.
+    expect(h.git.changedPathsForPr).not.toHaveBeenCalled();
     const err = await refusal(h.svc.deleteBranchChecked(BOB, 'bob/sync', { maySee }));
     const payload = (err as BranchDeleteBlockedError).payload as Record<string, unknown>;
     expect(payload).toMatchObject({ reason: 'open-change-request' });
@@ -622,16 +628,60 @@ describe('closeEmptyOpenChangeRequests — the background close', () => {
     await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(1);
     expect(rows.map((r) => r.state)).toEqual(['closed', 'open', 'open', 'open']);
     // Judged from the default branch's workspace after one fetch, not by cloning each request's branch.
-    expect(h.fetch).toHaveBeenCalledTimes(2); // the round's fetch, then the retirement's own
+    expect(h.fetch).toHaveBeenCalledTimes(1);
     expect(h.git.changedPathsForPr).toHaveBeenCalledWith(workspaceIdForBranch(DEFAULT), DEFAULT, 'ali/empty', { fetch: false });
-    // The source branch is removed as opening the page would, by `system`.
+    // The source branch is removed as opening the page would, by `system`,
+    // leased on the tip the request was judged empty at.
     expect(h.deleted).toEqual(['ali/empty']);
     expect(h.git.deleteBranch).toHaveBeenCalledWith(
       workspaceIdForBranch(DEFAULT),
       'ali/empty',
       expect.objectContaining({ email: 'system' }),
-      { systemCleanup: true },
+      { systemCleanup: true, expectTip: 'e1' },
     );
+  });
+
+  it('keeps the source branch when a save starts landing on it after the request was judged empty', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/empty': clean('e1') }, changes: { 'ali/empty': [] } });
+    // Clear when the request is judged; a lock is held by the removal's check.
+    h.hasAnyActive.mockResolvedValueOnce(false).mockResolvedValue(true);
+    await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(1);
+    expect(rows[0]!.state).toBe('closed');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('grants no lock on the source branch while removing it', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/empty': clean('e1') }, changes: { 'ali/empty': [] } });
+    let during: unknown = null;
+    h.git.deleteBranch.mockImplementationOnce(async () => {
+      during = await h.fileLocks.acquire(workspaceIdForBranch('ali/empty'), 'ali/empty', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
+      return { lastCommit: 'e1' };
+    });
+    await h.svc.closeEmptyOpenChangeRequests();
+    expect((during as { payload?: unknown }).payload).toMatchObject({ kind: 'branch-being-deleted' });
+  });
+
+  it('keeps the source branch, and still counts the close, when a commit pushed since is refused by the lease', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/empty': clean('e1') }, changes: { 'ali/empty': [] }, deleteFails: ['ali/empty'] });
+    await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(1);
+    expect(h.git.deleteBranch).toHaveBeenCalledWith(
+      workspaceIdForBranch(DEFAULT),
+      'ali/empty',
+      expect.objectContaining({ email: 'system' }),
+      { systemCleanup: true, expectTip: 'e1' },
+    );
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('keeps the source branch while another request is still open from or into it', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT), open(35, 'ali/next', 'ali/empty')];
+    const h = harness({ rows, branches: { 'ali/empty': clean('e1'), 'ali/next': clean('n1') }, changes: { 'ali/empty': [] } });
+    await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(1);
+    expect(rows.map((r) => r.state)).toEqual(['closed', 'open']);
+    expect(h.deleted).toEqual([]);
   });
 
   it('closes nothing in a round whose fetch fails', async () => {

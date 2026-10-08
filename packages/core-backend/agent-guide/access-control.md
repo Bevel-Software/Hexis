@@ -241,7 +241,8 @@ File-level write access decides how a change lands on the default branch:
   open change request from or into the branch that proposes nothing is closed
   by the delete. One that still proposes something refuses it, with a link:
   its author can withdraw it, or an Admin can decline it, in the app — hand the
-  user that link. Hand the user the
+  user that link. A request you cannot see is not named, and a preview leaves
+  it out, so a delete can still be refused after a clean preview. Hand the user the
   `lastCommit` it answers, so the branch can be restored. The server removes a
   draft on its own once its change request was merged, but only while nothing
   has happened to it since: no commit that is not on the default branch, no

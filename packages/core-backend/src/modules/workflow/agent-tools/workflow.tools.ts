@@ -622,8 +622,8 @@ export function registerWorkflowTools(
       'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
       '(retry once they land). An open change request from or into it that proposes nothing is closed and the ' +
       'delete goes ahead; one that still proposes something refuses it, naming and linking it: its author ' +
-      'withdraws it or an Admin declines it, in the app (one you cannot see is not named; an Admin can decline ' +
-      'it). Refuses a branch holding commits that are not on the ' +
+      'withdraws it or an Admin declines it, in the app (one you cannot see is not named, nor in a preview). ' +
+      'Refuses a branch holding commits that are not on the ' +
       'default branch, saying how many; `discardUnmerged: true` deletes it anyway and reports them as ' +
       '`discardedCommits`. Refuses if the shared repository is unreachable. Preview with ' +
       '`dryRun: true`: it changes nothing and answers `exists`, `canDelete`, `refusals`, `unmergedCommits`, ' +

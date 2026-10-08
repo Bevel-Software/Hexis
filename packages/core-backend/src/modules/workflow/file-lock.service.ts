@@ -78,13 +78,23 @@ export class FileLockService {
   private readonly closing = new Map<string, number>();
 
   /**
-   * Run `fn` while no lock can be acquired on `branch`. The deletion paths
-   * re-check for saves landing inside it, so that check and the deletion meet
-   * no save that started in between.
+   * Acquires on each branch that passed the `closing` check and have not
+   * settled yet. `whileNoneAcquired` waits for them: one whose row is still
+   * being written when a deletion starts would otherwise land after the
+   * deletion's last check.
+   */
+  private readonly acquiring = new Map<string, Set<Promise<unknown>>>();
+
+  /**
+   * Run `fn` while no lock can be acquired on `branch`, once every acquire
+   * already under way on it has settled. The deletion paths re-check for
+   * saves landing inside it, so that check sees every lock granted before it,
+   * and the deletion meets no save that started in between.
    */
   async whileNoneAcquired<T>(branch: string, fn: () => Promise<T>): Promise<T> {
     this.closing.set(branch, (this.closing.get(branch) ?? 0) + 1);
     try {
+      await Promise.allSettled([...(this.acquiring.get(branch) ?? [])]);
       return await fn();
     } finally {
       const n = (this.closing.get(branch) ?? 1) - 1;
@@ -129,6 +139,26 @@ export class FileLockService {
         path: targetPath,
       });
     }
+    const pending = this.acquireUnchecked(workspaceId, branch, targetPath, user, opts);
+    const inFlight = this.acquiring.get(branch) ?? new Set<Promise<unknown>>();
+    inFlight.add(pending);
+    this.acquiring.set(branch, inFlight);
+    try {
+      return await pending;
+    } finally {
+      inFlight.delete(pending);
+      if (inFlight.size === 0 && this.acquiring.get(branch) === inFlight) this.acquiring.delete(branch);
+    }
+  }
+
+  /** `acquire` past the deletion gate. */
+  private async acquireUnchecked(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+    opts?: { coordination?: boolean },
+  ): Promise<AcquireLockResult> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 
