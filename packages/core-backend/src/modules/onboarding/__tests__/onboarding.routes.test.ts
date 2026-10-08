@@ -19,10 +19,13 @@ afterEach(() => {
   server = undefined;
 });
 
-async function listen(svc: Pick<StarterPackService, 'status' | 'choose'>, as: AuthUser | null = ADA): Promise<string> {
+async function listen(
+  svc: Pick<StarterPackService, 'status' | 'choose'>,
+  as: AuthUser | null | (() => Promise<AuthUser | null>) = ADA,
+): Promise<string> {
   const app = express();
   app.use(express.json());
-  app.use('/api', createOnboardingRoutes(svc, async () => as));
+  app.use('/api', createOnboardingRoutes(svc, typeof as === 'function' ? as : async () => as));
   await new Promise<void>((resolve) => {
     server = app.listen(0, resolve);
   });
@@ -50,6 +53,30 @@ describe('GET /onboarding/starter-packs', () => {
     const base = await listen({ status: vi.fn(), choose: vi.fn() }, null);
     expect((await fetch(`${base}/api/onboarding/starter-packs`)).status).toBe(401);
   });
+
+  it('is 500, not 401, when the caller could not be looked up: an outage is not an expired session', async () => {
+    const svc = { status: vi.fn(), choose: vi.fn() };
+    const base = await listen(svc, async () => {
+      throw new Error('database unreachable');
+    });
+    const res = await fetch(`${base}/api/onboarding/starter-packs`);
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/who is signed in/i);
+    expect(svc.status).not.toHaveBeenCalled();
+  });
+
+  it('is 500 when the answer could not be had', async () => {
+    const svc = {
+      status: vi.fn(async () => {
+        throw new Error('packs folder unreadable');
+      }),
+      choose: vi.fn(),
+    };
+    const base = await listen(svc);
+    const res = await fetch(`${base}/api/onboarding/starter-packs`);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Could not load the starter packs' });
+  });
 });
 
 describe('POST /onboarding/starter-pack', () => {
@@ -63,22 +90,61 @@ describe('POST /onboarding/starter-pack', () => {
     expect(svc.choose).toHaveBeenCalledWith(ADA, 'sales');
   });
 
+  it('passes "none" through as the skip it is', async () => {
+    const skipped = { id: 'none', name: null, pages: 0, skills: 0, summary: '' };
+    const svc = { status: vi.fn(), choose: vi.fn(async () => skipped) };
+    const base = await listen(svc);
+    const res = await post(`${base}/api/onboarding/starter-pack`, { id: 'none' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(skipped);
+    expect(svc.choose).toHaveBeenCalledWith(ADA, 'none');
+  });
+
   it('needs an id', async () => {
     const base = await listen({ status: vi.fn(), choose: vi.fn() });
     expect((await post(`${base}/api/onboarding/starter-pack`, {})).status).toBe(400);
   });
 
-  it('passes a refusal through with its status', async () => {
+  it('is 401 without a user, and 500 when the caller could not be looked up', async () => {
+    const svc = { status: vi.fn(), choose: vi.fn() };
+    const anonymous = await listen(svc, null);
+    expect((await post(`${anonymous}/api/onboarding/starter-pack`, { id: 'sales' })).status).toBe(401);
+    server?.close();
+    const outage = await listen(svc, async () => {
+      throw new Error('database unreachable');
+    });
+    expect((await post(`${outage}/api/onboarding/starter-pack`, { id: 'sales' })).status).toBe(500);
+    expect(svc.choose).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [403, 'Only an admin can add starter pages.'],
+    [404, 'There is no starter pack "astronomy".'],
+    [409, 'Starter pages were already chosen for this knowledge base.'],
+  ])('passes a refusal through with its status: %i', async (status, message) => {
     const svc = {
       status: vi.fn(),
       choose: vi.fn(async () => {
-        throw new StarterPackError('Starter pages were already chosen for this knowledge base.', 409);
+        throw new StarterPackError(message, status);
       }),
     };
     const base = await listen(svc);
     const res = await post(`${base}/api/onboarding/starter-pack`, { id: 'sales' });
-    expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: 'Starter pages were already chosen for this knowledge base.' });
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual({ error: message });
+  });
+
+  it('says nothing was changed, in its own words, when the write failed for a reason of its own', async () => {
+    const svc = {
+      status: vi.fn(),
+      choose: vi.fn(async () => {
+        throw new Error('ENOSPC: no space left on device');
+      }),
+    };
+    const base = await listen(svc);
+    const res = await post(`${base}/api/onboarding/starter-pack`, { id: 'sales' });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Could not add the starter pages. Nothing was changed.' });
   });
 
   it('turns a path locked by someone else into a 409 to retry', async () => {

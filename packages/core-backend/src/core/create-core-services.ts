@@ -1070,6 +1070,7 @@ export async function createCoreServices(
     adminAccess,
     settings,
     accessControl,
+    pluginSource,
     events: eventBus,
     fileChanges: fileChangeNotifier,
   });

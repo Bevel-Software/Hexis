@@ -28,6 +28,13 @@ function makeDb() {
           else rows.push({ key: v.key, value: v.value, encrypted: v.encrypted });
           return Promise.resolve();
         },
+        onConflictDoNothing: () => ({
+          returning: () => {
+            if (rows.some((r) => r.key === v.key)) return Promise.resolve([]);
+            rows.push({ key: v.key, value: v.value, encrypted: v.encrypted });
+            return Promise.resolve([{ key: v.key }]);
+          },
+        }),
       }),
     }),
     delete: () => ({ where: () => Promise.resolve() }),
@@ -526,5 +533,35 @@ describe('DeploymentSettingsService — an environment of its own', () => {
     const shared = new DeploymentSettingsService(db, ENC_KEY);
     await shared.load();
     expect(shared.resolve('kbRepoUrl')).toBe('https://host.example/leaks-into-every-tenant.git');
+  });
+});
+
+describe('DeploymentSettingsService — recordIfAbsent', () => {
+  /**
+   * The claim a once-only flow rests on: the row is the lock, and the
+   * database — shared by every replica — lets exactly one insert through.
+   */
+  it('claims a setting once, and tells the second caller it was not theirs', async () => {
+    const { db, rows } = makeDb();
+    const one = new DeploymentSettingsService(db, ENC_KEY);
+    const two = new DeploymentSettingsService(db, ENC_KEY);
+    await one.load();
+    await two.load();
+
+    expect(await one.recordIfAbsent('starterPack', 'sales', 'u-ada')).toBe(true);
+    expect(await two.recordIfAbsent('starterPack', 'none', 'u-bo')).toBe(false);
+
+    expect(rows.filter((r) => r.key === 'starterPack')).toEqual([{ key: 'starterPack', value: 'sales', encrypted: false }]);
+    expect(one.resolve('starterPack')).toBe('sales');
+    // The loser's cache was not touched: it reads the winner's row on its next `reload`.
+    expect(two.resolve('starterPack')).toBe('');
+  });
+
+  it('is no claim at all with a blank value, which would be a clear', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    expect(await settings.recordIfAbsent('starterPack', '', null)).toBe(false);
+    expect(rows).toEqual([]);
   });
 });

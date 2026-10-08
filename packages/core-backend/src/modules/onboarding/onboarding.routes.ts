@@ -25,13 +25,28 @@ export function createOnboardingRoutes(
 ): express.Router {
   const router = express.Router();
 
+  /**
+   * The caller, or null once the response is written: 401 for nobody signed
+   * in, and 500 when that could not be told — a database outage is not an
+   * expired session, and saying so sends people to sign in again for nothing.
+   */
+  async function caller(req: express.Request, res: express.Response): Promise<AuthUser | null> {
+    let user: AuthUser | null;
+    try {
+      user = await resolveUser(req);
+    } catch (err) {
+      log.error('could not resolve the caller:', { err });
+      res.status(500).json({ error: 'Could not tell who is signed in. Try again.' });
+      return null;
+    }
+    if (!user) res.status(401).json({ error: 'Unauthenticated' });
+    return user;
+  }
+
   router.get('/onboarding/starter-packs', async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    const user = await resolveUser(req).catch(() => null);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
+    const user = await caller(req, res);
+    if (!user) return;
     try {
       res.json(await starterPacks.status(user));
     } catch (err) {
@@ -41,11 +56,8 @@ export function createOnboardingRoutes(
   });
 
   router.post('/onboarding/starter-pack', express.json(), async (req, res) => {
-    const user = await resolveUser(req).catch(() => null);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
+    const user = await caller(req, res);
+    if (!user) return;
     const id = (req.body as { id?: unknown } | undefined)?.id;
     if (typeof id !== 'string' || !id.trim()) {
       res.status(400).json({ error: 'Say which starter pack: `id`, or "none" to skip.' });

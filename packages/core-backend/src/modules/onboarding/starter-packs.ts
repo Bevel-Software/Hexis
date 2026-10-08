@@ -173,7 +173,12 @@ export async function starterPackFiles(pack: StarterPack, layout: Required<KbLay
   return out;
 }
 
-/** The files below `dir` as POSIX paths relative to it, sorted; none when it is not there. */
+/**
+ * The files below `dir` as POSIX paths relative to it, sorted; none when it
+ * is not there — or is a file where a folder was expected, which is said in
+ * the log and treated as empty: one odd entry in a pack must not take the
+ * whole choice down.
+ */
 async function filesUnder(dir: string): Promise<string[]> {
   const out: string[] = [];
   const walk = async (abs: string, rel: string): Promise<void> => {
@@ -181,7 +186,12 @@ async function filesUnder(dir: string): Promise<string[]> {
     try {
       entries = await fs.readdir(abs, { withFileTypes: true });
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT' && rel === '') return;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (rel === '' && code === 'ENOENT') return;
+      if (rel === '' && code === 'ENOTDIR') {
+        log.warn(`starter pack: "${dir}" is a file, not a folder — nothing taken from it.`);
+        return;
+      }
       throw err;
     }
     for (const entry of entries) {

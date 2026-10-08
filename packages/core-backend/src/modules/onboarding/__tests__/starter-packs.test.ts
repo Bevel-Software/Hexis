@@ -44,7 +44,8 @@ async function write(rel: string, content: string | Buffer): Promise<void> {
 
 describe('loadStarterPacks', () => {
   it('lists the valid packs in chip order, then by name', async () => {
-    await write('sales/pack.yaml', manifest('sales', { order: '2' }));
+    // Sales and Engineering share an order, so the name decides between them.
+    await write('sales/pack.yaml', manifest('sales', { order: '1' }));
     await write('engineering/pack.yaml', manifest('engineering', { order: '1' }));
     await write('general/pack.yaml', manifest('general', { name: 'Something else', order: '99' }));
     await write('README.md', '# not a pack\n');
@@ -150,5 +151,16 @@ describe('starterPackFiles', () => {
     // Text is rendered for the layout; a binary file is copied as it is.
     expect(files[0]!.content).toBe('# About us\n\nSee Teams/eng-starter.\n');
     expect(Buffer.isBuffer(files[1]!.content)).toBe(true);
+  });
+
+  it('treats a pack folder that is a file as empty, and still reads the rest of the pack', async () => {
+    await write('eng/pack.yaml', manifest('eng'));
+    await write('eng/KnowledgeBase/About us.md', '# About us\n');
+    await write('eng/Plugins', 'not a folder\n');
+    const pack = (await readStarterPack(path.join(root, 'eng')))!;
+
+    const files = await starterPackFiles(pack, DEFAULT_KB_LAYOUT);
+
+    expect(files.map((f) => f.repoPath)).toEqual(['KnowledgeBase/About us.md']);
   });
 });

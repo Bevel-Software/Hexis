@@ -740,6 +740,29 @@ export class DeploymentSettingsService {
     await this.save(entries, updatedBy, 'deployment');
   }
 
+  /**
+   * {@link record} one value ONLY IF NOTHING IS THERE, and say whether it was
+   * this call that put it there. The row is the claim for a flow that must
+   * happen once across every replica (the starter-pack choice): the insert
+   * yields to a row already there, so of two replicas claiming at once the
+   * database lets exactly one through. Validated as `record` is; a blank
+   * value is no claim (it would be a clear) and answers false.
+   */
+  async recordIfAbsent(key: string, value: string, updatedBy: string | null): Promise<boolean> {
+    const write = this.plan({ [key]: value }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const encrypted = write.def.secret === true;
+    const stored = encrypted ? this.crypto!.encrypt(write.value) : write.value;
+    const inserted = await this.db
+      .insert(deploymentSettings)
+      .values({ key, value: stored, encrypted, updatedBy })
+      .onConflictDoNothing({ target: deploymentSettings.key })
+      .returning({ key: deploymentSettings.key });
+    if (inserted.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
   /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
   private plan(
     entries: Record<string, string>,

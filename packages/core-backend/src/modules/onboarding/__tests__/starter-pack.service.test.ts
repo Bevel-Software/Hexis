@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_KB_LAYOUT, type AuthUser, type IWorkflowService, type KbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
 import { StarterPackError, StarterPackService, commitSubjectOf, summaryOf } from '../starter-pack.service.js';
 
 /**
@@ -29,14 +31,27 @@ async function put(base: string, rel: string, content: string): Promise<void> {
   await fs.writeFile(abs, content);
 }
 
-function harness({ layout = DEFAULT_KB_LAYOUT as KbLayout, admins = [ADMIN.email] } = {}) {
-  const store: Record<string, string> = {};
+/**
+ * `store` stands for the deployment-settings table: pass one to two
+ * harnesses and they are two replicas sharing a database.
+ */
+function harness({
+  layout = DEFAULT_KB_LAYOUT as KbLayout,
+  admins = [ADMIN.email],
+  store = {} as Record<string, string>,
+} = {}) {
   const settings = {
     reload: vi.fn(async (key: string) => store[key] ?? ''),
-    record: vi.fn(async (entries: Record<string, string>) => {
-      Object.assign(store, entries);
+    recordIfAbsent: vi.fn(async (key: string, value: string) => {
+      if (key in store) return false;
+      store[key] = value;
+      return true;
+    }),
+    clear: vi.fn(async (key: string) => {
+      delete store[key];
     }),
   };
+  const kb = testKbContext({ kbDirName: KB, layout });
   const workflow = {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderName: 'x' } })),
     releaseLock: vi.fn(async () => null),
@@ -48,7 +63,8 @@ function harness({ layout = DEFAULT_KB_LAYOUT as KbLayout, admins = [ADMIN.email
   const accessControl = { invalidate: vi.fn() };
   const svc = new StarterPackService({
     packsDir,
-    kb: testKbContext({ kbDirName: KB, layout }),
+    kb,
+    pluginSource: new KbPluginSource(new NodeFs(), kb),
     workspaceService: {
       getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-main' })),
       getWorkspacePath: vi.fn(async () => wsDir),
@@ -132,9 +148,16 @@ describe('who is asked', () => {
 
 describe('choosing a pack', () => {
   it('adds the pack in ONE commit by the admin, records the choice, and refreshes the tree', async () => {
-    const { svc, store, workflow, events, accessControl } = harness();
+    const { svc, store, settings, workflow, events, accessControl } = harness();
 
     const applied = await svc.choose(ADMIN, 'sales');
+
+    // The choice is claimed BEFORE the write, so another replica's claim is
+    // found and nothing is written twice (see the module doc).
+    expect(settings.recordIfAbsent).toHaveBeenCalledWith('starterPack', 'sales', ADMIN.id);
+    expect(settings.recordIfAbsent.mock.invocationCallOrder[0]!).toBeLessThan(
+      workflow.commitChanges.mock.invocationCallOrder[0]!,
+    );
 
     expect(applied).toEqual({ id: 'sales', name: 'Sales', pages: 2, skills: 2, summary: 'Added 2 pages and 2 skills for Sales.' });
     expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
@@ -206,6 +229,19 @@ describe('choosing a pack', () => {
     expect(applied).toMatchObject({ pages: 2, skills: 0 });
   });
 
+  it('leaves alone a plugin of the same name that lives in a grouping folder', async () => {
+    // Not at the plugins root: discovery lists it, a folder listing would not.
+    await put(wsDir, `${KB}/Plugins/teams/Sales Starter/plugin.json`, '{"name":"sales-starter"}\n');
+    await put(wsDir, `${KB}/Plugins/teams/Sales Starter/access.md`, '# theirs\n');
+    const { svc, workflow } = harness();
+
+    const applied = await svc.choose(ADMIN, 'sales');
+
+    const paths = (workflow.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
+    expect(paths.filter((p) => p.includes('/Plugins/'))).toEqual([]);
+    expect(applied).toMatchObject({ pages: 2, skills: 0 });
+  });
+
   it('writes under the folder names this deployment chose', async () => {
     await fs.rm(path.join(wsDir, KB), { recursive: true });
     await put(wsDir, `${KB}/Wiki/How to get started.md`, '# How to get started\n');
@@ -246,6 +282,18 @@ describe('choosing a pack', () => {
     expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
   });
 
+  it('two replicas choosing at once add the pack once: the second finds the first’s claim', async () => {
+    const store: Record<string, string> = {};
+    const one = harness({ store });
+    const two = harness({ store });
+    const results = await Promise.allSettled([one.svc.choose(ADMIN, 'sales'), two.svc.choose(ADMIN, 'none')]);
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+    const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(refused.reason).toMatchObject({ status: 409 });
+    expect(one.workflow.commitChanges.mock.calls.length + two.workflow.commitChanges.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(['sales', 'none']).toContain(store.starterPack);
+  });
+
   it('refuses a member (403) and a pack that does not exist (404), recording nothing', async () => {
     const { svc, store } = harness();
     await expect(svc.choose(MEMBER, 'sales')).rejects.toBeInstanceOf(StarterPackError);
@@ -254,10 +302,12 @@ describe('choosing a pack', () => {
     expect(store.starterPack).toBeUndefined();
   });
 
-  it('leaves the question open when the commit fails', async () => {
-    const { svc, store, workflow } = harness();
+  it('leaves the question open when the commit fails: the claim is taken back', async () => {
+    const { svc, store, settings, workflow } = harness();
     workflow.commitChanges.mockRejectedValueOnce(new Error('disk full'));
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('disk full');
+    expect(settings.recordIfAbsent).toHaveBeenCalledTimes(1);
+    expect(settings.clear).toHaveBeenCalledWith('starterPack');
     expect(store.starterPack).toBeUndefined();
   });
 });
