@@ -79,6 +79,17 @@
         var MANIFEST_PATH = '/embed-manifest.json';
         /** The global the bundle reads its handoff from (see `embed-config.ts`). */
         var HANDOFF_GLOBAL = '__HEXIS_EMBED__';
+        /**
+         * The height the view asks its host for once the page is on screen,
+         * in CSS pixels. A host starts an app view small — Claude at a few
+         * lines — and grows it only when the view says what it needs
+         * (`ui/notifications/size-changed`, which a host with flexible
+         * dimensions MUST honour). The page scrolls inside the view, so this
+         * is the reading height of a document pane, not the page's length:
+         * tall enough to read a section at a time, short enough to stay a
+         * part of the conversation rather than the whole screen.
+         */
+        var PREFERRED_HEIGHT = 640;
 
         function send(message) {
           // The host is this view's parent; it told us its origin on the
@@ -96,6 +107,15 @@
           notice.textContent = text;
           notice.classList.remove('hidden');
           root.classList.add('hidden');
+        }
+
+        /** Ask the host for a view this tall. It resizes the frame; the page fills it. */
+        function requestHeight(px) {
+          send({
+            jsonrpc: '2.0',
+            method: 'ui/notifications/size-changed',
+            params: { height: px },
+          });
         }
 
         /** Open a URL the way the host opens links: a new tab, through it. */
@@ -233,6 +253,10 @@
                 root.classList.remove('hidden');
                 notice.classList.add('hidden');
                 shown = true;
+                // Now that there is a page to show, ask for room to read it.
+                // Asked AFTER the mount, not at the handshake: a notice or a
+                // refusal is a sentence and needs no document pane.
+                requestHeight(PREFERRED_HEIGHT);
               });
               script.addEventListener('error', function () {
                 blocked(data, 'This chat app did not let the page load.');

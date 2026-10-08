@@ -127,7 +127,7 @@ export function EmbedView() {
         if (next.linked) setAwaitingLink(false);
       })
       .catch((err: unknown) => {
-        // 401 is the token: absent, malformed, or past its two hours. That is
+        // 401 is the token: absent, malformed, or past its hour. That is
         // the expired view — a plain sentence and NO content, ever.
         if (err instanceof EmbedApiError && err.status === 401) {
           setExpired(true);
