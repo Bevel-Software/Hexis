@@ -114,6 +114,20 @@ describe('the shared file rules are one text, in two places', () => {
 
 });
 
+describe('the delete rule for platform files', () => {
+  const managedItems = (): string => sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'managed-items')!.body;
+
+  it('says a nested access.md is deleted by whoever may write it, and the root\'s platform files by nobody', async () => {
+    const body = managedItems();
+    expect(body).toContain('delete_file deletes a nested `access.md` for whoever may write it');
+    expect(body).toContain("its folder then follows its parent's rules");
+    expect(body).toContain("the repository root's `access.md` and `roles.yaml` are deleted by nobody");
+    // The sentence the refusal actually carries, as the tools and the app say it.
+    expect(body).toContain("\"<name> is the repository's own file and cannot be deleted.\"");
+    expect(await composeAgentGuide(DEFAULT_KB_LAYOUT)).toContain(body);
+  });
+});
+
 describe('the handshake text stays inside the length it pins', () => {
   it('holds the shared section under its own cap', () => {
     const section = sharedFileRulesSection(DEFAULT_KB_LAYOUT);

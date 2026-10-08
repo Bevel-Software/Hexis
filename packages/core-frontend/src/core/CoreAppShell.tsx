@@ -67,12 +67,15 @@ import {
   useAppRegistry,
   type AppDef,
   type AppRegistry,
+  type RouteDef,
   type BannerDef,
   type CrCreationInput,
   type CrCreationPort,
   type PaneDef,
 } from './registry';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
+import { EmbedView } from '../modules/embed/components/EmbedView';
+import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
@@ -191,6 +194,18 @@ const CORE_PANES: PaneDef[] = [
   // the shared store owns whether it is showing.
   { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
   { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },
+];
+
+/**
+ * The two pages that are not part of the app: the embed a chat host frames,
+ * and the account-link page it sends an unlinked viewer to. Routes rather
+ * than apps — neither has a place in the switcher, neither sits inside the
+ * three-pane shell, and neither goes through the session gate (see the
+ * comment at the `<Routes>` block below).
+ */
+const CORE_TOP_LEVEL_ROUTES: RouteDef[] = [
+  { path: '/embed', element: <EmbedView /> },
+  { path: '/embed/link', element: <EmbedLinkPage /> },
 ];
 
 /**
@@ -596,6 +611,17 @@ export function CoreAppShell({ registry }: { registry: AppRegistry }) {
             a redeploy affects them all equally. */}
         <MaintenanceOverlay />
         <Routes>
+          {/* The embed surface, OUTSIDE `AppShell` and its auth gate — like
+              the registry routes below, it owns its own auth story. `/embed`
+              authenticates by the embed token in its query and by nothing
+              else (there is no session inside a host's frame);
+              `/embed/link` is the one page that DOES act under a session,
+              which is why the server refuses to let any site frame it.
+              Core's first, so a deployment adds to the app rather than
+              having to re-register these. */}
+          {CORE_TOP_LEVEL_ROUTES.map((r) => (
+            <Route key={r.path} path={r.path} element={r.element} />
+          ))}
           {registry.topLevelRoutes.map((r) => (
             <Route key={r.path} path={r.path} element={r.element} />
           ))}

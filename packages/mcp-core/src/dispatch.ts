@@ -57,6 +57,8 @@ export async function dispatchToolCall(
   tool: ProxiedTool,
   args: Record<string, unknown>,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  /** See {@link toCallToolResult}'s `structured`. */
+  options?: { structured?: boolean },
 ): Promise<CallToolResult> {
   let prev: unknown;
   let hasPrev = false;
@@ -84,5 +86,5 @@ export async function dispatchToolCall(
     return toolError(`The "${tool.mcpName}" tool produced no output: its stream ended without a result.`);
   }
 
-  return toCallToolResult(prev);
+  return toCallToolResult(prev, options);
 }

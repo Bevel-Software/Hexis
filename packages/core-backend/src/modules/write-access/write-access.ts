@@ -48,6 +48,12 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  *  - Account administration: the way an admin brings the number of people
  *    down. Erasing an account with `removeFromAccess` commits to the
  *    knowledge base, and that commit is part of the same act.
+ *  - The embed mint: `POST /api/embed/token` signs a short-lived VIEW
+ *    token for the Atlassian connector and changes nothing; the embed's
+ *    own edit routes stay refused. Its lock heartbeat and cancel stay open
+ *    for the same reason the app's heartbeat does: a held lock is kept or
+ *    let go, and no content changes — refusing them would have an editor
+ *    read the refusal as "your access was withdrawn".
  *  - The tool surface: every tool call is judged by the tool layer itself,
  *    which knows a read tool from a write tool (see `toolHandler`); the MCP
  *    endpoint only relays to it.
@@ -76,6 +82,9 @@ const ALWAYS_WRITABLE: readonly RegExp[] = [
   /^\/api\/workspace\/[^/]+\/workflow\/locks\/heartbeat$/,
   /^\/api\/events\/[^/]+\/focus$/,
   /^\/api\/tools\/preview$/,
+  /^\/api\/embed\/token$/,
+  /^\/api\/embed\/heartbeat$/,
+  /^\/api\/embed\/cancel$/,
 ];
 
 /**

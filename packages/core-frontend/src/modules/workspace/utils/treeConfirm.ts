@@ -2,8 +2,10 @@ import {
   currentKbLayout,
   isPlatformFile,
   isPlatformRestoreShape,
+  isRepositoryOwnFile,
   isRootPlatformFile,
   platformFileRefusal,
+  repositoryOwnFileDeleteRefusal,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import {
@@ -45,6 +47,19 @@ export function platformFileMoveRefusal(
   const rel = repoRelative(wsRelativePath, kbDirName);
   if (rel === null) return null;
   return isPlatformFile(rel, currentKbLayout()) ? platformFileRefusal(rel) : null;
+}
+
+/**
+ * Why this row may not be DELETED whoever asks — the same sentence the server
+ * refuses with — or null when the caller's write access decides. Only the
+ * repository's own files are refused: the root's `access.md` and
+ * `roles.yaml`. A nested `access.md` is deleted like any file its caller may
+ * write, which hands its folder back to the parent's rules.
+ */
+export function platformFileDeleteRefusal(wsRelativePath: string, kbDirName: string | null): string | null {
+  const rel = repoRelative(wsRelativePath, kbDirName);
+  if (rel === null) return null;
+  return isRepositoryOwnFile(rel, currentKbLayout()) ? repositoryOwnFileDeleteRefusal(rel) : null;
 }
 
 /**

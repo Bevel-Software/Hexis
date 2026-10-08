@@ -100,8 +100,9 @@ COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --prod
 
 # Compiled packages + their packaged assets. `coreMigrationsDir()` /
-# `defaultKbTemplateDir()` / `agentGuideDir()` (src/assets.ts) resolve these
-# relative to the package root, so the layout must mirror the source tree.
+# `defaultKbTemplateDir()` / `agentGuideDir()` / `mcpAppDir()` (src/assets.ts)
+# resolve these relative to the package root, so the layout must mirror the
+# source tree.
 # Every folder assets.ts names must be copied here: a missing one is not found
 # until the first request that reads it, and `agent-guide` is read while the
 # tool list is built, so leaving it out took every agent surface down on the
@@ -113,6 +114,7 @@ COPY --from=builder /app/packages/core-backend/dist packages/core-backend/dist
 COPY --from=builder /app/packages/core-backend/migrations packages/core-backend/migrations
 COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend/kb-template
 COPY --from=builder /app/packages/core-backend/agent-guide packages/core-backend/agent-guide
+COPY --from=builder /app/packages/core-backend/mcp-app packages/core-backend/mcp-app
 
 # The server shell (tsx runs TypeScript directly) + the built SPA it serves.
 COPY --from=builder /app/apps/server/src apps/server/src

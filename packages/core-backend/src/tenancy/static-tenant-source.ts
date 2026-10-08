@@ -169,6 +169,11 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     jwtSecret: secrets.jwtSecret,
     secretsEncKey: secrets.secretsEncKey,
     internalTokenSecret: secrets.internalTokenSecret,
+    // No shared-secret mint on a tenant of a host: the Atlassian connector
+    // is pointed at a deployment, not at one knowledge base inside a host,
+    // and a secret derived per tenant would be a credential nobody issued.
+    // The MCP App needs none of it — it mints through the MCP session.
+    embedSharedSecret: '',
     adminEmail,
     adminPassword,
     loginPasswordEnabled,

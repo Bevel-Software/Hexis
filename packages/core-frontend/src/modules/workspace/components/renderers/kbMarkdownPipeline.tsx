@@ -44,6 +44,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { CopyAnchorButton } from './CopyAnchorButton';
 import { KbImage, type KbImageResolver } from './KbImage';
+import { normalizeHref } from '../../../../shared/markdown/hrefs';
 
 export type { KbImageResolver, KbImageSource } from './KbImage';
 
@@ -132,6 +133,29 @@ export interface KbMarkdownComponentOptions {
    * never reach it. See {@link KbImage} for every state.
    */
   resolveImage?: KbImageResolver;
+  /**
+   * WHICH links this surface wants handed to `onOpenFile`, rather than left
+   * to the browser.
+   *
+   * - `'browser'` (default, the app): the internal `.md` path links only.
+   *   An `http(s)` destination becomes a plain `target="_blank"` anchor,
+   *   because in a tab that is exactly right — the browser opens a new tab
+   *   and nothing needs intercepting.
+   * - `'surface'` (the embed): EVERY destination that leaves this page. In a
+   *   host's sandbox there is no `allow-popups`, so `target="_blank"` does
+   *   nothing and the plain anchor NAVIGATES THE FRAME instead — the reader
+   *   loses the page and has no way back. Every such link has to be relayed
+   *   to the host, which is what `onOpenFile` does there.
+   *
+   * It also settles the narrower bug: the `.md` rule meant a knowledge-base
+   * link to an image, a PDF or a document was left to the browser as a
+   * relative URL. In the app that is a stale no-op; in a frame it is another
+   * way to navigate away.
+   *
+   * A same-page `#anchor` is the browser's under BOTH policies: it scrolls
+   * within the view and leaves nothing.
+   */
+  linkPolicy?: 'browser' | 'surface';
 }
 
 /**
@@ -144,6 +168,7 @@ export function useKbMarkdownComponents({
   headingLink,
   onMermaidError = 'error',
   resolveImage,
+  linkPolicy = 'browser',
 }: KbMarkdownComponentOptions) {
   return useMemo(() => {
     // One renderer for h1–h6: reads its level from the hast node's tagName,
@@ -222,6 +247,27 @@ export function useKbMarkdownComponents({
             </a>
           );
         }
+        // A surface that owns every outgoing link takes the rest: an
+        // `http(s)` address, and a workspace path the `.md` rule above did
+        // not match (an image, a PDF, a document). Same-page `#anchor` links
+        // are excluded — they scroll inside this view and leave nothing —
+        // judged on the NORMALISED spelling, as a browser judges it, so a
+        // whitespace-padded ` #goal` still scrolls rather than leaving.
+        if (onOpenFile && linkPolicy === 'surface' && href && !normalizeHref(href).startsWith('#')) {
+          return (
+            <a
+              {...props}
+              href={href}
+              onClick={(e) => {
+                e.preventDefault();
+                onOpenFile(href);
+              }}
+              className="cursor-pointer"
+            >
+              {children}
+            </a>
+          );
+        }
         if (href && /^https?:\/\//i.test(href)) {
           return <a href={href} {...props} target="_blank" rel="noopener noreferrer">{children}</a>;
         }
@@ -258,5 +304,5 @@ export function useKbMarkdownComponents({
         return <pre {...props}>{children}</pre>;
       },
     };
-  }, [onOpenFile, onOpenNodeId, headingLink, onMermaidError, resolveImage]);
+  }, [onOpenFile, onOpenNodeId, headingLink, onMermaidError, resolveImage, linkPolicy]);
 }

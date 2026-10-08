@@ -216,6 +216,25 @@ describe('AccessControlService', () => {
     expect(await svc.canWrite(workspaceId, 'ali@bevel.software', 'Knowledge/Secret/Foo.md')).toBe(false);
   });
 
+  // What deleting a nested access.md (delete_file, or the app's delete) does:
+  // the folder falls back to its parent's rules, nothing else to undo.
+  it('once a nested access.md is deleted, its folder follows the parent\'s rules', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    await writeFile(repo, 'roles.yaml', ROLES_YAML);
+    await writeFile(repo, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+    await writeFile(repo, 'Team/access.md', '---\nread:\n  - deny Felix Kissel <felix@example.com>\n---\n');
+    await writeFile(repo, 'Team/plan.md', 'plan');
+
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
+    expect(await svc.canRead(workspaceId, 'felix@example.com', 'Team/plan.md')).toBe(false);
+
+    await fs.rm(path.join(repo, 'Team/access.md'));
+    svc.invalidate(workspaceId);
+
+    expect(await svc.canRead(workspaceId, 'felix@example.com', 'Team/plan.md')).toBe(true);
+    expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Team/plan.md')).toBe(false);
+  });
+
   it('closeness beats tier: a closer everyone grant overrides a farther email deny', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     await writeFile(repo, 'roles.yaml', ROLES_YAML);

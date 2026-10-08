@@ -96,6 +96,12 @@ services:
       - UPDATE_CHECK
       - PUBLIC_BACKEND_URL
       - PUBLIC_FRONTEND_URL
+      # The shared secret the Atlassian connector presents to the embed mint
+      # (`POST /api/embed/token`). Pass-through, and unset on a deployment
+      # that has no connector pointed at it: that one route then 404s, and
+      # nothing else about the embed depends on it — an agent's `open_page`
+      # mints through the authenticated MCP session instead.
+      - EMBED_SHARED_SECRET
       - DATABASE_URL
       - POSTGRES_HOST=db
       - POSTGRES_USER=${POSTGRES_USER:-bevel}
