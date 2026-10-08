@@ -1798,8 +1798,8 @@ export function SetupScreen({
             <p className="mt-1">
               The move happens as soon as you confirm, with no restart. Unless the new repository holds the
               same history, every working copy on this server stops being used and is cloned fresh from the
-              new repository. Anything committed here and not
-              yet pushed from this server goes out of the app with it. Nothing is deleted, but it is only
+              new repository. Anything saved here that hasn’t reached your git host yet goes out of
+              the app with it. Nothing is deleted, but it is only
               recoverable from the
               <code className="mx-1">replaced-working-copies</code>
               folder on the server, by hand.

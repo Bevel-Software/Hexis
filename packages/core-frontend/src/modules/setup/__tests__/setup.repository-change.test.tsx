@@ -113,7 +113,7 @@ describe('a changed repository address, with change requests open', () => {
     expect(confirm).toHaveTextContent(/stops being used and is cloned fresh/i);
     // The warning has to name the cost, and name it truthfully: the copies are
     // set aside on the server, so the work is out of the app but not destroyed.
-    expect(confirm).toHaveTextContent(/not yet pushed from this server goes out of the app/i);
+    expect(confirm).toHaveTextContent(/hasn’t reached your git host yet goes out of\s+the app/i);
     expect(confirm).toHaveTextContent(/nothing is deleted/i);
     expect(confirm).toHaveTextContent(/replaced-working-copies/);
     expect(confirm).toHaveTextContent('There are 2 open change requests.');

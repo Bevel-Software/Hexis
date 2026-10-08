@@ -112,8 +112,16 @@ export function friendlyGitError(err: unknown): string {
     }
   }
 
-  const raw = rawMessage(err);
+  return friendlyGitMessage(rawMessage(err));
+}
 
+/**
+ * The string half of {@link friendlyGitError}: a backend message, as text,
+ * in plain words. For the places a message reaches the UI as a string, not an
+ * error — an event's `reason`, a reason the server stored, a warning in a
+ * change request's detail.
+ */
+export function friendlyGitMessage(raw: string): string {
   // Protected-branch rejections — `branch` is always quoted. Under the
   // current model the agent's writes against the official versions are NOT
   // hard-rejected on the name alone; path-level access control decides at
@@ -237,6 +245,34 @@ export function friendlyGitError(err: unknown): string {
   if (/^Cancel failed: /.test(raw)) {
     return "Couldn't cancel this change request right now. Try again in a moment.";
   }
+
+  // Applying a change request. The backend merges it and says so; what the
+  // reader cares about is whether it was published. Approving stays the
+  // reader's own act, so only the outcome is renamed.
+  const gate = raw.match(/^Merge gate rejected: (.+)$/s);
+  if (gate) {
+    const reasons = gate[1].split('; ').map(friendlyGitMessage).join(' ');
+    return `Can't publish this yet. ${reasons}`;
+  }
+  if (raw === 'Merge failed') return "Couldn't publish this change.";
+  const mergeFailed = raw.match(/^Merge failed: (.+)$/s);
+  if (mergeFailed) return `Couldn't publish this change: ${mergeFailed[1]}`;
+  if (raw === 'This pull request has already been merged.' || raw === 'This change request has already been merged.') {
+    return 'This change request is already published.';
+  }
+  if (raw === 'This pull request is closed.') return 'This change request is closed.';
+  if (raw === 'This pull request has no file changes to approve.') {
+    return 'This change request changes no files, so there is nothing to publish.';
+  }
+  if (raw === 'This draft conflicts with the target and needs resolving first.') {
+    return "Files changed after this was proposed, so it can't be published as it is.";
+  }
+  if (/^Only admins can merge with bypass\./.test(raw)) {
+    return 'Only an admin can publish a change before everyone has approved it.';
+  }
+  const reapprove = raw.match(/^(.+ need to re-approve .+) after the latest push\.$/s);
+  if (reapprove) return `${reapprove[1]} after the latest changes.`;
+  if (raw === 'change request not found') return 'That change request no longer exists.';
 
   return raw;
 }
