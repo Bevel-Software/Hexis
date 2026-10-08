@@ -69,6 +69,8 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { planMoveLinks } from './move-links.js';
+import { MoveLockedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
@@ -2944,12 +2946,13 @@ export function registerWorkspaceTools(
     // A plain string again: what refuses a move names the guide, and that is in
     // the shared rules now, which are rebuilt from the layout where they live.
     description:
-      'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
+      'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Committed + pushed as you. ' +
       'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
       'DESTINATION folder, so a move can change what you (and others) may do with the file: the dry run answers ' +
       '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }`, where `access` is your ' +
       'own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the move has landed, ' +
-      'with every `access.md` inside a moved folder counted at its new place, and a move whose `accessChanges` is true wants `confirm: true`.',
+      'with every `access.md` inside a moved folder counted at its new place, and a move whose `accessChanges` is true wants `confirm: true`. ' +
+      'Links are rewritten by default, in one commit with the move: those in the moved files and those in other markdown files pointing at them (`links` reports them). `rewriteLinks: false` turns that off. Path mentions in plain prose or code are never changed.',
     inputs: {
       type: 'object',
       properties: {
@@ -2958,6 +2961,7 @@ export function registerWorkspaceTools(
         dest: wsPath(kbDirName, 'Destination path — the full new path; must not exist yet'),
         dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
         confirm: { type: 'boolean', description: 'Required when the move changes your access. Set it only after a dry run.' },
+        rewriteLinks: { type: 'boolean', description: 'Rewrite the links into, out of and between the moved files (default true). `false` moves without touching any link.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -2978,6 +2982,12 @@ export function registerWorkspaceTools(
         confirmationRequired: { type: 'boolean', description: 'True when the call stopped for want of `confirm: true`.' },
         message: str('One sentence on what happened (or did not).'),
         moved: { type: 'boolean', description: 'True once the move landed.' },
+        links: {
+          type: 'object',
+          description:
+            'The link rewrite, the same on a dry run and on the move: `{ filesEdited, linksRewritten, edits: [{ path, from, to }] (the first 100), ' +
+            'notRewritten: [{ path, reason, links }], unsearched? }`. Absent with `rewriteLinks: false`.',
+        },
       },
       required: ['src', 'dest', 'moved'],
     },
@@ -3068,6 +3078,49 @@ export function registerWorkspaceTools(
           : occupiedBy !== null
             ? entryExistsMessage(occupiedBy, dest)
             : undefined;
+      // The links are planned only for a move that may run: a refused one
+      // reads no page. The plan is the same on a dry run and on the move.
+      const rewriteLinks = a.rewriteLinks !== false;
+      const linkPlan = rewriteLinks && reason === undefined
+        ? await planMoveLinks({
+          src,
+          dest,
+          branch,
+          kbDirName,
+          allFiles: await (async () => {
+            const { files, links } = await filesUnder(fs, kbDirName);
+            const symlinks = new Set(links);
+            return files.filter((f) => !symlinks.has(f));
+          })(),
+          canRead: (paths) => resolveReadableMap(
+            (wid, email, rels) => accessControl.canReadBatch(wid, email, rels),
+            workspaceIdForBranch(branch),
+            ctx.user.email,
+            kbDirName,
+            paths,
+          ),
+          writeBlocked: (paths) => writeBlocked(branch, ctx, paths),
+          readText: (p) => nodeFs.readFile(join(root, p), 'utf8'),
+          // Asked only once a page is known to be edited — the hooks hear of
+          // no page merely searched — so a read refusal arrives after the
+          // read; the plan then treats the page as unreadable and never names it.
+          hookRefusal: async (lockAt, path) => {
+            const why = (err: unknown) => `refused: ${err instanceof Error ? err.message : String(err)}`;
+            try {
+              await notifyAgentRead(agentAccessGate, ctx, branch, lockAt);
+            } catch (err) {
+              return { reason: why(err), read: true };
+            }
+            try {
+              await assertAgentWriteAllowed(agentAccessGate, ctx, branch, path);
+              return null;
+            } catch (err) {
+              return { reason: why(err), read: false };
+            }
+          },
+        })
+        : undefined;
+      const moveReason = reason ?? linkPlan?.overCap;
       const impact = {
         src,
         dest,
@@ -3075,8 +3128,9 @@ export function registerWorkspaceTools(
         descendants,
         access: { before, after },
         accessChanges,
-        allowed: reason === undefined,
-        ...(reason !== undefined ? { reason } : {}),
+        allowed: moveReason === undefined,
+        ...(moveReason !== undefined ? { reason: moveReason } : {}),
+        ...(linkPlan ? { links: linkPlan.report } : {}),
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
@@ -3088,6 +3142,7 @@ export function registerWorkspaceTools(
         throw await writeRefusal(branch, blocked[0], folderPath ? 'dir' : 'file');
       }
       if (collision) throw new ToolError(reason!, 409);
+      if (linkPlan?.overCap !== undefined) throw new ToolError(linkPlan.overCap, 400);
       if (accessChanges && a.confirm !== true) {
         return {
           ...impact,
@@ -3100,7 +3155,37 @@ export function registerWorkspaceTools(
       // no-replace move is what guarantees it. A destination created between
       // the two — by another agent, or by the sidebar, which moves without
       // taking this lock — comes back here as a refusal, not an overwrite.
-      await asEntryExists(() => fs.moveFile(src, dest));
+      if (linkPlan === undefined) {
+        await asEntryExists(() => fs.moveFile(src, dest));
+      } else {
+        // The move and every link edit, one commit. Under the locks, each page
+        // is checked to still hold the bytes its edit was computed from.
+        const edits = linkPlan.edits.map((e) => ({ path: e.path, lockAt: e.lockAt, content: e.content }));
+        const check = async () => {
+          for (const e of linkPlan.edits) {
+            const now = await nodeFs.readFile(join(root, e.lockAt), 'utf8').catch(() => null);
+            if (now !== e.original) {
+              throw new ToolError(`"${e.lockAt}" changed while the move was being planned, so nothing was moved. Run the move again.`, 409);
+            }
+          }
+        };
+        const summary = `Move ${src} to ${dest}`.slice(0, 200);
+        const locking = fs as LocalFilesystem & { moveWithEdits?: LockingFilesystem['moveWithEdits'] };
+        try {
+          if (typeof locking.moveWithEdits === 'function') {
+            await asEntryExists(() => locking.moveWithEdits!(src, dest, edits, summary, check));
+          } else {
+            // A filesystem without the one-commit move (none the agent is
+            // handed for writing): the move, then each edit.
+            await check();
+            await asEntryExists(() => fs.moveFile(src, dest));
+            for (const e of edits) await fs.writeFile(e.path, e.content);
+          }
+        } catch (err) {
+          if (err instanceof MoveLockedError) throw new ToolError(err.message, 409);
+          throw err;
+        }
+      }
       // Moving the last file — or a whole folder — out leaves the folder it
       // came from in place, like a delete.
       await keepFolderOf(fs, ctx, branch, src, kbDirName);

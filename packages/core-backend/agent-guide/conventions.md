@@ -11,6 +11,14 @@ merely correct.
    `[Page Name](relative/path/to/Page.md)`, relative to the LINKING file's
    directory rather than the repo root, so links resolve both in the app and on
    the git host.
+   `move_file` keeps most of them working: it rewrites the links inside the
+   moved files and those in the other markdown pages it searches, and names
+   what it left — HTML pages, raw HTML inside a markdown page, and pages you
+   may not change. It does not search
+   `transcripts/` or `probes/` folders, and pages you cannot read are neither
+   searched nor named (the answer only says such pages may exist); links there
+   can still point at the old path. Paths written in prose or code are not
+   links, and a move leaves them as they are.
 
 3. **Absolute dates.** `YYYY-MM-DD`, never "last Tuesday" — a saved file
    outlives the moment it was written.
