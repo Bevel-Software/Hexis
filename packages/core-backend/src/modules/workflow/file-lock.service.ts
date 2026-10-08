@@ -70,6 +70,30 @@ export class FileLockService {
   constructor(private readonly db: Database) {}
 
   /**
+   * Branches being deleted right now, with how many deletions hold each. No
+   * lock is granted on them: a deletion checks that no save is landing and
+   * then removes the branch, and a save that took its lock in between would
+   * be lost with the checkout. See `whileNoneAcquired`.
+   */
+  private readonly closing = new Map<string, number>();
+
+  /**
+   * Run `fn` while no lock can be acquired on `branch`. The deletion paths
+   * re-check for saves landing inside it, so that check and the deletion meet
+   * no save that started in between.
+   */
+  async whileNoneAcquired<T>(branch: string, fn: () => Promise<T>): Promise<T> {
+    this.closing.set(branch, (this.closing.get(branch) ?? 0) + 1);
+    try {
+      return await fn();
+    } finally {
+      const n = (this.closing.get(branch) ?? 1) - 1;
+      if (n > 0) this.closing.set(branch, n);
+      else this.closing.delete(branch);
+    }
+  }
+
+  /**
    * Acquire a lock for `(workspaceId, branch, path)` on behalf of `user`.
    *
    * Three outcomes folded into the same return shape:
@@ -98,6 +122,13 @@ export class FileLockService {
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
     const targetPath = canonicalFileIdentity(rawPath);
+    if (this.closing.has(branch)) {
+      throw new WorkflowValidationError(`"${branch}" is being deleted, so "${targetPath}" cannot be held for editing.`, {
+        kind: 'branch-being-deleted',
+        branch,
+        path: targetPath,
+      });
+    }
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 

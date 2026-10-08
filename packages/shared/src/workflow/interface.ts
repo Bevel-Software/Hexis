@@ -82,7 +82,9 @@ export interface IWorkflowService {
    * An agent's `delete_branch`: the app's author-or-Admin rule, plus the
    * guards an agent needs and a person in the branch switcher does not.
    * Refuses a protected branch, a name that is not a branch, a branch an open
-   * change request comes from or goes into, a branch whose checkout still has
+   * change request that still proposes something (or whose changes cannot be
+   * determined) comes from or goes into — open requests that propose nothing
+   * are closed first, and block nothing — a branch whose checkout still has
    * saves landing or a file held, and — unless `discardUnmerged` — one holding
    * commits that are not on the default branch. Fetches first, strictly: when
    * the shared repository cannot be reached it refuses. Runs from the default

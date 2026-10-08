@@ -392,6 +392,10 @@ describe('SetupScreen', () => {
     render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" />);
     api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: stored });
 
+    // It sits under Advanced, closed by default: opened first, as a person would.
+    const advanced = screen.getByText(/^Advanced/, { selector: 'summary' });
+    await userEvent.click(advanced);
+    expect(advanced.closest('details')).toHaveAttribute('open');
     const box = screen.getByRole('checkbox', { name: 'Remove branches left over from merged change requests' });
     expect(box).toBeChecked();
     await userEvent.click(box);

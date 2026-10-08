@@ -761,13 +761,7 @@ export class WorkflowService implements IWorkflowService {
       // Not coverable by `discardUnmerged`: these are a person's saves on
       // their way into the branch, not work already on it.
       if (await this.savesInFlight(workspaceIdForBranch(name))) {
-        refusals.push(
-          new BranchDeleteBlockedError(
-            'saves-landing',
-            name,
-            `"${name}" still has saves waiting to be committed or a file held for editing. Try again once they have landed.`,
-          ),
-        );
+        refusals.push(this.savesLandingRefusal(name));
       }
       if (state.unmergedCommits > 0 && !opts.discardUnmerged) {
         const n = state.unmergedCommits;
@@ -808,10 +802,16 @@ export class WorkflowService implements IWorkflowService {
         throw this.openRequestRefusal(name, { ...still, url: summary?.url ?? `/change-requests/${still.number}` });
       }
 
-      // Leased on the tip the checks above were made against, so a commit
-      // pushed since is refused by the host instead of deleted unseen.
-      const { lastCommit } = await this.deleteBranchUnlocked(wsId, name, user, {
-        ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
+      // The saves check above is a snapshot; a save could take its file lock
+      // since. With no lock grantable on the branch, it is made again and
+      // nothing can start landing between it and the deletion.
+      const { lastCommit } = await this.fileLocks.whileNoneAcquired(name, async () => {
+        if (await this.savesInFlight(workspaceIdForBranch(name))) throw this.savesLandingRefusal(name);
+        // Leased on the tip the checks above were made against, so a commit
+        // pushed since is refused by the host instead of deleted unseen.
+        return this.deleteBranchUnlocked(wsId, name, user, {
+          ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
+        });
       });
       return {
         kind: 'deleted',
@@ -3280,6 +3280,14 @@ export class WorkflowService implements IWorkflowService {
    * (their file is still only on disk). An answer that cannot be read is a
    * yes — the caller is about to delete the checkout.
    */
+  private savesLandingRefusal(name: string): BranchDeleteBlockedError {
+    return new BranchDeleteBlockedError(
+      'saves-landing',
+      name,
+      `"${name}" still has saves waiting to be committed or a file held for editing. Try again once they have landed.`,
+    );
+  }
+
   private async savesInFlight(wsId: string): Promise<boolean> {
     try {
       return (await this.fileLocks.hasAnyActive(wsId)) || (await this.pendingCommits.hasAnyForWorkspace(wsId));
@@ -3524,6 +3532,22 @@ export class WorkflowService implements IWorkflowService {
   }
 
   private tidyRound: Promise<{ closedEmpty: number; removedLeftovers: number }> | null = null;
+  private tidyStopped = false;
+
+  /**
+   * Stop the tidy-up when the graph stops: no round starts after this, and a
+   * round under way stops at its next request or branch. Then
+   * {@link drainTidy} waits for it, so it cannot fetch or delete once the
+   * pool is ended or a replacement graph owns the same checkout.
+   */
+  stopTidying(): void {
+    this.tidyStopped = true;
+  }
+
+  /** Settles once no tidy-up (nor the sweep that leads into one) is running. */
+  async drainTidy(): Promise<void> {
+    await Promise.allSettled([this.sweepKick, this.tidyRound]);
+  }
 
   /**
    * What follows every sweep for deleted branches — at startup, on a remote
@@ -3536,6 +3560,7 @@ export class WorkflowService implements IWorkflowService {
    */
   tidyAfterSweep(): Promise<{ closedEmpty: number; removedLeftovers: number }> {
     if (this.tidyRound) return this.tidyRound;
+    if (this.tidyStopped) return Promise.resolve({ closedEmpty: 0, removedLeftovers: 0 });
     this.tidyRound = (async () => {
       const closedEmpty = await this.closeEmptyOpenChangeRequests().catch((err: unknown) => {
         crLog.warn('background close of empty change requests failed:', { err });
@@ -3574,6 +3599,7 @@ export class WorkflowService implements IWorkflowService {
     }
     let closed = 0;
     for (const { number } of open) {
+      if (this.tidyStopped) break;
       try {
         const done = await this.closeIfEmpty(number, {
           workspaceId: wsId,
@@ -3660,6 +3686,7 @@ export class WorkflowService implements IWorkflowService {
 
     let removed = 0;
     for (const [branch, shas] of mergeCommits) {
+      if (this.tidyStopped) break;
       if (shas.length === 0) continue;
       try {
         const done = await this.branchLifecycle.run(`branch:${branch}`, async () => {
@@ -3674,12 +3701,12 @@ export class WorkflowService implements IWorkflowService {
             }
           }
           if (!contained) return false;
-          if (await this.savesInFlight(workspaceIdForBranch(branch))) return false;
-          await this.deleteBranchUnlocked(wsId, branch, SYSTEM_ACTOR, {
-            systemCleanup: true,
-            expectTip: state.lastCommit,
+          const tip = state.lastCommit;
+          return this.fileLocks.whileNoneAcquired(branch, async () => {
+            if (await this.savesInFlight(workspaceIdForBranch(branch))) return false;
+            await this.deleteBranchUnlocked(wsId, branch, SYSTEM_ACTOR, { systemCleanup: true, expectTip: tip });
+            return true;
           });
-          return true;
         });
         if (done) removed++;
       } catch (err) {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -13,7 +13,7 @@ import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { FileLockService } from '../file-lock.service.js';
+import { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowHooks } from '../workflow-hooks.js';
@@ -100,6 +100,8 @@ interface Harness {
   };
   fetch: ReturnType<typeof vi.fn>;
   deleted: string[];
+  fileLocks: FileLockService;
+  hasAnyActive: MockInstance<FileLockService['hasAnyActive']>;
 }
 
 /**
@@ -114,6 +116,8 @@ function harness(opts: {
   ancestry?: [string, string][];
   admins?: string[];
   savesLanding?: string[];
+  /** Branches whose checkout has a commit queued (no lock held). */
+  commitsQueued?: string[];
   fetchFails?: boolean;
   /** The changes each open request proposes, by its source branch; absent, one file. `error`: undeterminable. */
   changes?: Record<string, string[] | 'error'>;
@@ -147,6 +151,10 @@ function harness(opts: {
     if (opts.fetchFails) throw new Error('git fetch origin failed — remote refs could not be refreshed');
   });
   const landing = new Set((opts.savesLanding ?? []).map(workspaceIdForBranch));
+  const queued = new Set((opts.commitsQueued ?? []).map(workspaceIdForBranch));
+  // The real service, for its gate on acquiring; what is held is mocked.
+  const fileLocks = new FileLockService({} as Database);
+  const hasAnyActive = vi.spyOn(fileLocks, 'hasAnyActive').mockImplementation(async (ws: string) => landing.has(ws));
   const svc = new WorkflowService(
     fakeDb(rows),
     git as unknown as GitService,
@@ -166,12 +174,12 @@ function harness(opts: {
       hasBootstrappedWorkspace: vi.fn(async () => false),
     } as unknown as WorkspaceService,
     {} as IAccessControl,
-    { hasAnyActive: vi.fn(async (ws: string) => landing.has(ws)) } as unknown as FileLockService,
-    { hasAnyForWorkspace: vi.fn(async () => false) } as unknown as PendingCommitsService,
+    fileLocks,
+    { hasAnyForWorkspace: vi.fn(async (ws: string) => queued.has(ws)) } as unknown as PendingCommitsService,
     testKbContext(),
     openChangeGate(),
   );
-  return { svc, git, fetch, deleted };
+  return { svc, git, fetch, deleted, fileLocks, hasAnyActive };
 }
 
 const merged = (number: number, source: string, sha: string | null): CrRow => ({
@@ -288,6 +296,38 @@ describe('deleteBranchChecked — an agent deletes a branch', () => {
       expect(err.message).toContain('Try again once they have landed');
     }
     expect(h.deleted).toEqual([]);
+  });
+
+  it('refuses a branch with a commit still queued and no file held, with or without discardUnmerged', async () => {
+    const h = harness({
+      branches: { 'ali/draft': { exists: true, lastCommit: 'a3', unmergedCommits: 3 } },
+      commitsQueued: ['ali/draft'],
+    });
+    for (const discardUnmerged of [false, true]) {
+      const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/draft', { discardUnmerged }));
+      expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'saves-landing' });
+    }
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('refuses a save whose lock was taken after the first check, and grants no lock while it deletes', async () => {
+    const h = harness({ branches: { 'ali/draft': clean('a1') } });
+    // Nothing held at the first check; a save takes its lock before the delete.
+    h.hasAnyActive.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/draft'));
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'saves-landing' });
+    expect(h.deleted).toEqual([]);
+
+    // Once the checks pass, no save can start until the branch is gone.
+    h.hasAnyActive.mockResolvedValue(false);
+    let during: unknown = null;
+    h.git.deleteBranch.mockImplementationOnce(async () => {
+      during = await h.fileLocks.acquire(workspaceIdForBranch('ali/draft'), 'ali/draft', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
+      return { lastCommit: 'a1' };
+    });
+    await h.svc.deleteBranchChecked(ADMIN, 'ali/draft');
+    expect(during).toBeInstanceOf(Error);
+    expect((during as { payload?: unknown }).payload).toMatchObject({ kind: 'branch-being-deleted' });
   });
 
   it('answers "no branch named …" for a name that is not a branch, never a success', async () => {
@@ -509,6 +549,22 @@ describe('closeEmptyOpenChangeRequests — the background close', () => {
     expect(h.deleted).toEqual([]);
   });
 
+  it('does nothing once the graph has stopped it, and drains what was running', async () => {
+    const rows = [open(31, 'ali/empty', DEFAULT), merged(32, 'ali/done', 'm1')];
+    const h = harness({
+      rows,
+      branches: { 'ali/empty': clean('e1'), 'ali/done': clean('d1') },
+      ancestry: [['d1', 'm1']],
+      changes: { 'ali/empty': [] },
+    });
+    h.svc.stopTidying();
+    await expect(h.svc.tidyAfterSweep()).resolves.toEqual({ closedEmpty: 0, removedLeftovers: 0 });
+    await h.svc.drainTidy();
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
   it('runs before the leftover cleanup, and even with that cleanup switched off', async () => {
     const h = harness({});
     const order: string[] = [];
@@ -722,7 +778,7 @@ describe('deleteBranchChecked over real git — a delete made from another works
       {} as IReviewWorkflowService,
       workspaces,
       {} as IAccessControl,
-      { hasAnyActive: async () => false } as unknown as FileLockService,
+      { hasAnyActive: async () => false, whileNoneAcquired: (_b: string, fn: () => Promise<unknown>) => fn() } as unknown as FileLockService,
       { hasAnyForWorkspace: async () => false } as unknown as PendingCommitsService,
       testKbContext(),
       openChangeGate(),

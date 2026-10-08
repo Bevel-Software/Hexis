@@ -415,11 +415,13 @@ export class BranchDeleteBlockedError extends WorkflowDomainError {
     message: string,
     extra: Record<string, unknown> = {},
   ) {
+    // `extra` first: it adds detail, and can never contradict the kind,
+    // reason or branch the status and fields above were chosen for.
     super(message, reason === 'state-unconfirmed' ? 503 : 409, {
+      ...extra,
       kind: 'branch-delete-blocked',
       reason,
       branchName,
-      ...extra,
     });
     this.name = 'BranchDeleteBlockedError';
   }

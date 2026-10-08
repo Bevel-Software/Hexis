@@ -443,6 +443,13 @@ export interface CoreStopDeps {
   agentUploadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
   agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /**
+   * The workflow service, for the tidy-up it runs after each sweep (closing
+   * empty requests, removing leftover branches): detached from whatever
+   * started it, so stopped and awaited here before the pool goes. Optional:
+   * a caller that has not built one passes nothing.
+   */
+  workflowService?: { stopTidying(): void; drainTidy(): Promise<void> };
   /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
   startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
@@ -535,6 +542,9 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // synchronous, and nothing after it must be able to clone into a
   // workspaces folder that is about to belong to nobody.
   deps.startupRetry?.stop();
+  // The post-sweep tidy-up: no new round, and the one under way stops at its
+  // next request or branch. Synchronous.
+  deps.workflowService?.stopTidying();
   // Clearing the interval stops future ticks; it does nothing to a job a
   // tick already started, which holds a claim it heartbeats through the
   // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
@@ -552,6 +562,12 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   }
   if (deps.agentDownloadStore) {
     await bounded(deps.agentDownloadStore.drainSweep(), remaining(), 'finishing the download sweep', log);
+  }
+  // The tidy-up in flight fetches and deletes branches through the pool and
+  // the default branch's checkout: awaited, so the next graph for this
+  // tenant cannot find a branch deletion still running under it.
+  if (deps.workflowService) {
+    await bounded(deps.workflowService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

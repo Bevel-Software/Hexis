@@ -125,15 +125,31 @@ describe('DeploymentSettingsService — the leftover-branch cleanup switch', () 
    * On by default; an admin switches it off on the Deployment page, and the
    * environment variable wins over the page, as for every setting.
    */
-  it('is on by default, off once saved as false, and on again when cleared', async () => {
-    const { db } = makeDb();
+  it('is on by default, off once saved as false, and on again when cleared — after a reload too', async () => {
+    const { db, rows } = makeDb();
+    // Clearing deletes the row: the fake does so for real, so a reload proves it.
+    (db as unknown as { delete: () => unknown }).delete = () => ({
+      where: () => {
+        const at = rows.findIndex((r) => r.key === 'retireMergedBranches');
+        if (at >= 0) rows.splice(at, 1);
+        return Promise.resolve();
+      },
+    });
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    const on = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
-    expect(on()).toBe(true);
+    const on = (s: DeploymentSettingsService) => retireMergedBranchesOn(s.resolve('retireMergedBranches'));
+    const reloaded = async () => {
+      const fresh = new DeploymentSettingsService(db, ENC_KEY);
+      await fresh.load();
+      return fresh;
+    };
+    expect(on(settings)).toBe(true);
     await settings.save({ retireMergedBranches: 'false' }, null);
-    expect(on()).toBe(false);
+    expect(on(settings)).toBe(false);
+    expect(on(await reloaded())).toBe(false);
     await settings.save({ retireMergedBranches: '' }, null);
-    expect(on()).toBe(true);
+    expect(on(settings)).toBe(true);
+    expect(rows.some((r) => r.key === 'retireMergedBranches')).toBe(false);
+    expect(on(await reloaded())).toBe(true);
   });
 
   it('lets RETIRE_MERGED_BRANCHES win over the page', async () => {

@@ -22,6 +22,27 @@ function updated(branch: string): BranchSyncOutcome {
 }
 
 describe('KbSyncService', () => {
+  it('answers the sync without waiting for the tidy-up after it', async () => {
+    let finish = (): void => undefined;
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      // A tidy-up that never ends unless told to — and one that fails.
+      tidyAfterSweep: vi
+        .fn()
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (finish = () => resolve({ closedEmpty: 0, removedLeftovers: 0 }))),
+        )
+        .mockRejectedValueOnce(new Error('boom')),
+      retireRemoteGoneClone: vi.fn(async () => true),
+    };
+    const svc = new KbSyncService(workflow, workspaces(['main']));
+    await expect(svc.sync({ branches: 'all' })).resolves.toMatchObject({ status: 'synced' });
+    expect(workflow.tidyAfterSweep).toHaveBeenCalledTimes(1);
+    await expect(svc.sync({ branches: 'all' })).resolves.toMatchObject({ status: 'synced' });
+    finish();
+  });
+
   it('syncs every known clone for an "all" request and reports unknown branches as not cloned', async () => {
     const workflow: SyncWorkflowPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),

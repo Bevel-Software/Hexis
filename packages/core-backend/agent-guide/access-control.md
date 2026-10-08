@@ -242,5 +242,8 @@ File-level write access decides how a change lands on the default branch:
   by the delete. One that still proposes something refuses it, with a link:
   its author can withdraw it, or an Admin can decline it, in the app — hand the
   user that link. Hand the user the
-  `lastCommit` it answers, so the branch can be restored. Drafts whose change
-  request was merged are removed by the server on its own.
+  `lastCommit` it answers, so the branch can be restored. The server removes a
+  draft on its own once its change request was merged, but only while nothing
+  has happened to it since: no commit that is not on the default branch, no
+  request open from or into it, no save still landing, and its last commit
+  the one that was merged. Any other draft stays until someone deletes it.
