@@ -113,7 +113,8 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
   }, [enabled, record, userId, bus]);
 
   useEffect(() => {
-    if (!enabled || !record || record.connection) return;
+    // Same gate as the listener above: no account to ask about, no ask.
+    if (!enabled || !record || !userId || record.connection) return;
     let cancelled = false;
     let inFlight = false;
     let lastAsked = 0;
@@ -158,7 +159,7 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
       document.removeEventListener('visibilitychange', onReturn);
       window.removeEventListener('focus', onReturn);
     };
-  }, [enabled, record]);
+  }, [enabled, record, userId]);
 
   if (!record) return UNKNOWN;
   if (record.connection) return { ...record.connection, connected: true, settled: true };
