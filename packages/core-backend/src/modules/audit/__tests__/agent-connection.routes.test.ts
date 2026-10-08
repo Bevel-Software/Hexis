@@ -18,9 +18,11 @@ import type { AgentUse, IAgentConnectionStatus } from '../audit.contract.js';
 
 const ALICE = 'u-alice';
 const BOB = 'u-bob';
+const CARA = 'u-cara';
 
 const USES: Record<string, AgentUse> = {
   [BOB]: { at: new Date(Date.UTC(2026, 9, 7, 12, 0, 0)), client: 'Claude', kind: 'agent' },
+  [CARA]: { at: new Date(Date.UTC(2026, 9, 7, 13, 0, 0)), client: 'Laptop', kind: 'key' },
 };
 
 const status = {
@@ -64,6 +66,12 @@ describe('GET /onboarding/agent-connection', () => {
     const base = await listen(BOB);
     const res = await fetch(`${base}/api/onboarding/agent-connection`);
     expect(await res.json()).toEqual({ connected: true, at: '2026-10-07T12:00:00.000Z', client: 'Claude', kind: 'agent' });
+  });
+
+  it("keeps a connection key's kind: its label says nothing about which app holds it", async () => {
+    const base = await listen(CARA);
+    const res = await fetch(`${base}/api/onboarding/agent-connection`);
+    expect(await res.json()).toEqual({ connected: true, at: '2026-10-07T13:00:00.000Z', client: 'Laptop', kind: 'key' });
   });
 
   it("answers for the caller alone — a named account in the query is not asked about", async () => {

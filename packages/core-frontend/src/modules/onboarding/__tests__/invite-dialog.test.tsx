@@ -384,7 +384,8 @@ describe('InviteButton (toolbar)', () => {
       </AuthContext.Provider>,
     );
     const button = screen.getByRole('button', { name: 'Invite' });
-    expect(button).toHaveTextContent('');
+    // Exactly empty: the word is the accessible name, never on screen.
+    expect(button.textContent).toBe('');
     await userEvent.click(button);
     expect(screen.getByRole('dialog', { name: 'Invite your team' })).toBeInTheDocument();
   });

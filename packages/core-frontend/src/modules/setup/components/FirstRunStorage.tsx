@@ -188,10 +188,10 @@ export function FirstRunStorage({ repository, onSaved }: Props) {
   }
 
   /**
-   * Ask the host. A refusal is an answer and is shown; only a failure to ask
-   * throws. Null when there is no answer about what is typed now: the request
-   * failed, or the answers were edited while it was out (see
-   * {@link answersEpoch}), and then a Save waiting on it stops and the next
+   * Ask the host. A refusal is an answer and is shown. Never throws: null
+   * when there is no answer about what is typed now — the request failed
+   * (said in the banner), or the answers were edited while it was out (see
+   * {@link answersEpoch}) — and then a Save waiting on it stops, and the next
    * press tests what is on screen.
    */
   async function runTest(): Promise<ConnectionTest | null> {
