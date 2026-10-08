@@ -36,7 +36,21 @@ import '../auth/auth.middleware.js'; // Express Request augmentation
  * page made, so the attacker's frame would read and write as the victim. So
  * every route here reads `token` and never `req.userId`: a request carrying a
  * perfectly valid session and no token is refused.
+ *
+ * ── Cross-origin callers ──────────────────────────────────────────────────
+ *
+ * The MCP App view runs the embed inside a chat host's SANDBOX — another
+ * origin, unknowable in advance (a hash subdomain under Claude's content
+ * domain, a URL-derived one under ChatGPT's) — and calls the token routes
+ * from there. Nothing here has to allow that: the server's app-wide CORS
+ * (`create-core-server.ts`, mounted ahead of this router) already reflects
+ * any origin and answers the preflight, for every route. That is safe on the
+ * token routes for the reason the token-only rule exists: CORS guards a
+ * browser's ambient credentials, these routes take none, and the token in
+ * the request is the whole credential. The routes test mounts the same CORS
+ * to pin that a cross-origin caller gets through.
  */
+
 export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   const router = express.Router();
 

@@ -7,7 +7,7 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MCP_APP_MIME_TYPE, MCP_APP_URI_SCHEME } from '@bevel-software/platform-mcp-core';
 import { OPEN_PAGE_TOOL } from '../embed.tools.js';
-import { isFrameableOrigin, McpAppService, OPEN_PAGE_VIEW_URI, originOf } from '../mcp-app.js';
+import { isSandboxReachableOrigin, McpAppService, OPEN_PAGE_VIEW_URI, originOf } from '../mcp-app.js';
 import { createMcpAppRoutes } from '../mcp-app.routes.js';
 
 let server: Server | null = null;
@@ -31,13 +31,15 @@ describe('the open_page view', () => {
   });
 
   /**
-   * The view frames ONE address: the `/embed` page of the deployment that
-   * served it. Anything wider would buy nothing and widen what a host's
-   * sandbox permits.
+   * The view reaches ONE origin — the deployment that served it — for two
+   * things: fetching its build manifest and the token-only embed API
+   * (connect), and loading the embed bundle (resources). It frames nothing:
+   * Claude's host drops `frameDomains` and pins `frame-src` to `'self'`,
+   * which is why the view runs the bundle in its own document.
    */
-  it('allows framing exactly the deployment own public origin', async () => {
+  it('declares exactly the deployment own public origin for connecting and loading, and no frames', async () => {
     const manifest = await new McpAppService({ publicFrontendUrl: `${PUBLIC}/sub/path` }).manifest();
-    expect(manifest.resources[0].ui.csp?.frameDomains).toEqual([PUBLIC]);
+    expect(manifest.resources[0].ui.csp).toEqual({ connectDomains: [PUBLIC], resourceDomains: [PUBLIC] });
   });
 
   /**
@@ -52,15 +54,20 @@ describe('the open_page view', () => {
     expect(manifest.resources[0].ui.prefersBorder).toBe(false);
   });
 
-  it('is the HTML that frames the embed and relays a link, and nothing that renders content', async () => {
+  it('is the HTML that runs the deployment embed bundle and relays a link, and nothing that renders content', async () => {
     const manifest = await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest();
     const html = manifest.resources[0].text;
     expect(html).toContain('ui/initialize');
     expect(html).toContain('ui/notifications/tool-result');
     expect(html).toContain('ui/open-link');
-    expect(html).toContain('bevel-embed-open');
     expect(html).toContain('structuredContent');
-    // No second rendering path: the view frames the page, it does not draw it.
+    // The deployment's embed bundle, found through its build manifest and
+    // handed the page — not a frame of `/embed`, which a chat host's sandbox
+    // blocks.
+    expect(html).toContain('embed-manifest.json');
+    expect(html).toContain('__HEXIS_EMBED__');
+    expect(html).not.toContain('<iframe');
+    // No second rendering path: the view runs the app's renderers, it does not draw the page itself.
     expect(html).not.toContain('marked');
     expect(html).not.toContain('<markdown');
   });
@@ -78,7 +85,7 @@ describe('the open_page view', () => {
   });
 });
 
-describe('originOf / isFrameableOrigin', () => {
+describe('originOf / isSandboxReachableOrigin', () => {
   it('reduces an address to its origin, and refuses one that does not parse', () => {
     expect(originOf(`${PUBLIC}/sub?x=1#y`)).toBe(PUBLIC);
     expect(originOf('not a url')).toBeNull();
@@ -86,16 +93,17 @@ describe('originOf / isFrameableOrigin', () => {
 
   /**
    * A host runs an app view in a sandboxed https iframe, and no browser lets
-   * an https document frame a plain-http one — so a deployment reached over
-   * http has no embedded view, and `open_page` says so.
+   * an https document load scripts from, or fetch from, a plain-http origin —
+   * so a deployment reached over http has no embedded view, and `open_page`
+   * says so.
    */
   it.each([
     ['https', 'https://hexis.example', true],
     ['plain http', 'http://hexis.example', false],
     ['localhost over http', 'http://localhost:3001', false],
     ['nonsense', 'not a url', false],
-  ])('%s is frameable: %s', (_label, url, expected) => {
-    expect(isFrameableOrigin(url)).toBe(expected);
+  ])('%s is reachable from a sandbox: %s', (_label, url, expected) => {
+    expect(isSandboxReachableOrigin(url)).toBe(expected);
   });
 });
 
@@ -120,7 +128,10 @@ describe('the manifest route the local MCP server reads', () => {
     expect(body.tools[OPEN_PAGE_TOOL].resourceUri).toBe(OPEN_PAGE_VIEW_URI);
     expect(body.resources[0].mimeType).toBe(MCP_APP_MIME_TYPE);
     expect(body.resources[0].text).toContain('ui/initialize');
-    expect(body.resources[0].ui).toMatchObject({ csp: { frameDomains: [PUBLIC] }, prefersBorder: false });
+    expect(body.resources[0].ui).toMatchObject({
+      csp: { connectDomains: [PUBLIC], resourceDomains: [PUBLIC] },
+      prefersBorder: false,
+    });
     expect(body.resources[0].ui).not.toHaveProperty('domain');
   });
 

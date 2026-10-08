@@ -1,0 +1,6 @@
+---
+'@bevel-software/platform-core-backend': patch
+'@bevel-software/platform-core-frontend': patch
+---
+
+The page an agent opens in a chat now renders in Claude. The `open_page` view used to frame the deployment's `/embed` page, and Claude's MCP Apps host pins the sandbox's `frame-src` to `'self'` and ignores the `frameDomains` a view declares, so the view showed a blank box. The view now loads the deployment's own embed bundle into its document — found through `/embed-manifest.json`, which the web app's build writes beside its assets — and mounts the same `EmbedView` the `/embed` route renders, with the token and the deployment's origin handed over and links opened through the host's `ui/open-link`. The view declares the deployment's origin as `connectDomains` and `resourceDomains`, which hosts honour, and no `frameDomains`. The token-only embed routes answer any origin (they carry no cookie to protect); the shared-secret mint and the session-backed link routes do not. A knowledge-base HTML page renders through the renderer's `srcdoc` sandbox as before. A deployment's web app gains an `embed` entry (`src/embed.tsx`) that calls the new `mountEmbed` with its registry, so a renderer the deployment registered draws the page in the chat too.

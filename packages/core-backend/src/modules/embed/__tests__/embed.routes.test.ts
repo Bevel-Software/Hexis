@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
+import cors from 'cors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createEmbedLinkRoutes, createEmbedRoutes, TOKEN_REQUIRED } from '../embed.routes.js';
 import {
@@ -49,9 +50,12 @@ function stubService(overrides: Record<string, unknown> = {}) {
  */
 async function serve(
   service: ReturnType<typeof stubService>,
-  opts: { session?: boolean; restrictFraming?: boolean } = {},
+  opts: { session?: boolean; restrictFraming?: boolean; appWideCors?: boolean } = {},
 ) {
   const app = express();
+  // The server's own CORS, as `create-core-server` mounts it ahead of every
+  // route: any origin reflected, credentials allowed, preflights answered.
+  if (opts.appWideCors) app.use(cors({ origin: true, credentials: true }));
   app.use(express.json());
   // A deployment (or a later change to this app) that stamps a framing
   // restriction on EVERY response, ahead of the embed routes — the case the
@@ -307,5 +311,52 @@ describe('the account-link routes', () => {
     const service = stubService({ unlinkAccount: vi.fn(async () => false) });
     const client = await serve(service, { session: true });
     expect((await client.del('/api/embed/links/someone-elses')).status).toBe(404);
+  });
+});
+
+/**
+ * The MCP App view runs the embed inside a chat host's SANDBOX — another
+ * origin, and one no deployment can know in advance — and calls the token
+ * routes from there. The server's app-wide CORS is what lets it: mounted
+ * here as `create-core-server` mounts it, so what is pinned is the behaviour
+ * a sandbox actually meets, not a header these routes set themselves. Safe
+ * on the token routes for the reason the token-only rule exists: CORS guards
+ * a browser's ambient credentials, these routes take none, and the token in
+ * the request is the whole credential.
+ */
+describe('a cross-origin caller reaches the token routes through the app-wide CORS', () => {
+  const SANDBOX = 'https://sandbox.example';
+  const FOREIGN = { origin: SANDBOX };
+
+  it.each(DATA_ROUTES)('%s %s answers the sandbox origin', async (method, path) => {
+    const client = await serve(stubService(), { appWideCors: true });
+    const res =
+      method === 'GET'
+        ? await client.get(`${path}?token=${TOKEN}`, FOREIGN)
+        : await client.post(path, { token: TOKEN, content: 'x' }, FOREIGN);
+    expect(res.status).toBeLessThan(400);
+    expect(res.headers.get('access-control-allow-origin')).toBe(SANDBOX);
+  });
+
+  it('answers the preflight a JSON POST from the sandbox triggers', async () => {
+    const client = await serve(stubService(), { appWideCors: true });
+    const res = await fetch(`${client.base}/api/embed/save`, {
+      method: 'OPTIONS',
+      headers: { ...FOREIGN, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(SANDBOX);
+    expect(res.headers.get('access-control-allow-methods')).toContain('POST');
+    expect(res.headers.get('access-control-allow-headers')?.toLowerCase()).toContain('content-type');
+  });
+
+  it('still refuses a sandbox caller that brings no token', async () => {
+    // Being reachable from another origin changes nothing about who may
+    // read: the token is the credential, and a request without it is 401
+    // from the sandbox exactly as from a tab.
+    const client = await serve(stubService(), { appWideCors: true });
+    const res = await client.get('/api/embed/load', FOREIGN);
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe(TOKEN_REQUIRED);
   });
 });
