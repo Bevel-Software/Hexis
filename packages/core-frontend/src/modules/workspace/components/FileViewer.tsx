@@ -1,12 +1,13 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
-import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
+import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History, Users } from 'lucide-react';
+import { KNOWLEDGE_BASE_DIR, type FileTreeEntry, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { publishEditablePage, withdrawEditablePage } from '../state/editable-page';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
+import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../../../shared/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -56,8 +57,20 @@ import { useStarterPacks } from '../../onboarding/state/starter-packs';
 const SUGGESTION_LIMIT = 4;
 
 /** What a page is called, without the extension the reader did not choose. */
-function pageTitle(fileName: string): string {
-  return fileName.replace(/\.(md|markdown)$/i, '');
+function pageTitle(path: string, kbDirName: string | null): string {
+  return displayFileName(path, kbDirName).replace(/\.(md|markdown)$/i, '');
+}
+
+/**
+ * What an access rules file governs, said the way the explorer names it: the
+ * folder's own name, "Knowledge" for the knowledge section, and the whole
+ * knowledge base for the one at its top.
+ */
+function governedFolderLabel(folder: string, kbDirName: string | null): string {
+  if (kbDirName && folder === kbDirName) return 'everything in this knowledge base';
+  const rel = kbDirName && folder.startsWith(`${kbDirName}/`) ? folder.slice(kbDirName.length + 1) : folder;
+  if (rel === KNOWLEDGE_BASE_DIR) return 'everything in Knowledge';
+  return rel.slice(rel.lastIndexOf('/') + 1);
 }
 
 /** The folder a page sits in, or '' for one that sits at a root. */
@@ -492,8 +505,9 @@ export function FileViewer() {
       .then(async ({ acquired, contended, error }) => {
         if (!acquired) {
           // Two failure shapes:
-          //   - Contention (`contended`): held by someone else → the "Locked
-          //     by X" banner (below) already explains it; don't double-report.
+          //   - Contention (`contended`): held by someone else → the "X is
+          //     editing this page" banner (below) already explains it; don't
+          //     double-report.
           //   - Access-denied 403 / network (`error`, not contended): surface
           //     it. `useFileAccess` default-allows on a transient lookup
           //     failure, so the editor lets the user click Edit even when the
@@ -838,7 +852,7 @@ export function FileViewer() {
         // Read the message off the resolved outcome, not `fileLock.lockError`
         // — that's React state and is stale in this closure right after the
         // await. Covers both the access-denied 403 and lock-contention cases.
-        throw new Error(error ?? 'File is locked by another user.');
+        throw new Error(error ?? 'Someone else is editing this page.');
       }
       try {
         await fileLock.saveAndRelease();
@@ -956,6 +970,23 @@ export function FileViewer() {
     });
   }, [openFilePath]);
 
+  // An access rules file is its FOLDER's access, written down. Its page says
+  // so, and hands over the sheet that edits it: Manage access on the folder,
+  // the same sheet the folder's row in the tree opens. (Share in the header
+  // stays what it is on every page, access to this one file.)
+  const accessFolder =
+    openFilePath && isAccessRulesFile(openFilePath) && openFilePath.includes('/')
+      ? openFilePath.slice(0, openFilePath.lastIndexOf('/'))
+      : null;
+  const handleManageFolderAccess = useCallback(() => {
+    if (!accessFolder) return;
+    setShareTarget({
+      name: accessFolder.slice(accessFolder.lastIndexOf('/') + 1),
+      relativePath: accessFolder,
+      type: 'directory',
+    });
+  }, [accessFolder]);
+
   // Where to start, for a viewer with nothing open. Computed here rather than
   // in the empty branch below because that branch is a `return` and this is a
   // hook — and it costs nothing while a file IS open, which is the common case.
@@ -1047,7 +1078,7 @@ export function FileViewer() {
                       >
                         <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
                         <span className="min-w-0 flex-1 truncate text-ui text-ink">
-                          {pageTitle(page.name)}
+                          {pageTitle(page.relativePath, kbDirName)}
                         </span>
                         {/* The folder it sits in — two pages can share a name,
                             and the one thing that tells them apart is where they
@@ -1094,8 +1125,9 @@ export function FileViewer() {
 
   // What the pane card's bar names — extension kept, unlike the `<h1>` above,
   // because the bar is the technical label (`SKILL.md`, `How to get
-  // started.md`) exactly as the skill page's file bar renders it.
-  const fileBaseName = openFilePath.slice(openFilePath.lastIndexOf('/') + 1);
+  // started.md`) exactly as the skill page's file bar renders it. A platform
+  // file is the exception: it reads by its plain name, its real one on hover.
+  const fileBaseName = displayFileName(openFilePath, kbDirName);
 
   // The repo-relative path (kbDirName stripped) — what the change-request
   // machinery speaks. Null for files outside the KB clone, which cannot have
@@ -1232,9 +1264,9 @@ export function FileViewer() {
       onClick={handleEnterEditMode}
       title={
         lockedBy
-          ? `Locked by ${lockedBy}`
+          ? `${lockedBy} is editing this page`
           : isEnteringEdit
-            ? 'Acquiring lock and fetching latest content…'
+            ? 'Getting the latest version…'
             : 'Click to edit this file'
       }
     >
@@ -1301,6 +1333,7 @@ export function FileViewer() {
         header={
           <KbPageHeader
             path={openFilePath}
+            kbDirName={kbDirName}
             canWrite={access.canWrite}
             editMode={editMode}
             entering={isEnteringEdit}
@@ -1385,6 +1418,20 @@ export function FileViewer() {
                   onClick={() => setBannerCr(requestsOnThisFile[0])}
                 >
                   Review the change
+                </Button>
+              </div>
+            </Banner>
+          )}
+          {accessFolder && (
+            <Banner role="note" tone="neutral" icon={<Users size={14} />} className="mb-4 flex-none">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1">
+                  This file controls who can see and change{' '}
+                  <span className="font-medium">{governedFolderLabel(accessFolder, kbDirName)}</span>.
+                  Change it with Manage access.
+                </span>
+                <Button variant="outline" size="sm" onClick={handleManageFolderAccess}>
+                  Manage access
                 </Button>
               </div>
             </Banner>
@@ -1480,12 +1527,12 @@ export function FileViewer() {
             <Banner
               role="status"
               tone="wait"
-              icon={<Lock size={14} />}
+              icon={<Pencil size={14} />}
               aria-live="polite"
               aria-atomic="true"
               className="mb-4 flex-none"
             >
-              Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
+              <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
             </Banner>
           )}
 
@@ -1553,7 +1600,7 @@ export function FileViewer() {
           >
             {shellVariant === 'prose' ? (
               <>
-                <FilePaneCard file={fileBaseName} actions={paneActions}>
+                <FilePaneCard file={fileBaseName} fileTitle={fileNameTooltip(openFilePath, kbDirName)} actions={paneActions}>
                   {rendererElement}
                 </FilePaneCard>
                 {/* Every open proposal on this file, under the file it is

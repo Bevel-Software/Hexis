@@ -92,6 +92,8 @@ describe('GitSyncFailedBanner', () => {
     expect(alert.textContent).toContain('saved here');
     expect(alert.textContent).toContain('server logs');
     expect(alert.textContent).toContain('feat/x');
+    expect(alert.textContent).toContain('aren’t reaching your git host');
+    expect(alert.textContent).not.toMatch(/remote repository/i);
   });
 
   it('shows the sanitised git reason as the detail line', () => {
@@ -204,8 +206,11 @@ describe('GitSyncFailedBanner — remote-sync conflict', () => {
     bus.emit(CONFLICT);
     const alert = screen.getByRole('alert');
     // This one IS the author's to act on — no "check the server logs".
-    expect(alert.textContent).toContain('changed both here and there');
+    expect(alert.textContent).toContain('changed both here and on your git host');
     expect(alert.textContent).not.toContain('server logs');
+    // Plain words: no branch name, no "in sync", no "reconcile".
+    expect(alert.textContent).not.toContain('feat/x');
+    expect(alert.textContent).not.toMatch(/\bsync|reconcile|repository/i);
     expect(screen.getByRole('button', { name: 'Plugins/x/SKILL.md' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Docs/a.md' })).toBeTruthy();
   });

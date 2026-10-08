@@ -7,17 +7,13 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
 import type { OpenTab } from '../state/workspace.context';
+import { displayFileName } from '../../../shared/display-file-name';
 import '../workspace.css';
 
 const DRAG_MIME = 'application/x-bevel-tab-path';
 
 const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
   `You have unsaved changes in:\n  - ${filenames.join('\n  - ')}\nClose anyway?`;
-
-function basename(path: string): string {
-  const i = path.lastIndexOf('/');
-  return i >= 0 ? path.slice(i + 1) : path;
-}
 
 interface MenuState {
   tab: OpenTab;
@@ -31,6 +27,7 @@ export function EditorTabs() {
     activeTab,
     closeTab,
     reorderTab,
+    kbDirName,
   } = useWorkspace();
   const { openFile: navigateToFile, closeFile: navigateToBranchRoot } = useFileNav();
 
@@ -145,7 +142,7 @@ export function EditorTabs() {
             const dirty = tabs.filter((t) => t.isDirty);
             if (dirty.length > 0) {
               const ok = window.confirm(
-                UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))),
+                UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path, kbDirName))),
               );
               if (!ok) return;
             }
@@ -179,7 +176,7 @@ export function EditorTabs() {
               console.error('[EditorTabs] Failed to close tabs', failures);
               window.alert(
                 `Failed to close ${failures.length} tab(s): ${failures
-                  .map((f) => basename(f.path))
+                  .map((f) => displayFileName(f.path, kbDirName))
                   .join(', ')}`,
               );
             }
@@ -223,7 +220,8 @@ function TabPill(props: TabPillProps) {
     onDragEnd,
   } = props;
 
-  const filename = basename(tab.path);
+  const { kbDirName } = useWorkspace();
+  const filename = displayFileName(tab.path, kbDirName);
   const hasPending = tab.pendingFileContent !== null;
   const hasChangeRequest = useOpenChangeRequests().paths.has(tab.path);
   const ref = useRef<HTMLDivElement>(null);
