@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem } from '../../../shared/components';
-import { useConfirm, useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
+import { useConfirm, useDismissableMenu, useLatestRef, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
@@ -35,6 +35,9 @@ export function EditorTabs() {
   } = useWorkspace();
   const { openFile: navigateToFile, closeFile: navigateToBranchRoot } = useFileNav();
   const confirm = useConfirm();
+  // The live workspace, for a bulk close that awaits: the render that started
+  // it has gone stale by the time it navigates.
+  const workspaceIdRef = useLatestRef(workspaceId);
 
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
@@ -166,6 +169,9 @@ export function EditorTabs() {
             const closingActive = activePath !== null && tabs.some((t) => t.path === activePath);
             let lastActivePath = activePath;
             let closedAny = false;
+            // With skipConfirm, a close is refused only because the workspace
+            // moved on; after that, every path computed here is the old branch's.
+            let movedOn = false;
             // Store only the path + error metadata — the full OpenTab carries
             // file content/pendingFileContent which we don't want in logs or
             // any future telemetry sink.
@@ -179,6 +185,8 @@ export function EditorTabs() {
                 if (closed) {
                   lastActivePath = newActivePath;
                   closedAny = true;
+                } else {
+                  movedOn = true;
                 }
               } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
@@ -186,9 +194,10 @@ export function EditorTabs() {
                 failures.push({ path: t.path, message, stack });
               }
             }
-            // Nothing closed (the workspace moved on while asked): the URL
+            // The workspace moved on (while asked, or partway through): the URL
             // belongs to the new branch now, leave it alone.
-            if (closingActive && closedAny) {
+            const stillHere = !movedOn && workspaceIdRef.current === askedInWorkspaceId;
+            if (closingActive && closedAny && stillHere) {
               if (lastActivePath) navigateToFile(lastActivePath);
               else navigateToBranchRoot();
             }

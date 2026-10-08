@@ -201,6 +201,26 @@ describe('EditorTabs', () => {
     expect(closeTab.mock.calls[1]).toEqual([tabs[2], { skipConfirm: true, workspaceId: 'ws-1' }]);
   });
 
+  it('a bulk close leaves the URL alone when the workspace moves partway through', async () => {
+    const user = userEvent.setup();
+    mockNavigate.mockClear();
+    // The first close lands; then the workspace moves to another branch and
+    // closeTab refuses the rest.
+    const closeTab = vi
+      .fn<WorkspaceContextValue['closeTab']>()
+      .mockResolvedValueOnce({ closed: true, newActivePath: 'b.md' })
+      .mockResolvedValue({ closed: false, newActivePath: 'elsewhere.md' });
+    const tabs = [makeTab('a.md'), makeTab('b.md'), makeTab('c.md')];
+    const ws = makeWorkspace(tabs, 'c.md', { closeTab });
+    render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
+
+    fireEvent.contextMenu(screen.getAllByRole('tab')[0]); // right-click on a
+    await user.click(screen.getByText('Close all'));
+
+    await vi.waitFor(() => expect(closeTab).toHaveBeenCalledTimes(3));
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
   it('"Close tabs to the right" only closes tabs after the target', async () => {
     const user = userEvent.setup();
     const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: null }));
