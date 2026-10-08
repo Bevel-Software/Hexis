@@ -330,8 +330,14 @@ const NAV_BRIDGE = `
     if (id === '') return null;
     var el = document.getElementById(id);
     if (el) return el;
+    // The standard's fallback is the first <a name="…"> — an anchor, and only
+    // an anchor. A form control's name is not a fragment target: a browser
+    // leaves '#query' alone when only <input name="query"> carries it.
     var named = document.getElementsByName ? document.getElementsByName(id) : null;
-    return named && named.length ? named[0] : null;
+    for (var i = 0; named && i < named.length; i++) {
+      if (named[i].tagName && named[i].tagName.toUpperCase() === 'A') return named[i];
+    }
+    return null;
   }
   // A bare fragment is an in-page jump, scrolled here inside the frame. The
   // target is found as the HTML standard finds it: the fragment as written

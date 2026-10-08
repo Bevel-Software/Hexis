@@ -503,6 +503,26 @@ describe('buildSandboxedHtml', () => {
       expect(bridge.posted).toEqual([]);
     });
 
+    // The standard's fallback is the named ANCHOR: a form control carrying
+    // the name is not a target, even when it comes first in the document.
+    it('a name on a form control is not a fragment target; only <a name> is', () => {
+      const bridge = runBridge({ names: ['legacy'], namedControls: ['legacy', 'query'] });
+      const { prevented } = bridge.click('#query');
+      expect(bridge.scrolled).toEqual([]);
+      expect(prevented).toBe(true);
+      bridge.click('#legacy');
+      expect(bridge.scrolled).toEqual(['legacy']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('leaves a click that is not on a link alone — a button, a div — whatever it carries', () => {
+      const bridge = runBridge({ ids: ['goal'] });
+      const { prevented } = bridge.click('#goal', { noAnchor: true });
+      expect(prevented).toBe(false);
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.posted).toEqual([]);
+    });
+
     // The HTML standard's order: the fragment as written names the target
     // first, its decoding only when that finds nothing.
     it('prefers the id as written over its percent-decoding, as a browser does', () => {

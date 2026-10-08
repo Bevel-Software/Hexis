@@ -84,7 +84,7 @@ describe('the html-views guide section agrees with the renderer', () => {
   it('says a bare fragment scrolls the page, and the bridge does exactly that', () => {
     expect(flat).toContain('**A bare fragment scrolls the page.**');
     expect(flat).toContain('the page stays loaded and the app does not move');
-    expect(flat).toContain('A fragment that names no element does nothing, except `#` and `#top`, which scroll to the top of the page');
+    expect(flat).toContain('A fragment that names no element by `id`, and no `<a name>`, does nothing, except `#` and `#top`, which scroll to the top of the page');
     expect(flat).toContain('The same rules apply to a click on a link and to `window.bevel.openNode(href)` or `window.bevel.navigate(href)`');
 
     for (const route of ['click', 'openNode', 'navigate'] as const) {
