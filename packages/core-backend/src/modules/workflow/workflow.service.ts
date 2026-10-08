@@ -693,6 +693,19 @@ export class WorkflowService implements IWorkflowService {
       for (const { number } of reopened) {
         this.prs.invalidateDetailCache(number);
         crLog.info(`reopened change request #${number} for ${actor}: deleting "${branch}" failed after it was closed`);
+        // The close told every tab the request was gone; announce it back,
+        // as an open does, so none keeps leaving it out.
+        const summary = await this.prs.getPr(number).catch(() => null);
+        if (summary) {
+          this.events?.emit({
+            kind: 'change-request-opened',
+            number,
+            source: summary.branch,
+            target: summary.base,
+            authorIdHash: summary.authorId ?? null,
+            title: summary.title,
+          });
+        }
       }
     } catch (err) {
       crLog.warn(`could not reopen change requests ${numbers.map((n) => `#${n}`).join(', ')} after deleting "${branch}" failed:`, { err });

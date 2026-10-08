@@ -18,6 +18,7 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowHooks } from '../workflow-hooks.js';
 import { WorkflowService } from '../workflow.service.js';
+import type { WorkflowEventBus } from '../event-bus.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import {
   BranchAuthorshipError,
@@ -112,6 +113,8 @@ interface Harness {
   fetch: ReturnType<typeof vi.fn>;
   deleted: string[];
   fileLocks: FileLockService;
+  /** What the service announced to connected tabs. */
+  emitted: { kind: string; number?: number }[];
   hasAnyActive: MockInstance<FileLockService['hasAnyActive']>;
 }
 
@@ -136,6 +139,7 @@ function harness(opts: {
   deleteFails?: string[];
 }): Harness {
   const deleted: string[] = [];
+  const emitted: { kind: string; number?: number }[] = [];
   const rows = opts.rows ?? [];
   const branches = { ...(opts.branches ?? {}) };
   const git = {
@@ -203,8 +207,9 @@ function harness(opts: {
     { hasAnyForWorkspace: vi.fn(async (ws: string) => queued.has(ws)) } as unknown as PendingCommitsService,
     testKbContext(),
     openChangeGate(),
+    { emit: (e: { kind: string; number?: number }) => void emitted.push(e) } as unknown as WorkflowEventBus,
   );
-  return { svc, git, fetch, deleted, fileLocks, hasAnyActive };
+  return { svc, git, fetch, deleted, fileLocks, emitted, hasAnyActive };
 }
 
 const merged = (number: number, source: string, sha: string | null): CrRow => ({
@@ -541,6 +546,13 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     expect(closes.map((c) => c.number)).toEqual([21, 22]);
     expect(reopens.sort()).toEqual([21, 22]);
     expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+    // Every tab was told each request went, and is told it is back.
+    const told = (kind: string) => h.emitted.filter((e) => e.kind === kind).map((e) => e.number).sort();
+    expect(told('change-request-rejected')).toEqual([21, 22]);
+    expect(h.emitted.filter((e) => e.kind === 'change-request-opened')).toEqual([
+      expect.objectContaining({ number: 21, source: 'ali/sync', target: DEFAULT }),
+      expect.objectContaining({ number: 22, source: 'ali/feature', target: 'ali/sync' }),
+    ]);
     // The app's path, the same.
     reopens.length = 0;
     await expect(h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ali/sync', ADMIN)).rejects.toThrow(/stale info/);
