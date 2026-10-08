@@ -1,7 +1,6 @@
 import { useMemo } from 'react';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
-import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from '../git/branch-delete-menu-item';
 
 /**
  * The settings rows, and the one merge that orders them.
@@ -20,8 +19,9 @@ import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from '../git/branch-delete-menu-item'
  * Connected apps, feedback, LLM configuration, …) is registry-contributed —
  * see the enterprise shell's `adminMenuItems`. The `order` values interleave
  * the two lists to reproduce the historical row order. In THIS repo the
- * registry is empty (`makeRegistry({})`), so the menu is these six rows and no
- * more; the enterprise app gets all thirteen.
+ * registry is empty (`makeRegistry({})`), so the menu is these rows plus the
+ * core modules' own action rows the shell merges in (git's "Ask before
+ * deleting branches", while it applies); the enterprise app gets all thirteen.
  *
  * Skills & Tools is deliberately NOT here. It is an APP (see `CORE_APPS` in
  * CoreAppShell), and apps belong to the app switcher — which already lists it
@@ -33,7 +33,11 @@ import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from '../git/branch-delete-menu-item'
  * to one. The closures said the same thing twice — where the row goes, and how
  * to go there — and only the second half was legible to anything that was not
  * a click. The `dialog` and `onSelect` contracts on {@link AdminMenuItem} stay
- * fully supported for registry-contributed rows.
+ * fully supported for rows that arrive through the registry — and not every
+ * such row is the enterprise shell's: `CoreAppShell` merges core modules' own
+ * action rows into `registry.adminMenuItems` (git's "Ask before deleting
+ * branches", an `onSelect` row with no `path`, which therefore never reaches
+ * the settings nav).
  */
 export const CORE_MENU_ITEMS: AdminMenuItem[] = [
   {
@@ -74,9 +78,6 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     label: 'Account',
     path: '/account',
   },
-  // Git's row, shown only while the branch-delete question is off. It has no
-  // `path`, so the settings nav never lists it.
-  BRANCH_DELETE_CONFIRM_MENU_ITEM,
   {
     id: 'deployment',
     section: 'admin',

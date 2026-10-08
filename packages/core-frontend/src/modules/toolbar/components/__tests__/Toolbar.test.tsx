@@ -28,6 +28,7 @@ import {
   type AdminMenuItem,
   type ToolbarItemDef,
 } from '../../../../core/registry';
+import { GIT_MENU_ITEMS } from '../../../git';
 
 const stubAdminMenuItems: AdminMenuItem[] = [
   {
@@ -176,7 +177,9 @@ function renderToolbar(overrides?: {
                     >
                       <AppRegistryContext.Provider
                         value={makeRegistry({
-                          adminMenuItems: stubAdminMenuItems,
+                          // As `withCoreModuleContributions` composes it: git's own
+                          // rows ahead of the registry's.
+                          adminMenuItems: [...GIT_MENU_ITEMS, ...stubAdminMenuItems],
                           toolbarItems: overrides?.toolbarItems ?? [],
                         })}
                       >

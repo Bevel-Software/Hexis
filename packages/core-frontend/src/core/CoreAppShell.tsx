@@ -74,6 +74,7 @@ import {
   type CrCreationPort,
   type PaneDef,
 } from './registry';
+import { withCoreModuleContributions } from './core-contributions';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
 import { EmbedView } from '../modules/embed/components/EmbedView';
 import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
@@ -594,12 +595,13 @@ function AppShell() {
  */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // Core contributions merge ahead of registry-contributed ones: the core
-  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
-  // The review file-viewer panel is no longer registered here — see the note
-  // on `chrome` above.
+  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read,
+  // and core modules' own rows (see `withCoreModuleContributions`). The
+  // review file-viewer panel is no longer registered here — see the note on
+  // `chrome` above.
   const mergedRegistry = useMemo<AppRegistry>(
     () => ({
-      ...registry,
+      ...withCoreModuleContributions(registry),
       apps: [...CORE_APPS, ...registry.apps],
     }),
     [registry],
