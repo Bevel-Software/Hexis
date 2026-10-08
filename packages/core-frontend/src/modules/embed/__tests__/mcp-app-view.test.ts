@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * The MCP App view the backend serves as `ui://hexis/page.html`, RUN — not
+ * The MCP App view the backend serves as `ui://hexis/page-<hash>.html`, RUN — not
  * grepped. It lives in core-backend's packaged `mcp-app/` folder, and this
  * package is the one with a DOM to run it in.
  *
