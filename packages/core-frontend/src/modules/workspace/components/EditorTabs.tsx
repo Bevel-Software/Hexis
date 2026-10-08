@@ -7,7 +7,7 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
 import type { OpenTab } from '../state/workspace.context';
-import { displayFileName } from '../../../shared/display-file-name';
+import { displayFileName } from '../utils/display-file-name';
 import '../workspace.css';
 
 const DRAG_MIME = 'application/x-bevel-tab-path';

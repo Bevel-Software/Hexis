@@ -23,7 +23,7 @@ import {
   type RendererFileRef,
 } from '../../workspace/components/renderers';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip } from '../../workspace/utils/display-file-name';
 
 /**
  * One past save of a file, shown the way the FILE PAGE shows that file.

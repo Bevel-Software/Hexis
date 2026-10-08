@@ -14,11 +14,13 @@ import { fetchAgentConnection, type AgentConnection } from '../services/agent-co
  * tab — for an agent that connected before this tab existed, or while its
  * stream was down. Never on a timer.
  *
- * A "yes" is remembered for the session, per account, and every mounted
- * reader hears it: the page that saw the agent arrive hands the answer to the
- * list it navigates back to, instead of the list showing "not yet" until its
- * own request comes back. A "not yet" is never remembered — it is exactly the
- * answer expected to change.
+ * A "yes" is remembered for the session, PER SIGNED-IN USER — the record
+ * hangs off the auth context's user object, which the session holds for as
+ * long as that person is signed in — and every mounted reader hears it: the
+ * page that saw the agent arrive hands the answer to the list it navigates
+ * back to, instead of the list showing "not yet" until its own request
+ * comes back. A "not yet" is never remembered — it is exactly the answer
+ * expected to change. A fresh session starts from nothing.
  */
 
 /**
@@ -27,29 +29,43 @@ import { fetchAgentConnection, type AgentConnection } from '../services/agent-co
  */
 export const AGENT_RECHECK_MS = 30_000;
 
-const knownConnected = new Map<string, AgentConnection>();
-const listeners = new Set<() => void>();
-let version = 0;
-
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+interface Known {
+  connection: AgentConnection | null;
+  version: number;
+  listeners: Set<() => void>;
+  subscribe(listener: () => void): () => void;
+  snapshot(): number;
 }
 
-const snapshot = () => version;
+const known = new WeakMap<object, Known>();
 
-function rememberConnected(userId: string, connection: AgentConnection): void {
-  knownConnected.set(userId, connection);
-  version++;
-  listeners.forEach((l) => l());
+function knownFor(user: object): Known {
+  const found = known.get(user);
+  if (found) return found;
+  const record: Known = {
+    connection: null,
+    version: 0,
+    listeners: new Set(),
+    subscribe(listener) {
+      record.listeners.add(listener);
+      return () => record.listeners.delete(listener);
+    },
+    snapshot: () => record.version,
+  };
+  known.set(user, record);
+  return record;
 }
 
-/** Test seam: forget every remembered connection. */
-export function resetAgentConnectionForTests(): void {
-  knownConnected.clear();
-  version++;
-  listeners.forEach((l) => l());
+function rememberConnected(record: Known, connection: AgentConnection): void {
+  record.connection = connection;
+  record.version++;
+  record.listeners.forEach((l) => l());
 }
+
+const nobody = {
+  subscribe: () => () => {},
+  snapshot: () => 0,
+};
 
 export interface AgentConnectionState extends AgentConnection {
   /** The first answer is in (a failed request counts as "not yet"). */
@@ -71,13 +87,14 @@ const UNKNOWN: AgentConnectionState = { connected: false, settled: false };
  */
 export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {}): AgentConnectionState {
   const auth = useContext(AuthContext);
-  const userId = auth?.user?.id ?? null;
+  const user = auth?.user ?? null;
+  const userId = user?.id ?? null;
+  const record = user ? knownFor(user) : null;
   const bus = useEventBus();
-  useSyncExternalStore(subscribe, snapshot, snapshot);
-  // Keyed by account, so a tab that switches accounts never shows one
+  useSyncExternalStore(record?.subscribe ?? nobody.subscribe, record?.snapshot ?? nobody.snapshot, nobody.snapshot);
+  // Keyed by the record, so a tab that switches accounts never shows one
   // person's answer to the next.
-  const [answer, setAnswer] = useState<{ userId: string; state: AgentConnectionState } | null>(null);
-  const known = userId ? knownConnected.get(userId) : undefined;
+  const [answer, setAnswer] = useState<{ record: Known; state: AgentConnectionState } | null>(null);
 
   // The server's word, the moment it happens. The bus is already filtered to
   // this account's sessions; the check here covers a tab that switched
@@ -86,24 +103,24 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
   // newer connection's) changes nothing: the newest use names the client the
   // first-page prompt should address.
   useEffect(() => {
-    if (!enabled || !userId || !bus) return;
+    if (!enabled || !record || !userId || !bus) return;
     return bus.subscribe('agent-connected', (event) => {
       if (event.forUserId !== userId) return;
-      const known = knownConnected.get(userId);
-      if (known?.at && event.at <= known.at) return;
-      rememberConnected(userId, { connected: true, at: event.at, client: event.client, kind: event.agentKind });
+      const current = record.connection;
+      if (current?.at && event.at <= current.at) return;
+      rememberConnected(record, { connected: true, at: event.at, client: event.client, kind: event.agentKind });
     });
-  }, [enabled, userId, bus]);
+  }, [enabled, record, userId, bus]);
 
   useEffect(() => {
-    if (!enabled || !userId || knownConnected.has(userId)) return;
+    if (!enabled || !record || record.connection) return;
     let cancelled = false;
     let inFlight = false;
     let lastAsked = 0;
 
     const check = async () => {
       // Another reader may have heard the yes first; it is remembered for everyone.
-      if (cancelled || inFlight || knownConnected.has(userId)) return;
+      if (cancelled || inFlight || record.connection) return;
       inFlight = true;
       lastAsked = Date.now();
       let result: AgentConnection;
@@ -117,10 +134,10 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
       inFlight = false;
       if (cancelled) return;
       if (result.connected) {
-        rememberConnected(userId, result);
+        rememberConnected(record, result);
         return;
       }
-      setAnswer({ userId, state: { connected: false, settled: true } });
+      setAnswer({ record, state: { connected: false, settled: true } });
     };
 
     /**
@@ -129,7 +146,7 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
      * stream was down, or in a window this tab never heard from.
      */
     const onReturn = () => {
-      if (document.hidden || inFlight || knownConnected.has(userId)) return;
+      if (document.hidden || inFlight || record.connection) return;
       if (Date.now() - lastAsked >= AGENT_RECHECK_MS) void check();
     };
 
@@ -141,9 +158,9 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
       document.removeEventListener('visibilitychange', onReturn);
       window.removeEventListener('focus', onReturn);
     };
-  }, [enabled, userId]);
+  }, [enabled, record]);
 
-  if (!userId) return UNKNOWN;
-  if (known) return { ...known, connected: true, settled: true };
-  return answer?.userId === userId ? answer.state : UNKNOWN;
+  if (!record) return UNKNOWN;
+  if (record.connection) return { ...record.connection, connected: true, settled: true };
+  return answer?.record === record ? answer.state : UNKNOWN;
 }

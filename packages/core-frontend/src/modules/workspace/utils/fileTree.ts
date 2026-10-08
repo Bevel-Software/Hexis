@@ -5,7 +5,7 @@ import {
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
-import { isAccessRulesFile as isAccessRulesPath } from '../../../shared/display-file-name';
+import { isAccessRulesFile as isAccessRulesPath } from './display-file-name';
 
 // RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
 // KnowledgeBase/, Skills/ and Plugins/, but every reserved name renders as its

@@ -43,7 +43,7 @@ import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
 import { traceFiles } from '../utils/file-trace';
-import { displayFileName } from '../../../shared/display-file-name';
+import { displayFileName } from '../utils/display-file-name';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git

@@ -12,7 +12,7 @@ import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
-import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';

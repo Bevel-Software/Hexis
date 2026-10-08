@@ -11,7 +11,7 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
-import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip } from '../../workspace/utils/display-file-name';
 
 export interface FileChangeBoxesProps {
   /** Repo-root-relative path of the open file (kbDirName stripped). */

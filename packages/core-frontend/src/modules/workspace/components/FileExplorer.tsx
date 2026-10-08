@@ -70,7 +70,7 @@ import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
-import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { AdminContext } from '../../admin/state/admin.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';

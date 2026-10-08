@@ -1,3 +1,10 @@
+/**
+ * The workspace's own: what a knowledge-base file is CALLED on screen is a
+ * fact about the workspace's layout (its plugins root, its access rules),
+ * so it lives here with the tree it names, not among the shared components
+ * that know nothing of either. Other modules — the change-request views,
+ * the history preview, the search — read it from here.
+ */
 import { PLUGIN_MANIFEST_FILE, PLUGIN_SKILLS_DIR, currentKbLayout } from '@bevel-software/platform-shared';
 
 /**

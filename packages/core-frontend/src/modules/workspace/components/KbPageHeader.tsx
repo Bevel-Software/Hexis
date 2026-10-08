@@ -16,7 +16,7 @@ import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/
 import { useDismissableMenu } from '../../../shared/components';
 import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
-import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 
 /**
  * The document's title, and the page's actions beside it.

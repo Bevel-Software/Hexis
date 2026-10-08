@@ -13,7 +13,7 @@ import {
 import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { hasOwnApproval } from '../utils/approval';
-import { displayFileName } from '../../../shared/display-file-name';
+import { displayFileName } from '../../workspace/utils/display-file-name';
 
 /**
  * The change request's files as a TREE — the Knowledge sidebar's visual

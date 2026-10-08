@@ -12,7 +12,7 @@ import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api'
 import { pathForPlugin, urlForLibraryItem } from '../../library/routes/library-paths';
 import { pluginLabel, pluginNameForPath } from '../../library/utils/plugin-summary';
 import { PERSONAL_PLUGIN_NAME } from '../../library/utils/personal-plugin';
-import { displayFileName } from '../../../shared/display-file-name';
+import { displayFileName } from '../../workspace/utils/display-file-name';
 
 /**
  * What the search palette lists, flattened out of the two places it reads:
