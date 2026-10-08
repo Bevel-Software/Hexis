@@ -371,7 +371,7 @@ async function isDeadOrZombie(pid: number): Promise<boolean> {
 describe('workspace file primitives', () => {
   it('read_file returns the content', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n', canWrite: false });
   });
 
   it('write_file then read_file round-trips', async () => {
@@ -504,7 +504,7 @@ describe('workspace file primitives', () => {
   // that same text into an agent: a leading slash names the same path.
   it('every path input accepts a leading slash as the same workspace path', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n', canWrite: false });
     expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: `/${KB_DIR}/a.md` })).json()).toMatchObject({ type: 'file' });
     await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/b.md`, content: 'fresh' });
     await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/c.md`, content: 'batch' });
@@ -1123,7 +1123,7 @@ describe("the agent guide at the guide's name", () => {
   it('answers with the guide when the knowledge base has no file of that name', async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
-    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
     // By the root-anchored and the prefix-less spellings too, like any path.
     expect((await read(base, `/${GUIDE}`)).content).toBe('THE PLATFORM GUIDE\n');
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
@@ -1198,7 +1198,7 @@ describe("the agent guide at the guide's name", () => {
     };
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
     vanish = true;
-    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
     vanish = true;
     expect(await statOf(base)).toMatchObject({ platformGuide: true });
@@ -2210,7 +2210,7 @@ describe('images', () => {
     const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/photo.jpg` })).json()) as ImageSentinel;
     expect(body.mimeType).toBe('image/jpeg');
     expect(body.data).toBe(bytes.toString('base64'));
-    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes]`);
+    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes] (canWrite: false)`);
   });
 
   it('read_file refuses an image over 3.5 MiB raw with the downscale message, not a sentinel', async () => {
@@ -2236,6 +2236,7 @@ describe('images', () => {
     expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/icon.svg` })).json()).toEqual({
       path: `${KB_DIR}/icon.svg`,
       content: svg,
+      canWrite: false,
     });
   });
 
@@ -2619,6 +2620,7 @@ describe('the tools place an unprefixed path inside the repository', () => {
     expect(await (await tool(base, 'read_file', { path: 'Notes.md' })).json()).toEqual({
       path: `${KB_DIR}/Notes.md`,
       content: 'hello\nworld\n',
+      canWrite: false,
     });
     expect(await (await tool(base, 'file_stat', { path: 'Notes.md' })).json()).toMatchObject({ type: 'file' });
     const edited = await tool(base, 'edit_file', { path: 'Notes.md', old_string: 'world', new_string: 'earth' });

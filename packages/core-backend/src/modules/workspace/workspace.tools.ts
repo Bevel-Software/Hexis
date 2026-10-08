@@ -15,6 +15,7 @@ import {
 } from './agent-access.gate.js';
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
+import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/default-branch-write.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
@@ -949,6 +950,28 @@ export function registerWorkspaceTools(
 
   /** A repo-relative path in the workspace-relative form every tool speaks. */
   const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
+
+  /**
+   * `canWrite` for workspace paths, as `list_files` and `read_file` report it:
+   * whether the caller may commit a change there directly on the DEFAULT
+   * branch, whichever branch the call read — one batch per call (see
+   * `defaultBranchWriteVerdicts`). The repository folder itself is judged as
+   * the repository root; a path outside the repository never lands on the
+   * default branch, so it is `false`.
+   */
+  const canWriteAt = async (ctx: ToolContext, wsPaths: string[]): Promise<Map<string, boolean>> => {
+    const relOf = (p: string): string | null => {
+      const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
+      return norm === kbDirName ? '' : toKbRelative(norm, kbDirName);
+    };
+    const rels = wsPaths.map(relOf);
+    const verdicts = await defaultBranchWriteVerdicts(
+      { accessControl, defaultWorkspaceId: () => kb.defaultWorkspaceId() },
+      ctx,
+      rels.filter((r): r is string => r !== null),
+    );
+    return new Map(wsPaths.map((p, i) => [p, rels[i] !== null && verdicts.get(rels[i]!) === true]));
+  };
   const sourceToWs = (s: AccessDecisionSource | null) => (s ? { ...s, path: toWs(s.path) } : null);
 
   /**
@@ -1769,13 +1792,13 @@ export function registerWorkspaceTools(
     name: 'read_file',
     gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. What comes back for a document, an email file, an image ' +
-      'or any other binary file is the content rule\'s business (see the shared rules): text files as text, documents and ' +
-      'email files as extracted text, an image as the picture itself, anything else as a one-line description. ' +
-      'Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored ' +
-      'for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. ' +
-      'It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: such a ref belongs to no ' +
-      'workspace, so `branch` is ignored for it.',
+      'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text files as ' +
+      'text, documents and email files as extracted text, an image as the picture, anything else as a one-line ' +
+      'description. It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
+      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. Optional `offset`/`limit` slice the ' +
+      'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
+      'spills with them, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
+      CAN_WRITE_CLAUSE,
     inputs: {
       type: 'object',
       properties: {
@@ -1790,7 +1813,16 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path that was read (echoes the input).'), content: str('File (or spill) content, sliced if offset/limit were given.') },
+      properties: {
+        path: str('The path that was read (echoes the input).'),
+        content: str('File (or spill) content, sliced if offset/limit were given.'),
+        canWrite: {
+          type: 'boolean',
+          description:
+            'Whether you may commit a change to this file directly on the default branch, under that branch\'s access ' +
+            'rules — the same answer whichever branch you read. Absent for a spill ref.',
+        },
+      },
       required: ['path', 'content'],
     },
     write: false,
@@ -1808,6 +1840,10 @@ export function registerWorkspaceTools(
           : content;
       };
       const result = await readForTool(a.branch as string, p, ctx);
+      // Judged after the read, so a path the caller may not read is refused
+      // before anything is said about writing it. At the guide's name this is
+      // the knowledge base's own file there, as for any path.
+      const canWrite = (await canWriteAt(ctx, [p])).get(p) === true;
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1819,14 +1855,17 @@ export function registerWorkspaceTools(
       // content blocks before any client could try to validate it, so the
       // schema keeps describing the text path it has always described.
       // `offset`/`limit` are meaningless on a picture and are ignored.
+      // The picture's answer has no fields beside it, so its `canWrite` rides
+      // in the text note that accompanies it.
       if (result.kind === 'image') {
-        return mcpImageResult(result.data, result.mimeType, result.note);
+        const verdict = `canWrite: ${canWrite}`;
+        return mcpImageResult(result.data, result.mimeType, result.note ? `${result.note} (${verdict})` : verdict);
       }
       // Text and refusals alike land in `content` — a refusal (corrupt
       // document, unreadable binary, oversized image) IS the file's honest
       // textual answer, sliced like any other content.
       const content = result.kind === 'text' ? result.text : result.message;
-      return { path: p, content: slice(content) };
+      return { path: p, content: slice(content), canWrite };
     },
   });
 
@@ -1929,7 +1968,8 @@ export function registerWorkspaceTools(
     name: 'list_files',
     gated: true,
     description:
-      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it.`,
+      `List a directory. Returns \`{ path, entries: [{ name, type, size?, canWrite }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it. ` +
+      `\`canWrite\`: may you change that file, or add a file directly inside that folder, directly on the default branch. ${CAN_WRITE_CLAUSE}`,
     inputs: {
       type: 'object',
       properties: {
@@ -1949,8 +1989,19 @@ export function registerWorkspaceTools(
           description: 'Directory entries.',
           items: {
             type: 'object',
-            properties: { name: str('Entry name.'), type: str('`file` or `directory`.'), size: int('Size in bytes (files only).') },
-            required: ['name', 'type'],
+            properties: {
+              name: str('Entry name.'),
+              type: str('`file` or `directory`.'),
+              size: int('Size in bytes (files only).'),
+              canWrite: {
+                type: 'boolean',
+                description:
+                  'Whether you may commit directly on the default branch, under that branch\'s access rules: for a ' +
+                  'file, a change to it; for a folder, a new file directly inside it, by that folder\'s own rules. ' +
+                  'The same answer whichever branch you listed.',
+              },
+            },
+            required: ['name', 'type', 'canWrite'],
           },
         },
       },
@@ -1963,7 +2014,12 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
-      return { path: a.path ?? '', entries: filtered };
+      // One batch for the listing. A folder is judged at its own path, whose
+      // rules (its `access.md` and those above it) are what a file added
+      // directly inside it would get.
+      const wsPathOf = (e: DirEntry): string => (dir ? `${dir}/${e.name}` : e.name);
+      const verdicts = await canWriteAt(ctx, filtered.map(wsPathOf));
+      return { path: a.path ?? '', entries: filtered.map((e) => ({ ...e, canWrite: verdicts.get(wsPathOf(e)) === true })) };
     },
   });
 

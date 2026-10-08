@@ -546,8 +546,8 @@ export function registerWorkflowTools(
       'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
       'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
-      'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
-      'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
+      'SYNC — `source` = the change request\'s target, `target` = your draft — is always allowed, even with ' +
+      'that draft\'s request open. ' +
       'Writes are committed asynchronously; the merge first waits up to 20s for `source`\'s pending commits. ' +
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
       'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +

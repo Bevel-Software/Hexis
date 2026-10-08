@@ -154,7 +154,7 @@ describe('the skill tools read a branch when asked', () => {
       skills: { name: string; unmerged?: boolean }[];
     };
     expect(listArgs).toEqual([['e@x', { branch: undefined }]]);
-    expect(body.skills).toEqual([{ name: 'rfi', description: 'RFI.', path: released.path }]);
+    expect(body.skills).toEqual([{ name: 'rfi', description: 'RFI.', path: released.path, canWrite: false }]);
   });
 
   it('a blank branch is no branch at all: the released catalog answers', async () => {
