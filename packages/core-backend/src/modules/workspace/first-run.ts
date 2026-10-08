@@ -103,13 +103,15 @@ export type MayRead = (relPaths: string[]) => Promise<ReadonlyMap<string, boolea
  *
  * With `mayRead`, the answer is the CALLER'S, and nothing they may not read
  * takes part in it: a folder they may not read is not entered — not walked,
- * not counted against the budgets, not judged — and a file they may not
- * read is not theirs to know of, so it does not make the folder old for
- * them. The walk collects what it finds in the folders it may enter and
- * asks once per folder for its subfolders and once at the end for the
- * files, instead of stopping at the first page. Without `mayRead` the first
- * page found ends the walk. The budgets answer "not new" on a tree too large
- * to walk, naming nothing — and with `mayRead` that tree is the caller's own.
+ * not counted, not judged — and a file they may not read is not theirs to
+ * know of, so it does not make the folder old for them. The files of a
+ * folder are judged in chunks as they are listed (the first the caller may
+ * read ends the walk: not new), and its subfolders once, after its handle
+ * is closed. The budgets then count only what is entered on the caller's
+ * behalf: the folders they may read. The entry budget is the other mode's:
+ * without `mayRead` the first page found ends the walk, and a tree too large
+ * to walk answers "not new" — which, with nobody to answer for, names
+ * nothing.
  */
 export async function knowledgeFolderIsNew(
   dir: string,
@@ -118,16 +120,24 @@ export async function knowledgeFolderIsNew(
 ): Promise<boolean> {
   let opened = 0;
   let read = 0;
-  /** What the disk holds that could be somebody's, to be judged by `mayRead` once the walk is done. */
-  const found: string[] = [];
   const holdsNothing = async (folder: string, rel: string): Promise<boolean> => {
     if (++opened > FOLDER_BUDGET) return false;
     const folders: { abs: string; rel: string }[] = [];
+    /** This folder's pages not yet judged (`mayRead` mode only). */
+    let pages: string[] = [];
+    /** Whether any of the pages waiting is one the caller may read. */
+    const anyReadable = async (): Promise<boolean> => {
+      if (pages.length === 0) return false;
+      const verdicts = await mayRead!(pages);
+      const found = pages.some((p) => verdicts.get(p) === true);
+      pages = [];
+      return found;
+    };
     // `for await` closes the handle however the loop ends, an early return
     // included — and it is closed before any subfolder is opened, since those
     // are entered after the loop.
     for await (const entry of await nodeFs.opendir(folder)) {
-      if (++read > ENTRY_BUDGET) return false;
+      if (!mayRead && ++read > ENTRY_BUDGET) return false;
       const name = entry.name;
       if (name.startsWith('.') || NOT_CONTENT.has(name)) continue;
       if (rel === '' && name === STARTER_GUIDE_FILE && entry.isFile()) continue;
@@ -139,13 +149,12 @@ export async function knowledgeFolderIsNew(
       // Not a regular file: not a page, and never read through (see above).
       if (!entry.isFile()) continue;
       if (await isUntouchedStarterPage(join(folder, name), starterPages?.get(childRel))) continue;
-      if (mayRead) {
-        found.push(childRel);
-        continue;
-      }
       // A page, with nobody to ask: something someone put there.
-      return false;
+      if (!mayRead) return false;
+      pages.push(childRel);
+      if (pages.length >= JUDGE_CHUNK && (await anyReadable())) return false;
     }
+    if (await anyReadable()) return false;
     const enter = mayRead && folders.length > 0 ? await mayRead(folders.map((f) => f.rel)) : null;
     for (const child of folders) {
       if (enter && enter.get(child.rel) !== true) continue;
@@ -154,14 +163,14 @@ export async function knowledgeFolderIsNew(
     return true;
   };
   try {
-    if (!(await holdsNothing(dir, ''))) return false;
-    if (found.length === 0) return true;
-    const verdicts = await mayRead!(found);
-    return !found.some((rel) => verdicts.get(rel) === true);
+    return await holdsNothing(dir, '');
   } catch {
     return false;
   }
 }
+
+/** How many of a folder's pages are judged in one ask of `mayRead`. */
+const JUDGE_CHUNK = 200;
 
 /**
  * Whether the file at `file` still holds exactly `written`, the text a starter

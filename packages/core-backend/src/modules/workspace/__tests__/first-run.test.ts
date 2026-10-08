@@ -125,6 +125,25 @@ describe('knowledgeFolderIsNew', () => {
     expect(asked.map((rels) => [...rels].sort())).toEqual([['Leadership', 'Team']]);
   });
 
+  it('counts nothing the caller may not read, however much of it there is', async () => {
+    // More restricted pages beside the guide than the other mode's entry
+    // budget: for a caller who may read none of them, the folder is new.
+    await Promise.all(
+      Array.from({ length: ENTRY_BUDGET + 1 }, (_, i) => writeFile(join(dir, `Secret-${i}.md`), '# Secret\n')),
+    );
+    const asked: number[] = [];
+    const nobody = async (rels: string[]) => {
+      asked.push(rels.length);
+      return new Map(rels.map((rel) => [rel, false]));
+    };
+    expect(await knowledgeFolderIsNew(dir, undefined, nobody)).toBe(true);
+    // Judged in chunks as listed, every one of them.
+    expect(asked.reduce((n, k) => n + k, 0)).toBe(ENTRY_BUDGET + 1);
+    // One the caller may read, anywhere among them, and the folder is old.
+    const justOne = async (rels: string[]) => new Map(rels.map((rel) => [rel, rel === `Secret-${ENTRY_BUDGET}.md`]));
+    expect(await knowledgeFolderIsNew(dir, undefined, justOne)).toBe(false);
+  });
+
   it('passes a link over by kind: not a page, never read through, never asked about', async () => {
     try {
       await symlink(join(tmpdir(), 'elsewhere.md'), join(dir, 'Alias.md'));
