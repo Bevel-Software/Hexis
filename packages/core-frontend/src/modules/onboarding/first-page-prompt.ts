@@ -38,9 +38,9 @@ export function chatGptPromptUrl(prompt: string): string {
  *    on both, so a new chat at claude.ai can reach the knowledge base.
  *  - `chatgpt`: the chatgpt.com link, for ChatGPT's connector.
  *  - `copy`: the prompt itself, for everything else — Claude Code, Cursor,
- *    any agent on the local server, a connection key's label, a name we do
- *    not know. None of them can be opened from a link, and pointing someone
- *    at a web chat that cannot see their knowledge base is a dead end.
+ *    any agent on the local server, any connection key, a name we do not
+ *    know. None of them can be opened from a link, and pointing someone at a
+ *    web chat that cannot see their knowledge base is a dead end.
  */
 export type FirstPagePrimary = 'claude' | 'chatgpt' | 'copy';
 
@@ -49,7 +49,8 @@ export interface FirstPageRoute {
   /**
    * The agent as a person names it, for "Paste it into …": the part before
    * the local server's " · local server on <machine>", and null when the
-   * server only knows it as an unnamed or unknown agent.
+   * server only knows it as an unnamed or unknown agent — or by a connection
+   * key's label, which names the key rather than the app holding it.
    */
   agentName: string | null;
 }
@@ -61,12 +62,19 @@ const LOCAL_SERVER_SUFFIX = /\s*·\s*local server on\b.*$/i;
 const CLAUDE_WEB_NAMES = new Set(['claude', 'claude.ai', 'claude-ai', 'claude ai', 'claude desktop', 'claude-desktop']);
 
 /**
- * Reads the connection answer's `client` — the agent's registered name, or a
- * connection key's label — into the step's leading action. Case-insensitive,
- * and anything it does not recognise falls back to `copy`, which works with
- * every agent.
+ * Reads the connection answer's `client` into the step's leading action.
+ * Only an OAuth connection's (`kind: 'agent'`) name is the app's own: a
+ * connection key's label is whatever its owner typed, so a key called
+ * "ChatGPT CLI" says nothing about ChatGPT being able to use it, and a key —
+ * or an answer that does not say which it is — always leads with `copy`.
+ * Case-insensitive, and anything it does not recognise falls back to `copy`,
+ * which works with every agent.
  */
-export function firstPageRoute(client: string | null | undefined): FirstPageRoute {
+export function firstPageRoute(
+  client: string | null | undefined,
+  kind: 'agent' | 'key' | null | undefined,
+): FirstPageRoute {
+  if (kind !== 'agent') return { primary: 'copy', agentName: null };
   const raw = (client ?? '').trim();
   const local = LOCAL_SERVER_SUFFIX.test(raw);
   const name = raw.replace(LOCAL_SERVER_SUFFIX, '').trim();

@@ -274,6 +274,15 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           id={panelId}
           role="dialog"
           aria-label="Command menu"
+          // A press anywhere in the panel but the input keeps focus IN the
+          // input, as the rows already do for themselves: every key the
+          // palette answers — the arrows, Enter, and Escape back to where
+          // the reader was — is handled there, and a press on the padding,
+          // the status line or the list's scroll area would otherwise blur it
+          // and leave the open palette deaf to the keyboard.
+          onMouseDown={(e) => {
+            if (e.target !== inputRef.current) e.preventDefault();
+          }}
           className={cn(
             'z-40',
             compact ? 'fixed inset-x-3 top-[52px]' : 'absolute top-[calc(100%+6px)] left-0 w-full min-w-[320px]',
@@ -482,10 +491,14 @@ function SearchPanel({
   // Outside the listbox, which holds options and nothing else.
   // A failed catalog is said whether or not there are rows: with nothing
   // typed the suggested commands fill the list, and the person would never
-  // learn that skills and tools could not be found.
+  // learn that skills, tools and plugins could not be found. With a query
+  // and no rows, the failure follows the "nothing matches" line, so a reader
+  // is not told that the catalog was searched when it was not.
   const emptiness = flat.length === 0 ? (trimmed ? `Nothing matches “${trimmed}”.` : 'Nothing to search yet.') : null;
-  const failure = catalogState.failed && !catalogState.catalog ? 'Couldn’t load skills and tools.' : null;
-  const status = loadingItems ? 'Loading skills and tools…' : [emptiness, failure].filter(Boolean).join(' ') || null;
+  const failure = catalogState.failed && !catalogState.catalog ? 'Couldn’t load skills, tools and plugins.' : null;
+  const status = loadingItems
+    ? 'Loading skills, tools and plugins…'
+    : [emptiness, failure].filter(Boolean).join(' ') || null;
 
   return (
     <MenuPanel className="flex max-h-[min(480px,calc(100dvh-72px))] flex-col">
@@ -512,7 +525,7 @@ function SearchPanel({
       <div id={listboxId} role="listbox" aria-label="Commands and results" className="min-h-0 overflow-y-auto">
         {renderGroup('Actions', actionHits, 0)}
         {renderGroup('Pages', pageHits, actionHits.length)}
-        {renderGroup('Skills & tools', itemHits, actionHits.length + pageHits.length)}
+        {renderGroup('Skills, tools & plugins', itemHits, actionHits.length + pageHits.length)}
       </div>
       {notice && (
         <div role="alert" className="flex-none px-2 pt-2 text-ui text-danger">

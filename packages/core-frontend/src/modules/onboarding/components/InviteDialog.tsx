@@ -169,6 +169,7 @@ export function InviteDialog({ open, onClose, onInvited }: InviteDialogProps) {
         role={role}
         onRoleChange={setRole}
         validCount={valid.length}
+        invalidCount={pending.length - valid.length}
         sending={sending}
         placeholder={domain ? `name@${domain}, name@${domain}` : 'name@company.com'}
       />
@@ -185,6 +186,7 @@ function InviteFormBody({
   role,
   onRoleChange,
   validCount,
+  invalidCount,
   sending,
   placeholder,
 }: {
@@ -196,13 +198,18 @@ function InviteFormBody({
   role: InviteRole;
   onRoleChange(next: InviteRole): void;
   validCount: number;
+  /**
+   * Addresses a send would leave out — chips and text still in the field
+   * alike, since a send clears both and the field's would otherwise go
+   * without a word.
+   */
+  invalidCount: number;
   sending: boolean;
   placeholder: string;
 }) {
   const Extras = useAppRegistry().inviteExtras;
   const hintId = useId();
   const roleId = useId();
-  const invalidCount = emails.filter((e) => !isValidEmail(e)).length;
 
   return (
     <div className="flex flex-col gap-4 py-1">
@@ -262,16 +269,30 @@ const OUTCOME_BADGE: Record<InviteOutcome['status'], { tone: BadgeTone; label: s
   error: { tone: 'danger', label: 'Not invited' },
 };
 
+/**
+ * A switched-off account is on the list but cannot sign in: its row says so,
+ * in the waiting tone, rather than "Already had an account" beside a claim
+ * that it is ready.
+ */
+function outcomeBadge(outcome: InviteOutcome): { tone: BadgeTone; label: string } {
+  if (outcome.status === 'existing' && outcome.deactivated) return { tone: 'wait', label: 'Account switched off' };
+  return OUTCOME_BADGE[outcome.status];
+}
+
 function outcomeDetail(outcome: InviteOutcome): string {
   switch (outcome.status) {
     case 'created':
       if (outcome.roleError) return `Member: couldn’t make them an admin (${outcome.roleError})`;
       return outcome.role === 'admin' ? 'Admin' : 'Member';
-    case 'existing':
-      if (outcome.roleError) return `Can sign in already: couldn’t make them an admin (${outcome.roleError})`;
-      if (outcome.promoted) return 'Can sign in already, now an admin';
-      if (outcome.alreadyAdmin) return 'Can sign in already, already an admin';
-      return 'Can sign in already';
+    case 'existing': {
+      const access = outcome.deactivated
+        ? 'Can’t sign in until it’s switched on in User accounts'
+        : 'Can sign in already';
+      if (outcome.roleError) return `${access}: couldn’t make them an admin (${outcome.roleError})`;
+      if (outcome.promoted) return `${access}, now an admin`;
+      if (outcome.alreadyAdmin) return `${access}, already an admin`;
+      return access;
+    }
     case 'no-seat':
     case 'error':
       return outcome.message;
@@ -302,7 +323,7 @@ function InvitedBody({ outcomes, invited }: { outcomes: InviteOutcome[]; invited
           />
         )}
         {outcomes.map((outcome) => {
-          const badge = OUTCOME_BADGE[outcome.status];
+          const badge = outcomeBadge(outcome);
           return (
             <PersonRow
               key={outcome.email}

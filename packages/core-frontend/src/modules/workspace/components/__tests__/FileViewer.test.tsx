@@ -1750,6 +1750,55 @@ describe('FileViewer: opening straight into the editor', () => {
     expect(acquireLockMock).toHaveBeenCalledTimes(1);
   });
 
+  it('still opens the editor once the path URL has been swapped for the node-id URL', async () => {
+    // `FileRoute` canonicalises a node's path URL to its id URL, sometimes
+    // before the bytes land: the URL then names the id, and the request
+    // carries the path it was made for.
+    render(
+      <ViewerHarness
+        initialContent={'# Untitled\n\n'}
+        filePath={NEW_PAGE}
+        routePath="untitled_page"
+        routeState={{ startEditing: true, startEditingPath: NEW_PAGE }}
+      />,
+    );
+    expect(await screen.findByRole('textbox')).toBeInTheDocument();
+    expect(screen.getByTestId('location-state')).toHaveTextContent('null');
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the caret alone on a later Edit by hand when the request was turned away', async () => {
+    const user = userEvent.setup();
+    // The request's enter-edit is refused by the lock …
+    vi.mocked(acquireLockMock).mockRejectedValueOnce(
+      new LockApiError(403, 'You don\'t have permission to write to this page.', {
+        access: { path: NEW_PAGE, eligibleRoles: ['Admin'], eligibleUsers: [] },
+      }),
+    );
+    render(
+      <ViewerHarness
+        initialContent={'# Long page\n\nA long body.'}
+        filePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('location-state')).toHaveTextContent('null'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+
+    // … so the Edit the reader then clicks is theirs, not the request's: the
+    // caret is not sent to the end of the page, scrolling them away.
+    const setSelectionRange = vi.spyOn(HTMLTextAreaElement.prototype, 'setSelectionRange');
+    try {
+      await user.click(screen.getByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox');
+      await act(async () => {});
+      expect(setSelectionRange).not.toHaveBeenCalled();
+    } finally {
+      setSelectionRange.mockRestore();
+    }
+  });
+
   it('opens for reading when the navigation asked for nothing', async () => {
     render(<ViewerHarness initialContent="# Notes" filePath={NEW_PAGE} routePath={NEW_PAGE} />);
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeEnabled();

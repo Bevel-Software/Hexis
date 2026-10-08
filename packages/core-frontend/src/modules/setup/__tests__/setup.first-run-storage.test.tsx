@@ -322,6 +322,41 @@ describe('SetupGate: the first-run storage question', () => {
       expect(api.saveSettings).not.toHaveBeenCalled();
     });
 
+    it('drops a test answer about values edited while it was out, and tests what is typed before saving', async () => {
+      await openAddressStep();
+      await fill('https://gitlab.com/acme/old.git');
+      let answerOld!: (result: unknown) => void;
+      api.testConnection.mockImplementationOnce(() => new Promise((resolve) => (answerOld = resolve)));
+      await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+      await waitFor(() => expect(api.testConnection).toHaveBeenCalledTimes(1));
+
+      const address = screen.getByLabelText('Repository address');
+      await userEvent.clear(address);
+      await userEvent.type(address, 'https://gitlab.com/acme/new.git');
+      answerOld({ ok: true, outcome: 'connected', defaultBranch: 'trunk', branches: ['trunk'] });
+      // The old repository's answer is not shown as if it were about the new one…
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Test connection' })).toBeEnabled());
+      expect(screen.queryByText('Connected.')).toBeNull();
+
+      // …nor saved with: Save tests what is typed now, and takes the branch from that.
+      api.testConnection.mockResolvedValue({ ok: true, outcome: 'connected', defaultBranch: 'main', branches: ['main'] });
+      api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+      await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+      await waitFor(() =>
+        expect(api.saveSettings).toHaveBeenCalledWith(
+          expect.objectContaining({
+            kbRepoUrl: 'https://gitlab.com/acme/new.git',
+            defaultBranch: 'main',
+            protectedBranches: 'main',
+          }),
+        ),
+      );
+      expect(api.testConnection).toHaveBeenCalledTimes(2);
+      expect(api.testConnection).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kbRepoUrl: 'https://gitlab.com/acme/new.git' }),
+      );
+    });
+
     it('asks for the token username only on a host it does not know', async () => {
       await openAddressStep();
       await fill('https://git.acme.internal/kb.git');

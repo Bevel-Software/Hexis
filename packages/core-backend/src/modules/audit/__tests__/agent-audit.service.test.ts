@@ -14,13 +14,17 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
  * update / delete` pops the next queued result. `transaction` runs its
  * callback against the same fake, so queued results are consumed in order.
  * Every `where` predicate and `update` target is captured, so a test can pin
- * WHICH rows a statement addressed (see {@link render}), not just that it ran.
+ * WHICH rows a statement addressed (see {@link render}), not just that it ran;
+ * `orderBy` and `limit` too, since the fake applies neither and a test can
+ * only pin WHICH row of several a read keeps by the clauses it sent.
  */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: any[]; set: any[]; where: SQL[]; updateTargets: unknown[] } = {
+  const captured: { values: any[]; set: any[]; where: SQL[]; orderBy: SQL[][]; limit: number[]; updateTargets: unknown[] } = {
     values: [],
     set: [],
     where: [],
+    orderBy: [],
+    limit: [],
     updateTargets: [],
   };
   const counts = { insert: 0, select: 0, update: 0, delete: 0 };
@@ -36,10 +40,10 @@ function makeFakeDb(queue: unknown[]) {
     chain.values = passthrough((a) => captured.values.push(a[0]));
     chain.set = passthrough((a) => captured.set.push(a[0]));
     chain.where = passthrough((a) => captured.where.push(a[0]));
-    chain.limit = passthrough();
+    chain.limit = passthrough((a) => captured.limit.push(a[0]));
     chain.innerJoin = passthrough();
     chain.from = passthrough();
-    chain.orderBy = passthrough();
+    chain.orderBy = passthrough((a) => captured.orderBy.push(a));
     chain.groupBy = passthrough();
     chain.returning = passthrough();
     chain.then = (onF: any, onR: any) => Promise.resolve(result).then(onF, onR);
@@ -381,21 +385,33 @@ describe('AgentAuditService.lastAgentUse', () => {
     expect(keys!.params).toEqual([ALICE.id]);
   });
 
+  it('keeps the most recently used row of each kind, of however many a person has', async () => {
+    // The fake neither sorts nor limits, so what is pinned is what each read
+    // asks the database for: newest use first, one row.
+    const { service, captured } = makeService([[], []]);
+    await service.lastAgentUse(ALICE.id);
+    expect(captured.orderBy.map((clauses) => clauses.map((c) => render(c).sql))).toEqual([
+      ['"agent_connections"."last_used_at" desc'],
+      ['"api_tokens"."last_used_at" desc'],
+    ]);
+    expect(captured.limit).toEqual([1, 1]);
+  });
+
   it("names an agent connection by its client, and an unnamed one as such", async () => {
     const at = new Date(NOW - 60_000);
     const named = makeService([[{ client: 'Claude', at }], []]);
-    await expect(named.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Claude' });
+    await expect(named.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Claude', kind: 'agent' });
     const unnamed = makeService([[{ client: null, at }], []]);
-    await expect(unnamed.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Unnamed agent' });
+    await expect(unnamed.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Unnamed agent', kind: 'agent' });
   });
 
   it('answers with the newer of the two when both kinds have been used', async () => {
     const older = new Date(NOW - DAY);
     const newer = new Date(NOW - 60_000);
     const keyNewer = makeService([[{ client: 'Claude', at: older }], [{ client: 'Laptop', at: newer }]]);
-    await expect(keyNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Laptop' });
+    await expect(keyNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Laptop', kind: 'key' });
     const agentNewer = makeService([[{ client: 'Claude', at: newer }], [{ client: 'Laptop', at: older }]]);
-    await expect(agentNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Claude' });
+    await expect(agentNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Claude', kind: 'agent' });
   });
 });
 

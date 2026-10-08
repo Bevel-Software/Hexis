@@ -15,14 +15,39 @@ export interface AgentConnection {
   at?: string;
   /** The agent's registered client name ("Claude"), or the connection key's label. */
   client?: string;
+  /**
+   * Which of the two `client` is: `agent` for an OAuth connection's
+   * registered name, `key` for a connection key's free-text label.
+   */
+  kind?: 'agent' | 'key';
 }
 
-/** Throws on a refusal or a malformed body; callers read any failure as "not yet". */
+function optionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string';
+}
+
+/**
+ * Throws on a refusal or a malformed body; callers read any failure as "not
+ * yet". Checked field by field rather than cast: a body that is not the
+ * documented shape is a failure, not a quiet "not connected" — and a
+ * "connected" with a stray `client` or `kind` must not steer the first-page
+ * step's links.
+ */
 export async function fetchAgentConnection(): Promise<AgentConnection> {
   const res = await authFetch('/api/onboarding/agent-connection');
   if (!res.ok) throw new Error(`agent-connection: ${res.status}`);
-  const body = (await res.json()) as Partial<AgentConnection>;
-  return body.connected === true
-    ? { connected: true, at: body.at, client: body.client }
-    : { connected: false };
+  const body: unknown = await res.json();
+  if (typeof body !== 'object' || body === null || typeof (body as { connected?: unknown }).connected !== 'boolean') {
+    throw new Error('agent-connection: malformed body');
+  }
+  const { connected, at, client, kind } = body as Record<string, unknown>;
+  if (connected === false) return { connected: false };
+  if (
+    !optionalString(at) ||
+    !optionalString(client) ||
+    (kind !== undefined && kind !== 'agent' && kind !== 'key')
+  ) {
+    throw new Error('agent-connection: malformed body');
+  }
+  return { connected: true, at, client, kind };
 }

@@ -14,6 +14,7 @@ import { useAdmin } from '../../admin/state/admin.context';
 import { listAccounts } from '../../auth/services/account.api';
 import { listPlugins, type PluginSummary } from '../../library/services/plugins.api';
 import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-paths';
+import { usePluginsRevision } from '../../library/state/plugins-revision';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { SETUP_COLUMN_HIDDEN_QUERY } from '../../layout/breakpoints';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -70,7 +71,9 @@ function hasOwnContent(
       if (hasOwnContent(child, guidePath, placeholders)) return true;
       continue;
     }
-    if (child.relativePath === guidePath || child.name.toLowerCase() === 'access.md') continue;
+    // Exactly `access.md`: the platform reserves that name and no other
+    // spelling, so an `Access.md` someone wrote is a page like any other.
+    if (child.relativePath === guidePath || child.name === 'access.md') continue;
     if (placeholders.has(child.relativePath)) continue;
     return true;
   }
@@ -99,8 +102,9 @@ function isTeamPlugin(plugin: PluginSummary): boolean {
  * "Is there a team plugin yet?", asked of `GET /api/plugins` — the same
  * catalog the Library reads, fetched here on its own because the Library's
  * provider only exists under its routes and this column sits beside both
- * apps. Asked again as the person moves around Skills & Tools (that is where
- * a plugin gets made), and never again once the answer is yes.
+ * apps. Asked again whenever `refreshKey` moves — on entering Skills & Tools,
+ * and when this tab creates a plugin — and never again once the answer is
+ * yes.
  */
 function useTeamPluginExists(enabled: boolean, refreshKey: string): { found: boolean; settled: boolean } {
   const [found, setFound] = useState(false);
@@ -129,7 +133,10 @@ function useTeamPluginExists(enabled: boolean, refreshKey: string): { found: boo
 
 /**
  * "Is anybody else here yet?" — more than one account a person signs in
- * with. The platform's own machine accounts (`isSystem`) are not a team.
+ * with. The platform's own machine accounts (`isSystem`) are not a team, and
+ * a switched-off account is nobody who can join. An invited account that has
+ * not signed in yet DOES count: the step is "Invite your team", and inviting
+ * is what the admin can do — when each person first signs in is theirs.
  * Re-asked whenever the invite dialog created somebody.
  */
 function useHasTeammate(enabled: boolean, revision: number): { found: boolean; settled: boolean } {
@@ -140,7 +147,7 @@ function useHasTeammate(enabled: boolean, revision: number): { found: boolean; s
     let cancelled = false;
     listAccounts()
       .then((accounts) => {
-        if (!cancelled && accounts.filter((a) => !a.isSystem).length > 1) setFound(true);
+        if (!cancelled && accounts.filter((a) => !a.isSystem && !a.deactivatedAt).length > 1) setFound(true);
       })
       .catch(() => {
         /* as above: unknown leaves the step open */
@@ -189,9 +196,10 @@ export function GetStartedColumn() {
   const invite = useInviteDialog();
 
   /**
-   * Whether the person's agent has reached the platform — asked ONCE here
-   * (the welcome page is the one that polls), so someone who connected
-   * without ever opening that page still gets the tick. Connecting is what
+   * Whether the person's agent has reached the platform — asked on mount and
+   * again when the person comes back to the tab, never on a timer (the
+   * welcome page is the one that polls), so someone who connected without
+   * ever opening that page still gets the tick. Connecting is what
    * the onboarding asked for, so it concludes it too: the pill goes. Once
    * per mount, for the reason the welcome page gives.
    */
@@ -207,7 +215,20 @@ export function GetStartedColumn() {
 
   const onWelcome = pathname === WELCOME_PATH;
   const askServer = isAdmin && !gone;
-  const plugin = useTeamPluginExists(askServer, isLibraryLocation(pathname) ? pathname : '');
+  /**
+   * The plugin question's refresh: once per ENTRY into Skills & Tools (that
+   * is where a plugin gets made), and whenever this tab creates one — not on
+   * every move between its pages, which for a new workspace is the same
+   * empty catalog asked for over and over. Counted in state, adjusted while
+   * rendering, so the count moves in the same render as the path.
+   */
+  const inLibrary = isLibraryLocation(pathname);
+  const [libraryEntries, setLibraryEntries] = useState({ inLibrary, count: 0 });
+  if (libraryEntries.inLibrary !== inLibrary) {
+    setLibraryEntries({ inLibrary, count: libraryEntries.count + (inLibrary ? 1 : 0) });
+  }
+  const pluginsCreated = usePluginsRevision();
+  const plugin = useTeamPluginExists(askServer, `${libraryEntries.count}:${pluginsCreated}`);
   const teammate = useHasTeammate(askServer, invite?.invitedRevision ?? 0);
 
   const knowledgeRoot = kbDirName ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
@@ -317,6 +338,7 @@ export function GetStartedColumn() {
           extra: (
             <FirstPagePromptActions
               client={agent.client}
+              kind={agent.kind}
               prompt={firstPagePromptFor(chosenPack)}
               newPage={newPageAction}
             />
@@ -367,7 +389,9 @@ export function GetStartedColumn() {
   const allDone = doneCount === items.length;
   // The completion line says whether the agent can reach the knowledge base,
   // so it waits for that answer rather than rewriting itself under the reader.
-  if (onWelcome || tooNarrow || gone || !settled || (allDone && !agent.settled)) {
+  // So does the list for the file tree: before it loads, the guide reads as
+  // absent and the first page as unwritten — a shorter list, falsely open.
+  if (onWelcome || tooNarrow || gone || tree === null || !settled || (allDone && !agent.settled)) {
     return null;
   }
 
@@ -526,9 +550,9 @@ function PromptLink({ href, primary, children }: { href: string; primary?: boole
  *
  * Claude's and ChatGPT's connectors get "Ask … to write it", a new chat with
  * the prompt typed. Every other agent — Claude Code, Cursor, anything on the
- * local server, an unknown name — has no link that would reach it, so Copy
- * prompt leads there and says where to paste; the two web links stay as
- * quiet extras for someone who uses those too.
+ * local server, a connection key, an unknown name — has no link that would
+ * reach it, so Copy prompt leads there and says where to paste; the two web
+ * links stay as quiet extras for someone who uses those too.
  *
  * Real links rather than buttons that call `window.open`: a new tab is what
  * they are, so they should say so to the browser — middle-click, "copy link",
@@ -539,10 +563,12 @@ function PromptLink({ href, primary, children }: { href: string; primary?: boole
  */
 function FirstPagePromptActions({
   client,
+  kind,
   prompt,
   newPage,
 }: {
   client?: string;
+  kind?: 'agent' | 'key';
   /** The request: the chosen starter pack's, or the generic one. */
   prompt: string;
   newPage?: SetupAction;
@@ -550,7 +576,7 @@ function FirstPagePromptActions({
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
   const resetTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(resetTimer.current), []);
-  const { primary, agentName } = firstPageRoute(client);
+  const { primary, agentName } = firstPageRoute(client, kind);
 
   async function copy() {
     const ok = await copyToClipboard(prompt);

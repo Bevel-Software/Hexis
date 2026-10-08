@@ -289,8 +289,8 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         .limit(1),
     ]);
     const uses = [
-      agent?.at ? { at: agent.at, client: agent.client ?? 'Unnamed agent' } : null,
-      key?.at ? { at: key.at, client: key.client } : null,
+      agent?.at ? { at: agent.at, client: agent.client ?? 'Unnamed agent', kind: 'agent' as const } : null,
+      key?.at ? { at: key.at, client: key.client, kind: 'key' as const } : null,
     ].filter((u): u is AgentUse => u !== null);
     if (uses.length === 0) return null;
     return uses.reduce((newest, u) => (u.at.getTime() > newest.at.getTime() ? u : newest));

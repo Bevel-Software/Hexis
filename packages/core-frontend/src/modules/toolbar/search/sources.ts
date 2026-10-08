@@ -110,7 +110,8 @@ export interface LibraryCatalog {
  * Skill, tool and plugin rows, in that order. Skills and tools open at their
  * canonical item URL (`urlForLibraryItem`, the rule every Library card
  * follows), which needs the checkout's name — without it they are left out
- * rather than linked somewhere wrong. Plugins open on their own page.
+ * rather than linked somewhere wrong. Plugins open on their own page, and are
+ * listed even when only the skills' memberships name them (`pluginNames`).
  *
  * Proposals (skills and tools that exist only on a change request) are not
  * listed: their rows in the Library open a review, not a page, and a search
@@ -141,12 +142,28 @@ export function libraryResults(catalog: LibraryCatalog, kbDirName: string | null
         },
       }))
     : [];
-  const pluginRows: SearchResult[] = plugins.map((p) => ({
-    key: `plugin:${p.name}`,
+  const pluginRows: SearchResult[] = pluginNames(catalog).map((name) => ({
+    key: `plugin:${name}`,
     kind: 'plugin',
-    name: p.displayName || p.name,
+    name: pluginLabel(name, plugins),
     location: 'Plugin',
-    target: { kind: 'url', url: pathForPlugin(p.name) },
+    target: { kind: 'url', url: pathForPlugin(name) },
   }));
   return [...skills, ...tools, ...pluginRows];
+}
+
+/**
+ * Every plugin the catalog proves is there, from both witnesses the Library's
+ * plugin rows read: the plugin index, then any plugin a skill names as one it
+ * belongs to (inline or linked) that the index did not list. The second is
+ * what keeps plugins findable when `/api/plugins` fails and the index arrives
+ * empty: the skills still carry their plugins' identities.
+ */
+function pluginNames(catalog: LibraryCatalog): string[] {
+  const listed = new Set(catalog.plugins.map((p) => p.name));
+  const named = new Set<string>();
+  for (const skill of catalog.skills) {
+    for (const m of skill.plugins ?? []) if (!listed.has(m.name)) named.add(m.name);
+  }
+  return [...listed, ...[...named].sort((a, b) => a.localeCompare(b))];
 }

@@ -4,6 +4,8 @@ import type { PluginSummary } from '../../../library/services/plugins.api';
 import { libraryResults, pageResults } from '../sources';
 
 const KB = 'knowledge-base';
+// Encoded as `urlForLibraryItem` encodes it, so a branch name with a `/` in it still matches.
+const BRANCH = encodeURIComponent(DEFAULT_BRANCH);
 const file = (relativePath: string): FileTreeEntry => ({
   name: relativePath.split('/').pop()!,
   relativePath,
@@ -70,12 +72,60 @@ describe('libraryResults', () => {
       ['tool', 'Notion', 'GTM'],
       ['plugin', 'GTM', 'Plugin'],
     ]);
-    expect(rows[0].target).toEqual({ kind: 'url', url: `/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/GTM/skills/rfi` });
-    expect(rows[3].target).toEqual({ kind: 'url', url: `/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/gtm/mcp.json?server=notion` });
+    expect(rows[0].target).toEqual({ kind: 'url', url: `/workspace/${BRANCH}/${KB}/Plugins/GTM/skills/rfi` });
+    expect(rows[3].target).toEqual({ kind: 'url', url: `/workspace/${BRANCH}/${KB}/Plugins/gtm/mcp.json?server=notion` });
     expect(rows[4].target).toEqual({ kind: 'url', url: '/skills-and-tools/plugins/gtm' });
   });
 
   it('lists only plugins while the checkout name is unknown', () => {
     expect(libraryResults(catalog, null).map((r) => r.kind)).toEqual(['plugin']);
+  });
+
+  it('still lists the plugins skills belong to when the plugin index came back empty', () => {
+    const rows = libraryResults(
+      {
+        ...catalog,
+        skills: [
+          ...catalog.skills,
+          {
+            name: 'brief',
+            description: '',
+            path: 'Plugins/Product/skills/brief',
+            plugins: [
+              { name: 'product', linked: false, granted: true },
+              { name: 'gtm', linked: true, granted: true },
+            ],
+          },
+        ],
+        plugins: [],
+      },
+      KB,
+    );
+    expect(rows.filter((r) => r.kind === 'plugin').map((r) => [r.name, r.target])).toEqual([
+      ['gtm', { kind: 'url', url: '/skills-and-tools/plugins/gtm' }],
+      ['product', { kind: 'url', url: '/skills-and-tools/plugins/product' }],
+    ]);
+  });
+
+  it('adds a plugin a skill names to the ones the index lists, once', () => {
+    const rows = libraryResults(
+      {
+        ...catalog,
+        skills: [
+          ...catalog.skills,
+          {
+            name: 'brief',
+            description: '',
+            path: 'Shared/brief',
+            plugins: [
+              { name: 'gtm', linked: true, granted: true },
+              { name: 'product', linked: true, granted: true },
+            ],
+          },
+        ],
+      },
+      KB,
+    );
+    expect(rows.filter((r) => r.kind === 'plugin').map((r) => r.name)).toEqual(['GTM', 'product']);
   });
 });

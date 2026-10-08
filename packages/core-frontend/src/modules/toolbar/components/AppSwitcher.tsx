@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { activeAppId, useActiveAppId, useAppRegistry, type AppDef } from '../../../core/registry';
@@ -53,6 +53,11 @@ export function AppSwitcher() {
   return <AppMenu apps={apps} activeId={activeId} />;
 }
 
+/** A primary-button click with no modifier: the one a link should treat as "go here". */
+function isPlainClick(e: ReactMouseEvent<HTMLAnchorElement>): boolean {
+  return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
+
 interface SwitcherProps {
   apps: AppDef[];
   activeId: string | undefined;
@@ -81,9 +86,11 @@ function AppToggle({ apps, activeId }: SwitcherProps) {
               aria-current={current ? 'page' : undefined}
               title={app.description}
               // Same as choosing the current app in the menu: nothing. A
-              // click must not throw a deep link back to the app's root.
+              // click must not throw a deep link back to the app's root. A
+              // modified or middle click is the reader asking for a new tab
+              // or window, which the link still does like any other.
               onClick={(e) => {
-                if (current) e.preventDefault();
+                if (current && isPlainClick(e)) e.preventDefault();
               }}
               className={cn(
                 'whitespace-nowrap rounded-sm px-2.5 py-1 text-detail font-semibold transition-[background-color,color,box-shadow]',
@@ -146,7 +153,11 @@ function AppMenu({ apps, activeId }: SwitcherProps) {
   };
 
   return (
-    <div ref={ref} className="relative">
+    // `min-w-0` down the chain, and `truncate` on the brand as well as the app
+    // label: on the narrowest toolbars the trigger gives up width before the
+    // controls on the right are pushed off-screen. Its name is "Switch app"
+    // either way, and the menu it opens names every app in full.
+    <div ref={ref} className="relative min-w-0">
       <button
         ref={buttonRef}
         type="button"
@@ -158,7 +169,7 @@ function AppMenu({ apps, activeId }: SwitcherProps) {
         aria-expanded={open}
         aria-controls={open ? MENU_ID : undefined}
       >
-        <span className="shrink-0 text-sm font-semibold tracking-wide">{PRODUCT_NAME}</span>
+        <span className="min-w-0 truncate text-sm font-semibold tracking-wide">{PRODUCT_NAME}</span>
         {activeApp && (
           <>
             <span aria-hidden="true" className="shrink-0 text-sm text-ink-faint">

@@ -117,7 +117,7 @@ describe('useFileNav.openFile', () => {
     result.current.openWorkspacePath('knowledge-base/KnowledgeBase/Untitled.md', { edit: true });
     expect(navigateMock).toHaveBeenCalledWith(
       '/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/Untitled.md',
-      { state: { startEditing: true } },
+      { state: { startEditing: true, startEditingPath: 'knowledge-base/KnowledgeBase/Untitled.md' } },
     );
   });
 

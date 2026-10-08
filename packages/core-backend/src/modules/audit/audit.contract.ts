@@ -122,12 +122,19 @@ export interface IAgentAuditService {
 }
 
 /**
- * The most recent use of any of one person's live agents: when, and what it
- * calls itself (the agent's registered client name, or the key's label).
+ * The most recent use of any of one person's live agents: when, what it
+ * calls itself (the agent's registered client name, or the key's label), and
+ * which of the two that name is.
  */
 export interface AgentUse {
   at: Date;
   client: string;
+  /**
+   * `agent`: an OAuth connection, and `client` is the name the agent
+   * registered. `key`: a connection key, and `client` is whatever label its
+   * owner typed — it says nothing about which app holds the key.
+   */
+  kind: 'agent' | 'key';
 }
 
 /**

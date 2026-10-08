@@ -33,6 +33,8 @@ const doneLocally = new Set<string>();
 /** Full storage keys set this session — see {@link setFlag}. */
 const flagsLocally = new Set<string>();
 const listeners = new Set<() => void>();
+/** Bumped when ANOTHER tab changes one of the notes below — see {@link onStorage}. */
+let storageVersion = 0;
 
 /** Tell every mounted `useOnboarding` that the overrides above moved. */
 function emit(): void {
@@ -40,12 +42,32 @@ function emit(): void {
 }
 
 /**
+ * Another tab raised (or cleared) one of the notes. `setFlag` only wakes this
+ * tab's listeners, and the browser tells the OTHER tabs through `storage` —
+ * so a guide read, or a column closed, in one tab reaches every tab already
+ * open, rather than waiting for their next reload. A `null` key is the whole
+ * storage cleared.
+ */
+function onStorage(event: StorageEvent): void {
+  const { key } = event;
+  if (key !== null && !FLAG_PREFIXES.some((prefix) => key.startsWith(prefix))) return;
+  storageVersion++;
+  emit();
+}
+
+/**
  * The `useSyncExternalStore` half of the subscription: register a listener and
  * hand back its unsubscribe, so a hook that unmounts stops being notified.
+ * The window's `storage` listener lives exactly as long as there is somebody
+ * to tell.
  */
 function subscribe(listener: () => void): () => void {
+  if (listeners.size === 0) window.addEventListener('storage', onStorage);
   listeners.add(listener);
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) window.removeEventListener('storage', onStorage);
+  };
 }
 
 /**
@@ -60,6 +82,7 @@ const READ_GUIDE_PREFIX = 'bevel.onboarding.readGuide.';
 const COMMAND_MENU_PREFIX = 'bevel.onboarding.commandMenuOpened.';
 const SETUP_DISMISSED_PREFIX = 'bevel.onboarding.setupDismissed.';
 const SETUP_COMPLETE_PREFIX = 'bevel.onboarding.setupCompleteClosed.';
+const FLAG_PREFIXES = [READ_GUIDE_PREFIX, COMMAND_MENU_PREFIX, SETUP_DISMISSED_PREFIX, SETUP_COMPLETE_PREFIX];
 
 /** Storage is best-effort: private-mode Safari throws, and a lost flag costs
  *  one extra row on screen, not a failure. */
@@ -139,14 +162,7 @@ export function markOnboardingDone(userId: string, email: string): void {
 export function resetOnboardingForTests(): void {
   try {
     for (const key of Object.keys(window.localStorage)) {
-      if (
-        key.startsWith(READ_GUIDE_PREFIX) ||
-        key.startsWith(COMMAND_MENU_PREFIX) ||
-        key.startsWith(SETUP_DISMISSED_PREFIX) ||
-        key.startsWith(SETUP_COMPLETE_PREFIX)
-      ) {
-        window.localStorage.removeItem(key);
-      }
+      if (FLAG_PREFIXES.some((prefix) => key.startsWith(prefix))) window.localStorage.removeItem(key);
     }
   } catch {
     /* ignore */
@@ -165,9 +181,9 @@ export interface OnboardingController {
   markDone(): void;
 }
 
-/** The subscription's version counter: every override and note changes it. */
-const snapshot = () => `${doneLocally.size}:${flagsLocally.size}`;
-const serverSnapshot = () => '0:0';
+/** The subscription's version counter: every override and note, in this tab or another, changes it. */
+const snapshot = () => `${doneLocally.size}:${flagsLocally.size}:${storageVersion}`;
+const serverSnapshot = () => '0:0:0';
 
 const SIGNED_OUT: OnboardingController = {
   showPill: false,

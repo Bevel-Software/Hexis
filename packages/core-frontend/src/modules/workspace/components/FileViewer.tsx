@@ -486,7 +486,18 @@ export function FileViewer() {
   // one, an old request's `.finally(() => setIsEnteringEdit(false))`
   // would clobber the new request's "Loading…" state on the new file.
   const enterEditRequestRef = useRef(0);
-  const handleEnterEditMode = useCallback(() => {
+  // The file whose editor should open with the caret at the end — see the
+  // effect beside `editorContainerRef`. Set only at the moment an enter-edit
+  // flow that asked for it SUCCEEDS, so a request the lock, the branch or the
+  // reload turned away leaves nothing behind for a later Edit by hand to trip.
+  const caretToEndForRef = useRef<string | null>(null);
+  /**
+   * Enter edit mode, the way the Edit button does. `caretToEnd` is the
+   * `startEditing` request's: put the caret at the end of the page once the
+   * editor is up (see the caret effect). The button itself goes through
+   * `handleEnterEditMode`, which never asks for that.
+   */
+  const enterEditMode = useCallback((caretToEnd: boolean) => {
     if (editMode || isEnteringEdit || !openFilePath || onProtectedBranch || isReviewingPending) return;
     // **Non-optimistic on entry.** We acquire the lock + reload disk
     // bytes FIRST, then flip into edit mode. The optimistic path —
@@ -545,6 +556,7 @@ export function FileViewer() {
         // Stale-request check — file may have switched while we were
         // reloading. Don't flip editMode for the wrong file.
         if (!isStillCurrent()) return;
+        caretToEndForRef.current = caretToEnd ? targetPath : null;
         setEditMode(true);
       })
       .catch((err) => {
@@ -560,6 +572,7 @@ export function FileViewer() {
         }
       });
   }, [editMode, isEnteringEdit, openFilePath, onProtectedBranch, isReviewingPending, fileLock, reloadTabFromDisk]);
+  const handleEnterEditMode = useCallback(() => enterEditMode(false), [enterEditMode]);
 
   /**
    * Opening straight into edit mode, when the navigation asked for it
@@ -568,10 +581,17 @@ export function FileViewer() {
    * skill page already answers to), so no URL ever carries it.
    *
    * It is honoured the way a click on Edit would be, through
-   * `handleEnterEditMode` — the lock and the fresh read are not skipped — and
-   * only once the request can be judged: the file the URL names is the one
+   * `enterEditMode` — the lock and the fresh read are not skipped — and
+   * only once the request can be judged: the file it was made for is the one
    * open, with bytes, on a known branch, and the access lookup has answered
    * (`canWrite` null is "not asked yet", and acting on it would be a guess).
+   *
+   * "The file it was made for" is `startEditingPath` when the request names
+   * one, and the URL's path otherwise. The URL alone is not enough: a path
+   * URL is canonicalised to the node's id URL (`FileRoute`), sometimes before
+   * the file's bytes land, and from then on the URL names the id, not the
+   * path that is open.
+   *
    * Then it is CONSUMED — replaced out of the history entry, other state
    * kept — whether or not editing was allowed, so a refresh or a Back to this
    * entry opens the page for reading like any other. The ref covers the beat
@@ -580,41 +600,39 @@ export function FileViewer() {
   const location = useLocation();
   const navigate = useNavigate();
   const routePath = useParams<{ '*': string }>()['*'] ?? '';
-  const startEditingRequested =
-    (location.state as { startEditing?: boolean } | null)?.startEditing === true;
+  const editRequest = location.state as { startEditing?: boolean; startEditingPath?: string } | null;
+  const startEditingRequested = editRequest?.startEditing === true;
+  const startEditingPath = editRequest?.startEditingPath ?? routePath;
   const consumedEditRequestRef = useRef<string | null>(null);
-  // The file whose editor should open with the caret at the end — see the
-  // effect beside `editorContainerRef`.
-  const caretToEndForRef = useRef<string | null>(null);
   useEffect(() => {
     if (!startEditingRequested || consumedEditRequestRef.current === location.key) return;
-    if (!openFilePath || openFilePath !== routePath || openFileContent === null || !Renderer) return;
+    if (!openFilePath || openFilePath !== startEditingPath || openFileContent === null || !Renderer) return;
     if (currentBranch === null || access.canWrite === null) return;
     consumedEditRequestRef.current = location.key;
     const rest = { ...(location.state as Record<string, unknown>) };
     delete rest.startEditing;
+    delete rest.startEditingPath;
     navigate(
       { pathname: location.pathname, search: location.search, hash: location.hash },
       { replace: true, state: Object.keys(rest).length > 0 ? rest : null },
     );
     if (!isViewOnlyFile(openFilePath)) {
-      caretToEndForRef.current = openFilePath;
       // A one-shot reaction to the router's state, not derived state: this is
       // the Edit click the navigation asked for, made once its file is ready.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      handleEnterEditMode();
+      enterEditMode(true);
     }
   }, [
     startEditingRequested,
     location,
     navigate,
-    routePath,
+    startEditingPath,
     openFilePath,
     openFileContent,
     Renderer,
     currentBranch,
     access.canWrite,
-    handleEnterEditMode,
+    enterEditMode,
   ]);
 
   // Tell the command menu whether "Edit this page" would do anything — the
@@ -1154,8 +1172,8 @@ export function FileViewer() {
     // above — not a component created during render. The provider hands the
     // open file's `download:` verdict to any DownloadFileButton inside the
     // renderer without widening the renderer contract.
-    // eslint-disable-next-line react-hooks/static-components
     <CanDownloadContext.Provider value={access.canDownload}>
+    {/* eslint-disable-next-line react-hooks/static-components */}
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
       // When a teammate's save lands, the workspace state updates the

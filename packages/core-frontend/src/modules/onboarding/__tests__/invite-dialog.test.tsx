@@ -99,6 +99,23 @@ describe('splitEmails', () => {
     expect(splitEmails('A@x.io, b@x.io;c@x.io\nd@x.io')).toEqual(['a@x.io', 'b@x.io', 'c@x.io', 'd@x.io']);
     expect(splitEmails('Ana Diaz <ana@x.io>; Bo <bo@x.io>')).toEqual(['ana@x.io', 'bo@x.io']);
   });
+
+  it('keeps a display name with a comma in it whole, quoted or not', () => {
+    expect(splitEmails('Doe, Jane <jane@example.com>')).toEqual(['jane@example.com']);
+    expect(splitEmails('Doe, Jane <jane@example.com>, Roe, Rick <rick@example.com>')).toEqual([
+      'jane@example.com',
+      'rick@example.com',
+    ]);
+    expect(splitEmails('"Doe, Jane" <jane@example.com>; "Bo; Smith" <bo@example.com>')).toEqual([
+      'jane@example.com',
+      'bo@example.com',
+    ]);
+  });
+
+  it('keeps bare addresses beside named ones, and a mistyped one after the last of them', () => {
+    expect(splitEmails('ana@x.io, Doe, Jane <jane@x.io>, bo@x.io')).toEqual(['ana@x.io', 'jane@x.io', 'bo@x.io']);
+    expect(splitEmails('Doe, Jane <jane@x.io>, nope')).toEqual(['jane@x.io', 'nope']);
+  });
 });
 
 describe('InviteDialog: the address field', () => {
@@ -132,6 +149,22 @@ describe('InviteDialog: the address field', () => {
     expect(bad).toHaveClass('text-danger');
     expect(screen.getByText('One address isn’t valid and won’t be invited.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Invite 1 person' })).toBeEnabled();
+  });
+
+  it('counts an invalid address still in the field, which a send would clear unsent', async () => {
+    const { input } = mountDialog();
+    await userEvent.type(input, 'ana@bevel.software{Enter}not-an-address');
+    expect(chips()).toEqual(['ana@bevel.software']);
+    expect(screen.getByText('One address isn’t valid and won’t be invited.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Invite 1 person' })).toBeEnabled();
+  });
+
+  it('turns a pasted Outlook recipient list into one chip per person', () => {
+    const { input } = mountDialog();
+    fireEvent.paste(input, {
+      clipboardData: { getData: () => 'Doe, Jane <jane@bevel.software>; Roe, Rick <rick@bevel.software>' },
+    });
+    expect(chips()).toEqual(['jane@bevel.software', 'rick@bevel.software']);
   });
 
   it('can remove a chip with its button', async () => {
@@ -200,9 +233,9 @@ describe('InviteDialog: sending', () => {
     expect(screen.getByText('Can sign in already, already an admin')).toBeInTheDocument();
   });
 
-  it('says "no seat left" on the row the deployment refused with a 403', async () => {
+  it('says "no seat left" on the row the deployment refused for want of a place', async () => {
     createAccountMock.mockImplementation(async (email) => {
-      if (email === 'bo@bevel.software') throw new AccountRequestError('No seat left on this plan', 403);
+      if (email === 'bo@bevel.software') throw new AccountRequestError('No seat left on this plan', 403, 'admission');
     });
     const { input, onInvited } = mountDialog();
     await userEvent.type(input, 'ana@bevel.software{Enter}bo@bevel.software{Enter}');
@@ -213,6 +246,37 @@ describe('InviteDialog: sending', () => {
     expect(within(bo).getByText('Not invited: no seat left')).toBeInTheDocument();
     expect(within(bo).getByText('No seat left on this plan')).toBeInTheDocument();
     expect(onInvited).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads a 403 that is not an admission refusal (the admin check) as an error, not "no seat left"', async () => {
+    createAccountMock.mockRejectedValue(new AccountRequestError('Admins only', 403));
+    const { input } = mountDialog();
+    await userEvent.type(input, 'ana@bevel.software{Enter}');
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
+
+    await screen.findByRole('dialog', { name: 'Nobody was invited' });
+    expect(screen.queryByText('Not invited: no seat left')).not.toBeInTheDocument();
+    expect(screen.getByText('Not invited')).toBeInTheDocument();
+    expect(screen.getByText('Admins only')).toBeInTheDocument();
+  });
+
+  it('does not claim a switched-off account can sign in, or count it as invited', async () => {
+    listAccountsMock.mockResolvedValue([
+      account('juan@bevel.software'),
+      { ...account('bo@bevel.software'), deactivatedAt: '2026-09-01T00:00:00Z' },
+    ]);
+    const { input, onInvited } = mountDialog();
+    await userEvent.type(input, 'bo@bevel.software{Enter}');
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
+
+    await screen.findByRole('dialog', { name: 'Nobody was invited' });
+    expect(createAccountMock).not.toHaveBeenCalled();
+    const bo = screen.getByText('bo@bevel.software').closest('li')!;
+    expect(within(bo).getByText('Account switched off')).toBeInTheDocument();
+    expect(within(bo).getByText('Can’t sign in until it’s switched on in User accounts')).toBeInTheDocument();
+    expect(screen.queryByText(/Their accounts are ready/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Where they sign in')).not.toBeInTheDocument();
+    expect(onInvited).not.toHaveBeenCalled();
   });
 
   it('shows any other refusal in the server’s words', async () => {
@@ -307,5 +371,21 @@ describe('InviteButton (toolbar)', () => {
   it('is not offered without a dialog to open', () => {
     mountButton(true, false);
     expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+  });
+
+  it('drops its word on a compact toolbar but keeps its name, and still opens the dialog', async () => {
+    render(
+      <AuthContext.Provider value={authValue()}>
+        <AdminContext.Provider value={adminValue(true)}>
+          <InviteDialogProvider>
+            <InviteButton compact />
+          </InviteDialogProvider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>,
+    );
+    const button = screen.getByRole('button', { name: 'Invite' });
+    expect(button).toHaveTextContent('');
+    await userEvent.click(button);
+    expect(screen.getByRole('dialog', { name: 'Invite your team' })).toBeInTheDocument();
   });
 });

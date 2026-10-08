@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useEffect } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate, type NavigateFunction } from 'react-router-dom';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { AuthContext } from '../../auth/state/auth.context';
 import { authValue } from '../../library/__tests__/auth-harness';
@@ -21,6 +22,8 @@ import type { StarterPacksAnswer } from '../services/starter-packs.api';
 import { resetStarterPacksForTests } from '../state/starter-packs';
 import { SearchPalette } from '../../toolbar/components/SearchPalette';
 import { COMMAND_MENU_SHORTCUT_LABEL } from '../../toolbar/commands/command-menu';
+import { AGENT_RECHECK_MS } from '../state/agent-connection';
+import { notePluginCreated } from '../../library/state/plugins-revision';
 
 /**
  * The "Get set up" column: every tick is derived from state the app already
@@ -151,6 +154,16 @@ function LocationProbe() {
   return <div data-testid="pathname">{useLocation().pathname}</div>;
 }
 
+/** The router's `navigate`, handed out so a test can move the app around under the column. */
+let navigateTo: NavigateFunction = () => {};
+function NavigateHandle() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigateTo = navigate;
+  }, [navigate]);
+  return null;
+}
+
 function setViewportWidth(width: number): void {
   (window as typeof window & { happyDOM: { setInnerWidth(v: number): void } }).happyDOM.setInnerWidth(width);
 }
@@ -158,7 +171,8 @@ function setViewportWidth(width: number): void {
 type MountOptions = {
   admin?: boolean;
   onboardingDone?: boolean;
-  files?: string[];
+  /** The workspace's files; null while the tree has not loaded. */
+  files?: string[] | null;
   openFilePath?: string | null;
   route?: string;
   createFile?: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
@@ -184,12 +198,18 @@ function columnUi({
       <AuthContext.Provider value={auth}>
         <AdminContext.Provider value={adminValue(admin)}>
           <WorkspaceContext.Provider
-            value={makeWorkspaceFixture({ kbDirName: KB, fileTree: treeOf(files), openFilePath, createFile })}
+            value={makeWorkspaceFixture({
+              kbDirName: KB,
+              fileTree: files ? treeOf(files) : null,
+              openFilePath,
+              createFile,
+            })}
           >
             <InviteDialogProvider>
               {withPalette && <SearchPalette compact />}
               <GetStartedColumn />
               <LocationProbe />
+              <NavigateHandle />
             </InviteDialogProvider>
           </WorkspaceContext.Provider>
         </AdminContext.Provider>
@@ -414,7 +434,7 @@ describe('GetStartedColumn: what a member sees', () => {
  */
 describe('GetStartedColumn: a connected agent', () => {
   it('ticks "Connect your agent" from the endpoint, and concludes the onboarding once', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     mount();
     await waitFor(() => expect(isDone('Connect your agent')).toBe(true));
     expect(doneWrites()).toBe(1);
@@ -437,8 +457,43 @@ describe('GetStartedColumn: a connected agent', () => {
     }
   });
 
+  /**
+   * Connecting somewhere else — another window, the External agent access
+   * page — still ticks the list: it asks again when the person comes back to
+   * the tab, though not more than once in a while.
+   */
+  it('asks again when you come back to the tab, at most once in a while', async () => {
+    vi.useFakeTimers();
+    try {
+      mount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+      // Straight back: too soon to ask again.
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AGENT_RECHECK_MS);
+      });
+      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(2);
+      expect(isDone('Connect your agent')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not conclude again for an account the server already concluded', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     mount({ onboardingDone: true });
     await waitFor(() => expect(row('Write your first page')).not.toBeNull());
     await act(async () => {});
@@ -464,7 +519,7 @@ describe('GetStartedColumn: a connected agent', () => {
   });
 
   it('offers "Ask Claude to write it" first once connected, keeping New page beside it', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     mount();
     const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
     expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
@@ -496,7 +551,7 @@ describe('GetStartedColumn: a connected agent', () => {
     });
 
     it("asks the agent with the pack's prompt", async () => {
-      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
       fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
       mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
       const page = row('Write your first page')!;
@@ -528,7 +583,7 @@ describe('GetStartedColumn: a connected agent', () => {
     });
 
     it('keeps the generic prompt when the team skipped', async () => {
-      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
       fetchStarterPacksMock.mockResolvedValue({ offered: false, chosen: 'none', packs: [], chosenPack: null });
       mount();
       const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
@@ -538,7 +593,7 @@ describe('GetStartedColumn: a connected agent', () => {
   });
 
   it('leads with "Ask ChatGPT to write it" for a ChatGPT connection, Claude quiet beside Copy prompt', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT', kind: 'agent' });
     mount();
     const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask ChatGPT to write it' });
     expect(ask).toHaveAttribute('href', chatGptPromptUrl(FIRST_PAGE_PROMPT));
@@ -553,7 +608,7 @@ describe('GetStartedColumn: a connected agent', () => {
   });
 
   it('leads with Copy prompt for an agent no link opens, and says where to paste it', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude Code · local server on LAPTOP-1' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude Code · local server on LAPTOP-1', kind: 'agent' });
     const writeText = vi.fn().mockResolvedValue(undefined);
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
@@ -575,14 +630,28 @@ describe('GetStartedColumn: a connected agent', () => {
     }
   });
 
+  it('leads with Copy prompt for a connection key, whatever its label says', async () => {
+    // A key's label is free text: "ChatGPT CLI" names the key, not an app
+    // that a chatgpt.com link would reach.
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT CLI', kind: 'key' });
+    mount();
+    const page = await waitFor(() => {
+      const r = row('Write your first page')!;
+      within(r).getByRole('button', { name: 'Copy prompt' });
+      return r;
+    });
+    expect(within(page).queryByRole('link', { name: /to write it/ })).not.toBeInTheDocument();
+    expect(within(page).getByText('Paste it into your agent.')).toBeInTheDocument();
+  });
+
   it('says "your agent" when the connection has no name to offer', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Unnamed agent' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Unnamed agent', kind: 'agent' });
     mount();
     expect(await within(row('Write your first page')!).findByText('Paste it into your agent.')).toBeInTheDocument();
   });
 
   it('copies the prompt and says so', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     const writeText = vi.fn().mockResolvedValue(undefined);
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
@@ -599,7 +668,7 @@ describe('GetStartedColumn: a connected agent', () => {
   });
 
   it('ticks the page step by itself when the agent’s page lands, whoever wrote it', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/About us.md`] });
     await waitFor(() => expect(isDone('Connect your agent')).toBe(true));
     expect(isDone('Write your first page')).toBe(true);
@@ -644,6 +713,42 @@ describe('GetStartedColumn: what an admin sees', () => {
     await waitFor(() => expect(isDone('Invite your team')).toBe(true));
   });
 
+  it('does not count a switched-off account as a teammate', async () => {
+    listAccountsMock.mockResolvedValue([
+      account('juan@bevel.software'),
+      account('ana@bevel.software', { deactivatedAt: '2026-09-01T00:00:00Z' }),
+    ]);
+    mount({ admin: true });
+    await screen.findByRole('complementary', { name: 'Get set up' });
+    expect(isDone('Invite your team')).toBe(false);
+  });
+
+  /**
+   * The plugin question is asked on entering Skills & Tools and when this tab
+   * creates a plugin — not on every move between Library pages.
+   */
+  it('asks for plugins again on entering Skills & Tools and on a plugin created, not on every Library page', async () => {
+    mount({ admin: true });
+    await screen.findByRole('complementary', { name: 'Get set up' });
+    expect(listPluginsMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => navigateTo('/skills-and-tools'));
+    await waitFor(() => expect(listPluginsMock).toHaveBeenCalledTimes(2));
+    await act(async () => navigateTo('/skills-and-tools/owned'));
+    await act(async () => navigateTo('/skills-and-tools/plugins/GTM'));
+    expect(listPluginsMock).toHaveBeenCalledTimes(2);
+
+    listPluginsMock.mockResolvedValue([plugin('Plugins/GTM')]);
+    act(() => notePluginCreated());
+    await waitFor(() => expect(isDone('Create a plugin for your team')).toBe(true));
+    expect(listPluginsMock).toHaveBeenCalledTimes(3);
+
+    // Found is final: leaving and coming back asks nothing more.
+    await act(async () => navigateTo('/workspace'));
+    await act(async () => navigateTo('/skills-and-tools'));
+    expect(listPluginsMock).toHaveBeenCalledTimes(3);
+  });
+
   it('opens the invite dialog from the invite step', async () => {
     mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
@@ -670,7 +775,7 @@ describe('GetStartedColumn: all done', () => {
   it('says "You’re set up" when the last step ticks, in place of the list', async () => {
     listPluginsMock.mockResolvedValue([plugin('Plugins/GTM')]);
     listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('ana@bevel.software')]);
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     const everythingBut = { admin: true, onboardingDone: true, openFilePath: GUIDE };
     // One step short, the settled column shows the seven it has...
     const { rerender } = mount(everythingBut);
@@ -688,7 +793,7 @@ describe('GetStartedColumn: all done', () => {
   });
 
   it('celebrates a list finished elsewhere on arrival, and does not mention a team to a member', async () => {
-    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
     expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
     expect(screen.getByText('Your agent can read and write your knowledge base.')).toBeInTheDocument();
@@ -759,6 +864,29 @@ describe('GetStartedColumn: the command menu', () => {
   });
 });
 
+/**
+ * The first-page step reads the file tree. Until the tree is in, the guide
+ * looks absent and the first page unwritten, so the list waits for it rather
+ * than showing a shorter, falsely open one.
+ */
+describe('GetStartedColumn: the file tree', () => {
+  it('stays hidden until the tree has loaded', () => {
+    const { rerender } = mount({ files: null });
+    expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+    rerender(columnUi({}));
+    expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
+    expect(row('Read “How to get started”')).not.toBeNull();
+  });
+
+  it('skips exactly `access.md`, the name the platform reserves — not another spelling', () => {
+    const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/access.md`] });
+    expect(isDone('Write your first page')).toBe(false);
+    unmount();
+    mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/Access.md`] });
+    expect(isDone('Write your first page')).toBe(true);
+  });
+});
+
 describe('GetStartedColumn: getting out of the way', () => {
   it('stays dismissed once closed, across remounts', async () => {
     const { unmount } = mount();
@@ -768,6 +896,32 @@ describe('GetStartedColumn: getting out of the way', () => {
     unmount();
     mount();
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+  });
+
+  /**
+   * The notes are per browser, so a tab already open hears another tab's
+   * close through `storage` — not at its next reload.
+   */
+  it('goes when another tab closes it', () => {
+    mount();
+    expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
+    const key = 'bevel.onboarding.setupDismissed.juan@bevel.software';
+    window.localStorage.setItem(key, '1');
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key, newValue: '1' }));
+    });
+    expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+  });
+
+  it('ticks the guide when another tab opened it', () => {
+    mount();
+    expect(isDone('Read “How to get started”')).toBe(false);
+    const key = 'bevel.onboarding.readGuide.juan@bevel.software';
+    window.localStorage.setItem(key, '1');
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key, newValue: '1' }));
+    });
+    expect(isDone('Read “How to get started”')).toBe(true);
   });
 
   it('is not shown on the welcome page', () => {

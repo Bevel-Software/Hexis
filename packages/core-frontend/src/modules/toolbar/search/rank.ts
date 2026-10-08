@@ -32,7 +32,15 @@ export function normalizeForMatch(text: string): string {
     .trim();
 }
 
-const WORD_CHAR = /[\p{L}\p{N}]/u;
+/**
+ * A letter or digit at the very END of the text — the character just before a
+ * match. Tested against the whole prefix rather than `text[at - 1]` because
+ * that indexes UTF-16 code units: a letter outside the Basic Multilingual
+ * Plane (`𝐀`, the later CJK ideographs) is two of them, and its trailing half alone
+ * is no letter, so a mid-word match after one would pass for a word start.
+ * The `u` flag reads the prefix by code point.
+ */
+const ENDS_IN_WORD_CHAR = /[\p{L}\p{N}]$/u;
 
 /**
  * The tier `query` matches `name` at, or null for no match. Both arguments
@@ -49,7 +57,7 @@ export function matchTier(name: string, query: string): 0 | 1 | 2 | null {
   // Any occurrence at a word start counts, not just the first: `an` in
   // "Banana and" first lands mid-word, then again at the start of "and".
   while (at !== -1) {
-    if (!WORD_CHAR.test(n[at - 1])) return 1;
+    if (!ENDS_IN_WORD_CHAR.test(n.slice(0, at))) return 1;
     at = n.indexOf(q, at + 1);
   }
   return 2;

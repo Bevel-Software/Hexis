@@ -264,8 +264,10 @@ function CoreSurfaces() {
   // The "Get set up" column sits beside whichever surface is on screen, here
   // for the same reason: one checklist across both apps, mounted once, so it
   // does not re-fetch or re-flash on a switch between them. The row wraps
-  // both branches identically, so the surface below keeps its position and
-  // stays mounted across the switch (see above).
+  // both branches identically, so it is the COLUMN that keeps its place in the
+  // tree and stays mounted across the switch. The surface beside it does not:
+  // `LibraryRoutes` and `KnowledgeSurface` are different components, so a
+  // switch unmounts one and mounts the other, as it always has.
   return (
     <OpenChangeRequestsProvider>
       <div className="flex h-full min-h-0">
