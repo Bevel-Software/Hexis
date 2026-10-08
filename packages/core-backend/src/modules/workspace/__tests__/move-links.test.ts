@@ -109,6 +109,23 @@ describe('planMoveLinks', () => {
     expect(plan.report.notRewritten).toEqual([{ path: `${KB}/Board.html`, reason: 'html page', links: ['Old/One.md'] }]);
   });
 
+  it('raw HTML inside a markdown page is reported, not rewritten — beside the markdown links that are', async () => {
+    const files = {
+      [`${KB}/Old/One.md`]: 'x\n',
+      [`${KB}/Old/pic.png`]: '',
+      // One markdown link, which is rewritten, and one raw `<img>`, which is not.
+      [`${KB}/Gallery.md`]: '[one](Old/One.md)\n\n<img src="Old/pic.png" alt="pic">\n',
+      // A page whose raw HTML points elsewhere is not named.
+      [`${KB}/Other.md`]: '<a href="Elsewhere.md">x</a> mentions Old in prose\n',
+    };
+    const plan = await planMoveLinks(inputOf(files));
+    expect(plan.edits.map((e) => e.path)).toEqual([`${KB}/Gallery.md`]);
+    expect(plan.edits[0].content).toBe('[one](New/Old/One.md)\n\n<img src="Old/pic.png" alt="pic">\n');
+    expect(plan.report.notRewritten).toEqual([
+      { path: `${KB}/Gallery.md`, reason: 'html in markdown', links: ['Old/pic.png'] },
+    ]);
+  });
+
   it(`more than ${MOVE_LINK_EDIT_CAP} edited files is refused, saying how to split or switch off`, async () => {
     const files: Record<string, string> = { [`${KB}/Old/One.md`]: 'x\n' };
     for (let i = 0; i <= MOVE_LINK_EDIT_CAP; i++) files[`${KB}/Pages/P${i}.md`] = '[one](../Old/One.md)\n';

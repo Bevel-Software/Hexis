@@ -16,7 +16,9 @@
  *     left;
  *   - a file the read hook refuses counts as one the caller cannot read: not
  *     named, only covered by the same sentence;
- *   - an HTML page is named with its links, and left.
+ *   - an HTML page is named with its links, and left — and so is a markdown
+ *     page for the raw HTML it carries (`<a href>`, `<img src>`), which the
+ *     grammar reads but never rewrites.
  */
 
 import {
@@ -144,6 +146,11 @@ export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPla
       if (links.length > 0) notRewritten.push({ path: newPath, reason: 'html page', links });
       continue;
     }
+    // Raw HTML inside a markdown page (`<img src>`, `<a href>`) renders like
+    // a link but is not one the grammar rewrites: named with those links and
+    // left, as an HTML page is, so a stale target is never silent.
+    const html = htmlLinksAffectedByMove(text, opts);
+    if (html.length > 0) notRewritten.push({ path: newPath, reason: 'html in markdown', links: html });
     const rewritten = rewriteMdLinks(text, opts);
     if (rewritten.edits.length === 0) continue;
     edits.push({ path: newPath, lockAt: oldPath, original: text, content: rewritten.text, links: rewritten.edits });
