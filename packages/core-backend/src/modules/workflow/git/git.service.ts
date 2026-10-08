@@ -2163,6 +2163,36 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Whether this clone's HEAD already holds everything origin has on its
+   * branch: a push would then fast-forward origin to HEAD, and no cooperative
+   * pull-rebase would replay origin's commits INTO HEAD first. Asked after a
+   * fetch, about the fetched ref.
+   *
+   * The roles.yaml preservation asks this before pushing a restore it finds
+   * already committed. "HEAD's roles.yaml is the base version" is only worth
+   * publishing when origin ends up AT HEAD — a clone behind origin would have
+   * origin's divergent copy rebased into it on the way, and the push would
+   * land exactly what the restore exists to keep off the base.
+   *
+   * Exit 1 is git's "not an ancestor". Every other failure propagates — a
+   * tracking ref that does not exist, a broken repository — so a probe that
+   * cannot answer fails the guard closed, never open.
+   */
+  async headContainsOrigin(workspaceId: string): Promise<boolean> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const branch = await this.currentBranch(cwd);
+      try {
+        await this.git(cwd, ['merge-base', '--is-ancestor', `refs/remotes/origin/${branch}`, 'HEAD']);
+        return true;
+      } catch (err) {
+        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return false;
+        throw err;
+      }
+    });
+  }
+
+  /**
    * `hasUnpushedCommits` without the workspace reservation — for a caller that
    * already holds one (`mergeChangeRequest`, which has to ask inside the same
    * reservation as the reset that would discard the answer). Fails closed: a

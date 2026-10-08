@@ -352,6 +352,39 @@ describe('GitService.pull', () => {
     await runGit(repo, ['push', 'origin', 'target-company-state']);
     await expect(svc.hasUnpushedCommits(workspaceId)).resolves.toBe(false);
   });
+
+  /**
+   * The question the roles.yaml preservation asks before pushing a restore it
+   * finds already committed: not "is there unpushed work" but "would the push
+   * fast-forward origin to HEAD". A clone behind origin answers no, and one
+   * whose tracking ref git cannot even resolve answers with an error — the
+   * guard that asks must fail closed on it, so the probe may not swallow it.
+   */
+  it('headContainsOrigin: true in sync and ahead, false behind origin, an error without a tracking ref', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
+      stubWorkflowHooks(),
+      testKbContext(),
+    );
+
+    await expect(svc.headContainsOrigin(workspaceId)).resolves.toBe(true);
+
+    // Ahead: a local commit on top of origin's tip.
+    await fs.writeFile(path.join(repo, 'new.txt'), 'x\n');
+    await runGit(repo, ['add', '.']);
+    await runGit(repo, ['commit', '-m', 'unpushed']);
+    await expect(svc.headContainsOrigin(workspaceId)).resolves.toBe(true);
+
+    // Behind: publish it, then step the clone back before it.
+    await runGit(repo, ['push', 'origin', 'target-company-state']);
+    await runGit(repo, ['reset', '--hard', 'HEAD~1']);
+    await expect(svc.headContainsOrigin(workspaceId)).resolves.toBe(false);
+
+    // No tracking ref at all: not "false", an error.
+    await runGit(repo, ['checkout', '-b', 'never-pushed']);
+    await expect(svc.headContainsOrigin(workspaceId)).rejects.toThrow();
+  });
 });
 
 /**

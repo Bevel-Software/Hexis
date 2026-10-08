@@ -67,8 +67,11 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     headRoles: string | null;
     baseRoles: string | null;
     commitFileResult?: unknown;
-    /** What the clone says when asked whether it holds commits origin lacks. */
-    unpushedCommits?: boolean;
+    /**
+     * What the clone answers when asked whether its HEAD already holds all of
+     * origin/<head>; an Error makes the probe throw instead.
+     */
+    headContainsOrigin?: boolean | Error;
     pushImpl?: () => Promise<void>;
     getPrResult?: { branch: string; base: string } | null;
     getPrDetailResult?: unknown;
@@ -98,7 +101,11 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
         'commitFileResult' in opts ? opts.commitFileResult : { sha: 'preserve-sha' },
       ),
       push: vi.fn(opts.pushImpl ?? (async () => undefined)),
-      hasUnpushedCommits: vi.fn().mockResolvedValue(opts.unpushedCommits ?? false),
+      headContainsOrigin: vi.fn(async () => {
+        const answer = opts.headContainsOrigin ?? false;
+        if (answer instanceof Error) throw answer;
+        return answer;
+      }),
     } as unknown as GitService;
 
     const prs = {
@@ -334,18 +341,50 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     // The earlier attempt restored and committed roles.yaml on the source,
     // and the host refused the push (the 409 above). origin/head therefore
     // still diverges, the working tree already matches base, and commitFile
-    // has nothing new — but the clone holds the restore commit, unpushed.
-    // The retry must push it and merge, not refuse "out of sync" forever.
+    // has nothing new — but the clone's HEAD holds the restore commit on top
+    // of everything origin has. The retry must push it and merge, not refuse
+    // "out of sync" forever.
     await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
     const { svc, git, reviewWorkflow } = makeSvc({
       headRoles: ATTACKER_ROLES,
       baseRoles: BASE_ROLES,
       commitFileResult: null,
-      unpushedCommits: true,
+      headContainsOrigin: true,
     });
     await expect(merge(svc)).resolves.toMatchObject({ kind: 'merged' });
     expect(git.push).toHaveBeenCalledTimes(1);
     expect(reviewWorkflow.mergePr).toHaveBeenCalled();
+  });
+
+  it('still ABORTS when the base version is on disk but the clone is BEHIND origin/head (fail-closed)', async () => {
+    // The unsafe shape: HEAD never saw origin's divergent roles.yaml commit,
+    // the working tree matches base, and the clone carries some unpushed
+    // save. Pushing would rebase origin's divergent copy INTO HEAD first and
+    // the merge would land it — so holding unpushed work is not the question,
+    // holding all of origin is.
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      commitFileResult: null,
+      headContainsOrigin: false,
+    });
+    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
+    expect(git.push).not.toHaveBeenCalled();
+    expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
+  });
+
+  it('ABORTS when the probe for "does HEAD hold origin/head" itself fails (fail-closed, not open)', async () => {
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      commitFileResult: null,
+      headContainsOrigin: new Error("fatal: Not a valid object name refs/remotes/origin/mallory/escalate"),
+    });
+    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
+    expect(git.push).not.toHaveBeenCalled();
+    expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
   });
 
   it('ABORTS the merge when the post-preservation CR detail cannot be reloaded (fail-closed)', async () => {

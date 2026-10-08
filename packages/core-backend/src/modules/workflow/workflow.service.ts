@@ -3984,7 +3984,16 @@ export class WorkflowService implements IWorkflowService {
         // the retry the refusal promises could never succeed: every attempt
         // would find the file already restored and stop here, and the merge
         // would stay refused until some unrelated save pushed the branch.
-        if (!committed && !(await this.git.hasUnpushedCommits(ws.id))) {
+        //
+        // The question is NOT "does the clone hold unpushed commits" — any
+        // queued save answers yes. It is whether HEAD already holds all of
+        // origin/<head>, so that the push fast-forwards origin to a head whose
+        // roles.yaml is the base version. A clone BEHIND origin would have
+        // origin's divergent copy rebased into HEAD by the cooperative pull on
+        // the way to the push, and the merge would land it: that clone is the
+        // out-of-sync one this guard refuses. A probe that cannot answer
+        // throws, and the guard fails closed with it.
+        if (!committed && !(await this.git.headContainsOrigin(ws.id))) {
           throw new Error(
             'roles.yaml restore produced no commit while origin still diverges from base — source workspace out of sync; refusing to merge',
           );
