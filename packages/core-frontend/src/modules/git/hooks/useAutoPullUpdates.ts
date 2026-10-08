@@ -63,7 +63,7 @@ export function useAutoPullUpdates(
         await pull();
       } catch (err) {
         if (cancelled) return;
-        const sanitizedReason = sanitizeErrorText(err) || 'Could not get updates.';
+        const sanitizedReason = sanitizeErrorText(err) || 'Something unexpected went wrong.';
         setAutoUpdate({
           status: 'failed',
           branch: status.branch,

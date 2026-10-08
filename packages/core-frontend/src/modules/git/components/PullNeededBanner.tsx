@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { GitMerge } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 import { currentBranchModel, isProtectedBranch } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { useAutoUpdate } from '../state/auto-update.context';
@@ -78,7 +78,7 @@ export function PullNeededBanner() {
     setPending(true);
     try {
       // Pull is the only operation whose failure should hand off to the
-      // agent — that's the user-visible action they clicked Retry on, and
+      // agent — that's the user-visible action they clicked Update on, and
       // a pull failure is the case where the agent has a real recovery
       // (resolve conflicts, switch branches, etc.) to attempt. Wrap it
       // alone so a transient post-pull refresh hiccup can't masquerade
@@ -89,8 +89,8 @@ export function PullNeededBanner() {
       } catch (err) {
         const reason =
           err instanceof Error
-            ? sanitizeErrorText(err) || 'Could not get updates.'
-            : 'Could not get updates.';
+            ? sanitizeErrorText(err) || 'Couldn’t get the latest changes.'
+            : 'Couldn’t get the latest changes.';
         setError(reason);
         const seedReason = classifyPullFailure(err);
         // Hand off through the change-request port so the user always has a
@@ -126,8 +126,8 @@ export function PullNeededBanner() {
       } catch (err) {
         const reason =
           err instanceof Error
-            ? sanitizeErrorText(err) || 'Could not refresh after update.'
-            : 'Could not refresh after update.';
+            ? sanitizeErrorText(err) || 'Got the latest changes, but couldn’t show them. Reload the page.'
+            : 'Got the latest changes, but couldn’t show them. Reload the page.';
         setError(reason);
         console.debug('[pull] post-pull refresh failed:', reason);
       }
@@ -151,12 +151,8 @@ export function PullNeededBanner() {
   const showAssistantAction = !onProtectedBranch && !!crPort?.resolvePullIssue;
   const showAction = showRetry || showAssistantAction;
   const handleClick = showRetry ? pullDirectly : askAgentToMerge;
-  const buttonLabel = pending ? 'Retrying…' : showRetry ? 'Retry' : 'Ask assistant';
-  const message = autoFailed
-    ? 'Couldn’t update automatically'
-    : showAssistantAction
-      ? 'Your draft is missing teammate updates'
-      : 'Updates are waiting';
+  const buttonLabel = pending ? 'Updating…' : showRetry ? 'Update' : 'Ask assistant';
+  const message = autoFailed ? 'Couldn’t get the latest changes' : 'New changes available';
   // After save=share, the only thing that can keep auto-pull from running on
   // a protected branch is in-memory tab edits. The previous fallback referred
   // to "discard your local changes" — a dirty-tree / conflicted-paths exit
@@ -165,9 +161,9 @@ export function PullNeededBanner() {
   const guidance = autoFailed
     ? autoUpdate.reason
     : showAssistantAction
-      ? null
+      ? 'Your draft doesn’t have them yet.'
       : hasUnsavedEditorChanges
-        ? 'Finish or save your open file before updating.'
+        ? 'Save your open page to get them.'
         : null;
 
   return (
@@ -176,10 +172,8 @@ export function PullNeededBanner() {
       className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
     >
       <div className="flex items-center gap-2">
-        <GitMerge size={13} className="shrink-0" />
-        <span className="flex-1">
-          {message} (<span className="font-mono font-semibold">{status.branch}</span>).
-        </span>
+        <RefreshCw size={13} className="shrink-0" />
+        <span className="flex-1">{message}</span>
         {showAction && (
           <Button variant="primary" size="tiny" onClick={handleClick} disabled={pending}>
             {buttonLabel}
