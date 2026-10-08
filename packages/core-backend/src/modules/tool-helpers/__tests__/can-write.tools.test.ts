@@ -317,6 +317,39 @@ describe('read_file carries canWrite for the file read', () => {
     expect(read.canWrite).toBe(true);
   });
 
+  it('gives the default branch\'s AGENTS.md verdict on a draft that deleted the file', async () => {
+    const onDraft = join(wsDir(DRAFT), KB, 'AGENTS.md');
+    await rm(onDraft);
+    try {
+      for (const as of [ADMIN, ENG]) {
+        const main = await call<Read>('read_file', { branch: MAIN, path: `${KB}/AGENTS.md` }, as);
+        const draft = await call<Read>('read_file', { branch: DRAFT, path: `${KB}/AGENTS.md` }, as);
+        // The draft serves the platform's guide alone; what lands is still the default branch's file.
+        expect(draft.content).not.toContain('Our conventions');
+        expect(main.canWrite, as).toBe(true);
+        expect(draft.canWrite, as).toBe(true);
+      }
+    } finally {
+      await writeFile(onDraft, MAIN_TREE['AGENTS.md']);
+    }
+  });
+
+  it('gives false on a draft that added AGENTS.md when the default branch has none', async () => {
+    const onMain = join(wsDir(MAIN), KB, 'AGENTS.md');
+    await rm(onMain);
+    try {
+      for (const as of [ADMIN, ENG]) {
+        const main = await call<Read>('read_file', { branch: MAIN, path: `${KB}/AGENTS.md` }, as);
+        const draft = await call<Read>('read_file', { branch: DRAFT, path: `${KB}/AGENTS.md` }, as);
+        expect(draft.content).toContain('Our conventions');
+        expect(main.canWrite, as).toBe(false);
+        expect(draft.canWrite, as).toBe(false);
+      }
+    } finally {
+      await writeFile(onMain, MAIN_TREE['AGENTS.md']);
+    }
+  });
+
   it('carries no canWrite for a spill ref', async () => {
     const { ref } = await spills.write('spilled');
     const read = await call<Read>('read_file', { branch: MAIN, path: ref });

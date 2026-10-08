@@ -1770,16 +1770,16 @@ export function registerWorkspaceTools(
   const readForTool: ReadForTool = async (branch, p, ctx) => (await readServed(branch, p, ctx)).result;
 
   /**
-   * {@link readForTool}, also saying whether what answered is the platform's
-   * guide ALONE — no file of the knowledge base's own (or none this caller may
-   * read) at the guide's name — which nothing can be written at, so
-   * `read_file` reports `canWrite: false` there, as `file_stat` does.
+   * {@link readForTool}, also saying, at the guide's name, whether a file of
+   * the knowledge base's own answered first on THIS branch (`guide`: `own`)
+   * or the platform's guide answered alone (`alone`); `null` for any other
+   * path. `read_file` needs it to judge `canWrite` there (see its handler).
    */
   const readServed = async (
     branch: string,
     p: string,
     ctx: ToolContext,
-  ): Promise<{ result: ReadResult; guideOnly: boolean }> => {
+  ): Promise<{ result: ReadResult; guide: 'own' | 'alone' | null }> => {
     // The guide's name at the repository root answers with the platform's
     // guide, which is text the code owns and every agent may read: no gate
     // and no read hook for it. A file the knowledge base keeps under that
@@ -1789,7 +1789,7 @@ export function registerWorkspaceTools(
     // recognised by its header and not served a second time.
     if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
       const { text, own } = await guideServed(branch, ctx, p);
-      return { result: { kind: 'text', text }, guideOnly: !own };
+      return { result: { kind: 'text', text }, guide: own ? 'own' : 'alone' };
     }
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
     await assertCanRead(readGateFor(branch, ctx), p);
@@ -1798,7 +1798,23 @@ export function registerWorkspaceTools(
     // the access gate and the read hook above — a document read is still a
     // KB read. ONE registry dispatch picks the reader by extension.
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-    return { result: await readers.readerFor(p).read(bytes, p), guideOnly: false };
+    return { result: await readers.readerFor(p).read(bytes, p), guide: null };
+  };
+
+  /**
+   * Whether the DEFAULT branch has a file of the knowledge base's own at the
+   * guide's name that this caller may read — not a copy of the platform's
+   * guide an earlier release wrote. Asked without the read hook: nothing is
+   * read for the caller, only whether there is something there. A failure is
+   * `false`, so `canWrite` fails closed.
+   */
+  const ownGuideOnDefault = async (ctx: ToolContext, p: string): Promise<boolean> => {
+    try {
+      const fs = await ctx.getFilesystem(kb.defaultBranch);
+      return (await ownGuideReadable(fs, kb.defaultBranch, ctx, p)) && (await isOwnEntryStill(fs, p));
+    } catch {
+      return false;
+    }
   };
 
   mount({
@@ -1852,13 +1868,19 @@ export function registerWorkspaceTools(
           ? content.slice(start, limit !== undefined ? start + limit : undefined)
           : content;
       };
-      const { result, guideOnly } = await readServed(a.branch as string, p, ctx);
+      const branch = a.branch as string;
+      const { result, guide } = await readServed(branch, p, ctx);
       // Judged after the read, so a path the caller may not read is refused
-      // before anything is said about writing it. At the guide's name this is
-      // the knowledge base's own file there, as for any path; the platform's
-      // guide served alone is not on disk and cannot be written — the same
-      // `false` whether nothing is there or a file the caller may not read.
-      const canWrite = !guideOnly && (await canWriteAt(ctx, [p])).get(p) === true;
+      // before anything is said about writing it. At the guide's name this
+      // answers for the knowledge base's own file there, as `file_stat` does:
+      // where the platform's guide stands alone there is nothing to change —
+      // `false`, whether nothing is there or a file the caller may not read.
+      // Like every verdict here, that is decided on the DEFAULT branch, not
+      // the one read: a draft that deleted or added the file must not move
+      // the answer about what can land directly.
+      const ownOnDefault =
+        guide === null || (branch === kb.defaultBranch ? guide === 'own' : await ownGuideOnDefault(ctx, p));
+      const canWrite = ownOnDefault && (await canWriteAt(ctx, [p])).get(p) === true;
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
