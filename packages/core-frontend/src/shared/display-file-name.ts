@@ -6,9 +6,10 @@ import { PLUGIN_MANIFEST_FILE, currentKbLayout } from '@bevel-software/platform-
  *
  * Almost always that is the file's own name. The exceptions are the files the
  * platform reads as configuration, whose names only make sense to someone who
- * knows how Hexis is built: a plugin's `plugin.json` is its settings. Those
- * read in plain words here, and only here, so no surface can call the same
- * file two different things.
+ * knows how Hexis is built: a plugin's `plugin.json` is its settings, and a
+ * folder's `access.md` is who has access to it. Those read in plain words
+ * here, and only here, so no surface can call the same file two different
+ * things.
  *
  * DISPLAY ONLY. The file on disk, its URL, every API and everything an agent
  * reads keep the real name; {@link fileNameTooltip} hands it to whoever
@@ -17,8 +18,12 @@ import { PLUGIN_MANIFEST_FILE, currentKbLayout } from '@bevel-software/platform-
  * Paths, not bare names: a `plugin.json` is the plugin's settings only directly
  * inside a plugin's folder (`<kb>/Plugins/<plugin>/plugin.json`, or the same
  * path repo-relative). One bundled deeper — a skill's example — is just a file
- * called `plugin.json`, and a bare name cannot say which it is.
+ * called `plugin.json`, and a bare name cannot say which it is. An `access.md`
+ * governs its folder at any depth, so its name alone is enough.
  */
+
+/** The access rules file's name — a platform file at any depth. */
+const ACCESS_RULES_FILE = 'access.md';
 
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
@@ -31,7 +36,13 @@ function plainName(path: string): string | null {
   if (name === PLUGIN_MANIFEST_FILE && segments[segments.length - 3] === currentKbLayout().pluginsDir) {
     return 'Plugin settings';
   }
+  if (name === ACCESS_RULES_FILE) return 'Who has access';
   return null;
+}
+
+/** Whether `path` is a folder's access rules — the file "Who has access" names. */
+export function isAccessRulesFile(path: string): boolean {
+  return baseName(path) === ACCESS_RULES_FILE;
 }
 
 /** The name to show for the file at `path`. */

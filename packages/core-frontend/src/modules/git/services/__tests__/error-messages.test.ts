@@ -151,6 +151,16 @@ describe('friendlyGitMessage: a change request that lands reads as published', (
     }
   });
 
+  it('names who has access, not access.md, when nobody can approve a file', () => {
+    const said = friendlyGitMessage(
+      'No one is eligible to approve this file — broaden the access.md rules covering it first',
+    );
+    expect(said).toBe(
+      'No one can approve this file yet: nobody has edit access to its folder. Ask an admin to change who has access.',
+    );
+    expect(said).not.toContain('access.md');
+  });
+
   it('is what friendlyGitError says for the same text in an error', () => {
     expect(friendlyGitError(new GitApiError(422, 'Merge failed'))).toBe("Couldn't publish this change.");
   });

@@ -1004,6 +1004,37 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('menuitem', { name: /whole folder/i })).not.toBeInTheDocument();
   });
 
+  it("calls a folder's access.md Who has access, says what it governs, and opens the folder's Manage access", async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="read: everyone"
+        filePath="knowledge-base/KnowledgeBase/Legal/access.md"
+      />,
+    );
+
+    const h1 = await screen.findByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Who has access');
+    expect(h1).toHaveAttribute('title', 'access.md');
+    expect(screen.getByRole('note')).toHaveTextContent(
+      'This file controls who can see and change Legal. Change it with Manage access.',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Manage access' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access: directory knowledge-base/KnowledgeBase/Legal',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing about access on an ordinary page', async () => {
+    render(<ViewerHarness initialContent="plain" />);
+    await screen.findByRole('heading', { level: 1 });
+    expect(screen.queryByText(/This file controls who can see and change/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manage access' })).not.toBeInTheDocument();
+  });
+
   // ── WP5: the rail ──
 
   // The rail lost its only trigger with the ⋯ menu's File details entry, so

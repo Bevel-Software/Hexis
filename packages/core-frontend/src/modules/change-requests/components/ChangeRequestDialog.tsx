@@ -17,7 +17,7 @@ import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
-import { friendlyGitMessage } from '../../git/services/error-messages';
+import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { describeReadFailure } from '../services/denied-file.api';
@@ -675,7 +675,7 @@ export function ChangeRequestDialog({
         : await approvePrFile(cr.number, path);
       setDetail((d) => (d ? { ...d, approvals } : d));
     } catch (err) {
-      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+      setVerbError(err instanceof Error ? friendlyGitError(err) : "Couldn't record that.");
     } finally {
       setVerbBusy(false);
     }
@@ -697,7 +697,7 @@ export function ChangeRequestDialog({
         setDetail((d) => (d ? { ...d, approvals } : d));
       }
     } catch (err) {
-      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+      setVerbError(err instanceof Error ? friendlyGitError(err) : "Couldn't record that.");
     } finally {
       setVerbBusy(false);
     }

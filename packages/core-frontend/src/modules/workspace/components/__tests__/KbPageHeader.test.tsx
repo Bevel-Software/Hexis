@@ -44,6 +44,13 @@ describe('KbPageHeader', () => {
     expect(h1).toHaveAttribute('title', 'plugin.json');
   });
 
+  it("titles a folder's access.md Who has access, with the file name on hover", () => {
+    renderHeader({ path: 'knowledge-base/KnowledgeBase/Legal/access.md' });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Who has access');
+    expect(h1).toHaveAttribute('title', 'access.md');
+  });
+
   it('leaves an unknown extension alone', () => {
     renderHeader({ path: 'Knowledge/roles.unknownext' });
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('roles.unknownext');

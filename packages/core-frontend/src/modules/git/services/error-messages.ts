@@ -274,6 +274,12 @@ export function friendlyGitMessage(raw: string): string {
   if (reapprove) return `${reapprove[1]} after the latest changes.`;
   if (raw === 'change request not found') return 'That change request no longer exists.';
 
+  // Nobody can approve a file whose folder grants no one edit access. The
+  // server names the rules file; the reader needs the folder's access.
+  if (/^No one is eligible to approve this file/.test(raw)) {
+    return "No one can approve this file yet: nobody has edit access to its folder. Ask an admin to change who has access.";
+  }
+
   return raw;
 }
 

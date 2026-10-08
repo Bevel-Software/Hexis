@@ -1,13 +1,13 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
-import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
+import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History, Users } from 'lucide-react';
+import { KNOWLEDGE_BASE_DIR, type FileTreeEntry, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { publishEditablePage, withdrawEditablePage } from '../state/editable-page';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
-import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
+import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../../../shared/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -59,6 +59,18 @@ const SUGGESTION_LIMIT = 4;
 /** What a page is called, without the extension the reader did not choose. */
 function pageTitle(path: string): string {
   return displayFileName(path).replace(/\.(md|markdown)$/i, '');
+}
+
+/**
+ * What an access rules file governs, said the way the explorer names it: the
+ * folder's own name, "Knowledge" for the knowledge section, and the whole
+ * knowledge base for the one at its top.
+ */
+function governedFolderLabel(folder: string, kbDirName: string | null): string {
+  if (kbDirName && folder === kbDirName) return 'everything in this knowledge base';
+  const rel = kbDirName && folder.startsWith(`${kbDirName}/`) ? folder.slice(kbDirName.length + 1) : folder;
+  if (rel === KNOWLEDGE_BASE_DIR) return 'everything in Knowledge';
+  return rel.slice(rel.lastIndexOf('/') + 1);
 }
 
 /** The folder a page sits in, or '' for one that sits at a root. */
@@ -958,6 +970,23 @@ export function FileViewer() {
     });
   }, [openFilePath]);
 
+  // An access rules file is its FOLDER's access, written down. Its page says
+  // so, and hands over the sheet that edits it: Manage access on the folder,
+  // the same sheet the folder's row in the tree opens. (Share in the header
+  // stays what it is on every page, access to this one file.)
+  const accessFolder =
+    openFilePath && isAccessRulesFile(openFilePath) && openFilePath.includes('/')
+      ? openFilePath.slice(0, openFilePath.lastIndexOf('/'))
+      : null;
+  const handleManageFolderAccess = useCallback(() => {
+    if (!accessFolder) return;
+    setShareTarget({
+      name: accessFolder.slice(accessFolder.lastIndexOf('/') + 1),
+      relativePath: accessFolder,
+      type: 'directory',
+    });
+  }, [accessFolder]);
+
   // Where to start, for a viewer with nothing open. Computed here rather than
   // in the empty branch below because that branch is a `return` and this is a
   // hook — and it costs nothing while a file IS open, which is the common case.
@@ -1388,6 +1417,20 @@ export function FileViewer() {
                   onClick={() => setBannerCr(requestsOnThisFile[0])}
                 >
                   Review the change
+                </Button>
+              </div>
+            </Banner>
+          )}
+          {accessFolder && (
+            <Banner role="note" tone="neutral" icon={<Users size={14} />} className="mb-4 flex-none">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1">
+                  This file controls who can see and change{' '}
+                  <span className="font-medium">{governedFolderLabel(accessFolder, kbDirName)}</span>.
+                  Change it with Manage access.
+                </span>
+                <Button variant="outline" size="sm" onClick={handleManageFolderAccess}>
+                  Manage access
                 </Button>
               </div>
             </Banner>

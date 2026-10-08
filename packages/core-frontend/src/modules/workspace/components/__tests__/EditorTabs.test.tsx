@@ -126,6 +126,16 @@ describe('EditorTabs', () => {
     expect(mcp.querySelector('.truncate')?.textContent).toBe('mcp.json');
   });
 
+  it("names a folder's access.md Who has access", () => {
+    const tabs = [makeTab('knowledge-base/KnowledgeBase/Legal/access.md')];
+    const ws = makeWorkspace(tabs, 'knowledge-base/KnowledgeBase/Legal/access.md');
+    render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
+
+    const tab = screen.getByRole('tab');
+    expect(tab.querySelector('.truncate')?.textContent).toBe('Who has access');
+    expect(tab).toHaveAttribute('title', 'knowledge-base/KnowledgeBase/Legal/access.md');
+  });
+
   it('shows a dirty dot when a tab has unsaved changes', () => {
     const tabs = [makeTab('a.md', { isDirty: true })];
     const ws = makeWorkspace(tabs, 'a.md');
