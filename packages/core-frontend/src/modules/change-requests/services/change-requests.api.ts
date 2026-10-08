@@ -6,6 +6,7 @@ import type {
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { getOrCreateWorkspace, readFile } from '../../workspace/services/workspace.api';
+import { BranchUnavailableError } from '../utils/readFailure';
 
 /**
  * The change-request module's data access — the reads every review surface
@@ -70,9 +71,21 @@ export async function removeFolderFromChangeRequests(folder: string): Promise<Fo
   return data.results;
 }
 
-/** Read a file from a branch's shared workspace (bootstraps the clone if needed). */
+/**
+ * Read a file from a branch's shared workspace (bootstraps the clone if
+ * needed). A failure to open the branch is answered as
+ * {@link BranchUnavailableError}, never as the file read's own error: both
+ * answer 404 for different reasons, and a caller that reads a file-read 404
+ * as "the branch has no such file" must not be told that about a branch that
+ * could not be opened.
+ */
 export async function readFileOnBranch(branch: string, repoRelativePath: string): Promise<string> {
-  const { workspace } = await getOrCreateWorkspace(branch);
+  let workspace: Awaited<ReturnType<typeof getOrCreateWorkspace>>['workspace'];
+  try {
+    ({ workspace } = await getOrCreateWorkspace(branch));
+  } catch (err: unknown) {
+    throw new BranchUnavailableError(branch, err);
+  }
   return readFile(workspace.id, `${workspace.kbDirName}/${repoRelativePath}`);
 }
 
