@@ -3,7 +3,13 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
 import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import {
+  assertBranchProvided,
+  BranchNotFoundError,
+  DefaultBranchUnsetError,
+  WorkflowDomainError,
+} from '../../shared/domain-errors.js';
+import { branchHandlingFor, type BranchHandling } from './tool-def.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
@@ -20,6 +26,95 @@ function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
 export interface ToolHandlerOptions {
   /** Mutating tool — refuse read-scoped callers up front (defense in depth). */
   write?: boolean;
+  /**
+   * How this route treats `branch`, when it must differ from what its
+   * `toolDef` recorded. Only `execute_command` sets it (`own`): it falls back
+   * to an internal caller's focused branch rather than being refused.
+   */
+  branch?: BranchHandling;
+}
+
+/**
+ * What the tool handler needs to know about branches, asked at call time so a
+ * default branch renamed in the settings is the next call's default.
+ */
+export interface ToolBranchPort {
+  /** The deployment's default branch; `''` until one is configured. */
+  defaultBranch(): string;
+  /**
+   * True only when `branch` certainly does not exist. Creates no workspace
+   * and clones nothing. A name it cannot judge — malformed, or a remote it
+   * could not ask — is `false`: opening the branch then answers for it.
+   */
+  isMissing(branch: string): Promise<boolean>;
+}
+
+/**
+ * Refuse a branch that certainly does not exist. A fault while finding out —
+ * a storage error reading the workspaces root, say — is logged here in full
+ * and answered as a 500 that names the branch and nothing else: its message
+ * would carry the deployment's paths to the caller.
+ */
+async function assertBranchExists(branch: string, branches: ToolBranchPort | undefined): Promise<void> {
+  let missing: boolean | undefined;
+  try {
+    missing = await branches?.isMissing(branch);
+  } catch (err) {
+    log.error('branch existence check failed:', { branch, err });
+    throw new ToolError(`Could not check whether branch ${branch} exists.`, 500);
+  }
+  if (missing) throw new BranchNotFoundError(branch);
+}
+
+/**
+ * The branch a call runs on, from the tool's handling and the call's
+ * arguments — or the refusal. `defaulted` says the caller named none.
+ */
+async function resolveBranch(
+  handling: BranchHandling,
+  args: Record<string, unknown>,
+  branches: ToolBranchPort | undefined,
+): Promise<{ branch: string; defaulted: boolean } | null> {
+  if (handling === 'none') return null;
+  const given = args.branch;
+  if (handling === 'own') {
+    // The tool reads its optional branch itself, absence and all; only a
+    // name it was given is ours to check, and only one that names something —
+    // what the tool makes of a value that does not is the tool's to answer.
+    if (namesSomething(given)) await assertBranchExists(given, branches);
+    return null;
+  }
+  // ABSENT, and only absent, is defaulted. An empty or non-string value is a
+  // caller that meant to name a branch and got it wrong: refused by name
+  // under both declarations rather than quietly read as the default.
+  if (handling === 'defaults-to-default-branch' && given === undefined) {
+    const fallback = branches?.defaultBranch() ?? '';
+    if (fallback.length === 0) throw new DefaultBranchUnsetError();
+    return { branch: fallback, defaulted: true };
+  }
+  assertBranchProvided(given);
+  await assertBranchExists(given, branches);
+  return { branch: given, defaulted: false };
+}
+
+function namesSomething(v: unknown): v is string {
+  try {
+    assertBranchProvided(v);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A plain JSON object answer — the only kind a `branch` field can be added to.
+ * A `Date`, a class instance or an array serializes as something else, and
+ * spreading it into `{ branch }` would lose that answer.
+ */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (typeof v !== 'object' || v === null) return false;
+  const prototype: unknown = Object.getPrototypeOf(v);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /**
@@ -30,8 +125,14 @@ export interface ToolHandlerOptions {
  * The handler receives `req.body` as the flat args (UTCP's `body_field` already
  * delivered the inner body as the request body).
  */
-export function createToolHandlerFactory(resolve: ResolveToolContext, writeAccess: IWriteAccess = alwaysWritable) {
+export function createToolHandlerFactory(
+  resolve: ResolveToolContext,
+  writeAccess: IWriteAccess = alwaysWritable,
+  /** Absent: no default branch to fall back on, and no existence check before the tool runs. */
+  branches?: ToolBranchPort,
+) {
   return function toolHandler(handler: ToolHandler, opts: ToolHandlerOptions = {}) {
+    let warnedHeldToRequired = false;
     return async (req: Request, res: Response): Promise<void> => {
       const auth = req.toolAuth;
       if (!auth) {
@@ -79,8 +180,52 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
         ? args.sessionId
         : undefined;
       try {
+        // The branch is resolved HERE, once, before the tool runs: refused,
+        // defaulted or checked to exist, by what the tool declared — so no
+        // tool, the platform's or a deployment's, carries a guard of its own,
+        // and none can be handed a branch that is missing, empty or not a
+        // string. Its declaration comes from the `toolDef` built for this
+        // route; a route no `toolDef` described is read like an optional
+        // `branch` the tool handles itself.
+        //
+        // A writing route never defaults, whatever was recorded for it:
+        // `toolDef` refuses the declaration at startup for a tool it knows
+        // writes, and one only mounted as writing is held to `required` here,
+        // so its write cannot land on the default branch unasked. Its
+        // published schema still calls `branch` optional — the tool's
+        // declaration is wrong, not the call — so the mismatch is logged,
+        // once per route, for the tool's author to fix by declaring both
+        // `write: true` and `branch: 'required'` (`write` alone with the
+        // defaulting declaration makes `toolDef` throw at startup).
+        const declared =
+          opts.branch ?? branchHandlingFor(req.baseUrl + (req.route?.path ?? req.path)) ?? 'own';
+        const heldToRequired = declared === 'defaults-to-default-branch' && opts.write === true;
+        const handling: BranchHandling = heldToRequired ? 'required' : declared;
+        if (heldToRequired && !warnedHeldToRequired) {
+          warnedHeldToRequired = true;
+          log.warn(
+            `Tool route ${req.baseUrl + (req.route?.path ?? req.path)} is mounted as writing but declared ` +
+              `branch: 'defaults-to-default-branch'; it is held to 'required'. ` +
+              `Declare both \`write: true\` and \`branch: 'required'\` to its toolDef.`,
+          );
+        }
+        const resolved = await resolveBranch(handling, args, branches);
+        // The tool can read no other branch than the resolved one: `args`
+        // carries it under the same name, and a tool that takes no branch
+        // gets none at all.
+        const toolArgs = resolved
+          ? { ...args, branch: resolved.branch }
+          : handling === 'none'
+            ? withoutBranch(args)
+            : args;
         const ctx = await resolve(auth, abort.signal, sessionId);
-        const out = await handler(args, ctx);
+        if (resolved) ctx.branch = resolved.branch;
+        let out = await handler(toolArgs, ctx);
+        // A defaulted call's answer says which branch it ran on, so a caller
+        // that forgot its branch can see it was answered about another.
+        if (resolved?.defaulted && isPlainObject(out) && out.branch === undefined) {
+          out = { ...out, branch: resolved.branch };
+        }
         if (isAsyncIterable(out)) {
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -124,6 +269,13 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
       }
     };
   };
+}
+
+function withoutBranch(args: Record<string, unknown>): Record<string, unknown> {
+  if (!('branch' in args)) return args;
+  const rest = { ...args };
+  delete rest.branch;
+  return rest;
 }
 
 export type ToolHandlerFactory = ReturnType<typeof createToolHandlerFactory>;
