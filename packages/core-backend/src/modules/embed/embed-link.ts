@@ -62,9 +62,13 @@ function safeDecode(s: string): string {
 export function isSafeRepoRelativeEmbedPath(repoRelative: string): boolean {
   if (!repoRelative) return false;
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(repoRelative)) return false;
+  if (/[\x00-\x1f\x7f]/.test(repoRelative)) return false;
   if (/%2e|%2f|%5c/i.test(repoRelative)) return false;
-  const norm = repoRelative.replace(/\\/g, '/');
+  // A backslash is refused, not read as a separator: the workspace path
+  // validator refuses it too, so normalising it here would only move a
+  // malformed reference from this 400 to a later one.
+  if (repoRelative.includes('\\')) return false;
+  const norm = repoRelative;
   if (norm.startsWith('/')) return false;
   return norm.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }

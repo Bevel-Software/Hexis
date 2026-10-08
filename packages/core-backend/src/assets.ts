@@ -41,8 +41,9 @@ export function agentGuideDir(): string {
  * place, and `tsc` copies nothing that is not TypeScript.
  *
  * The backend serves these as BYTES and never imports frontend code — the
- * view's whole job is to frame the `/embed` page, where the app's renderers
- * already are.
+ * view's whole job is to load the deployment's embed bundle into its own
+ * document (hosts forbid framing the deployment, see `mcp-app.ts`), where the
+ * app's renderers then draw the page.
  */
 export function mcpAppDir(): string {
   return path.join(packageRoot(), 'mcp-app');

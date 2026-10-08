@@ -138,7 +138,10 @@ export class McpAppService {
  */
 export function originOf(url: string): string | null {
   try {
-    return new URL(url).origin;
+    const origin = new URL(url).origin;
+    // An address that parses but has no web origin (`file:`, `data:`) is
+    // serialised as the literal "null" — not an origin a host's CSP can name.
+    return origin === 'null' ? null : origin;
   } catch {
     return null;
   }
