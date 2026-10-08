@@ -48,9 +48,19 @@ const stubAdminMenuItems: AdminMenuItem[] = [
     section: 'admin',
     order: 90,
     label: 'Stub admin row',
-    onSelect: ({ closeMenu }) => closeMenu(),
+    onSelect: ({ closeMenu, user }) => {
+      stubAdminRowSelectedBy.push(user.email);
+      closeMenu();
+    },
+  },
+  {
+    id: 'stub-hidden-row',
+    order: 20,
+    label: 'Stub hidden row',
+    isShown: (user) => user.email !== 'user@example.com',
   },
 ];
+const stubAdminRowSelectedBy: string[] = [];
 
 /** Exposes the router's current pathname so menu navigation can be asserted. */
 function LocationProbe() {
@@ -522,6 +532,17 @@ describe('Toolbar', () => {
       expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
       expect(row('Stub extension')).toBeInTheDocument();
+    });
+
+    // A row decides for itself whether it is offered, and its action learns
+    // who is signed in — how git's "Ask before deleting branches" is built.
+    it('leaves out a row that is not shown to this person, and tells a row who selected it', async () => {
+      stubAdminRowSelectedBy.length = 0;
+      renderToolbar({ isAdmin: true });
+      await openMenu();
+      expect(noRow('Stub hidden row')).toBeNull();
+      await userEvent.click(row('Stub admin row'));
+      expect(stubAdminRowSelectedBy).toEqual(['user@example.com']);
     });
 
     // Core rows all NAVIGATE — the settings surfaces are standalone routed

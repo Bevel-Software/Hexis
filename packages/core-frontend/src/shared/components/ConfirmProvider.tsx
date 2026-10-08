@@ -5,8 +5,8 @@ import { Dialog } from './Dialog';
 import { useLatestRef } from './useLatestRef';
 import {
   ConfirmContext,
+  type AskFn,
   type ConfirmAnswer,
-  type ConfirmFn,
   type ConfirmRequest,
 } from './confirm-context';
 
@@ -34,12 +34,28 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   // just come up from the queue must already see it at the head.
   const queueRef = useLatestRef(queue);
 
-  const confirm = useCallback<ConfirmFn>(
-    (request) =>
+  const confirm = useCallback<AskFn>(
+    (request, signal) =>
       new Promise<ConfirmAnswer>((resolve) => {
+        // The asker is already gone: nobody is there to confirm.
+        if (signal.aborted) {
+          resolve(CANCELLED);
+          return;
+        }
         nextId.current += 1;
         const id = nextId.current;
-        setQueue((q) => [...q, { id, request, resolve }]);
+        // The asker went away with the question open (or queued): take it
+        // down and answer Cancel, so the gone view's action never runs.
+        const withdraw = () => {
+          resolve(CANCELLED);
+          setQueue((q) => q.filter((p) => p.id !== id));
+        };
+        signal.addEventListener('abort', withdraw, { once: true });
+        const settle = (answer: ConfirmAnswer) => {
+          signal.removeEventListener('abort', withdraw);
+          resolve(answer);
+        };
+        setQueue((q) => [...q, { id, request, resolve: settle }]);
       }),
     [],
   );

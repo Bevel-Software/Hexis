@@ -1,4 +1,11 @@
-import { createContext, useContext, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from 'react';
 
 /**
  * What the app asks before an action, through its own dialog — never the
@@ -37,13 +44,19 @@ export interface ConfirmAnswer {
 
 export type ConfirmFn = (request: ConfirmRequest) => Promise<ConfirmAnswer>;
 
-export const ConfirmContext = createContext<ConfirmFn | null>(null);
+/**
+ * The provider's side: a question tied to the life of whoever asked it.
+ * Once `signal` aborts, the question is withdrawn and answers Cancel.
+ */
+export type AskFn = (request: ConfirmRequest, signal: AbortSignal) => Promise<ConfirmAnswer>;
+
+export const ConfirmContext = createContext<AskFn | null>(null);
 
 /**
  * Without a `ConfirmProvider` there is nobody to ask, and an answer made up
  * here would be exactly the silent "no" this replaces — so it fails loudly.
  */
-const missingProvider: ConfirmFn = () =>
+const missingProvider: AskFn = () =>
   Promise.reject(new Error('useConfirm() needs a <ConfirmProvider> above it'));
 
 /**
@@ -52,7 +65,29 @@ const missingProvider: ConfirmFn = () =>
  *
  *   const confirm = useConfirm();
  *   const { confirmed } = await confirm({ title: 'Delete', message: '…' });
+ *
+ * A question belongs to the component that asked it. If that component goes
+ * away while the dialog is open (a route change, Back), the dialog closes and
+ * the question answers Cancel: the action it guarded was the gone view's, and
+ * nobody confirmed it.
  */
 export function useConfirm(): ConfirmFn {
-  return useContext(ConfirmContext) ?? missingProvider;
+  const ask = useContext(ConfirmContext) ?? missingProvider;
+  const lifeRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    // Made in the effect, not during render, so a StrictMode remount gets a
+    // fresh one rather than one already aborted.
+    const life = new AbortController();
+    lifeRef.current = life;
+    return () => life.abort();
+  }, []);
+  return useCallback<ConfirmFn>(
+    (request) => {
+      // Before the first effect (a question asked during render) there is no
+      // life yet; tie it to one that never ends rather than refuse to ask.
+      const signal = lifeRef.current?.signal ?? new AbortController().signal;
+      return ask(request, signal);
+    },
+    [ask],
+  );
 }

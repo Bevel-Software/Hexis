@@ -1,15 +1,11 @@
 import { Fragment, useCallback, useRef, useState } from 'react';
-import { ChevronDown, GitBranch, LogOut } from 'lucide-react';
+import { ChevronDown, LogOut } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
 import type { AdminMenuItem } from '../../../core/registry';
 import { useMenuSections } from '../../settings/settings-nav-items';
-import {
-  askBeforeBranchDelete,
-  isBranchDeleteConfirmSkipped,
-} from '../../git/state/branch-delete-confirm';
 import {
   MenuItem,
   MenuLabel,
@@ -144,7 +140,8 @@ export function ProfileMenu() {
       return;
     }
     if (item.onSelect) {
-      item.onSelect({ closeMenu: close, navigate });
+      // Rows render only with a user (see the early return below).
+      if (user) item.onSelect({ closeMenu: close, navigate, user });
       return;
     }
     if (item.path) {
@@ -268,32 +265,12 @@ export function ProfileMenu() {
             </span>
           </div>
 
-          {defaultItems.map(renderRow)}
-
-          {/* The way back from the branch delete's "Don't ask again". Read
-              from storage as the panel opens, so it is there exactly while
-              this person's question is off in this browser. */}
-          {isBranchDeleteConfirmSkipped(user.email) && (
-            <MenuItem
-              className="group"
-              onClick={() => {
-                askBeforeBranchDelete(user.email);
-                close();
-              }}
-            >
-              <span className="flex items-center gap-2.5">
-                <span className="flex-none text-ink-faint transition-colors group-hover:text-ink-muted">
-                  <GitBranch size={15} />
-                </span>
-                Ask before deleting branches
-              </span>
-            </MenuItem>
-          )}
+          {defaultItems.filter((item) => item.isShown?.(user) ?? true).map(renderRow)}
 
           {isAdmin && adminItems.length > 0 && (
             <div role="group" aria-labelledby="profile-menu-admin-section-label">
               <MenuLabel id="profile-menu-admin-section-label">Admin only</MenuLabel>
-              {adminItems.map(renderRow)}
+              {adminItems.filter((item) => item.isShown?.(user) ?? true).map(renderRow)}
             </div>
           )}
 

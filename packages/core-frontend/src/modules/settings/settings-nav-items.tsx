@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
+import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from '../git/branch-delete-menu-item';
 
 /**
  * The settings rows, and the one merge that orders them.
@@ -73,6 +74,9 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     label: 'Account',
     path: '/account',
   },
+  // Git's row, shown only while the branch-delete question is off. It has no
+  // `path`, so the settings nav never lists it.
+  BRANCH_DELETE_CONFIRM_MENU_ITEM,
   {
     id: 'deployment',
     section: 'admin',

@@ -17,7 +17,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */
@@ -71,6 +71,8 @@ export interface AdminMenuItemHelpers {
   closeMenu(): void;
   /** react-router navigation. */
   navigate(to: string): void;
+  /** The signed-in person the menu belongs to. */
+  user: AuthUser;
 }
 
 /**
@@ -108,6 +110,12 @@ export interface AdminMenuItem {
    */
   path?: string;
   onSelect?(helpers: AdminMenuItemHelpers): void;
+  /**
+   * Whether the dropdown offers this row to `user` right now. Asked each time
+   * the panel renders, so a row can come and go with state the menu does not
+   * own (a preference in storage, say). Absent means always shown.
+   */
+  isShown?(user: AuthUser): boolean;
   dialog?(props: { open: boolean; onClose(): void }): ReactElement;
 }
 

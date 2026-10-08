@@ -72,6 +72,39 @@ describe('ConfirmProvider', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('withdraws the question as Cancel when the component that asked goes away', async () => {
+    // Two askers under one provider; only the first goes away.
+    let showAsker = true;
+    const asks: { current: ReturnType<typeof useConfirm> | null }[] = [{ current: null }, { current: null }];
+    function Asker({ slot }: { slot: number }) {
+      asks[slot].current = useConfirm();
+      return null;
+    }
+    const tree = () => (
+      <ConfirmProvider>
+        {showAsker && <Asker slot={0} />}
+        <Asker slot={1} />
+      </ConfirmProvider>
+    );
+    const { rerender } = render(tree());
+    let gone!: Promise<ConfirmAnswer>;
+    let stays!: Promise<ConfirmAnswer>;
+    act(() => {
+      gone = asks[0].current!({ title: 'Gone', message: 'From the view that leaves?' });
+      stays = asks[1].current!({ title: 'Stays', message: 'From the view that stays?' });
+    });
+    expect(await screen.findByText('From the view that leaves?')).toBeInTheDocument();
+
+    showAsker = false;
+    rerender(tree());
+    await expect(gone).resolves.toEqual({ confirmed: false, dontAskAgain: false });
+    // The other view's question comes up next and still needs its own answer.
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('From the view that stays?')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
+    await expect(stays).resolves.toEqual({ confirmed: true, dontAskAgain: false });
+  });
+
   it('asks one question at a time, in order', async () => {
     const { result } = renderHook(() => useConfirm(), { wrapper });
     let first!: Promise<ConfirmAnswer>;
