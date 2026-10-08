@@ -93,6 +93,7 @@ import {
   ACCESS_LOOKUP_TIMEOUT_MS,
   accessChangeOf,
   moveWarnings,
+  platformFileDeleteRefusal,
   platformFileDragRefusal,
   platformFileMoveRefusal,
 } from '../utils/treeConfirm';
@@ -413,6 +414,7 @@ function ContextMenu({
   onCreateFolder,
   onRename,
   renameRefusal = null,
+  deleteRefusal = null,
   onDownload,
   onWithdraw,
   returnFocusTo,
@@ -444,6 +446,12 @@ function ContextMenu({
    * reachable: an affordance that vanishes teaches nobody why.
    */
   renameRefusal?: string | null;
+  /**
+   * Why Delete is not on offer for this row — the repository's own files
+   * (the root's `access.md` and `roles.yaml`) are deleted by nobody. Drawn
+   * disabled with the reason, as a refused Rename is.
+   */
+  deleteRefusal?: string | null;
   onDownload?: () => void;
   /**
    * Take this suggestion back. Supplied ONLY by a proposed row whose change
@@ -809,7 +817,17 @@ function ContextMenu({
       )}
       {!isRoot && deletable && (
         // Danger tone comes from the primitive, not from a hand-written red.
-        <MenuItem role="menuitem" tone="danger" onClick={handleDelete}>
+        // A refused Delete keeps its place and says why, as Rename does.
+        <MenuItem
+          role="menuitem"
+          tone="danger"
+          aria-disabled={deleteRefusal ? true : undefined}
+          title={deleteRefusal ?? undefined}
+          onClick={() => {
+            if (deleteRefusal) return;
+            handleDelete();
+          }}
+        >
           <span className="flex items-center gap-2"><Trash2 size={14} />Delete</span>
         </MenuItem>
       )}
@@ -1787,6 +1805,7 @@ export function FileTreeNode({
           onClose={() => setContextMenu(null)}
           onRename={() => setRenaming(true)}
           renameRefusal={platformRefusal}
+          deleteRefusal={platformFileDeleteRefusal(entry.relativePath, kbDirName)}
           onDownload={handleDownload}
           extraItems={nav.menuItems?.(entry)}
           returnFocusTo={rowRef}

@@ -599,7 +599,7 @@ describe('WorkflowService — git-sync visibility events', () => {
     expect(kinds()).toEqual(['file-changed', 'file-changed']);
   });
 
-  it('carries the branch and a sanitised reason for the banner', async () => {
+  it('carries the branch and a reason in words — never the git output — for the banner', async () => {
     const svc = makeFacade(
       makeGit({ pushBehavior: 'auth-fail' }),
       makeFileLocks(USER.id),
@@ -615,9 +615,10 @@ describe('WorkflowService — git-sync visibility events', () => {
       workspaceId: 'ws-1',
       branch: 'feat/x',
     });
-    expect((emitSpy.mock.calls[0][0] as { reason: string }).reason).toContain(
-      'Authentication failed',
-    );
+    // The kind of failure survives; git's own text stays in the server log.
+    const { reason } = emitSpy.mock.calls[0][0] as { reason: string };
+    expect(reason).toBe("The repository host did not accept this server's credentials.");
+    expect(reason).not.toContain('Authentication failed');
   });
 
   it('re-announces on every failure, so a session joining mid-outage still learns of it', async () => {

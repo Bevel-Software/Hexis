@@ -43,8 +43,9 @@ Access to any path — reading it as much as writing it — is governed by
   shared. The same line in a file's FRONTMATTER only makes that one file
   visible — a plugin's `access.md` ships with `read: everyone` in its
   frontmatter so the plugin can be found and joined, and that admits nobody
-  to the plugin itself. A person's own space (`{{pluginsDir}}/personal-<id>/`)
-  denies `everyone` outright, so opening a parent folder never opens it.
+  to the plugin itself. A person's personal plugin
+  (`{{pluginsDir}}/personal-<id>/`) grants its owner access and denies
+  `everyone` outright, so opening a parent folder never opens it.
   When a group and a role share a name, the bare name means the GROUP;
   `role/<Name>` (for example `deny role/Reviewer`) always means the role.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
@@ -83,12 +84,13 @@ Access to any path — reading it as much as writing it — is governed by
   never overridable by an `access.md`.
 - **`access.md` files are picked up at any depth**, so a folder can tighten or
   widen what it inherited from its parent.
-- **Per-file rules exist for Markdown notes only.** A note (`.md`, lowercase)
-  may name verbs in its own frontmatter, and those rules apply to that one
-  note. (A `.tool` definition keeps the access verbs in its own YAML the same
-  way.) Every other file (a PDF, a presentation, a spreadsheet, an image, any
-  binary, a `.markdown` or `.MD` file, or binary content saved as `.md`)
-  takes its folder's rules: sharing it on its own is refused with
+- **Per-file rules exist for Markdown notes and `.tool` definitions.** A note
+  (`.md`, lowercase) may name verbs in its own frontmatter, and those rules
+  apply to that one note; a `.tool` definition keeps the access verbs in its
+  own YAML the same way; a distribution may register further file kinds
+  that carry their own rules. Any other file (a PDF, a presentation, a
+  spreadsheet, an image, any binary, a `.markdown` or `.MD` file, or binary
+  content saved as `.md`) takes its folder's rules: sharing it on its own is refused with
   `folder-governs-access`, naming the folder. To change who
   can open such a file, change its folder's `access.md`, or move the file to a
   folder whose rules fit.

@@ -61,17 +61,45 @@ describe('inputSchemaDefect', () => {
     ).toEqual({ path: '/properties/code/pattern', reason: 'must be a valid regular expression' });
   });
 
-  it('reports a bad regex wherever a schema stands — inside `anyOf`, `items`, `$defs`', () => {
+  it('reports a bad regex wherever a schema stands — inside `anyOf`, `items`, and a `$defs` entry a `$ref` reaches', () => {
     expect(
       inputSchemaDefect({
         type: 'object',
         properties: { rows: { type: 'array', items: { anyOf: [{ type: 'string', pattern: 'a{2,1}' }] } } },
       }),
     ).toEqual({ path: '/properties/rows/items/anyOf/0/pattern', reason: 'must be a valid regular expression' });
-    expect(inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: {} })).toEqual({
-      path: '/$defs/x/pattern',
-      reason: 'must be a valid regular expression',
-    });
+    // Reported at the entry's OWN path — where the server's owner edits it —
+    // whichever reference reached it.
+    for (const keyword of ['$ref', '$dynamicRef']) {
+      expect(
+        inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: { v: { [keyword]: '#/$defs/x' } } }),
+      ).toEqual({ path: '/$defs/x/pattern', reason: 'must be a valid regular expression' });
+    }
+  });
+
+  it('does not report a `$defs` entry nothing references: no client compiles it and the listing never carries it', () => {
+    // ajv is lazy on `$defs`, and the proxy drops the block, inlining only
+    // what a `$ref` reaches — so a bad regex there hides no tool anywhere, and
+    // flagging it would hide one for a place the offered schema does not have.
+    expect(inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: {} })).toBeNull();
+    expect(inputSchemaDefect({ type: 'object', definitions: { x: { pattern: '(' } }, properties: {} })).toBeNull();
+    // A reference that does not resolve reaches nothing, and two references
+    // to one entry are one entry.
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        $defs: { x: { pattern: '(' }, ok: { type: 'string' } },
+        properties: { a: { $ref: '#/$defs/missing' }, b: { $ref: '#/$defs/ok' }, c: { $ref: '#/$defs/ok' } },
+      }),
+    ).toBeNull();
+    // A pointer into the prototype chain names nothing: `#/__proto__` is not
+    // `Object.prototype`, and `#/$defs/constructor` is not `Object`.
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        properties: { a: { $ref: '#/__proto__' }, b: { $ref: '#/$defs/constructor' }, c: { $ref: '#/properties/a/__proto__/x' } },
+      }),
+    ).toBeNull();
   });
 
   it('reports a `patternProperties` KEY that is not a compilable regular expression', () => {
@@ -212,7 +240,13 @@ describe('inputSchemaDefect', () => {
    * catches it. A future change to `validateFormats` therefore has to justify
    * itself by behaviour, because by itself it has none.
    */
-  it('would flag nothing more with format assertions on, which is why `pattern` is checked directly', () => {
+  it('flags nothing more with `validateFormats` switched on in a process that registers no formats — the switch alone is inert', () => {
+    // What this pins is the SWITCH, as this process runs it: `ajv` ships no
+    // format implementations of its own, and nothing here registers
+    // `ajv-formats`, so turning assertions on asserts nothing. Registering
+    // the draft formats would be a new dependency and a different guard,
+    // and the module header says why it would still be the wrong one (an AI
+    // client never meta-validates the schema document).
     const badPattern = { type: 'object', properties: { x: { type: 'string', pattern: '[' } } };
     const corpus: Record<string, unknown>[] = [
       badPattern,

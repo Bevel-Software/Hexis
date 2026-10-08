@@ -20,6 +20,13 @@ import type { AgentIdentity } from './handshake.js';
  * list does not know is not a guess, it is a mystery, which the Audit log
  * must not carry. No match in a bounded number of hops is "no guess".
  *
+ * Passing over the shells has one consequence worth knowing: a server
+ * started BY HAND from an editor's integrated terminal has that editor
+ * above the shell, and is named after it — the chain looks exactly like the
+ * editor spawning the server through `cmd` or `sh`, which it does. The
+ * stderr line says the name was guessed, and from what; a client that
+ * names itself in its handshake is never guessed at.
+ *
  * One process-table read per guess, never one per hop: the table is one or
  * two short commands on every platform, and a guess is made once, at sign-in.
  *
@@ -50,7 +57,9 @@ const AGENTS: ReadonlyArray<{ key: string; program: RegExp; command?: RegExp }> 
   // Claude.app and claude.exe are Claude Desktop or Claude Code's native
   // binary; Claude Code installed with npm runs on node, as its package or
   // its `claude` bin shim.
-  { key: 'claude', program: /^claude$/i, command: /@anthropic-ai[\\/]claude-code|[\\/]claude(\.[cm]?js)?(?=["'\s]|$)/i },
+  // A scoped package is matched to its segment end: `@openai/codex` is Codex,
+  // `@openai/codex-notes` is some other package that happens to start the same.
+  { key: 'claude', program: /^claude$/i, command: /@anthropic-ai[\\/]claude-code(?=[\\/"'\s]|$)|[\\/]claude(\.[cm]?js)?(?=["'\s]|$)/i },
   { key: 'cursor', program: /^cursor( helper.*)?$/i },
   { key: 'windsurf', program: /^windsurf( helper.*)?$/i },
   // `Code.exe` / `Code - Insiders.exe` on Windows, `code` / `code-insiders`
@@ -58,8 +67,8 @@ const AGENTS: ReadonlyArray<{ key: string; program: RegExp; command?: RegExp }> 
   { key: 'code', program: /^(code|code - insiders|code-insiders|visual studio code( - insiders)?)( helper.*)?$/i },
   { key: 'codium', program: /^(codium|vscodium)( helper.*)?$/i },
   { key: 'zed', program: /^zed$/i },
-  { key: 'codex', program: /^codex$/i, command: /@openai[\\/]codex|[\\/]codex(\.[cm]?js)?(?=["'\s]|$)/i },
-  { key: 'gemini-cli', program: /^gemini$/i, command: /@google[\\/]gemini-cli|[\\/]gemini(\.[cm]?js)?(?=["'\s]|$)/i },
+  { key: 'codex', program: /^codex$/i, command: /@openai[\\/]codex(?=[\\/"'\s]|$)|[\\/]codex(\.[cm]?js)?(?=["'\s]|$)/i },
+  { key: 'gemini-cli', program: /^gemini$/i, command: /@google[\\/]gemini-cli(?=[\\/"'\s]|$)|[\\/]gemini(\.[cm]?js)?(?=["'\s]|$)/i },
   { key: 'cline', program: /^cline$/i, command: /[\\/]cline(\.[cm]?js)?(?=["'\s]|$)/i },
 ];
 
@@ -117,15 +126,33 @@ export const readProcessTable: ProcessTable = async () => {
   }
 };
 
+/**
+ * What a runtime is RUNNING: the first argument of its command line that is
+ * not the runtime itself and not an option — the script or bin path. Only
+ * that token names the program; the arguments after it are the program's
+ * own (`node /tmp/server.js --plugin @openai/codex` runs `/tmp/server.js`,
+ * whatever it was told). Quoted tokens are read as one.
+ */
+function scriptOf(command: string): string | null {
+  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  for (const token of tokens.slice(1)) {
+    const bare = token.replace(/^["']|["']$/g, '');
+    if (bare === '' || bare.startsWith('-')) continue;
+    return bare;
+  }
+  return null;
+}
+
 /** The agent a process row is, by the list above, or null for anything else. */
 function agentOf(row: ProcessRow): string | null {
   const program = (row.name.split(/[\\/]/).pop() ?? row.name).replace(/\.(exe|app)$/i, '').trim();
   // On macOS the executable inside a bundle may be generic ("Electron" for
   // VS Code); the bundle's own name says what it is.
   const bundle = /([^\\/]+)\.app(?=[\\/]|$)/i.exec(row.name)?.[1];
+  const script = row.command && RUNTIME.test(program) ? scriptOf(row.command) : null;
   for (const agent of AGENTS) {
     if (agent.program.test(program) || (bundle && agent.program.test(bundle))) return agent.key;
-    if (agent.command && row.command && RUNTIME.test(program) && agent.command.test(row.command)) return agent.key;
+    if (agent.command && script !== null && agent.command.test(script)) return agent.key;
   }
   return null;
 }

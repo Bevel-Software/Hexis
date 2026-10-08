@@ -4,7 +4,9 @@ import {
   CALL_TOOL_CHAIN_NAME,
   CHAIN_FAILURES_RULE,
   CHAIN_LARGE_RESULTS_RULE,
+  callLine,
   codeModeMetaTools,
+  splitCallLine,
 } from '@bevel-software/platform-mcp-core';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../../tool-manuals/tool-manuals.contract.js';
@@ -103,9 +105,13 @@ async function hexisTools(): Promise<UtcpTool[]> {
     // every real composition supplies one: without it they would be the two
     // descriptions this suite never measured.
     unused(),
+    // The guide reader, not needed to build defs; then the download store,
+    // mounted on the same terms as the upload one.
+    undefined,
+    unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
-  registerPluginsTools(registry);
+  registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, emptySkills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
     accessControl: unused(),
@@ -146,8 +152,10 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // The cap does not answer the ~500-character cut; the ORDER of the text
     // does, and this is where that claim is checked rather than asserted in a
     // comment. A client that stops at 500 must still have the sentence saying
-    // what the tool does — what it loses is the tail, and the shared rules are
-    // stated in the handshake instructions and in the guide anyway. Lowering
+    // what the tool does — what it loses is the tail. The shared rules are
+    // stated in the guide (which the opener sends every client to, including
+    // the description-only ones this cut is about) and, for the clients that
+    // honour it, in the handshake instructions as well. Lowering
     // the cap to 500 would not buy this; only order does.
     const late = (await hexisTools())
       .map((t) => ({ tool: t.name, endsAt: firstSentenceEnd(t) }))
@@ -165,14 +173,22 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // The sentence is in the description the registry lists, so the catalog
     // measured here is the catalog a client gets, sentence included.
     const tools = await hexisTools();
-    const opened = tools.filter((t) => t.description?.startsWith(`${GUIDE_FIRST_SENTENCE} `));
+    // ONE predicate for both halves, so no description falls between them: a
+    // tool whose own description is empty is served the sentence alone, and
+    // one with text after it has whitespace between — not `here.Read`.
+    // Behind the `Call:` line, when the description already carries one (the
+    // meta-tools are built with theirs): that line comes first on every tool.
+    const opensWithGuide = (t: UtcpTool): boolean => {
+      const description = splitCallLine(t.description ?? '').rest;
+      if (description === GUIDE_FIRST_SENTENCE) return true;
+      return description.startsWith(GUIDE_FIRST_SENTENCE) && /^\s/.test(description.slice(GUIDE_FIRST_SENTENCE.length));
+    };
+    const opened = tools.filter(opensWithGuide);
     expect(opened.length).toBeGreaterThan(0);
     // The guide's own tool is the one exception: it is what the sentence
     // points at, and it is in the catalog measured here so the cap holds on
     // it too (see the first test).
-    expect(tools.filter((t) => !t.description?.startsWith(GUIDE_FIRST_SENTENCE)).map((t) => t.name)).toEqual([
-      GET_AGENT_GUIDE_TOOL,
-    ]);
+    expect(tools.filter((t) => !opensWithGuide(t)).map((t) => t.name)).toEqual([GET_AGENT_GUIDE_TOOL]);
     for (const tool of opened) {
       expect(clientVisibleLength(tool), tool.name).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
     }
@@ -186,21 +202,23 @@ describe('no Hexis tool description is long enough to be cut', () => {
     const read = (await hexisTools()).find((t) => t.name === 'read_file');
     expect(read).toBeDefined();
     // Its own text (the guide-first sentence included), plus the prefix at
-    // ITS cap and the blank line between.
-    const own = read!.description!.length;
-    expect(clientVisibleLength(read!)).toBe(own + TOOL_PREFIX_CAP + 2);
-    expect(own + TOOL_PREFIX_CAP + 2).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // ITS cap and the blank line between, must fit — measured as the client
+    // sees it.
+    expect(clientVisibleLength(read!)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
   });
 
   it('fails, naming the tool, when a paragraph takes a description over the cap', () => {
     const padded = { name: 'write_file', description: 'x'.repeat(TOOL_DESCRIPTION_CAP + 1) } as UtcpTool;
     expect(clientVisibleLength(padded)).toBeGreaterThan(TOOL_DESCRIPTION_CAP);
-    // A tool with no description at all is not over the cap.
-    expect(clientVisibleLength({ name: 'nothing' } as UtcpTool)).toBe(0);
-    // Unless it is a PREFIXED one: the prefix is sent on its own then (no
-    // description, so no blank line either), and that text is what the client
-    // was handed. Measuring it as nothing would hide the only thing it got.
-    expect(clientVisibleLength({ name: 'read_file' } as UtcpTool)).toBe(TOOL_PREFIX_CAP);
+    // A tool with no description at all is handed its `Call:` line alone —
+    // the example counts toward the cap like any other text a client gets.
+    const nothingCall = callLine(`${EXTERNAL_KB_MANUAL_NAME}.nothing`, undefined);
+    expect(clientVisibleLength({ name: 'nothing' } as UtcpTool)).toBe(nothingCall.length);
+    // A PREFIXED one is handed the prefix too, behind the line (no
+    // description, so no blank line after the prefix), and that text is what
+    // the client was handed. Measuring it as nothing would hide what it got.
+    const readCall = callLine(`${EXTERNAL_KB_MANUAL_NAME}.read_file`, undefined);
+    expect(clientVisibleLength({ name: 'read_file' } as UtcpTool)).toBe(readCall.length + 2 + TOOL_PREFIX_CAP);
   });
 
   it('measures the catalog, which is what a client lists — and says what is outside it', async () => {
@@ -285,13 +303,15 @@ describe('the shared rules describe the tools they name', () => {
     // to the rules. Composed at the mount, because `mcp-core` builds the
     // constant without knowing where this deployment states them.
     const served = (await hexisTools()).find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
-    expect(served.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
+    // Behind its `Call:` line, which is the first line of every description.
+    expect(served.description!.startsWith('Call: call_tool_chain(')).toBe(true);
+    expect(splitCallLine(served.description!).rest.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
     expect(served.description!.split(GUIDE_FIRST_SENTENCE)).toHaveLength(2);
     expect(served.description!.trimEnd().endsWith('.')).toBe(true);
     expect(clientVisibleLength(served)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
     // The other two open the same way: the guide comes before the registry too.
     for (const tool of servedMetaTools([]).filter((t) => t.name !== CALL_TOOL_CHAIN_NAME)) {
-      expect(tool.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), tool.name).toBe(true);
+      expect(splitCallLine(tool.description!).rest.startsWith(`${GUIDE_FIRST_SENTENCE} `), tool.name).toBe(true);
     }
   });
 

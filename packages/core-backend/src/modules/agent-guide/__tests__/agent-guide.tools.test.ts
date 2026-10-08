@@ -9,7 +9,8 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from '../agent-guide.tools.js';
-import type { RenderedGuideSection } from '../agent-guide.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { agentGuideSections, joinGuideSections, type RenderedGuideSection } from '../agent-guide.js';
 
 let server: Server | null = null;
 
@@ -107,7 +108,15 @@ describe('get_agent_guide', () => {
     const { call, reads, sectionsNow } = await serve();
     expect(await call()).toEqual({
       status: 200,
-      body: { guide: '# Knowledge base\n\nRead me.\n\n## Access control\n\nWho may do what.\n\n## Knowledge graph\n\nA distribution added this one.\n' },
+      body: {
+        guide: '# Knowledge base\n\nRead me.\n\n## Access control\n\nWho may do what.\n\n## Knowledge graph\n\nA distribution added this one.\n',
+        // The complete list, whatever the description had room for.
+        sections: [
+          { id: 'introduction', title: 'Knowledge base' },
+          { id: 'access-control', title: 'Access control' },
+          { id: 'knowledge-graph', title: 'Knowledge graph' },
+        ],
+      },
     });
     expect(await call({ section: 'access-control' })).toEqual({
       status: 200,
@@ -121,30 +130,78 @@ describe('get_agent_guide', () => {
     // what the next call returns, so a layout applied later is seen.
     expect(reads()).toBe(3);
     sectionsNow([{ id: 'introduction', title: 'Renamed', body: '# Renamed\n\nThe layout changed.' }]);
-    expect(await call()).toEqual({ status: 200, body: { guide: '# Renamed\n\nThe layout changed.\n' } });
+    expect(await call()).toEqual({
+      status: 200,
+      body: { guide: '# Renamed\n\nThe layout changed.\n', sections: [{ id: 'introduction', title: 'Renamed' }] },
+    });
     expect(await call({ section: 'introduction' })).toMatchObject({ status: 200, body: { title: 'Renamed' } });
     expect((await call({ section: 'access-control' })).status).toBe(400);
     expect(reads()).toBe(6);
   });
 
-  it('keeps every section id in the description when a distribution adds more than the titles leave room for', async () => {
+  it('stays under the cap whatever a distribution adds: titles go first, then ids beyond what fits are counted', async () => {
     // A client cuts a long description from the end, and an id cut off is a
-    // section an agent cannot ask for. So the ids are what the description
-    // keeps; the titles are what it gives up, and only once they do not fit.
-    const { registry, sectionsNow } = await serve();
+    // section an agent cannot ask for — so the description never carries a
+    // cut list. Three forms, by what fits: ids with titles; ids alone; as
+    // many ids as fit and the count of the rest, with the complete list on
+    // the whole-guide response's `sections`.
+    const { registry, call, sectionsNow } = await serve();
+    const describedAs = async () => (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!.description!;
+
+    // Forty sections with long titles: the ids fit, the titles do not.
     const many = Array.from({ length: 40 }, (_, i) => ({
       id: `section-${i}`,
       title: `A title long enough that forty of them do not fit, number ${i}`,
       body: `## Title ${i}\n\nBody.`,
     }));
     sectionsNow([...SECTIONS, ...many]);
-    const def = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
-    expect(def.description!.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
-    for (const section of [...SECTIONS, ...many]) expect(def.description).toContain(`\`${section.id}\``);
-    expect(def.description).not.toContain('(Knowledge base)');
+    const idsOnly = await describedAs();
+    expect(idsOnly.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    for (const section of [...SECTIONS, ...many]) expect(idsOnly).toContain(`\`${section.id}\``);
+    expect(idsOnly).not.toContain('(Knowledge base)');
+    expect(idsOnly).not.toContain(' more');
+
+    // Two hundred sections with long ids: not even the ids fit. The ones
+    // that do are listed whole, the rest are counted, nothing is cut — and
+    // the whole-guide response names every one.
+    const flood = Array.from({ length: 200 }, (_, i) => ({
+      id: `a-section-id-long-enough-that-two-hundred-never-fit-${i}`,
+      title: `T${i}`,
+      body: `## T${i}\n\nBody.`,
+    }));
+    sectionsNow([...SECTIONS, ...flood]);
+    const counted = await describedAs();
+    expect(counted.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    expect(counted).toContain('`introduction`');
+    const shown = (counted.match(/`[^`]+`(?=, |\.$)/g) ?? []).filter((id) => id.startsWith('`a-section-id') || id === '`introduction`' || id === '`access-control`' || id === '`knowledge-graph`');
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.length).toBeLessThan(203);
+    expect(counted).toMatch(new RegExp(`and ${203 - shown.length} more, all named under \`sections\` in the whole-guide response\\.$`));
+    // No id is ever cut mid-way: every listed id is one of the guide's.
+    const all = new Set([...SECTIONS, ...flood].map((s) => `\`${s.id}\``));
+    for (const id of shown) expect(all.has(id), id).toBe(true);
+    const whole = (await call()).body as { sections: { id: string }[] };
+    expect(whole.sections.map((s) => s.id)).toEqual([...SECTIONS, ...flood].map((s) => s.id));
+
     // With the platform's few, the titles are there.
     sectionsNow(SECTIONS);
-    const few = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
-    expect(few.description).toContain('`introduction` (Knowledge base)');
+    expect(await describedAs()).toContain('`introduction` (Knowledge base)');
+  });
+
+  it('returns the platform\'s HTML views section on its own, and inside the whole guide', async () => {
+    const { call, registry, sectionsNow } = await serve();
+    const platform = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    sectionsNow([...platform]);
+    const html = platform.find((s) => s.id === 'html-views')!;
+    expect(await call({ section: 'html-views' })).toEqual({
+      status: 200,
+      body: { guide: html.body, section: 'html-views', title: 'HTML views' },
+    });
+    const whole = await call();
+    expect(whole.body.guide).toBe(joinGuideSections(platform));
+    expect(String(whole.body.guide)).toContain('## HTML views');
+    // The description lists it, so an agent knows it can ask for it.
+    const def = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
+    expect(def.description).toContain('`html-views`');
   });
 });

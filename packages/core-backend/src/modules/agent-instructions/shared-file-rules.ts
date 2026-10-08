@@ -145,15 +145,15 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       // that take content as a JSON string names the route in one sentence of
       // its own; WHY a file should go that way, and how, is here.
       id: 'upload-route',
-      heading: 'Large, escape-heavy and binary content goes by upload',
+      heading: 'Large, escape-heavy and binary content: upload in, download out',
       body:
-        'write_file, write_files and edit_file take content as a JSON string you have to type out in full, so a long ' +
-        'file is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and ' +
-        'an image, a PDF or a zip cannot be sent at all. For any of those: call `request_file_upload`, POST the file — ' +
-        'or one zip holding many files — to the address it answers with any HTTP client ' +
-        '(`curl -X POST --data-binary @<file> "<uploadUrl>?filename=<name>"`), then `apply_file_upload` to land it on ' +
-        'a branch in one commit. The bytes never pass through the conversation, so nothing is cut or mangled on the ' +
-        'way. A person can also use Upload in the app.',
+        'write_file, write_files and edit_file take content as a JSON string you type out in full, so a long file ' +
+        'is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and an ' +
+        'image, a PDF or a zip cannot be sent at all. For those, call `request_file_upload`, POST the file (or one ' +
+        'zip of many) with any HTTP client (`curl -X POST --data-binary @<file> ' +
+        '"<uploadUrl>?filename=<name>"`), then `apply_file_upload` lands it in one commit. To take copies OUT, ' +
+        '`request_file_download` answers a one-time link per file and a zip per folder (`curl -o <name> ' +
+        '"<downloadUrl>"`). Either way no bytes pass through the conversation.',
     },
     {
       id: 'dry-run-confirm',
@@ -170,15 +170,15 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       id: 'managed-items',
       heading: 'What these tools never move or delete',
       body:
-        `A platform file (${platformFileList(layout)}) is refused with ` +
-        '"<name> is a platform file and stays in its folder." — a folder that moves ' +
-        'takes its own platform files along, still in their folder, and a folder that is deleted takes them with it in ' +
-        'the same one change, so its files are never left ungoverned part-way. A platform folder (the repository root ' +
-        `or a reserved root folder such as \`${layout.knowledgeBaseDir}/\`) and git metadata are refused, and so is creating a ` +
-        'platform file or folder at a destination (renaming a note to `access.md` is refused). A path that is, or goes ' +
-        'through, a symbolic link is refused: links are never followed or removed. On a protected branch you must be ' +
-        'able to write everything the call touches — for a folder, every file under it, at its old and its new path. ' +
-        'file_stat reports `managed`, `movable` and `deletable` so you can tell before the call.',
+        `A platform file (${platformFileList(layout)}) is never moved: "<name> is a platform file and stays in its folder." ` +
+        'A folder moved or deleted takes its own along, in one change. delete_file deletes a nested `access.md` for ' +
+        "whoever may write it (its folder then follows its parent's rules) and refuses `.bevelignore`; the repository " +
+        "root's `access.md` and `roles.yaml` are deleted by nobody: \"<name> is the repository's own file and cannot be " +
+        'deleted." A platform folder (the root, or a reserved one like ' +
+        `\`${layout.knowledgeBaseDir}/\`), git metadata, and making a platform file or folder at a destination are ` +
+        'refused; so is a path that is or crosses a symlink: links are never followed or removed. On a protected ' +
+        'branch you must be able to write all a call touches — for a folder, every file under it, at its old and new ' +
+        'path. file_stat reports `managed`, `movable` and `deletable` up front.',
     },
     {
       id: 'refused-for-permissions',
@@ -223,11 +223,10 @@ function platformFileList(layout: KbLayout): string {
  * organisation's own conventions file comes with it, and to read both first.
  *
  * The guide is read by name at the repository root, where coding agents look
- * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone. A
- * deployment that once gave the guide a name of its own still answers to that
- * name, so the rule names it when it differs. `CLAUDE.md` is named as a
- * fallback because a knowledge base seeded before the rename may still carry
- * one its people edited.
+ * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone.
+ * One name on every deployment, so the rule takes no layout. `CLAUDE.md` is
+ * named as a fallback because a knowledge base seeded before the rename may
+ * still carry one its people edited.
  */
 function conventionsRule(): string {
   return (

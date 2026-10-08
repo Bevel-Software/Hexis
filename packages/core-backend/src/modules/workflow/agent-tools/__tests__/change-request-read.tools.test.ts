@@ -17,6 +17,7 @@ import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middlewar
 import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
 import { registerChangeRequestReadTools } from '../change-request-read.tools.js';
+import { APPLY_FAILURE_REASON_WITHHELD } from '../change-request-read-shape.js';
 
 /** The signed-in caller of every test below, unless it says otherwise. */
 const VIEWER = 'mia@bevel.software';
@@ -155,18 +156,23 @@ const authService = {
   getUserById: async (id: string) => ({ id, email: callerEmail, name: 'Caller' }),
 } as never;
 
+/** The clone the workspace service knows of — null for a deployment where none has been created yet. */
+let anyWorkspaceId: string | null = 'existing-ws';
 const workspaceService = {
   // The read tools resolve any existing clone: every verdict is read at
   // `origin/<base>`, so no draft has to be cloned to answer.
-  findAnyWorkspaceId: async () => 'existing-ws',
+  findAnyWorkspaceId: async () => anyWorkspaceId,
   getOrCreateForUser: async () => ({ id: 'existing-ws' }),
   getWorkspacePath: async () => '/tmp/ws',
   getOrCreateForBranch: async (b: string) => ({ id: b }),
 } as never;
 
+/** The workspace each listing was asked to read in, in order. */
+let listedIn: Array<string | undefined> = [];
 const workflowService = {
-  listChangeRequestsByState: async (states: ChangeRequestState[]) => {
+  listChangeRequestsByState: async (states: ChangeRequestState[], opts?: { workspaceId?: string }) => {
     calls.push(['listChangeRequestsByState', [...states].sort()]);
+    listedIn.push(opts?.workspaceId);
     return summaries.filter((s) => states.includes(s.state));
   },
   getChangeRequestDetail: async (
@@ -420,6 +426,26 @@ describe('list_change_requests', () => {
     expect(json.totalCount).toBe(0);
   });
 
+  it('lists in the same clone the by-number tools read in — the default one when none exists yet', async () => {
+    // The by-number tools fall back to the default workspace; a listing that
+    // fell back to nothing built every file list empty and hid every request
+    // the caller did not author, while `get_change_request` served them. One
+    // resolution, handed to both.
+    const base = await start();
+    summaries = [summary()];
+    listedIn = [];
+    await call(base, 'list_change_requests', {});
+    expect(listedIn).toEqual(['existing-ws']);
+    anyWorkspaceId = null;
+    try {
+      listedIn = [];
+      await call(base, 'list_change_requests', {});
+      expect(listedIn).toEqual([testKbContext().defaultWorkspaceId()]);
+    } finally {
+      anyWorkspaceId = 'existing-ws';
+    }
+  });
+
   it('still shows the author their own request when they may read none of it', async () => {
     const base = await start();
     readable = [];
@@ -438,6 +464,34 @@ describe('list_change_requests', () => {
     expect(json.changeRequests).toHaveLength(1);
     expect(json.changeRequests[0]).toMatchObject({ changedFiles: 1, withheldFiles: 1 });
     expect(JSON.stringify(json)).not.toContain('Payroll');
+  });
+
+  it('tells why the last Apply failed, in its own words only when every file is readable', async () => {
+    const base = await start();
+    const failure = { reason: 'Conflicts in Payroll/Rates.md', conflicts: true, at: '2026-09-29T09:00:00.000Z' };
+    readable = ['Knowledge/A.md'];
+    summaries = [summary({ touchedNodePaths: ['Knowledge/A.md', 'Payroll/Rates.md'], lastApplyFailure: failure })];
+    const withheld = await call(base, 'list_change_requests', {});
+    expect(withheld.json.changeRequests[0]).toMatchObject({
+      lastApplyFailure: { reason: APPLY_FAILURE_REASON_WITHHELD, conflicts: true, at: failure.at },
+    });
+    expect(JSON.stringify(withheld.json)).not.toContain('Payroll');
+    // The detail withholds on the same verdict, through its own path.
+    details.set(
+      12,
+      detail({
+        files: [file('Knowledge/A.md'), file('Payroll/Rates.md')],
+        touchedNodePaths: ['Knowledge/A.md', 'Payroll/Rates.md'],
+        lastApplyFailure: failure,
+      }),
+    );
+    const detailWithheld = (await call(base, 'get_change_request', { number: 12 })).json;
+    expect(detailWithheld).toMatchObject({ lastApplyFailure: { reason: APPLY_FAILURE_REASON_WITHHELD } });
+    expect(JSON.stringify(detailWithheld)).not.toContain('Payroll');
+    readable = ['Knowledge/A.md', 'Payroll/Rates.md'];
+    const shown = await call(base, 'list_change_requests', {});
+    expect(shown.json.changeRequests[0]).toMatchObject({ lastApplyFailure: failure });
+    expect((await call(base, 'get_change_request', { number: 12 })).json).toMatchObject({ lastApplyFailure: failure });
   });
 
   it('pages after the access filter, so a page length says nothing about what was withheld', async () => {
@@ -599,7 +653,10 @@ describe('get_change_request', () => {
 
   it('refuses a number that is not a positive integer', async () => {
     const base = await start();
-    for (const number of [0, -3, 1.5, 'twelve', undefined]) {
+    // 2^53 and above are integers JSON can spell that a double cannot hold
+    // exactly: refused like a fraction, rather than rounded on the way to
+    // the database or turned into its error.
+    for (const number of [0, -3, 1.5, 2 ** 53, 1e300, 'twelve', undefined]) {
       expect((await call(base, 'get_change_request', { number })).status, String(number)).toBe(400);
     }
   });
@@ -976,11 +1033,15 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     mixedAccessRequest();
     summaries = [details.get(1)!];
     for (const tool of TOOLS) {
-      const { status, json } = await call(
-        base,
-        tool,
-        tool === 'list_change_requests' ? {} : { number: 1, include: ['patches'] },
-      );
+      // `include` only where the tool declares it: a call naming an argument
+      // its tool does not have is refused before it runs.
+      const args =
+        tool === 'list_change_requests'
+          ? {}
+          : tool === 'list_change_request_files'
+            ? { number: 1, include: ['patches'] }
+            : { number: 1 };
+      const { status, json } = await call(base, tool, args);
       expect(status, tool).toBe(200);
       const whole = JSON.stringify(json);
       expect(whole, tool).not.toContain('Avi-Checkin');

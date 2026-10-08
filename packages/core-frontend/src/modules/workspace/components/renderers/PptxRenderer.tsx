@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Presentation } from 'lucide-react';
-import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
 import { RetryReadButton } from './RetryReadButton';
 import { useReadRetry } from './useReadRetry';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { useRendererRawRead } from './rendererRawRead';
 import { DownloadFileButton } from './DownloadFileButton';
 import { extractPptxOutline, type PptxSlide } from './pptxOutline';
 import { readBodyCapped } from './readBodyCapped';
@@ -50,16 +48,15 @@ const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
 const MAX_LINES_PER_SLIDE = 500;
 
 export function PptxRenderer({ filePath }: FileRendererProps) {
-  const workspaceId = useRendererWorkspaceId();
-  /** A past save, when Version history mounted this; null = the working tree. */
-  const fileRef = useRendererFileRef();
   /**
-   * The save as PRIMITIVES, hoisted out of the object so the read effect can
-   * depend on exactly what it reads. Depending on `fileRef` itself would put
-   * a context object in the dependency list.
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
    */
-  const versionRef = fileRef?.ref ?? null;
-  const versionSide = fileRef?.side;
+  const rawRead = useRendererRawRead();
   const { attempt, retry } = useReadRetry();
   const [slides, setSlides] = useState<PptxSlide[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +64,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
   useEffect(() => {
     setSlides(null);
     setError(null);
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     // `cancelled` only stops this effect from PUBLISHING; the request itself
@@ -76,10 +73,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
     const abort = new AbortController();
     (async () => {
       try {
-        const res = await authFetch(
-          rawFileUrl(workspaceId, filePath, { ref: versionRef, side: versionSide }),
-          { signal: abort.signal },
-        );
+        const res = await rawRead.fetch(filePath, { signal: abort.signal });
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load presentation (HTTP ${res.status})`);
@@ -109,7 +103,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
       cancelled = true;
       abort.abort();
     };
-  }, [workspaceId, filePath, versionRef, versionSide, attempt]);
+  }, [rawRead, filePath, attempt]);
 
   if (error) {
     return (

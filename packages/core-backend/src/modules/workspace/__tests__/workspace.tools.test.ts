@@ -15,6 +15,7 @@ import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
@@ -28,13 +29,16 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
+import { compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
+import { routeToolSchemas } from '../../tool-helpers/route-tool-schemas.js';
+import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -317,7 +321,9 @@ const postRaw = (url: string, body: unknown = {}) =>
  * POST a well-formed call. Every KB tool requires `branch` — a call that names
  * none is refused at the mount with 400 `branch-required` — so this names one
  * unless the test already did. A test ABOUT the missing input uses `postRaw`,
- * so the thing under test is never papered over by the helper.
+ * so the thing under test is never papered over by the helper. So does
+ * `start_session`, which declares no arguments at all and forbids extras: its
+ * route refuses a `branch` as an argument it does not have.
  */
 const post = (url: string, body: unknown = {}) =>
   postRaw(
@@ -329,6 +335,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   /* fresh per test via start() */
+  guideText = 'THE PLATFORM GUIDE\n';
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -967,6 +974,8 @@ describe('write modes and per-path outcomes', () => {
     for (const res of [
       await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'x', mode: 'replace' }),
       await writeFiles(base, { files: [{ path: `${KB_DIR}/a.md`, content: 'x' }], mode: 'replace' }),
+      // An empty batch is no way round it: the mode is judged before the batch is.
+      await writeFiles(base, { files: [], mode: 'bogus' }),
     ]) {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; code: string };
@@ -1121,6 +1130,15 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
     // Sliced like any content.
     expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it('answers with the platform\'s composed guide, HTML views section and all', async () => {
+    guideText = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const { content } = await read(base, 'AGENTS.md');
+    expect(content).toBe(guideText);
+    expect(content).toContain('## HTML views');
+    expect(content).toContain('**A bare fragment scrolls the page.**');
   });
 
   it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
@@ -1937,6 +1955,52 @@ describe('office documents and PDFs', () => {
     expect(external.find((t) => t.name === 'start_session')!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
   });
 
+  /**
+   * The call example at the top of every description is generated from the
+   * tool's input schema, and the same schema is what the argument check reads.
+   * If the two could disagree, the platform would publish an example its own
+   * check refuses — so every declared tool is called with its own example here.
+   */
+  it('every declared tool can be called with its own generated example', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    // The whole family this harness declares, the four the scenarios name included.
+    for (const name of ['read_file', 'write_file', 'list_files', 'grep']) {
+      expect(tools.some((t) => t.name === name), name).toBe(true);
+    }
+    expect(tools.length).toBeGreaterThan(12);
+    for (const def of tools) {
+      const compiled = compileCheck(def.inputs);
+      expect(compiled.checkable, `${def.name}: ${compiled.checkable ? '' : compiled.reason}`).toBe(true);
+      // Narrowed by hand: the assertion above already failed the test if not.
+      if (!compiled.checkable) throw new Error(compiled.reason);
+      expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
+      // And the FLAT schema, which is what the tool's own route checks the
+      // call against: the two must agree, or a call the example produced would
+      // be refused one layer in.
+      const flat = routeToolSchemas(def.name)?.flat;
+      expect(flat, def.name).toBeDefined();
+      const flatCheck = compileCheck(flat);
+      expect(flatCheck.checkable, `${def.name} (flat): ${flatCheck.checkable ? '' : flatCheck.reason}`).toBe(true);
+      if (!flatCheck.checkable) throw new Error(flatCheck.reason);
+      expect(flatCheck.check(exampleArguments(flat)), `${def.name} (flat)`).toEqual([]);
+    }
+  });
+
+  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const def of tools) {
+      // Measured as a CLIENT receives it: the call line, the purpose prefix at
+      // its own cap (the four knowledge-base tools carry one), and the
+      // description — the three things that ride one tool's entry.
+      const received = clientVisibleLength(def);
+      expect(received, `${def.name} is ${received} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
+        TOOL_DESCRIPTION_CAP,
+      );
+    }
+  });
+
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
     const PNG = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -2269,13 +2333,13 @@ describe('start_session', () => {
 
   it('returns the sink-minted id as sessionId', async () => {
     const base = await startSessionApp();
-    const res = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+    const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
     expect(res.sessionId).toBe('thread-xyz');
   });
 
   it('mints the session for the authenticated user', async () => {
     const base = await startSessionApp();
-    await post(`${base}/api/agent/tools/start_session`);
+    await postRaw(`${base}/api/agent/tools/start_session`);
     expect(created).toHaveLength(1);
     expect(created[0].userId).toBe('user-42');
     expect(created[0].startedAt).toBeInstanceOf(Date);
@@ -2286,7 +2350,7 @@ describe('start_session', () => {
     // loopback token resolves to source 'external' at the verifier (see
     // tool-auth), so it is admitted here like any external agent.
     const base = await startSessionApp('internal');
-    const res = await post(`${base}/api/agent/tools/start_session`);
+    const res = await postRaw(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
   });
@@ -2310,7 +2374,7 @@ describe('start_session', () => {
     it('answers every one of them with a session id of its own', async () => {
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const responses = await Promise.all(Array.from({ length: 50 }, () => postRaw(`${base}/api/agent/tools/start_session`)));
       const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
 
       expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
@@ -2343,13 +2407,13 @@ describe('start_session', () => {
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       let failed: Awaited<ReturnType<typeof post>>;
       try {
-        failed = await post(`${base}/api/agent/tools/start_session`);
+        failed = await postRaw(`${base}/api/agent/tools/start_session`);
       } finally {
         errorLog.mockRestore();
       }
       expect(failed.status).toBeGreaterThanOrEqual(500);
 
-      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retried = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
       expect(retried.sessionId).toBe('session-2');
       expect(calls).toBe(2);
     });
@@ -2361,8 +2425,8 @@ describe('start_session', () => {
       // to other tools, and the spare is simply never mentioned again.
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
-      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
 
       expect(retry.sessionId).not.toBe(first.sessionId);
       expect(first.sessionId).toBeTruthy();
@@ -3409,6 +3473,80 @@ describe('preflight for moves and deletes', () => {
       expect(run.status).toBe(403);
       expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
     });
+
+    // A nested access.md is deleted the way a person deletes it in the app:
+    // by whoever may write it, through the same one-file delete (the locking
+    // filesystem's, which commits and pushes as the caller) as any file.
+    it('a nested access.md is deleted by a caller who may write it, like any file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/access.md'), '---\nread: Admin\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Sales/access.md') })).body).toMatchObject({
+        managed: true, movable: false, deletable: true,
+      });
+      const deleted: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string) => { deleted.push(p); return deleteFile(p); };
+
+      const run = await call(base, 'delete_file', { path: KB('Sales/access.md') });
+
+      expect(run.status).toBe(200);
+      expect(run.body).toEqual({ path: KB('Sales/access.md'), deleted: true });
+      expect(deleted).toEqual([KB('Sales/access.md')]);
+      expect(await exists(KB('Sales/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a nested access.md the caller may not write is the ordinary write refusal, and stays', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Locked/access.md'), '---\nread: everyone\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Locked/access.md') })).body).toMatchObject({
+        managed: true, deletable: false,
+      });
+
+      const run = await call(base, 'delete_file', { path: KB('Locked/access.md') });
+
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/access.md'), canPropose: true });
+      expect(JSON.stringify(run.body)).not.toContain('platform file');
+      expect(await exists(KB('Locked/access.md'))).toBe(true);
+    });
+
+    it('the root access.md and roles.yaml are the repository\'s own: refused for everyone, and they stay', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      for (const name of ['access.md', 'roles.yaml']) {
+        // The caller here may write and own everything: the refusal is not about who asks.
+        expect((await call(base, 'file_stat', { path: KB(name) })).body).toMatchObject({
+          managed: true, movable: false, deletable: false,
+          access: { read: true, write: true, download: true, owner: true },
+        });
+        const run = await call(base, 'delete_file', { path: KB(name) });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(`${name} is the repository's own file and cannot be deleted.`);
+        expect(await exists(KB(name))).toBe(true);
+      }
+    });
+
+    it('a nested roles.yaml is content, and .bevelignore stays refused as before', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      expect((await call(base, 'delete_file', { path: KB('Sales/roles.yaml') })).status).toBe(200);
+      const ignore = await call(base, 'delete_file', { path: KB('Sales/.bevelignore') });
+      expect(ignore.status).toBe(400);
+      expect(ignore.body.error).toBe('.bevelignore is a platform file and cannot be deleted through the agent tools.');
+      expect((await call(base, 'file_stat', { path: KB('Sales/.bevelignore') })).body).toMatchObject({ deletable: false });
+    });
+
+    it('delete_folder still refuses the repository root, which keeps its access.md', async () => {
+      const base = await seeded();
+      for (const args of [{ dryRun: true }, { confirm: true }]) {
+        const run = await call(base, 'delete_folder', { path: KB_DIR, ...args });
+        expect(run.body.allowed === false || run.status === 400).toBe(true);
+        expect(JSON.stringify(run.body)).toContain('The repository root is a platform folder and cannot be moved or deleted.');
+      }
+      expect(await exists(KB('access.md'))).toBe(true);
+    });
   });
 
   describe('what counts as the platform\'s own, and what a move or delete may reach', () => {
@@ -4311,6 +4449,47 @@ describe('agent read/write hooks', () => {
       },
     ]);
     expect(writes).toEqual([]);
+  });
+
+  it("file_stat at the guide's name tells the read hook once when it reads the organisation's own file, and never for the guide alone", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // Nothing of the organisation's there: the guide is everyone's and no
+    // file is read, so the hook hears nothing.
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: telling it from a stale copy reads it,
+    // and the hook hears of that read exactly once — as it does of a read_file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A stale copy of the guide is read to be recognised, so it is heard of too.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`, `${KB_DIR}/AGENTS.md`]);
+  });
+
+  it("grep at the guide's name tells the read hook the same way: never for the guide alone, once for the organisation's own file", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // The guide alone: nothing of the organisation's is read, so the hook
+    // hears nothing — a search of the guide's path is not a read of a file.
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: once, as read_file tells it — not once
+    // for the search root and again for the file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme GUIDE\n');
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A search of the whole knowledge base: the root once, then each file the
+    // walk opens once — the own AGENTS.md among them exactly once, from the
+    // composed search, never again from the walk.
+    reads = [];
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', sessionId: 's1' })).status).toBe(200);
+    expect(reads[0]?.wsPath).toBe(KB_DIR);
+    expect(reads.filter((op) => op.wsPath === `${KB_DIR}/AGENTS.md`)).toHaveLength(1);
   });
 
   it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {

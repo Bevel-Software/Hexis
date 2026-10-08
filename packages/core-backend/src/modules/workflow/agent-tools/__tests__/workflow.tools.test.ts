@@ -304,6 +304,19 @@ describe('registerWorkflowTools', () => {
         const mergeBranch = tools.find((t) => t.name === 'merge_branch')!;
         expect(mergeBranch.description).toMatch(/a person merges/);
         expect(mergeBranch.description).toMatch(/SYNC/);
+        // Every outcome is named, and the asynchronous commit the merge waits for.
+        for (const kind of ['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution']) {
+          expect(mergeBranch.description, kind).toContain(`\`${kind}\``);
+        }
+        expect(mergeBranch.description).toMatch(/committed asynchronously/);
+        expect(mergeBranch.description).toMatch(/waits up to 20s/);
+        const outcome = (mergeBranch.outputs as { properties: { outcome: { description: string; properties: Record<string, { enum?: string[] }> } } })
+          .properties.outcome;
+        expect(outcome.properties.kind.enum).toEqual(['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution']);
+        expect(Object.keys(outcome.properties)).toEqual(
+          expect.arrayContaining(['sha', 'conflictedPaths', 'branch', 'pending', 'needsAttention', 'message']),
+        );
+        expect(outcome.description).toMatch(/committed asynchronously and the merge waits/);
       }
     });
   });

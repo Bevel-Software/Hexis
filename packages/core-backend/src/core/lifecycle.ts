@@ -437,6 +437,8 @@ export interface CoreStopDeps {
    * Optional: a caller that has not built one passes nothing.
    */
   agentUploadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
+  agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
   startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
@@ -524,6 +526,7 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // synchronous, and it only clears an interval and tells a sweep already
   // running to stop deleting.
   deps.agentUploadStore?.stopSweeping();
+  deps.agentDownloadStore?.stopSweeping();
   // A startup phase still asking for an unreachable remote stops asking:
   // synchronous, and nothing after it must be able to clone into a
   // workspaces folder that is about to belong to nobody.
@@ -542,6 +545,9 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // never heard of is still walking the same directory.
   if (deps.agentUploadStore) {
     await bounded(deps.agentUploadStore.drainSweep(), remaining(), 'finishing the upload sweep', log);
+  }
+  if (deps.agentDownloadStore) {
+    await bounded(deps.agentDownloadStore.drainSweep(), remaining(), 'finishing the download sweep', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

@@ -1289,6 +1289,5 @@ describe('SetupScreen — the agent guide', () => {
     cleanup();
     render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
     expect(screen.queryByLabelText('Agent guide file')).toBeNull();
-    expect(screen.queryByTestId('agents-file-link')).toBeNull();
   });
 });

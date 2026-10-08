@@ -32,7 +32,10 @@ const BOB = { id: 'user-bob', email: 'bob@x.com', name: 'Bob' };
 const CATALOG = [
   {
     slug: 'weather',
-    name: 'weather',
+    // The catalog NAME differs from the slug on purpose: the hidden-tool
+    // source is keyed by name, and a lookup keyed by slug would pass a
+    // fixture where the two are the same string.
+    name: 'Weather Service',
     path: 'Plugins/weather.tool',
     type: 'mcp' as const,
     setup: { kind: 'oauth-manual' as const, reason: 'no dynamic client registration' },
@@ -96,7 +99,7 @@ const externalApiKeyService = {
 
 /** What the proxy's schema check found for `weather`, when a test wires one in. */
 const HIDDEN_WEATHER_TOOL: HiddenTool = {
-  manual: 'weather',
+  manual: 'Weather Service',
   name: 'weather_srv_forecast',
   path: '/properties/value/anyOf/0/required/0',
   reason: 'must be a string',
@@ -169,8 +172,10 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     // Bob can't read billing — it must be absent, not just canWrite=false.
     expect(bob.tools.map((t) => t.slug)).toEqual(['weather']);
     expect(bob.tools[0].canWrite).toBe(false);
-    // Status was resolved for BOB's user id, not leaked from Alice's.
-    expect(statusFor).toHaveBeenLastCalledWith(BOB.id, ['weather_SHARED_KEY']);
+    // Status was resolved for BOB's user id, not leaked from Alice's — under
+    // the key the vault derives from the manual's NAME (`Weather Service`:
+    // the space becomes `_`, every `_` is doubled, then the variable).
+    expect(statusFor).toHaveBeenLastCalledWith(BOB.id, ['Weather__Service_SHARED_KEY']);
     expect(bob.tools[0].variables[0].userConfigured).toBe(false);
   });
 
@@ -195,7 +200,7 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
 
   it('marks a tool hidden for an invalid schema, to the caller who may manage the server', async () => {
     const base = await start({
-      hiddenFor: (manual) => (manual === 'weather' ? [HIDDEN_WEATHER_TOOL] : []),
+      hiddenFor: (manual) => (manual === 'Weather Service' ? [HIDDEN_WEATHER_TOOL] : []),
     });
 
     const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
@@ -220,12 +225,30 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     expect(bob.tools[0].hiddenTools).toEqual([]);
   });
 
-  it('reports no hidden tool when no MCP surface has loaded a server yet', async () => {
+  it('reports no hidden tool on a deployment with no MCP surface at all — no source wired', async () => {
     const base = await start(); // no source wired, as a deployment without the proxy
     const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
       tools: { slug: string; hiddenTools: HiddenTool[] }[];
     };
     for (const tool of alice.tools) expect(tool.hiddenTools).toEqual([]);
+  });
+
+  it('reports no hidden tool to a manager whose server is healthy, or has not loaded yet — source wired, nothing found', async () => {
+    // The distinct case from the one above: the proxy IS there and has nothing
+    // against `weather`, which Alice manages. `[]` is the finding, not the
+    // absence of a finder.
+    const hiddenFor = vi.fn((): HiddenTool[] => []);
+    const base = await start({ hiddenFor });
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; canWrite: boolean; hiddenTools: HiddenTool[] }[];
+    };
+    const weather = alice.tools.find((t) => t.slug === 'weather')!;
+    expect(weather.canWrite).toBe(true);
+    expect(weather.hiddenTools).toEqual([]);
+    // Asked by the manual's catalog NAME, which is how the proxy knows it —
+    // not by its slug — and the answer came from the source.
+    expect(hiddenFor).toHaveBeenCalledWith('Weather Service');
+    expect(hiddenFor).not.toHaveBeenCalledWith('weather');
   });
 
   it('rejects an unauthenticated call outright', async () => {

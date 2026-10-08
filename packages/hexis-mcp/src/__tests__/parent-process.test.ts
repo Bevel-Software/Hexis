@@ -92,6 +92,35 @@ describe('guessing the agent from the process tree', () => {
       { pid: 30, ppid: 20, name: 'node', command: 'node /Users/x/.claude/plugins/codex-notes/index.js' },
     ];
     expect(await guessAgentFromAncestry(30, table(rows))).toBeNull();
+    // Nor a scoped package that merely STARTS like an agent's: the package
+    // name ends at its segment.
+    const lookalikes: ProcessRow[] = [
+      { pid: 10, ppid: 1, name: 'Terminal' },
+      { pid: 20, ppid: 10, name: 'node', command: 'node /opt/node_modules/@openai/codex-notes/bin.js' },
+      { pid: 30, ppid: 20, name: 'node', command: 'node C:\\tools\\node_modules\\@anthropic-ai\\claude-code-tools\\cli.js' },
+      { pid: 40, ppid: 30, name: 'node', command: 'node /opt/node_modules/@google/gemini-cli-extras/index.js' },
+    ];
+    expect(await guessAgentFromAncestry(40, table(lookalikes))).toBeNull();
+    // The real packages still are.
+    const real: ProcessRow[] = [
+      { pid: 10, ppid: 1, name: 'Terminal' },
+      { pid: 20, ppid: 10, name: 'node', command: 'node /opt/node_modules/@openai/codex/bin/codex.js' },
+    ];
+    expect(await guessAgentFromAncestry(20, table(real))).toEqual({ name: 'codex', guessed: true });
+    // Only what the runtime RUNS names it: an agent's package among the
+    // arguments of some other script is that script's business.
+    const argued: ProcessRow[] = [
+      { pid: 10, ppid: 1, name: 'Terminal' },
+      { pid: 20, ppid: 10, name: 'node', command: 'node /tmp/server.js --plugin @openai/codex' },
+      { pid: 30, ppid: 20, name: 'node', command: 'node --max-old-space-size=4096 /tmp/relay.js /usr/local/bin/claude' },
+    ];
+    expect(await guessAgentFromAncestry(30, table(argued))).toBeNull();
+    // Runtime options before the script are skipped, quoted paths read whole.
+    const flagged: ProcessRow[] = [
+      { pid: 10, ppid: 1, name: 'Terminal' },
+      { pid: 20, ppid: 10, name: 'node', command: 'node --enable-source-maps "C:\\Program Files\\node_modules\\@anthropic-ai\\claude-code\\cli.js" --resume' },
+    ];
+    expect(await guessAgentFromAncestry(20, table(flagged))).toEqual({ name: 'claude', guessed: true });
   });
 
   it('answers null when the table cannot be read, or the parent is not in it', async () => {

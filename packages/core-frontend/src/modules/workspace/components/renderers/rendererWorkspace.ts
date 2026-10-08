@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import { WorkspaceContext } from '../../state/workspace.context';
+import { RendererSurfaceContext } from './rendererSurface';
 
 /**
  * A PAST SAVE the renderers should read instead of the working tree.
@@ -50,13 +51,18 @@ export const RendererWorkspaceContext = createContext<{
  * The workspace id the renderer should read from: the override when one is
  * provided, otherwise the checked-out workspace.
  *
- * Throws when neither is present, exactly as `useWorkspace()` did — a renderer
- * with no workspace at all would otherwise sit on "Loading…" forever.
+ * Throws when neither is present and no renderer surface is either, exactly
+ * as `useWorkspace()` did — a renderer with no workspace at all would
+ * otherwise sit on "Loading…" forever. Under a surface it answers null.
  */
 export function useRendererWorkspaceId(): string | null {
   const override = useContext(RendererWorkspaceContext);
   const workspace = useContext(WorkspaceContext);
+  const surface = useContext(RendererSurfaceContext);
   if (override !== null) return override.workspaceId;
+  // A surface (the embed) stands alone: its bytes come through the surface,
+  // so "no workspace" is an answer there, not a mounting mistake.
+  if (workspace === null && surface !== null) return null;
   if (workspace === null) {
     throw new Error(
       'useRendererWorkspaceId must be used within WorkspaceContext.Provider or RendererWorkspaceContext.Provider',

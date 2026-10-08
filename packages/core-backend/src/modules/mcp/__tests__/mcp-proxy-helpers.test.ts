@@ -68,13 +68,48 @@ describe('toListedTool', () => {
     ...over,
   });
 
-  it('passes a conforming tool through', () => {
+  it('passes a conforming tool through, its call example first', () => {
     const listed = toListedTool(proxied({ mcpName: 'gmail_send_email' }));
     expect(listed).toEqual({
       name: 'gmail_send_email',
-      description: 'a tool',
+      description: 'Call: m.t({})\n\na tool',
       inputSchema: { type: 'object', properties: {} },
     });
+  });
+
+  it('generates the example from the tool\'s own schema, in the shape it really takes', () => {
+    const platform = toListedTool(
+      proxied({
+        utcpName: 'KNOWLEDGE_BASE.read_file',
+        mcpName: 'read_file',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            body: {
+              type: 'object',
+              properties: { branch: { type: 'string' }, path: { type: 'string' }, limit: { type: 'integer' } },
+              required: ['branch', 'path'],
+            },
+          },
+          required: ['body'],
+        } as never,
+      }),
+    )!;
+    expect(platform.description.split('\n')[0]).toBe(
+      'Call: KNOWLEDGE_BASE.read_file({ body: { branch: "...", path: "..." } })',
+    );
+    const flat = toListedTool(
+      proxied({
+        utcpName: 'NS.search',
+        mcpName: 'NS_search',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string' }, limit: { type: 'integer' } },
+          required: ['query'],
+        } as never,
+      }),
+    )!;
+    expect(flat.description.split('\n')[0]).toBe('Call: NS.search({ query: "..." })');
   });
 
   it('drops a tool whose name is too long or has illegal chars (so it cannot blank the whole list)', () => {

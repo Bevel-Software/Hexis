@@ -29,7 +29,8 @@ none of them.
 
 A `SKILL.md` committed on the default branch is listed and loadable from the
 very next `list_skills` or `get_skill`, on the connection you already have:
-skills are read from the workspace on every request, on either connection.
+the released catalog is cached briefly and dropped the moment the default
+branch changes, so the next request reads the workspace again.
 See *A released tool or skill is live within ten seconds* under **Tool
 Manuals** for the one caveat (an MCP client that caches the prompt list it
 was given at connect time must re-list — the prompt-list-changed notification

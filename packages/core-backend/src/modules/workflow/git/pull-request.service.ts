@@ -20,7 +20,7 @@ import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
-import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
@@ -52,6 +52,25 @@ const LIST_PR_CACHE_TTL_MS = 30_000;
  * is evicted.
  */
 const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
+/** How many mismatched applied rows to remember — see `touchedPathsFor`. */
+const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
+/** How many rows a listing reads from git at once. */
+const SUMMARY_CONCURRENCY = 8;
+
+/** `fn` over `items`, at most `limit` in flight, results in order. */
+async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
 const DETAIL_CACHE_TTL_MS = 30_000;
 
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
@@ -86,11 +105,13 @@ export type ChangeSource =
  * A DECLINED one is read from NOTHING, and that is not a degradation:
  *
  *   - The row records no sha, so nothing durable says what the request
- *     proposed. Declining does not retire the source branch (only merging
- *     deletes it), so the branch pair would answer — but it would answer with
- *     what that branch differs by NOW. The author keeps committing to it, and
- *     may open a fresh request from it; reading the declined request would then
- *     present someone else's later work as the proposal that was turned down.
+ *     proposed. Declining retires the source branch as merging does
+ *     (`deleteChangeRequest` ends in `retireMergedSourceBranch`) — unless
+ *     another open request still needs that branch, which keeps it alive and
+ *     moving. Where the branch pair still resolves it would answer with what
+ *     that branch differs by NOW, work committed since for the request that
+ *     kept it included; reading the declined request would then present later
+ *     work as the proposal that was turned down.
  *   - An empty file set proves no read access downstream, so a declined request
  *     is readable by its author alone — the owner's criterion of 2026-10-02.
  *   - And it asks git nothing, so neither a listing nor a by-number read of a
@@ -103,6 +124,8 @@ export type ChangeSource =
 export function changeSourceFor(row: {
   number: number;
   state: string;
+  /** The stored title, handed along so a merge commit in the old message format is still recognised. */
+  title?: string;
   mergedSha?: string | null;
 }): ChangeSource {
   if (row.state === 'open') return { kind: 'branches' };
@@ -113,7 +136,7 @@ export function changeSourceFor(row: {
   // tip, which is usually another request's merge commit; the git layer rejects
   // that rather than answering with its files. See `merge-commit.ts`.
   if (row.state === 'merged' && row.mergedSha) {
-    return { kind: 'commit', applied: { number: row.number, mergeSha: row.mergedSha } };
+    return { kind: 'commit', applied: { number: row.number, mergeSha: row.mergedSha, title: row.title } };
   }
   return { kind: 'none' };
 }
@@ -187,6 +210,8 @@ export class PullRequestService implements IPullRequestService {
    * nothing invalidates this, and nothing needs to. See {@link touchedPathsFor}.
    */
   private readonly appliedChanges = new Map<string, { paths: string[]; pairs: ChangedPathPair[] }>();
+  /** Applied rows whose recorded commit is not their own, by the same key — never asked again. */
+  private readonly mismatchedAppliedChanges = new Set<string>();
   /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
@@ -339,6 +364,15 @@ export class PullRequestService implements IPullRequestService {
       const key = `${workspaceId}\u0000${source.applied.mergeSha}\u0000${source.applied.number}`;
       const known = this.appliedChanges.get(key);
       if (known) return known;
+      // A row whose commit the clone holds but which is NOT this request's
+      // own (a `merged_sha` written before merges recorded their own commit)
+      // never becomes it, and is remembered as such, bounded in count:
+      // without this, every list re-ran its git calls for every such row,
+      // serialized under the workspace mutex, on every poll, and a deployment
+      // with hundreds of pre-fix rows paid seconds of git per poll
+      // indefinitely. A commit the clone does not HOLD is not remembered —
+      // the next fetch may bring it, and the next list asks again.
+      if (this.mismatchedAppliedChanges.has(key)) return empty;
       return this.gitService
         .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
         .then((answer) => {
@@ -351,11 +385,17 @@ export class PullRequestService implements IPullRequestService {
           if (this.appliedChanges.size < MAX_REMEMBERED_APPLIED_CHANGES) this.appliedChanges.set(key, answer);
           return answer;
         })
-        .catch(degrade('changedPathsAndPairsOfAppliedChange'));
+        .catch((err: unknown) => {
+          if (err instanceof AppliedChangeMismatchError) {
+            if (this.mismatchedAppliedChanges.size >= MAX_MISMATCHED_APPLIED_CHANGES) this.mismatchedAppliedChanges.clear();
+            this.mismatchedAppliedChanges.add(key);
+          }
+          return degrade('changedPathsAndPairsOfAppliedChange')(err);
+        });
     }
     return this.gitService
       .changedPathsAndPairsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
-      .catch(degrade('changedPathsForPr'));
+      .catch(degrade('changedPathsAndPairsForPr'));
   }
 
   /**
@@ -460,18 +500,22 @@ export class PullRequestService implements IPullRequestService {
       .where(inArray(changeRequests.state, wanted))
       .orderBy(desc(changeRequests.createdAt));
     // ONE fetch for the whole list, for the reason spelled out on listOpenPrs —
-    // and only when an OPEN row is in scope. An open request is diffed from two
-    // branch refs, which are as current as the last fetch; a merged one from a
-    // commit that cannot change and a declined one from nothing at all. So a
-    // listing of closed and merged requests reaches the network not once, which
-    // is what the read tools' `state: closed` asks for (and `state: all` keeps
-    // its single fetch for the open rows it does contain).
-    if (workspaceId && rows.length > 0 && wanted.includes('open')) {
+    // never one per row — and only when a row in scope reads from git at all.
+    // An open request is diffed from two branch refs, which are as current as
+    // the last fetch; a MERGED one from its merge commit, which cannot change
+    // but which a clone that has not fetched since the merge does not hold —
+    // without this fetch such a clone would read every applied request as
+    // author-only for good. A declined one reads from nothing, so a listing
+    // of declined requests alone reaches the network not once.
+    if (workspaceId && rows.some((row) => row.state === 'open' || row.state === 'merged')) {
       await this.workspaceService
         .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
         .catch(() => undefined);
     }
-    return Promise.all(rows.map((row) => this.summaryOf(row, workspaceId, { fetch: false })));
+    // Bounded fan-out: an applied row's read takes the workspace mutex for
+    // its git calls, so a hundred rows launched at once would only queue on
+    // it while holding a hundred pending promises.
+    return mapWithLimit(rows, SUMMARY_CONCURRENCY, (row) => this.summaryOf(row, workspaceId, { fetch: false }));
   }
 
   async listPrsAuthoredBy(
@@ -665,6 +709,13 @@ export class PullRequestService implements IPullRequestService {
         // answered no files — which, since an empty file set proves no read
         // access, made every applied request readable by its author alone.
         // Reading back what happened is what the ticket exists for.
+        //
+        // One refresh first: the commit cannot change, but a clone that has
+        // not fetched since the merge does not hold it yet, and reading it as
+        // missing would make the request author-only on that clone for good.
+        await this.workspaceService
+          .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
+          .catch(() => undefined);
         const ends = await this.gitService.appliedChangeShas(workspaceId, source.applied);
         baseSha = ends.baseSha;
         headSha = ends.headSha;

@@ -36,6 +36,20 @@ export function agentGuideDir(): string {
 }
 
 /**
+ * The MCP App views this deployment serves over `resources/read` — one static
+ * HTML file each, no build step. Beside `agent-guide/` and `kb-template/` for
+ * the same reason: a build and the published source find it at the same
+ * place, and `tsc` copies nothing that is not TypeScript.
+ *
+ * The backend serves these as BYTES and never imports frontend code — the
+ * view's whole job is to frame the `/embed` page, where the app's renderers
+ * already are.
+ */
+export function mcpAppDir(): string {
+  return path.join(packageRoot(), 'mcp-app');
+}
+
+/**
  * The starter packs a new knowledge base may be filled from — one folder per
  * team (`engineering/`, `sales/`, …), each a `pack.yaml` beside the pages and
  * the plugin it adds (see `modules/onboarding/starter-packs.ts`). Beside

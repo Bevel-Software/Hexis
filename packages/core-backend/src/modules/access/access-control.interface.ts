@@ -264,6 +264,19 @@ export interface IAccessControl {
   ): Promise<boolean>;
 
   /**
+   * Batched `canDownload` — one config load per call, the same resolution
+   * as the single form, each path's own frontmatter `download:` rules
+   * included. A folder download judges every file it would pack through
+   * this, so a folder of a thousand files costs one model load, not a
+   * thousand.
+   */
+  canDownloadBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>>;
+
+  /**
    * True iff `userEmail` is an `owner` of `relativePath` per the current
    * access tree, resolved from the `owner:` lists alone (the `write` /
    * `download` lists do NOT confer ownership — only the reverse holds).

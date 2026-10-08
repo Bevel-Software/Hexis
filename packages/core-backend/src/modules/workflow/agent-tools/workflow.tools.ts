@@ -1,11 +1,10 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
-import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
+import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { KbContext } from '../../../shared/kb-context.js';
-import { assertBranchProvided } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
@@ -191,21 +190,24 @@ export function registerWorkflowTools(
      * out of the check while still demanding the input.
      */
     skipBranch?: boolean;
+    /** Arguments this tool's handler refuses by name itself (see `ToolDefSpec`). */
+    refusesItself?: string[];
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
-    const inputs = spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs);
-    // The tool's OWN declaration is the only honest answer to "must this call
-    // name a branch": the injected input and a hand-declared one (the fork
-    // base, the draft to switch to) are equally required, and a tool that adds
-    // or drops the input later moves this with it.
-    const requiresBranch = ((inputs as { required?: string[] }).required ?? []).includes('branch');
+    // Every workflow tool that takes a branch REQUIRES it — the injected input
+    // and a hand-declared one (the fork base, the draft to switch to) alike.
+    // A hand-declared one is required by its own schema, which `toolDef`
+    // reads as `required` too; the tool handler refuses a call without it.
     const def = toolDef({
       name: spec.name,
       description: spec.description,
       path,
-      inputs,
+      inputs: spec.inputs,
+      branch: spec.skipBranch ? undefined : 'required',
+      write: spec.write,
       outputs: spec.outputs,
+      refusesItself: spec.refusesItself,
       tags: spec.write ? ['workflow', 'write'] : ['workflow'],
     });
     registry.registerInternalTool(def);
@@ -223,24 +225,12 @@ export function registerWorkflowTools(
       // workspace path, and a path with no prefix is placed under
       // `<kbDirName>/` rather than refused.
       toolHandler(
-        (args, ctx) => {
-          // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
-          // they address a workspace by id rather than going through
-          // `getFilesystem`, so the choke point that guards the file tools
-          // never sees them. Without this, a branch-less `commit_change`
-          // commits to a workspace id literally named "undefined", and a
-          // branch-less `create_branch` forks from one: it clones a branch of
-          // that name, fails, and answers `There is no branch named undefined.`
-          //
-          // Keyed on whether the SCHEMA requires `branch`, not on whether the
-          // input was injected. `create_branch` and `switch_branch` declare
-          // their own required `branch`; a check keyed on the injection skipped
-          // exactly those two, which is how the reported bug survived on
-          // `create_branch` — the one tool whose `branch` is a branch the
-          // caller must already have.
-          if (requiresBranch) assertBranchProvided(args.branch);
-          return spec.handler(normalizePathArgs(args, kbDirName), ctx);
-        },
+        // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
+        // they address a workspace by id rather than going through
+        // `getFilesystem` — so the branch-less call the tool handler refuses
+        // before this runs would otherwise commit to, or fork from, a
+        // workspace literally named "undefined".
+        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx),
         { write: spec.write },
       ),
     );
@@ -383,6 +373,9 @@ export function registerWorkflowTools(
     // workspace-`branch` injection ("the branch you are currently working on"),
     // whose wording invites filling in the draft being created instead.
     skipBranch: true,
+    // The handler refuses a missing `name` with a message that says what the
+    // name is for (`name-required`); the generic check leaves it to that.
+    refusesItself: ['name'],
     inputs: {
       type: 'object',
       properties: {
@@ -550,13 +543,16 @@ export function registerWorkflowTools(
     name: 'merge_branch',
     description:
       'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
-      'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
-      'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
+      'a person merges: this tool never lands a change request. It refuses while a change request from `source` ' +
+      'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
       'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
-      'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
-      'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths ' +
-      '(nothing is written; resolve them on `source` and merge again).',
+      'is always allowed, even with the draft\'s request open. ' +
+      'Writes are committed asynchronously; the merge first waits up to 20s for those on `source`. ' +
+      'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
+      'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
+      'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
+      'paths (nothing is written; resolve them on `source` and merge again).',
     // Names both branches itself; the merge runs in `target`'s workspace.
     skipBranch: true,
     inputs: {
@@ -573,11 +569,28 @@ export function registerWorkflowTools(
       properties: {
         outcome: {
           type: 'object',
-          description: 'Either a completed merge or a signal that conflicts must be resolved first.',
+          description:
+            'A completed merge, a merge with nothing to do, writes on `source` not committed yet ' +
+            '(writes are committed asynchronously and the merge waits up to 20 seconds for them), ' +
+            'or a signal that conflicts must be resolved first.',
           properties: {
-            kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
-            sha: { type: 'string', description: 'Present when `kind` is `merged` — the tip of `target` after the merge.' },
+            kind: { type: 'string', enum: ['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution'] },
+            sha: {
+              type: 'string',
+              description:
+                'Present when `kind` is `merged` (the merge commit, now the tip of `target`) or `nothing-to-merge` ' +
+                '(the unchanged tip of `target`, which already held everything on `source`).',
+            },
             conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
+            branch: { type: 'string', description: 'Present when `kind` is `pending-commits` — the branch whose writes are not committed yet.' },
+            pending: { type: 'integer', description: 'Present when `kind` is `pending-commits` — how many commits on that branch are still queued, plus those that failed when `needsAttention` is present.' },
+            needsAttention: {
+              type: 'string',
+              description:
+                'Present when `kind` is `pending-commits` and a queued commit failed: the worker\'s message. ' +
+                'Waiting will not help; tell the user.',
+            },
+            message: { type: 'string', description: 'Present when `kind` is `pending-commits` — what to do next.' },
           },
           required: ['kind'],
         },

@@ -1581,6 +1581,22 @@ export class AccessControlService implements IAccessControl {
     return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
   }
 
+  async canDownloadBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionResolved(model, 'download', userEmail, p, owns[i]));
+    });
+    return result;
+  }
+
   async canOwnerBatch(
     workspaceId: string,
     userEmail: string,

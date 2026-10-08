@@ -16,7 +16,7 @@ import type {
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
-import { mergeCommitSubjectNames } from './merge-commit.js';
+import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -33,7 +33,9 @@ import {
 } from '../../kb-fs/branch-name.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
+  AppliedChangeMismatchError,
   BranchAuthorshipError,
+  BranchDeleteRefusedError,
   WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
@@ -801,6 +803,29 @@ export class GitService implements IGitService {
         }
       }
 
+      // Remote delete FIRST. Skip in `onlyIfNoRemote` mode (the contract is
+      // local-only cleanup) and skip when origin has no such branch. Origin
+      // is asked, not this clone's remote-tracking ref: a branch pushed from
+      // another clone since the last fetch has no tracking ref here, and
+      // trusting the cache would delete it locally while it lives on.
+      // A refusal by the host — or a host that cannot be asked — fails the
+      // whole delete: the local branch is untouched, so nothing is
+      // half-deleted and the person can try again. Deleting locally first
+      // would leave a branch that vanished here but lives on the remote —
+      // and, unlike a refused write, a deleted branch has no later push to
+      // reconcile it.
+      if (!opts.onlyIfNoRemote) {
+        try {
+          if (await this.originHasBranch(cwd, name)) {
+            await this.git(cwd, ['push', 'origin', '--delete', name]);
+          }
+        } catch (err) {
+          const detail = sanitizeError(err);
+          log.warn(`the repository host refused to delete branch "${name}"; leaving it in place:`, { detail });
+          throw new BranchDeleteRefusedError(name, detail);
+        }
+      }
+
       // Local delete. `-D` force-deletes even if the branch isn't "fully
       // merged" from git's POV — squash-merged PRs leave a local branch whose
       // commits don't appear on origin/<base> verbatim, but the changes are
@@ -811,17 +836,6 @@ export class GitService implements IGitService {
       // them locally), and "discard from origin" must still work for those.
       if (await this.refExists(cwd, `refs/heads/${name}`)) {
         await this.git(cwd, ['branch', '-D', name]);
-      }
-
-      // Remote delete. Skip in `onlyIfNoRemote` mode (the contract is
-      // local-only cleanup) and skip when there's no remote ref to delete.
-      // A push failure here surfaces to the caller — the local ref is
-      // already gone, and we don't try to resurrect it because rolling back
-      // a "merged-into-the-deleted-branch" local commit would be even more
-      // confusing than the half-finished state.
-      if (!opts.onlyIfNoRemote
-        && await this.refExists(cwd, `refs/remotes/origin/${name}`)) {
-        await this.git(cwd, ['push', 'origin', '--delete', name]);
       }
     });
   }
@@ -1494,6 +1508,8 @@ export class GitService implements IGitService {
        * forget the only commit its files can be read from.
        */
       appliedChangeNumber?: number;
+      /** The request's stored title, so a merge commit in the old message format is recognised too. */
+      appliedChangeTitle?: string;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
@@ -1608,7 +1624,7 @@ export class GitService implements IGitService {
           const own =
             opts.appliedChangeNumber === undefined
               ? null
-              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber);
+              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber, opts.appliedChangeTitle);
           return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own };
         }
 
@@ -1667,6 +1683,7 @@ export class GitService implements IGitService {
     baseWorkspaceId: string,
     targetBranch: string,
     number: number,
+    title?: string,
   ): Promise<string | null> {
     assertValidBranchName(targetBranch);
     const cwd = await this.repoDir(baseWorkspaceId);
@@ -1691,7 +1708,7 @@ export class GitService implements IGitService {
       );
       return null;
     }
-    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number));
+    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number, title));
   }
 
   /**
@@ -1709,25 +1726,38 @@ export class GitService implements IGitService {
    * The two conditions are the reader's own (`appliedChangeShas`): a merge
    * commit, whose subject names this number. Deciding it here with the same
    * predicate means the writer records only what the reader will accept. The
-   * walk is bounded by `--grep` (the number, as a fixed string) and capped,
-   * since the subject check still has to confirm a body-only match. Never on an
-   * ordinary merge: the two callers are the empty-merge case here and
+   * walk is bounded by `--grep` (the number, as a fixed string), which is the
+   * whole of the target's history for commits mentioning the number — and not
+   * by a count: a fixed count of newer merges once hid a stuck request's commit
+   * from the probe on a busy target, and a request that could no longer be
+   * finalized is worse than a log walk. The message check then confirms a
+   * body-only mention is not the request's own. Never on an ordinary merge:
+   * the two callers are the empty-merge case here and
    * {@link appliedMergeCommitOnTarget}, which the approval gate asks before it
    * refuses a retry that has nothing left to merge.
+   *
+   * `title` lets the old message format be recognised — see
+   * {@link mergeCommitMessageNames}.
    */
   private async ownMergeCommitOn(
     cwd: string,
     targetRef: string,
     number: number,
+    title?: string,
   ): Promise<string | null> {
+    // The whole message per commit. Records are NUL-separated (`-z`), the one
+    // byte a commit message cannot hold, and the sha is the record's first
+    // line: nothing a title may contain can split a record or a line early.
     const { stdout } = await this.git(cwd, [
-      'log', '--merges', '--fixed-strings', `--grep=(#${number})`,
-      '--format=%H%x00%s', '-n', '20', targetRef,
+      'log', '-z', '--merges', '--fixed-strings', `--grep=(#${number})`,
+      '--format=%H%n%B', targetRef,
     ]);
-    for (const line of stdout.split('\n')) {
-      const [sha, subject] = line.split('\0');
-      if (!sha || subject === undefined) continue;
-      if (mergeCommitSubjectNames(subject, number)) return sha.trim();
+    for (const record of stdout.split('\0')) {
+      const newline = record.indexOf('\n');
+      const sha = (newline === -1 ? record : record.slice(0, newline)).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;
+      const message = newline === -1 ? '' : record.slice(newline + 1);
+      if (mergeCommitMessageNames(message, number, title)) return sha;
     }
     return null;
   }
@@ -1850,7 +1880,10 @@ export class GitService implements IGitService {
    */
   async remoteBranchExists(workspaceId: string, branch: string): Promise<boolean> {
     assertValidBranchName(branch);
-    const cwd = await this.repoDir(workspaceId);
+    return this.originHasBranch(await this.repoDir(workspaceId), branch);
+  }
+
+  private async originHasBranch(cwd: string, branch: string): Promise<boolean> {
     try {
       await this.git(cwd, ['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${branch}`]);
       return true;
@@ -1945,9 +1978,10 @@ export class GitService implements IGitService {
       // commit the clone holds but origin has not seen into cherry-picks of
       // the commits it merged — the merged branch stops being a parent, so
       // "does the published head contain the target's head" answers no
-      // however many times the update runs. Only the change-request update
-      // asks for it; every other pull replays plain saves, where the two
-      // spellings produce the same history.
+      // however many times the update runs. The change-request update and
+      // every push's cooperative recovery ask for it (a merge a refused push
+      // stranded rides along with the branch's next push); with no merge
+      // among the local commits the two spellings produce the same history.
       await this.git(cwd, [
         'rebase',
         '--autostash',
@@ -2064,7 +2098,12 @@ export class GitService implements IGitService {
         }
         throw err;
       }
-      await this.rebaseOntoRemote(cwd, branch, remoteRef);
+      // `preserveMerges` here too: this sync runs on a timer, so it is the
+      // pull most likely to reach a branch while a merge a refused open or
+      // update left local is still waiting for its push. A plain rebase would
+      // flatten that merge before the push ever ran, and the branch would be
+      // "behind" its target again however many times it was updated.
+      await this.rebaseOntoRemote(cwd, branch, remoteRef, { preserveMerges: true });
       this.accessControl?.invalidate(workspaceId);
       const after = await this.revParseOrNull(cwd, 'HEAD');
       const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
@@ -2121,6 +2160,36 @@ export class GitService implements IGitService {
    */
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
     return this.mutex.run(workspaceId, async () => this.hasUnpushedCommitsAt(await this.repoDir(workspaceId)));
+  }
+
+  /**
+   * Whether this clone's HEAD already holds everything origin has on its
+   * branch: a push would then fast-forward origin to HEAD, and no cooperative
+   * pull-rebase would replay origin's commits INTO HEAD first. Asked after a
+   * fetch, about the fetched ref.
+   *
+   * The roles.yaml preservation asks this before pushing a restore it finds
+   * already committed. "HEAD's roles.yaml is the base version" is only worth
+   * publishing when origin ends up AT HEAD — a clone behind origin would have
+   * origin's divergent copy rebased into it on the way, and the push would
+   * land exactly what the restore exists to keep off the base.
+   *
+   * Exit 1 is git's "not an ancestor". Every other failure propagates — a
+   * tracking ref that does not exist, a broken repository — so a probe that
+   * cannot answer fails the guard closed, never open.
+   */
+  async headContainsOrigin(workspaceId: string): Promise<boolean> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const branch = await this.currentBranch(cwd);
+      try {
+        await this.git(cwd, ['merge-base', '--is-ancestor', `refs/remotes/origin/${branch}`, 'HEAD']);
+        return true;
+      } catch (err) {
+        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return false;
+        throw err;
+      }
+    });
   }
 
   /**
@@ -2829,22 +2898,33 @@ export class GitService implements IGitService {
         throw err;
       }
     };
+    // Two refusals, told apart for the caller's sake. A commit this clone does
+    // NOT HOLD is a passing state — the next fetch may bring it — and is
+    // reported as plain validation failure, to be asked again. A commit the
+    // clone holds that is NOT THIS REQUEST'S merge commit (no second parent,
+    // or a message that does not name the request) never becomes it, and is
+    // reported as a mismatch the caller may remember.
+    if (!(await revParse(`${mergeSha}^{commit}`))) {
+      throw new WorkflowValidationError(
+        `commit ${mergeSha} is not in this clone, so change request #${number} cannot be read from it yet`,
+      );
+    }
     // The SECOND parent first, because its absence is the whole P1: a merge
     // `--no-ff` always has one, and a commit that does not is not a merge this
-    // request made. Asking for it also answers "is this commit here at all".
+    // request made.
     const headSha = await revParse(`${mergeSha}^2^{commit}`);
     if (!headSha) {
-      throw new WorkflowValidationError(
-        `commit ${mergeSha} is not a merge commit in this clone, so it cannot be change request #${number}'s`,
+      throw new AppliedChangeMismatchError(
+        `commit ${mergeSha} is not a merge commit, so it cannot be change request #${number}'s`,
       );
     }
     const baseSha = await revParse(`${mergeSha}^1^{commit}`);
     if (!baseSha) {
-      throw new WorkflowValidationError(`no first parent for commit ${mergeSha}`);
+      throw new AppliedChangeMismatchError(`no first parent for commit ${mergeSha}`);
     }
-    const { stdout: subject } = await this.git(cwd, ['log', '-1', '--format=%s', mergeSha]);
-    if (!mergeCommitSubjectNames(subject, number)) {
-      throw new WorkflowValidationError(
+    const { stdout: message } = await this.git(cwd, ['log', '-1', '--format=%B', mergeSha]);
+    if (!mergeCommitMessageNames(message, number, applied.title)) {
+      throw new AppliedChangeMismatchError(
         `commit ${mergeSha} is not the merge commit of change request #${number}`,
       );
     }

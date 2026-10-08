@@ -698,13 +698,55 @@ describe('WorkspaceService.createFolderZip', () => {
     }));
   }
 
+  /** The filter a caller with every permission passes: pack everything found. */
+  const ALL = async (paths: string[]) => new Set(paths);
+
+  it('packs only what the filter allows, and asks it once with every file as a repository path', async () => {
+    const dir = path.join(repoDir, 'judged');
+    await fs.mkdir(path.join(dir, 'inner'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'open.md'), 'open');
+    await fs.writeFile(path.join(dir, 'withheld.md'), 'withheld');
+    await fs.writeFile(path.join(dir, 'inner', 'deep.md'), 'deep');
+    const asked: string[][] = [];
+    const include = async (paths: string[]) => {
+      asked.push([...paths].sort());
+      return new Set(paths.filter((p) => p !== 'judged/withheld.md'));
+    };
+
+    const buf = await svc.createFolderZip(workspaceId, 'judged', include);
+
+    // Asked once, with every file the walk found, keyed the way the access
+    // rules are: relative to the repository, not to the folder or the workspace.
+    expect(asked).toEqual([['judged/inner/deep.md', 'judged/open.md', 'judged/withheld.md']]);
+    const names = (await unzipEntries(buf)).map((e) => e.name).sort();
+    expect(names).toEqual(['judged/inner/deep.md', 'judged/open.md']);
+  });
+
+  it('keys the files the same way whether the folder is written with a trailing slash or not', async () => {
+    const dir = path.join(repoDir, 'slashed');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'a.md'), 'a');
+    const asked: string[][] = [];
+    const include = async (paths: string[]) => {
+      asked.push(paths);
+      return new Set(paths);
+    };
+
+    await svc.createFolderZip(workspaceId, 'slashed/', include);
+    await svc.createFolderZip(workspaceId, `${'knowledge-base'}/slashed//`, include);
+
+    // A `slashed//a.md` key would match no verdict, and the filter would
+    // withhold the whole folder without a word.
+    expect(asked).toEqual([['slashed/a.md'], ['slashed/a.md']]);
+  });
+
   it('zips a folder prefixing entries with the folder name', async () => {
     const dir = path.join(repoDir, 'docs');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, 'a.md'), 'alpha');
     await fs.writeFile(path.join(dir, 'b.md'), 'beta');
 
-    const buf = await svc.createFolderZip(workspaceId, 'docs');
+    const buf = await svc.createFolderZip(workspaceId, 'docs', ALL);
     const entries = await unzipEntries(buf);
     const names = entries.map((e) => e.name).sort();
     expect(names).toEqual(['docs/a.md', 'docs/b.md']);
@@ -719,7 +761,7 @@ describe('WorkspaceService.createFolderZip', () => {
     await fs.writeFile(path.join(dir, 'nested', 'mid.md'), 'mid');
     await fs.writeFile(path.join(dir, 'nested', 'deep', 'leaf.md'), 'leaf');
 
-    const buf = await svc.createFolderZip(workspaceId, 'tree');
+    const buf = await svc.createFolderZip(workspaceId, 'tree', ALL);
     const names = (await unzipEntries(buf)).map((e) => e.name).sort();
     expect(names).toEqual([
       'tree/nested/deep/leaf.md',
@@ -736,7 +778,7 @@ describe('WorkspaceService.createFolderZip', () => {
     await fs.writeFile(path.join(dir, '.gitkeep'), '');
     await fs.writeFile(path.join(dir, 'real.md'), 'real');
 
-    const buf = await svc.createFolderZip(workspaceId, 'mixed');
+    const buf = await svc.createFolderZip(workspaceId, 'mixed', ALL);
     const names = (await unzipEntries(buf)).map((e) => e.name).sort();
     expect(names).toEqual(['mixed/real.md']);
   });
@@ -748,7 +790,7 @@ describe('WorkspaceService.createFolderZip', () => {
     await fs.writeFile(path.join(dir, 'public.md'), 'pub');
     await fs.writeFile(path.join(dir, 'secret.md'), 'shh');
 
-    const buf = await svc.createFolderZip(workspaceId, 'with-ignore');
+    const buf = await svc.createFolderZip(workspaceId, 'with-ignore', ALL);
     const names = (await unzipEntries(buf)).map((e) => e.name).sort();
     expect(names).toContain('with-ignore/public.md');
     expect(names).not.toContain('with-ignore/secret.md');
@@ -756,17 +798,17 @@ describe('WorkspaceService.createFolderZip', () => {
 
   it('refuses to zip a file (not a directory)', async () => {
     await fs.writeFile(path.join(repoDir, 'lone.md'), 'one');
-    await expect(svc.createFolderZip(workspaceId, 'lone.md')).rejects.toThrow('Not a directory');
+    await expect(svc.createFolderZip(workspaceId, 'lone.md', ALL)).rejects.toThrow('Not a directory');
   });
 
   it('refuses a traversing path, and reads an unprefixed one as the repository folder', async () => {
-    await expect(svc.createFolderZip(workspaceId, '../escape')).rejects.toThrow(
+    await expect(svc.createFolderZip(workspaceId, '../escape', ALL)).rejects.toThrow(
       'is outside the knowledge base repository',
     );
     // The unprefixed spelling is the repository's own folder, so it zips.
     await fs.mkdir(path.join(repoDir, 'unprefixed'), { recursive: true });
     await fs.writeFile(path.join(repoDir, 'unprefixed', 'a.md'), 'a');
-    const buf = await svc.createFolderZip(workspaceId, 'unprefixed');
+    const buf = await svc.createFolderZip(workspaceId, 'unprefixed', ALL);
     expect((await unzipEntries(buf)).map((e) => e.name)).toEqual(['unprefixed/a.md']);
   });
 
@@ -796,7 +838,7 @@ describe('WorkspaceService.createFolderZip', () => {
       return result;
     });
     try {
-      await expect(svc.createFolderZip(workspaceId, 'too-big'))
+      await expect(svc.createFolderZip(workspaceId, 'too-big', ALL))
         .rejects.toBeInstanceOf(FolderTooLargeError);
     } finally {
       statSpy.mockRestore();

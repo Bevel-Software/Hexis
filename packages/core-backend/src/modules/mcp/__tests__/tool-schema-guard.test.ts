@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
-import { ToolSchemaGuard, type ScreenedTool } from '../tool-schema-guard.js';
+import { MAX_REMEMBERED_CALLERS, ToolSchemaGuard, type ScreenedTool } from '../tool-schema-guard.js';
 
 const tool = (name: string, inputSchema: unknown): ScreenedTool => ({
   utcpName: `notion.srv.${name}`,
@@ -206,5 +206,61 @@ describe('ToolSchemaGuard', () => {
     screen(guard, 'u1', load({ notion: [tool('bad', INVALID)] }));
     screen(guard, 'u2', load({ notion: [tool('bad', INVALID)] }));
     expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  describe('with more callers than it remembers', () => {
+    const MANY = MAX_REMEMBERED_CALLERS;
+
+    it('evicts the caller longest unseen, and keeps every other caller\'s finding on the owner\'s page', () => {
+      const guard = new ToolSchemaGuard();
+      // The first caller's finding, then a crowd of callers with nothing to
+      // report, then one more than fits.
+      screen(guard, 'first', load({ notion: [tool('bad', INVALID)] }));
+      for (let i = 1; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      // `first` was seen again since — so it is not the longest unseen, and
+      // its finding stays when the crowd overflows.
+      screen(guard, 'first', load({ notion: [tool('bad', INVALID)] }));
+      screen(guard, 'overflow', load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      // Overflow once more: now `u1` goes, then `u2` — never the whole table.
+      screen(guard, 'overflow-2', load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+    });
+
+    it("keeps the order per caller: an evicted caller's next load is their newest, whichever began first", () => {
+      const guard = new ToolSchemaGuard();
+      for (let i = 0; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
+      // `u0` is the longest unseen. Two loads of theirs begin, old then new —
+      // and before either lands, the table overflows and `u0` is evicted,
+      // watermark and all.
+      const older = guard.beginLoad();
+      const newer = guard.beginLoad();
+      screen(guard, 'newcomer', load({ notion: [tool('a', VALID)] }));
+      // Nothing of `u0` is held, so whichever lands first is the newest
+      // picture this process has of them: the old load, with its finding.
+      guard.screen('u0', older, load({ notion: [tool('bad', INVALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      // The newer load then lands with the corrected schema and wins —
+      // and the watermark it restores rejects anything older after it.
+      guard.screen('u0', newer, load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toEqual([]);
+      const own = guard.screen('u0', older, load({ notion: [tool('bad', INVALID)] }));
+      expect([...own.keys()]).toEqual(['notion.srv.bad']);
+      expect(guard.hiddenFor('notion')).toEqual([]);
+    });
+
+    it("does not rank one caller's load against another caller's eviction", () => {
+      const guard = new ToolSchemaGuard();
+      // `x` begins a load; the table then fills and overflows, evicting
+      // callers whose tickets are newer than `x`'s.
+      const x = guard.beginLoad();
+      for (let i = 0; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
+      screen(guard, 'overflow', load({ notion: [tool('a', VALID)] }));
+      // `x`'s load is `x`'s newest, evictions elsewhere notwithstanding: its
+      // finding reaches the owner's page.
+      guard.screen('x', x, load({ notion: [tool('bad', INVALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+    });
   });
 });

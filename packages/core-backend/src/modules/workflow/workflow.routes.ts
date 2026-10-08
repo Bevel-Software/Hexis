@@ -52,8 +52,13 @@ function toHttpError(
   return { status: 500, body: { error: 'Internal server error' } };
 }
 
-/** What a viewer who cannot read every touched file reads in place of a refusal's reason. */
-export const APPLY_FAILURE_REASON_WITHHELD = 'The reason names files you do not have access to read.';
+/**
+ * What a viewer who cannot read every touched file reads in place of a
+ * refusal's reason — one string, shared with the agent read tools, which
+ * withhold on the same predicate.
+ */
+export { APPLY_FAILURE_REASON_WITHHELD } from './agent-tools/change-request-read-shape.js';
+import { APPLY_FAILURE_REASON_WITHHELD } from './agent-tools/change-request-read-shape.js';
 
 function parsePrNumber(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;

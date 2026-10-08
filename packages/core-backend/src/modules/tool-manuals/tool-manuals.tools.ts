@@ -3,6 +3,7 @@ import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js'
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
+import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
@@ -54,6 +55,11 @@ export function registerToolManualsTools(
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  // The def above is built per catalog listing (its description names the
+  // tools configured for THIS caller), so declare the arguments here as well:
+  // a direct REST call that lands before the first listing must be checked
+  // against them too.
+  declareRouteTool('list_local_tools', LIST_LOCAL_TOOLS_INPUTS);
 
   router.post(
     '/agent/tools/list_local_tools',
@@ -79,13 +85,14 @@ export function registerToolManualsTools(
     // answers and the four things an agent cannot read off a field.
     //
     // It sits a few characters under `TOOL_DESCRIPTION_CAP` WITH the guide-first
-    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`),
+    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`)
+    // and the `Call:` line generated ahead of everything,
     // which is why every sentence here is the short form: the `hiddenTools`
     // clause and that opener both came out of the same budget, and what a
     // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
-      'Configuration status of every `.tool` the current user can access: what each tool needs set up and what is ' +
-      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
+      'Configuration status of every `.tool` the current user can access: what each needs set up and what is ' +
+      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
       'READ is absent, and every flag is the caller\'s own. ' +
       'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
       'editor; users sign in on /connect. ' +
@@ -96,7 +103,7 @@ export function registerToolManualsTools(
       'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
       'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
       'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
-      'yet — open a change request and ask the user to merge it in the app to activate it.',
+      'yet — open a change request and ask the user to merge it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -303,6 +310,9 @@ async function localToolsLine(svc: IToolManualService, userEmail?: string): Prom
   return `Local-only tools configured for you: ${tools.map((t) => `\`${t.name}\``).join(', ')}.`;
 }
 
+/** `list_local_tools` takes nothing; a const so the route and the def share one declaration. */
+const LIST_LOCAL_TOOLS_INPUTS = { type: 'object' as const, properties: {}, additionalProperties: false };
+
 async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
     name: 'list_local_tools',
@@ -318,7 +328,7 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       'setup by hand. ' +
       (await localToolsLine(svc, userEmail)),
     path: '/api/agent/tools/list_local_tools',
-    inputs: { type: 'object', properties: {}, additionalProperties: false },
+    inputs: LIST_LOCAL_TOOLS_INPUTS,
     outputs: {
       type: 'object',
       properties: {

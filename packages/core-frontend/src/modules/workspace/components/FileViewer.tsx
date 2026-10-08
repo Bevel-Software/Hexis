@@ -45,7 +45,7 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
-import { getFileRenderer, getRendererLayout, isViewOnlyFile } from './renderers';
+import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
 import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
@@ -168,12 +168,10 @@ export function FileViewer() {
   // Registry renderer overrides win over the built-in extension map — the
   // enterprise registry swaps in its own `.html` renderer (vendored d3/mermaid
   // + KB graph client) this way.
-  const Renderer = useMemo(() => {
-    if (!openFilePath) return null;
-    const ext = openFilePath.slice(openFilePath.lastIndexOf('.')).toLowerCase();
-    const override = renderers.find((r) => r.extensions.includes(ext));
-    return override?.Component ?? getFileRenderer(openFilePath);
-  }, [openFilePath, renderers]);
+  const Renderer = useMemo(
+    () => (openFilePath ? pickFileRenderer(openFilePath, renderers) : null),
+    [openFilePath, renderers],
+  );
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState<'content' | 'history' | 'compare'>('content');

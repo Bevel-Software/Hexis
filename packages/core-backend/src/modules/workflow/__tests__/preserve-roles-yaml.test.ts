@@ -13,7 +13,11 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
-import { RolesYamlPreservationError } from '../../../shared/domain-errors.js';
+import {
+  PushNeedsAgentResolutionError,
+  RolesYamlPreservationError,
+} from '../../../shared/domain-errors.js';
+import type { WorkflowEventBus } from '../event-bus.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
@@ -63,12 +67,18 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     headRoles: string | null;
     baseRoles: string | null;
     commitFileResult?: unknown;
+    /**
+     * What the clone answers when asked whether its HEAD already holds all of
+     * origin/<head>; an Error makes the probe throw instead.
+     */
+    headContainsOrigin?: boolean | Error;
     pushImpl?: () => Promise<void>;
     getPrResult?: { branch: string; base: string } | null;
     getPrDetailResult?: unknown;
     // Simulate a concurrent editor already holding the roles.yaml lock. When set,
     // acquire returns { acquired: false } and the restore must fail-closed.
     lockHeldBy?: string;
+    events?: WorkflowEventBus;
   }) {
     const ac = noopAccessControl();
     const reviewWorkflow = {
@@ -91,6 +101,11 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
         'commitFileResult' in opts ? opts.commitFileResult : { sha: 'preserve-sha' },
       ),
       push: vi.fn(opts.pushImpl ?? (async () => undefined)),
+      headContainsOrigin: vi.fn(async () => {
+        const answer = opts.headContainsOrigin ?? false;
+        if (answer instanceof Error) throw answer;
+        return answer;
+      }),
     } as unknown as GitService;
 
     const prs = {
@@ -123,6 +138,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       fileLocks, {} as unknown as PendingCommitsService,
       testKbContext({ kbDirName: KB_DIR }),
       openChangeGate(),
+      opts.events,
     );
     // Conflicts are now surfaced by the local merge inside `reviewWorkflow.mergePr`
     // (mocked to resolve here), so there's no provider "mergeable" pre-check to stub.
@@ -221,17 +237,55 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     expect(git.push).toHaveBeenCalled();
   });
 
-  it('ABORTS the merge (RolesYamlPreservationError) if the restore push fails', async () => {
+  it('ABORTS the merge when the host refuses the restore push, keeping the restore locally (409, saved-locally, banner)', async () => {
     await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), ATTACKER_ROLES);
-    const { svc, reviewWorkflow } = makeSvc({
+    const emit = vi.fn();
+    const { svc, git, reviewWorkflow, fileLocks } = makeSvc({
       headRoles: ATTACKER_ROLES,
       baseRoles: BASE_ROLES,
-      pushImpl: async () => { throw new Error('push rejected: non-fast-forward'); },
+      pushImpl: async () => {
+        throw new Error('git push failed: remote: Internal Server Error');
+      },
+      events: { emit } as unknown as WorkflowEventBus,
     });
 
-    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
-    // Fail-closed: the merge must NOT have run.
+    const err = await merge(svc).catch((e: unknown) => e);
+    // Answered like every refused push — not the 502 preservation error, and
+    // never a raw 500.
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect((err as PushNeedsAgentResolutionError).status).toBe(409);
+    expect((err as Error).message).toContain(`Saved locally on "${HEAD}"`);
+    expect(JSON.stringify((err as PushNeedsAgentResolutionError).payload)).not.toContain('Internal Server Error');
+    // Fail-closed: the merge must NOT have run — origin still carries the
+    // divergent roles.yaml.
     expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
+    // The local result stays: base version on disk, committed, lock dropped.
+    expect(await fs.readFile(path.join(headRepoDir, 'roles.yaml'), 'utf-8')).toBe(BASE_ROLES);
+    expect(git.commitFile).toHaveBeenCalled();
+    expect(fileLocks.release).toHaveBeenCalled();
+    // A refusal is not a divergence: no cooperative pull-rebase, no retry.
+    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(git.pull).not.toHaveBeenCalledWith(expect.anything(), { preserveMerges: true });
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'git-sync-failed', workspaceId: HEAD, branch: HEAD }),
+    );
+  });
+
+  it('a non-fast-forward restore push takes the cooperative pull-rebase, then the merge proceeds', async () => {
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), ATTACKER_ROLES);
+    let pushes = 0;
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      pushImpl: async () => {
+        if (pushes++ === 0) throw new Error('push rejected: non-fast-forward');
+      },
+    });
+
+    await merge(svc);
+    expect(git.pull).toHaveBeenCalled();
+    expect(git.push).toHaveBeenCalledTimes(2);
+    expect(reviewWorkflow.mergePr).toHaveBeenCalledTimes(1);
   });
 
   it('ABORTS the merge if the CR (PR) cannot be resolved', async () => {
@@ -277,6 +331,56 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       headRoles: ATTACKER_ROLES,
       baseRoles: BASE_ROLES,
       commitFileResult: null,
+    });
+    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
+    expect(git.push).not.toHaveBeenCalled();
+    expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
+  });
+
+  it('a merge retried after a refused restore push pushes the restore that is already committed, then merges', async () => {
+    // The earlier attempt restored and committed roles.yaml on the source,
+    // and the host refused the push (the 409 above). origin/head therefore
+    // still diverges, the working tree already matches base, and commitFile
+    // has nothing new — but the clone's HEAD holds the restore commit on top
+    // of everything origin has. The retry must push it and merge, not refuse
+    // "out of sync" forever.
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      commitFileResult: null,
+      headContainsOrigin: true,
+    });
+    await expect(merge(svc)).resolves.toMatchObject({ kind: 'merged' });
+    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(reviewWorkflow.mergePr).toHaveBeenCalled();
+  });
+
+  it('still ABORTS when the base version is on disk but the clone is BEHIND origin/head (fail-closed)', async () => {
+    // The unsafe shape: HEAD never saw origin's divergent roles.yaml commit,
+    // the working tree matches base, and the clone carries some unpushed
+    // save. Pushing would rebase origin's divergent copy INTO HEAD first and
+    // the merge would land it — so holding unpushed work is not the question,
+    // holding all of origin is.
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      commitFileResult: null,
+      headContainsOrigin: false,
+    });
+    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
+    expect(git.push).not.toHaveBeenCalled();
+    expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
+  });
+
+  it('ABORTS when the probe for "does HEAD hold origin/head" itself fails (fail-closed, not open)', async () => {
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      commitFileResult: null,
+      headContainsOrigin: new Error("fatal: Not a valid object name refs/remotes/origin/mallory/escalate"),
     });
     await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
     expect(git.push).not.toHaveBeenCalled();

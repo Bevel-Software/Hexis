@@ -6,7 +6,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail as hash } from '../../../../shared/email-identity.js';
-import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
+import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 function pr(overrides: Partial<PullRequestSummary>): PullRequestSummary {
   return {
@@ -312,8 +312,9 @@ describe('PullRequestService.listPrsByState', () => {
     // The merge commit, not the branch pair: the source branch is retired, so
     // asking for it is what sent one fetch per row at the remote.
     // The ref carries the NUMBER as well as the sha: the git layer refuses a
-    // commit that is not this request's own merge commit.
-    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA });
+    // commit that is not this request's own merge commit. And the TITLE, so a
+    // commit written in the old message format is recognised too.
+    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA, title: 'A proposal' });
     expect(forPr).not.toHaveBeenCalled();
     expect(summary).toMatchObject({
       number: 9,
@@ -350,11 +351,22 @@ describe('PullRequestService.listPrsByState', () => {
   // which no longer exists — once per row, logging a warning for each. A few
   // hundred applied requests opened a few hundred concurrent fetches to answer
   // nothing. Nothing about a closed row needs the network.
-  describe('listing closed and merged requests reaches the network not once', () => {
-    it('asks for no clone refresh when no open row is in scope', async () => {
-      const { svc, ensureRemotesFetched } = svcOver([row({ state: 'merged' })], ['A.md']);
+  describe('listing closed and merged requests costs at most one fetch, never one per row', () => {
+    it('asks for no clone refresh when only declined rows are in scope — they read from nothing', async () => {
+      const { svc, ensureRemotesFetched } = svcOver([row({ state: 'closed', mergedSha: null })], ['A.md']);
       await svc.listPrsByState(['closed', 'merged']);
       expect(ensureRemotesFetched).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the clone ONCE for a list of merged rows — their commits are immutable, but a clone must hold them', async () => {
+      // A clone that has not fetched since the merges would otherwise read
+      // every applied request as author-only for good (cubic P1 on #373).
+      const { svc, ensureRemotesFetched } = svcOver(
+        [row({ number: 1, state: 'merged' }), row({ number: 2, state: 'merged' }), row({ number: 3, state: 'merged' })],
+        ['A.md'],
+      );
+      await svc.listPrsByState(['closed', 'merged']);
+      expect(ensureRemotesFetched).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the ONE refresh for a set that does contain open rows', async () => {
@@ -362,6 +374,28 @@ describe('PullRequestService.listPrsByState', () => {
       vi.spyOn(svc, 'listOpenPrs').mockResolvedValue([]);
       await svc.listPrsByState(['open', 'merged']);
       expect(ensureRemotesFetched).toHaveBeenCalledTimes(1);
+    });
+
+    it('remembers a recorded commit that is not the request\'s own, and never asks git for it again', async () => {
+      // Rows whose `merged_sha` is not this request's own commit — written
+      // before merges recorded their own — fail the verification for good;
+      // re-running their git calls on every poll, serialized under the
+      // workspace mutex, is what a deployment with hundreds of them paid.
+      const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['A.md']);
+      atCommit.mockRejectedValue(new AppliedChangeMismatchError('commit is not the merge commit of change request #9'));
+      const first = await svc.listPrsByState(['closed', 'merged']);
+      expect(first[0]?.touchedNodePaths).toEqual([]);
+      await svc.listPrsByState(['closed', 'merged']);
+      await svc.listPrsByState(['closed', 'merged']);
+      expect(atCommit).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks again for a commit the clone did not hold — that one the next fetch may bring', async () => {
+      const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['A.md']);
+      atCommit.mockRejectedValueOnce(new WorkflowValidationError('commit is not in this clone'));
+      expect((await svc.listPrsByState(['closed', 'merged']))[0]?.touchedNodePaths).toEqual([]);
+      expect((await svc.listPrsByState(['closed', 'merged']))[0]?.touchedNodePaths).toEqual(['A.md']);
+      expect(atCommit).toHaveBeenCalledTimes(2);
     });
 
     it('asks git NOTHING about a declined row — there is no diff to compute', async () => {
@@ -561,7 +595,7 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
   it('reads its files from the merge commit, and never asks for its branches', async () => {
     const { svc, resolvePrShas, changedFilesOfAppliedChange } = svcFor();
     const detail = await svc.getPrDetail(4);
-    expect(changedFilesOfAppliedChange).toHaveBeenCalledWith('ws', { number: 4, mergeSha: MERGE_SHA }, {});
+    expect(changedFilesOfAppliedChange).toHaveBeenCalledWith('ws', { number: 4, mergeSha: MERGE_SHA, title: 'A proposal' }, {});
     // Not one branch resolution, so not one fetch: the branch no longer exists
     // and the commit cannot change.
     expect(resolvePrShas).not.toHaveBeenCalled();
@@ -594,7 +628,7 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
     await svc.getPrDetail(4, { patches: false });
     expect(changedFilesOfAppliedChange).toHaveBeenCalledWith(
       'ws',
-      { number: 4, mergeSha: MERGE_SHA },
+      { number: 4, mergeSha: MERGE_SHA, title: 'A proposal' },
       { patchCap: 0 },
     );
   });

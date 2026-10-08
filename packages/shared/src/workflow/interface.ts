@@ -445,7 +445,8 @@ export interface IWorkflowService {
    */
   listChangeRequestsByState(
     states: ChangeRequestState[],
-    opts?: { fresh?: boolean },
+    /** `workspaceId`: the clone to read file lists in; any clone will do, and a caller that resolved one passes it so the list and the by-number reads agree. */
+    opts?: { fresh?: boolean; workspaceId?: string },
   ): Promise<ChangeRequest[]>;
   /** Change requests authored by the given user (matched on stored author identity). */
   listChangeRequestsAuthoredBy(
@@ -691,6 +692,13 @@ export interface IWorkflowService {
    *     merge resets it to the published tip, which would discard them.
    *
    * Conflicts write nothing and come back as `conflicts-need-resolution`.
+   *
+   * Writes are committed asynchronously, so before merging this waits — up to
+   * 20 seconds, holding no lock — for `sourceBranch` to have no queued commit.
+   * Still queued after that, or a queued commit escalated to a person, comes
+   * back as `pending-commits` with nothing merged. A target that already held
+   * everything on the source comes back as `nothing-to-merge` with its tip;
+   * `merged` means a merge commit was made.
    */
   mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
 }

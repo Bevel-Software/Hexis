@@ -243,6 +243,91 @@ describe('GitService.mergeChangeRequest', () => {
     expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 8)).toBeNull();
   });
 
+  it('still finds the commit behind any number of newer merges on a busy target', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merged = await git.mergeChangeRequest(
+      baseWsId, 'alice/add', BASE,
+      { subject: mergeCommitSubject('Add feature', 7), body: 'Merged via Bevel' }, USER,
+      { appliedChangeNumber: 7 },
+    );
+    expect(merged.kind).toBe('merged');
+    if (merged.kind !== 'merged') return;
+
+    // Twenty-five merges land on the target after it — more than the fixed
+    // count the probe once stopped at, which left a stuck request on a busy
+    // branch un-finalizable for good.
+    const busy = path.join(root, 'busy');
+    await runGit(root, ['clone', '-b', BASE, upstream, busy]);
+    for (let i = 0; i < 25; i += 1) {
+      await runGit(busy, ['checkout', '-b', `other-${i}`]);
+      await fs.writeFile(path.join(busy, `other-${i}.md`), `${i}\n`);
+      await runGit(busy, ['add', '-A']);
+      await runGit(busy, ['commit', '-m', `work ${i}`]);
+      await runGit(busy, ['checkout', BASE]);
+      await runGit(busy, ['merge', '--no-ff', '-m', `Other change ${i} (#${100 + i})`, `other-${i}`]);
+    }
+    await runGit(busy, ['push', 'origin', BASE]);
+
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBe(merged.mergeCommit);
+    // Twenty-five merges are a hundred and fifty git processes; slow on a
+    // loaded Windows runner, so this one gets its own budget.
+  }, 120_000);
+
+  it('recognises a merge commit an earlier release wrote with the title unflattened, given the stored title', async () => {
+    // Before titles were flattened, a title with a blank line put `(#N)` after
+    // git's one-paragraph subject, and such rows read as author-only. The row
+    // still holds the title, which is what names the commit now.
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const title = 'Add feature\n\nand a note';
+    const old = path.join(root, 'old-format');
+    await runGit(root, ['clone', '-b', BASE, upstream, old]);
+    await runGit(old, ['merge', '--no-ff', '-m', `${title} (#5)`, '-m', 'Merged via Bevel', 'origin/alice/add']);
+    await runGit(old, ['push', 'origin', BASE]);
+    const sha = (await gitOut(old, ['rev-parse', 'HEAD'])).trim();
+    expect((await gitOut(old, ['log', '-1', '--format=%s'])).trim()).toBe('Add feature');
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    // With the title: the commit is the request's own, on the target and by sha.
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, title)).toBe(sha);
+    expect(await git.appliedChangeShas(baseWsId, { number: 5, mergeSha: sha, title }))
+      .toMatchObject({ baseSha: expect.any(String), headSha: expect.any(String) });
+    // Without it, nothing vouches for a number that is not where the subject
+    // rule looks — and another title does not either.
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5)).toBeNull();
+    await expect(git.appliedChangeShas(baseWsId, { number: 5, mergeSha: sha })).rejects.toThrow(/not the merge commit/);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, 'Add feature')).toBeNull();
+  });
+
+  it('does not take a current-format commit of another request for one whose title merely contains its number', async () => {
+    // Request 43, titled `Fix crash (#42)`, merges as `Fix crash (#42) (#43)`.
+    // Asked for request 42 with the stored title `Fix crash`, the old-format
+    // rule must refuse it: 42's number is not at the end of the line there.
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merged = await git.mergeChangeRequest(
+      baseWsId, 'alice/add', BASE,
+      { subject: mergeCommitSubject('Fix crash (#42)', 43), body: 'x' }, USER,
+      { appliedChangeNumber: 43 },
+    );
+    expect(merged.kind).toBe('merged');
+    if (merged.kind !== 'merged') return;
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 43)).toBe(merged.mergeCommit);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 42, 'Fix crash')).toBeNull();
+    await expect(git.appliedChangeShas(baseWsId, { number: 42, mergeSha: merged.sha, title: 'Fix crash' })).rejects.toThrow(
+      /not the merge commit/,
+    );
+  });
+
   // One variable at a time, because the two halves of the P1 are not the same
   // claim. With the remote REACHABLE, a missing tracking ref is not a hazard at
   // all: the refresh names its destination explicitly, so it recreates the ref

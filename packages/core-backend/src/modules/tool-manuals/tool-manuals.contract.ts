@@ -330,10 +330,11 @@ export interface ToolCapability {
 
 /**
  * A single tool manual for the BROWSER tool page (`GET /api/tools/:slug`): the
- * summary plus the two human-facing fields the catalog listing has no use for.
- * Both are normalized to `null` rather than left optional — the page renders a
- * definite "nothing here" state, so an absent field and an empty one are the
- * same thing to it.
+ * summary plus the three human-facing fields the catalog listing has no use
+ * for — the description, the capabilities and the tools hidden for an invalid
+ * schema. Each is normalized to a definite empty (`null`, `[]`) rather than
+ * left optional — the page renders a definite "nothing here" state, so an
+ * absent field and an empty one are the same thing to it.
  */
 export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'> {
   description: string | null;

@@ -18,6 +18,7 @@ import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
 import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
+import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { describeReadFailure } from '../services/denied-file.api';
@@ -237,6 +238,16 @@ export function ChangeRequestDialog({
       for (const off of offs) off();
     };
   }, [bus, cr.number]);
+
+  // The request's verbs (revert, update) push its SOURCE branch, which is
+  // rarely the branch in the address bar. Watch that workspace while the
+  // dialog is open, so a push the host refuses raises the sync banner here —
+  // and the push that later lands clears it here.
+  const sourceWorkspaceId = encodeURIComponent(cr.branch);
+  useEffect(() => {
+    if (!bus) return;
+    return bus.watchWorkspace(sourceWorkspaceId);
+  }, [bus, sourceWorkspaceId]);
 
   // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
   // lifted to full paths, and every touched file lists whatever folder it is
@@ -1088,6 +1099,10 @@ export function ChangeRequestDialog({
             </>
           )}
         </p>
+
+        <div className="mx-8 mt-4 empty:hidden overflow-hidden rounded-lg">
+          <GitSyncFailedBanner workspaceId={sourceWorkspaceId} />
+        </div>
 
         {error && (
           <Banner tone="danger" role="alert" className="mx-8 mt-4">
