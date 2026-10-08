@@ -1695,11 +1695,23 @@ describe('FileViewer: the starter-pack question', () => {
     expect(screen.queryByRole('button', { name: 'Engineering' })).toBeNull();
   });
 
-  it('waits for the branch to be known rather than asking on a guess', async () => {
+  it('waits for the branch to be known rather than asking on a guess, showing neither state meanwhile', async () => {
     starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
     render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={null} />);
     await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
     expect(screen.queryByText('What does your team do?')).toBeNull();
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+  });
+
+  it('shows no reading empty state before the server has answered: the question must not flash in after it', async () => {
+    let answer!: (a: unknown) => void;
+    starterPacksMock.fetchStarterPacks.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={DEFAULT} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    answer({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
   });
 
   it('after a choice, says what was added above the ordinary empty state', async () => {

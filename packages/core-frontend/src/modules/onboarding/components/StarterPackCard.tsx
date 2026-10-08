@@ -11,11 +11,15 @@ import { SKIP_STARTER_PACK, type StarterPackApplied, type StarterPackSummary } f
  * quiet way out.
  *
  * Choosing adds the pack in one commit; the tree is fetched again here rather
- * than left to the change event, so the pages are in it by the time the card
- * hands over to the ordinary empty state, which suggests them. A refusal is
- * said on the card itself, in the server's words: toasts speak only inside
- * the Library, and "someone is editing the knowledge base right now" is
- * exactly the sentence the admin needs to read.
+ * than left to the change event, and BEFORE the shared answer retires the
+ * card, so the pages are in the tree by the time the ordinary empty state
+ * takes over and suggests them (should that fetch fail, the change event the
+ * commit sends brings the tree up to date). A refusal is said on the card
+ * itself, in the server's words: toasts speak only inside the Library, and
+ * "someone is editing the knowledge base right now" is exactly the sentence
+ * the admin needs to read. What is under way is said in a live region too:
+ * the buttons only change shape, and a screen reader would hear nothing
+ * until the result.
  */
 export function StarterPackCard({
   packs,
@@ -35,14 +39,19 @@ export function StarterPackCard({
     setBusy(id);
     setError(null);
     try {
-      const applied = await choose(id);
-      if (applied.pages + applied.skills > 0) await refreshFileTree().catch(() => null);
+      const applied = await choose(id, (added) =>
+        added.pages + added.skills > 0 ? refreshFileTree() : Promise.resolve(null),
+      );
       onDone(applied);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(null);
     }
   }
+
+  const skipping = busy === SKIP_STARTER_PACK;
+  const adding = busy && !skipping ? packs.find((pack) => pack.id === busy) : undefined;
+  const underWay = adding ? `Adding starter pages and skills for ${adding.name}…` : skipping ? 'Skipping…' : '';
 
   return (
     <section aria-labelledby="starter-pack-title" className="text-center">
@@ -75,10 +84,15 @@ export function StarterPackCard({
         variant="quiet"
         className="mt-4"
         disabled={busy !== null}
+        aria-busy={skipping}
         onClick={() => void pick(SKIP_STARTER_PACK)}
       >
-        Skip, I’ll start from scratch
+        {skipping ? 'Skipping…' : 'Skip, I’ll start from scratch'}
       </Button>
+      {/* Always in the tree, so the region exists before it has something to say. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {underWay}
+      </span>
     </section>
   );
 }

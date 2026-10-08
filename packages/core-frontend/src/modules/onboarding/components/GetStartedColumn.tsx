@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Check, Copy, X } from 'lucide-react';
 import {
   KNOWLEDGE_BASE_DIR,
+  currentBranchModel,
   currentKbLayout,
   isPersonalPluginDir,
   type FileTreeEntry,
@@ -189,7 +190,7 @@ export function GetStartedColumn() {
   const onboarding = useOnboarding();
   const checklist = useSetupChecklist();
   const { isAdmin, isAdminLoading = false } = useAdmin();
-  const { kbDirName, openFilePath } = useWorkspace();
+  const { kbDirName, openFilePath, workspaceBranch } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
   const { openWorkspacePath } = useFileNav();
   const { createPage } = useCreatePage();
@@ -240,11 +241,15 @@ export function GetStartedColumn() {
    * the generic one, and its pages stay placeholders — not a first page —
    * until someone fills one in. Which are still untouched is the server's
    * answer (it compares them with the pack), asked again whenever the tree
-   * changes while any are left.
+   * changes while any are left. That answer describes the DEFAULT branch,
+   * where the pack landed; the tree here is the branch on screen, so on any
+   * other branch the step reads that tree alone rather than apply the
+   * default branch's placeholders to pages that may well be filled in there.
    */
   const starter = useStarterPacks({ enabled: !gone });
   const chosenPack = starter.answer?.chosenPack ?? null;
-  const placeholders = new Set(chosenPack?.starterPages ?? []);
+  const onDefaultBranch = workspaceBranch !== null && workspaceBranch === currentBranchModel().defaultBranch;
+  const placeholders = new Set(onDefaultBranch ? (chosenPack?.starterPages ?? []) : []);
   const { reload: reloadStarter } = starter;
   const waitingOnPlaceholders = placeholders.size > 0;
   const firstTree = useRef(tree);
@@ -324,6 +329,12 @@ export function GetStartedColumn() {
    * lands in the tree. Before then that button would open a chat
    * that cannot reach this knowledge base, so the step says what connecting
    * would add instead.
+   *
+   * Not ticked before the starter-pack answer is in: until then a pack's
+   * untouched pages would read as content, and a fast tree could complete
+   * the whole list — and let it be closed — on the strength of placeholders.
+   * A failed request settles too, and the pages count as the app counted
+   * them before there were packs.
    */
   items.push({
     id: 'page',
@@ -331,6 +342,7 @@ export function GetStartedColumn() {
     done:
       knowledgeRoot !== null &&
       guidePath !== null &&
+      starter.settled &&
       hasOwnContent(findEntry(tree, knowledgeRoot), guidePath, placeholders),
     ...(agent.connected
       ? {

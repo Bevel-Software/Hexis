@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useSyncExternalStore } from 'react';
 import { AuthContext } from '../../auth/state/auth.context';
 import {
+  StarterPackApiError,
   chooseStarterPack,
   fetchStarterPacks,
   type StarterPackApplied,
@@ -22,6 +23,8 @@ import {
 
 const answers = new Map<string, StarterPacksAnswer | null>();
 const inFlight = new Map<string, Promise<void>>();
+/** Accounts asked for again while their request was out: one more request follows it. */
+const again = new Set<string>();
 const listeners = new Set<() => void>();
 let version = 0;
 
@@ -40,7 +43,13 @@ function remember(userId: string, answer: StarterPacksAnswer | null): void {
 
 function load(userId: string): Promise<void> {
   const running = inFlight.get(userId);
-  if (running) return running;
+  if (running) {
+    // Asked again while a request is out: that one may have been answered
+    // before whatever prompted this (a page just filled in), so one more
+    // follows it, and whoever asked waits for the one that saw the change.
+    again.add(userId);
+    return running.then(() => inFlight.get(userId) ?? Promise.resolve());
+  }
   const request = fetchStarterPacks()
     .then(
       (answer) => remember(userId, answer),
@@ -48,7 +57,10 @@ function load(userId: string): Promise<void> {
         if (!answers.has(userId)) remember(userId, null);
       },
     )
-    .finally(() => inFlight.delete(userId));
+    .finally(() => {
+      inFlight.delete(userId);
+      if (again.delete(userId)) void load(userId);
+    });
   inFlight.set(userId, request);
   return request;
 }
@@ -57,6 +69,7 @@ function load(userId: string): Promise<void> {
 export function resetStarterPacksForTests(): void {
   answers.clear();
   inFlight.clear();
+  again.clear();
   version++;
   listeners.forEach((l) => l());
 }
@@ -64,12 +77,18 @@ export function resetStarterPacksForTests(): void {
 export interface StarterPacksState {
   /** The server's answer; null until it arrives, or when it could not be had. */
   answer: StarterPacksAnswer | null;
-  /** The first request has come back, either way. */
+  /** The first request has come back, either way — or there is no account to ask for. */
   settled: boolean;
   /** Ask again — after the tree changed under a chosen pack's pages, say. */
   reload(): Promise<void>;
-  /** Answer the question (a pack's id, or `none`); resolves to what was added, and the answer is re-read. */
-  choose(id: string): Promise<StarterPackApplied>;
+  /**
+   * Answer the question (a pack's id, or `none`); resolves to what was added,
+   * and the answer is re-read. `settle` runs after the server answered and
+   * BEFORE the shared answer changes under its readers: for what must be in
+   * place by then (the tree, with the pack's pages in it). Its failure is
+   * not the choice's.
+   */
+  choose(id: string, settle?: (applied: StarterPackApplied) => Promise<unknown>): Promise<StarterPackApplied>;
 }
 
 export function useStarterPacks({ enabled = true }: { enabled?: boolean } = {}): StarterPacksState {
@@ -87,8 +106,19 @@ export function useStarterPacks({ enabled = true }: { enabled?: boolean } = {}):
   }, [userId]);
 
   const choose = useCallback(
-    async (id: string) => {
-      const applied = await chooseStarterPack(id);
+    async (id: string, settle?: (applied: StarterPackApplied) => Promise<unknown>) => {
+      let applied: StarterPackApplied;
+      try {
+        applied = await chooseStarterPack(id);
+      } catch (err) {
+        // Refused because the question is no longer asked — answered in
+        // another tab, say: the answer is read again, so the card goes. A
+        // lock refusal wears the same status; its re-read finds the offer
+        // still standing, and the card stays to say so.
+        if (err instanceof StarterPackApiError && err.status === 409 && userId) await load(userId);
+        throw err;
+      }
+      if (settle) await settle(applied).catch(() => null);
       if (userId) {
         // The question is answered whatever the re-read says: never show it
         // again on the strength of a request that failed.
@@ -103,7 +133,7 @@ export function useStarterPacks({ enabled = true }: { enabled?: boolean } = {}):
 
   return {
     answer: userId ? (answers.get(userId) ?? null) : null,
-    settled: !!userId && answers.has(userId),
+    settled: !userId || answers.has(userId),
     reload,
     choose,
   };

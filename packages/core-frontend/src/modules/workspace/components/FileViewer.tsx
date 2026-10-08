@@ -1036,6 +1036,11 @@ export function FileViewer() {
   const [starterNote, setStarterNote] = useState<string | null>(null);
   const onDefaultBranch = workspaceBranch !== null && workspaceBranch === currentBranchModel().defaultBranch;
   const starterOffer = starterPacks.answer?.offered && onDefaultBranch ? starterPacks.answer.packs : [];
+  // Until the server has answered (and, when it offers the question, until
+  // the branch is known) the pane shows neither: the reading empty state
+  // would flash under an admin for the length of one request, suggestions
+  // and all, before the question replaced it.
+  const starterPending = !starterPacks.settled || (starterPacks.answer?.offered === true && workspaceBranch === null);
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
   // refresh, share or back-press must land on the page — not on the empty
@@ -1075,7 +1080,7 @@ export function FileViewer() {
             <div className="w-full max-w-md">
               <StarterPackCard packs={starterOffer} onDone={(applied) => setStarterNote(applied.summary || null)} />
             </div>
-          ) : (
+          ) : starterPending ? null : (
             <div className="w-full max-w-md text-center">
               {starterNote && (
                 <p role="status" className="mb-4 text-ui text-ok">

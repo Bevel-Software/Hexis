@@ -67,7 +67,9 @@ describe('StarterPackCard', () => {
   it('choosing posts the pack, says it is adding, refreshes the tree and hands over what was added', async () => {
     let finish!: (applied: StarterPackApplied) => void;
     chooseMock.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
-    const { onDone, refreshFileTree } = mount();
+    let treeRefreshed!: () => void;
+    const { onDone, refreshFileTree } = mount(vi.fn(() => new Promise<null>((resolve) => (treeRefreshed = () => resolve(null)))));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
     await userEvent.click(screen.getByRole('button', { name: 'Sales' }));
 
@@ -75,24 +77,48 @@ describe('StarterPackCard', () => {
     expect(screen.getByRole('button', { name: 'Adding…' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Engineering' })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Skip/ })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('Adding starter pages and skills for Sales…');
 
     const applied = { id: 'sales', name: 'Sales', pages: 6, skills: 37, summary: 'Added 6 pages and 37 skills for Sales.' };
     finish(applied);
+    await waitFor(() => expect(refreshFileTree).toHaveBeenCalledTimes(1));
+    // The tree comes first: nothing is handed over, and the answer is not
+    // read again, until the pages are in it.
+    expect(onDone).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    treeRefreshed();
     await waitFor(() => expect(onDone).toHaveBeenCalledWith(applied));
-    expect(refreshFileTree).toHaveBeenCalledTimes(1);
     // The answer is read again, so the prompt and the card follow the choice.
-    expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('skipping posts "none" and has no tree to refresh', async () => {
-    chooseMock.mockResolvedValue({ id: 'none', name: null, pages: 0, skills: 0, summary: '' });
+  it('skipping posts "none", says so, and has no tree to refresh', async () => {
+    let finish!: (applied: StarterPackApplied) => void;
+    chooseMock.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
     const { onDone, refreshFileTree } = mount();
 
     await userEvent.click(screen.getByRole('button', { name: 'Skip, I’ll start from scratch' }));
 
-    await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(chooseMock).toHaveBeenCalledWith('none');
+    const skip = screen.getByRole('button', { name: 'Skipping…' });
+    expect(skip).toBeDisabled();
+    expect(skip).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByRole('status')).toHaveTextContent('Skipping…');
+
+    finish({ id: 'none', name: null, pages: 0, skills: 0, summary: '' });
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(refreshFileTree).not.toHaveBeenCalled();
+  });
+
+  it('reads the answer again when the question was answered elsewhere, so the card can go', async () => {
+    chooseMock.mockRejectedValueOnce(new StarterPackApiError('Starter pages were already chosen for this knowledge base.', 409));
+    mount();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Engineering' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('already chosen');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('says a refusal on the card and lets the admin try again', async () => {

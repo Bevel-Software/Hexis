@@ -178,7 +178,12 @@ type MountOptions = {
   createFile?: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
   /** Mount the toolbar's command menu beside the column, as the app does. */
   withPalette?: boolean;
+  /** The branch on screen; the default one (the test setup's) unless a test is about a draft. */
+  workspaceBranch?: string | null;
 };
+
+/** The default branch the test setup pins: where a starter pack lands. */
+const DEFAULT_BRANCH = 'target-company-state';
 
 /** The column in every context it reads; `rerender` it to move the app's state under it. */
 function columnUi({
@@ -189,6 +194,7 @@ function columnUi({
   route = '/workspace',
   createFile = async () => {},
   withPalette = false,
+  workspaceBranch = DEFAULT_BRANCH,
 }: MountOptions = {}) {
   const auth = authValue({
     user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
@@ -203,6 +209,7 @@ function columnUi({
               fileTree: files ? treeOf(files) : null,
               openFilePath,
               createFile,
+              workspaceBranch,
             })}
           >
             <InviteDialogProvider>
@@ -300,8 +307,9 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(screen.getByText('1 of 4')).toBeInTheDocument();
   });
 
-  it('ticks "Write your first page" only for content other than the starter page', () => {
+  it('ticks "Write your first page" only for content other than the starter page', async () => {
     const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/access.md`] });
+    await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
     expect(isDone('Write your first page')).toBe(false);
     expect(
       within(row('Write your first page')!).getByText(
@@ -310,7 +318,8 @@ describe('GetStartedColumn: what a member sees', () => {
     ).toBeInTheDocument();
     unmount();
     mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Product/Roadmap.md`] });
-    expect(isDone('Write your first page')).toBe(true);
+    // Ticked once the starter-pack answer is in (none chosen here).
+    await waitFor(() => expect(isDone('Write your first page')).toBe(true));
   });
 
   it('"New page" creates Untitled.md in the Knowledge folder and opens it for editing', async () => {
@@ -589,6 +598,46 @@ describe('GetStartedColumn: a connected agent', () => {
       const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
       await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
       expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
+    });
+
+    it('does not tick the step before the answer is in: untouched pack pages are not a first page', async () => {
+      let answer!: (a: StarterPacksAnswer) => void;
+      fetchStarterPacksMock.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
+      expect(isDone('Write your first page')).toBe(false);
+      answer(chosen(SALES_PAGES));
+      // Still open: both pages are placeholders. Filling one in would tick it.
+      await act(async () => {});
+      expect(isDone('Write your first page')).toBe(false);
+    });
+
+    it('reads the tree alone on a draft branch, where the default branch’s placeholders do not apply', async () => {
+      fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
+      mount({ files: [...STARTER_TREE, ...SALES_PAGES], workspaceBranch: 'alice/draft' });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
+      await waitFor(() => expect(isDone('Write your first page')).toBe(true));
+    });
+
+    it('asks again for a tree change that lands while the previous answer is still on its way', async () => {
+      const resolvers: ((a: StarterPacksAnswer) => void)[] = [];
+      fetchStarterPacksMock.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+      const files = [...STARTER_TREE, ...SALES_PAGES];
+      const { rerender } = mount({ files });
+      await waitFor(() => expect(resolvers).toHaveLength(1));
+      resolvers[0]!(chosen(SALES_PAGES));
+      await waitFor(() => expect(isDone('Write your first page')).toBe(false));
+
+      // Two tree changes in a row: the first starts a request, the second
+      // lands while it is out. One more request follows, and it is that one
+      // which reports the page filled in.
+      rerender(columnUi({ files: [...files] }));
+      await waitFor(() => expect(resolvers).toHaveLength(2));
+      rerender(columnUi({ files: [...files] }));
+      resolvers[1]!(chosen(SALES_PAGES));
+      await waitFor(() => expect(resolvers).toHaveLength(3));
+      resolvers[2]!(chosen([SALES_PAGES[1]!]));
+      await waitFor(() => expect(isDone('Write your first page')).toBe(true));
     });
   });
 
@@ -878,12 +927,13 @@ describe('GetStartedColumn: the file tree', () => {
     expect(row('Read “How to get started”')).not.toBeNull();
   });
 
-  it('skips exactly `access.md`, the name the platform reserves — not another spelling', () => {
+  it('skips exactly `access.md`, the name the platform reserves — not another spelling', async () => {
     const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/access.md`] });
+    await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
     expect(isDone('Write your first page')).toBe(false);
     unmount();
     mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/Access.md`] });
-    expect(isDone('Write your first page')).toBe(true);
+    await waitFor(() => expect(isDone('Write your first page')).toBe(true));
   });
 });
 
