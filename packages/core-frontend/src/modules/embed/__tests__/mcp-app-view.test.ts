@@ -221,10 +221,11 @@ describe('the MCP App view', () => {
     await settled();
     expect(sizeRequests()).toHaveLength(0);
     bundleScript()!.dispatchEvent(new Event('load'));
-    const [ask] = sizeRequests();
-    expect(ask).toBeDefined();
-    expect(typeof ask.params?.height).toBe('number');
-    expect(ask.params!.height as number).toBeGreaterThanOrEqual(480);
+    // The one height the view asks for, pinned: a document pane's reading
+    // height, and the number the changeset documents.
+    expect(sizeRequests()).toEqual([
+      { jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height: 640 } },
+    ]);
   });
 
   it('asks for no room when there is only a sentence to show', async () => {
