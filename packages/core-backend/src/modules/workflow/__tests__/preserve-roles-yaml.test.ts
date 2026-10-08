@@ -67,6 +67,8 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     headRoles: string | null;
     baseRoles: string | null;
     commitFileResult?: unknown;
+    /** What the clone says when asked whether it holds commits origin lacks. */
+    unpushedCommits?: boolean;
     pushImpl?: () => Promise<void>;
     getPrResult?: { branch: string; base: string } | null;
     getPrDetailResult?: unknown;
@@ -96,6 +98,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
         'commitFileResult' in opts ? opts.commitFileResult : { sha: 'preserve-sha' },
       ),
       push: vi.fn(opts.pushImpl ?? (async () => undefined)),
+      hasUnpushedCommits: vi.fn().mockResolvedValue(opts.unpushedCommits ?? false),
     } as unknown as GitService;
 
     const prs = {
@@ -325,6 +328,24 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
     expect(git.push).not.toHaveBeenCalled();
     expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
+  });
+
+  it('a merge retried after a refused restore push pushes the restore that is already committed, then merges', async () => {
+    // The earlier attempt restored and committed roles.yaml on the source,
+    // and the host refused the push (the 409 above). origin/head therefore
+    // still diverges, the working tree already matches base, and commitFile
+    // has nothing new — but the clone holds the restore commit, unpushed.
+    // The retry must push it and merge, not refuse "out of sync" forever.
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), BASE_ROLES);
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      commitFileResult: null,
+      unpushedCommits: true,
+    });
+    await expect(merge(svc)).resolves.toMatchObject({ kind: 'merged' });
+    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(reviewWorkflow.mergePr).toHaveBeenCalled();
   });
 
   it('ABORTS the merge when the post-preservation CR detail cannot be reloaded (fail-closed)', async () => {

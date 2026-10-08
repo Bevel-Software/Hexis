@@ -3976,7 +3976,15 @@ export class WorkflowService implements IWorkflowService {
         // with origin/<head>), then origin/<head> STILL carries the divergent
         // roles.yaml and the merge would land it. Treat that as a hard failure —
         // returning false here would fail OPEN. Fail closed instead.
-        if (!committed) {
+        //
+        // One shape of "nothing to commit" is not out of sync: a restore an
+        // earlier merge attempt committed, whose push the host refused. The
+        // clone's HEAD already carries the base version — that is why there
+        // was nothing new to commit — and only the push is owed. Without this,
+        // the retry the refusal promises could never succeed: every attempt
+        // would find the file already restored and stop here, and the merge
+        // would stay refused until some unrelated save pushed the branch.
+        if (!committed && !(await this.git.hasUnpushedCommits(ws.id))) {
           throw new Error(
             'roles.yaml restore produced no commit while origin still diverges from base — source workspace out of sync; refusing to merge',
           );
