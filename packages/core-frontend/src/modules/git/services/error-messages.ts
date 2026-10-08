@@ -250,10 +250,7 @@ export function friendlyGitMessage(raw: string): string {
   // reader cares about is whether it was published. Approving stays the
   // reader's own act, so only the outcome is renamed.
   const gate = raw.match(/^Merge gate rejected: (.+)$/s);
-  if (gate) {
-    const reasons = gate[1].split('; ').map(friendlyGitMessage).join(' ');
-    return `Can't publish this yet. ${reasons}`;
-  }
+  if (gate) return `Can't publish this yet. ${plainGateReasons(gate[1])}`;
   if (raw === 'Merge failed') return "Couldn't publish this change.";
   const mergeFailed = raw.match(/^Merge failed: (.+)$/s);
   if (mergeFailed) return `Couldn't publish this change: ${mergeFailed[1]}`;
@@ -270,8 +267,7 @@ export function friendlyGitMessage(raw: string): string {
   if (/^Only admins can merge with bypass\./.test(raw)) {
     return 'Only an admin can publish a change before everyone has approved it.';
   }
-  const reapprove = raw.match(/^(.+ need to re-approve .+) after the latest push\.$/s);
-  if (reapprove) return `${reapprove[1]} after the latest changes.`;
+  if (/ need to re-approve .+ after the latest push\.$/s.test(raw)) return plainGateReasons(raw);
   if (raw === 'change request not found') return 'That change request no longer exists.';
 
   // Nobody can approve a file whose folder grants no one edit access. The
@@ -281,6 +277,25 @@ export function friendlyGitMessage(raw: string): string {
   }
 
   return raw;
+}
+
+/**
+ * The merge gate's reasons in plain words. The backend joins them with `; `,
+ * and a reason can carry that same separator inside it (a role and a named
+ * approver), so they are not split apart and rejoined: each phrase is
+ * replaced where it stands, and every separator stays exactly where it was.
+ * "must" rather than "need", which reads right for one approver and for many.
+ */
+function plainGateReasons(reasons: string): string {
+  return reasons
+    .replace(/This (?:pull|change) request has already been merged\./g, 'This change request is already published.')
+    .replace(/This pull request is closed\./g, 'This change request is closed.')
+    .replace(
+      /This pull request has no file changes to approve\./g,
+      'This change request changes no files, so there is nothing to publish.',
+    )
+    .replace(/ need to re-approve /g, ' must re-approve ')
+    .replace(/ after the latest push\./g, ' after the latest changes.');
 }
 
 function rawMessage(err: unknown): string {

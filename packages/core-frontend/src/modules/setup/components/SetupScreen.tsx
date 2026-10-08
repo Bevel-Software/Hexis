@@ -112,7 +112,7 @@ const FIELDS: Record<
   },
   kbSyncSecret: {
     label: 'Hook secret',
-    help: 'Lets your git host tell this deployment when the repository changes, so changes made there show up here right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can bring in updates, with Update now. Stored encrypted, and never shown again.',
+    help: 'Lets your git host tell this deployment when the repository changes, so changes made there show up here right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can bring in updates. Stored encrypted, and never shown again.',
     placeholder: 'A long random string',
     advanced: true,
   },

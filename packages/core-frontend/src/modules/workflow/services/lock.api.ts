@@ -31,10 +31,12 @@ export class LockApiError extends Error {
  * it went idle, or expired, before a save or a heartbeat landed. The
  * server's own sentence ("Cannot release lock on …: not held by you")
  * names the mechanism; the person only needs to know their editing
- * stopped and what to do about it.
+ * stopped and what to do about it. Said without naming a save: every call
+ * here answers with it, the heartbeat included, and a heartbeat that finds
+ * the session gone attempted no save at all.
  */
 export const EDITING_ENDED_MESSAGE =
-  'Your editing session ended before this save. Check the page and edit it again if anything is missing.';
+  'Your editing session ended. Check the page and edit it again if anything is missing.';
 
 async function unwrap<T>(res: Response): Promise<T> {
   if (res.ok) return (await res.json()) as T;

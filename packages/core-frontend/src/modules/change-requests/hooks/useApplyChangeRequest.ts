@@ -46,7 +46,9 @@ export function refusalLine(
   const own = refusals.get(cr.number);
   const persisted = cr.lastApplyFailure ?? null;
   if (own && !isLater(persisted?.at, own.at)) return own.conflicts ? null : own.reason;
-  return persisted?.reason ?? null;
+  // The server stored this one as the gate said it; the reader gets it in the
+  // same words the dialog's banner uses.
+  return persisted?.reason ? friendlyGitMessage(persisted.reason) : null;
 }
 
 /** True when `a` is a strictly later instant than `b`; unknown is never later. */

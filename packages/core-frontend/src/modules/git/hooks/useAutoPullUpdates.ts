@@ -6,6 +6,7 @@ import {
 } from '../state/auto-update.context';
 import type { WorkspaceContextValue } from '../../workspace/state/workspace.context';
 import { sanitizeErrorText } from '../services/error-messages';
+import { pullFailureDetail } from '../services/pull-failure';
 import { PR_STALE_EVENT } from '../../../core/events';
 
 export function useAutoPullUpdates(
@@ -63,7 +64,9 @@ export function useAutoPullUpdates(
         await pull();
       } catch (err) {
         if (cancelled) return;
-        const sanitizedReason = sanitizeErrorText(err) || 'Something unexpected went wrong.';
+        // What the banner shows under "Couldn’t get the latest changes": the
+        // reader's words for it, not the sanitized error, which still speaks git.
+        const sanitizedReason = pullFailureDetail(err) ?? 'Something unexpected went wrong.';
         setAutoUpdate({
           status: 'failed',
           branch: status.branch,

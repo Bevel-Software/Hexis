@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Change, FileLock } from '@bevel-software/platform-shared';
 import {
   acquireLock as acquireLockApi,
+  EDITING_ENDED_MESSAGE,
   checkpointLockedFile,
   getLock as getLockApi,
   heartbeatLock,
@@ -245,7 +246,9 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
         // on the next dirty edit.
         const msg = err instanceof Error ? err.message : String(err);
         console.warn('[useFileLock] heartbeat lost', { workspaceId, branch, path, error: msg });
-        setLockError(`Editing stopped: ${msg}`);
+        // The session-ended sentence already says editing stopped; anything
+        // else is a reason, and gets the prefix that makes it one.
+        setLockError(msg === EDITING_ENDED_MESSAGE ? msg : `Editing stopped: ${msg}`);
         setHoldingLock(false);
       }
     }, HEARTBEAT_INTERVAL_MS);

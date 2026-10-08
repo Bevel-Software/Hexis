@@ -119,7 +119,19 @@ describe('friendlyGitMessage: a change request that lands reads as published', (
         'Merge gate rejected: Waiting on approval for Docs/a.md from Owners.; Ali need to re-approve Docs/b.md after the latest push.',
       ),
     ).toBe(
-      "Can't publish this yet. Waiting on approval for Docs/a.md from Owners. Ali need to re-approve Docs/b.md after the latest changes.",
+      "Can't publish this yet. Waiting on approval for Docs/a.md from Owners.; Ali must re-approve Docs/b.md after the latest changes.",
+    );
+  });
+
+  it('keeps every separator where it was, since a reason can carry one of its own', () => {
+    // A role and a named approver on one file are joined by the same `; `
+    // the gate joins its reasons with; splitting on it would read as
+    // "Product Manager Bob".
+    expect(friendlyGitMessage('Merge gate rejected: Waiting on approval for Docs/a.md from Product Manager; Bob.')).toBe(
+      "Can't publish this yet. Waiting on approval for Docs/a.md from Product Manager; Bob.",
+    );
+    expect(friendlyGitMessage('Admin need to re-approve Docs/b.md after the latest push.')).toBe(
+      'Admin must re-approve Docs/b.md after the latest changes.',
     );
   });
 

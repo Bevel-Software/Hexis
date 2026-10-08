@@ -424,6 +424,13 @@ describe('PluginPage', () => {
     expect(screen.queryByRole('menuitem', { name: 'Rename plugin' })).toBeNull();
   });
 
+  it('offers no Edit plugin settings for a plugin read from the bundle format — its manifest is not editable here', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', canWrite: true, linksAreManaged: false })]);
+    renderPlugin('gtm');
+    await screen.findByRole('button', { name: 'More actions' });
+    expect(screen.queryByRole('button', { name: 'Edit plugin settings' })).toBeNull();
+  });
+
   it('opens the manifest at the plugin FOLDER, which is not its identity', async () => {
     pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'go-to-market', displayName: 'GTM', canWrite: true })]);
     renderPlugin('go-to-market');

@@ -243,9 +243,14 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
 
     fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
+    // In plain words, sorted by what kind of failure it was: never git's own
+    // sentence, scrubbed or not.
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('Network unreachable'),
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Couldn’t get the latest changes. Your git host couldn’t be reached',
+      ),
     );
+    expect(screen.getByRole('alert').textContent).not.toContain('Network unreachable');
     expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
   });
 

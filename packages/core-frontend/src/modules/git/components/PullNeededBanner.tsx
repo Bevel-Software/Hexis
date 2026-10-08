@@ -7,34 +7,8 @@ import { useCrCreationPort } from '../../../core/registry';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { sanitizeErrorText } from '../services/error-messages';
+import { describePullFailure, pullFailurePhrase } from '../services/pull-failure';
 import { Button } from '../../../shared/components';
-
-/**
- * Classify a pull failure into a short, user-safe phrase. Returned strings
- * flow through the change-request port's `resolvePullIssue` (the enterprise
- * registry splices them into the chat composer, where the user sees them), so
- * the labels must not leak git vocabulary — no "merge conflict",
- * "uncommitted", "working tree", "stash", "HEAD". The agent's own prompt
- * knows the underlying mechanics; the user gets a workspace-level description
- * of what happened.
- */
-function classifyPullFailure(error: unknown): string {
-  const sanitized = sanitizeErrorText(error).toLowerCase();
-  if (/\b(conflict|conflicts|merge conflict|would be overwritten)\b/.test(sanitized)) {
-    return 'two versions of the same file need to be reconciled';
-  }
-  if (/\b(uncommitted|local changes|working tree|dirty|stash)\b/.test(sanitized)) {
-    return 'there are local changes that need to be sorted out first';
-  }
-  if (
-    /\b(network|auth|credential|permission denied|unauthorized|forbidden|timeout|timed out|could not resolve host|failed to connect|401|403)\b/.test(
-      sanitized,
-    )
-  ) {
-    return 'a connection or permission problem';
-  }
-  return 'something unexpected went wrong';
-}
 
 /**
  * Shown when the current branch is behind origin. On protected branches
@@ -87,12 +61,10 @@ export function PullNeededBanner() {
       try {
         await git.pull();
       } catch (err) {
-        const reason =
-          err instanceof Error
-            ? sanitizeErrorText(err) || 'Couldn’t get the latest changes.'
-            : 'Couldn’t get the latest changes.';
-        setError(reason);
-        const seedReason = classifyPullFailure(err);
+        // In the reader's words, never the sanitized error: scrubbed of
+        // secrets it still speaks git ("working tree has uncommitted changes").
+        setError(describePullFailure(err));
+        const seedReason = pullFailurePhrase(err);
         // Hand off through the change-request port so the user always has a
         // path forward — the enterprise registry seeds the agent chat, where
         // the common rebase-refused case (dirty working tree from a mid-flow

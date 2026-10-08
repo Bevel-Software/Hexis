@@ -39,13 +39,20 @@ export function ManifestButton({
   kbDirName,
   folder,
   canWrite,
+  managed,
 }: {
   kbDirName: string | null;
   folder: string;
   canWrite: boolean;
+  /**
+   * False for a plugin read from the bundle format: its manifest is
+   * `plugin.bundle.json`, edited in its own repository and read-only here, so
+   * there are no settings this button could open.
+   */
+  managed: boolean;
 }) {
   const navigate = useNavigate();
-  if (!canWrite || !kbDirName) return null;
+  if (!managed || !canWrite || !kbDirName) return null;
   return (
     <Button
       variant="quiet"
