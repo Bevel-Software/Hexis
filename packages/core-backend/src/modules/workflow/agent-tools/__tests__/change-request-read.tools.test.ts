@@ -387,10 +387,16 @@ describe('list_change_requests', () => {
     const base = await start();
     // `merged` is what the ANSWER says for an applied request, so it is the
     // word an agent is most likely to feed back in; a typo is refused too.
+    // The route's argument check answers first — the schema pins `state` to
+    // its three values — and names them in its refusal; the handler's own
+    // check beneath it is the floor for a caller that reaches it another way.
     for (const state of ['merged', 'applied', 'OPEN', '', 7, null]) {
       calls = [];
       const { status, json } = await call(base, 'list_change_requests', { state });
       expect(status, JSON.stringify(state)).toBe(400);
+      expect((json as { kind?: string }).kind, JSON.stringify(state)).toBe('arguments-do-not-match');
+      // The three values are named either in the mismatch line (a wrong
+      // string) or in the interface the refusal carries (a wrong type).
       expect(JSON.stringify(json), JSON.stringify(state)).toMatch(/open.*closed.*all/);
       expect(calls, JSON.stringify(state)).toEqual([]);
     }
