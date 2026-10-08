@@ -2317,6 +2317,7 @@ describe('start_session', () => {
       undefined,
       undefined,
       undefined,
+      undefined /* downloads */,
       starterPacks,
     );
     app.use('/api', router);
@@ -2480,7 +2481,8 @@ describe('start_session', () => {
 
     const startSession = async () => {
       const base = await startSessionApp('external', undefined, wsDir);
-      return (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+      // `postRaw`: the tool takes no arguments, and `post` adds a branch.
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
     };
 
     it('is there while the knowledge folder holds only the starter guide', async () => {
@@ -2525,13 +2527,13 @@ describe('start_session', () => {
         }),
       };
       const base = await startSessionApp('external', undefined, wsDir, starter);
-      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
       expect(first.firstRun).toBe(
         firstRunNote(`${KB_DIR}/KnowledgeBase`, { name: 'Sales', suggestedPages: ['Customers', 'Pricing'] }),
       );
 
       await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n\nAcme.\n');
-      const second = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      const second = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
       expect(second).not.toHaveProperty('firstRun');
     });
 
