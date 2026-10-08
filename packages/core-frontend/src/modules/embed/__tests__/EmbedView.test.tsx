@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
@@ -90,10 +90,16 @@ beforeEach(() => {
   api.embedRawUrl.mockImplementation(
     (token: string, path?: string) => `/api/embed/raw?token=${token}${path ? `&path=${path}` : ''}`,
   );
+  // The lock is let go on the way out too (unmount), so a test that ends
+  // mid-edit sees a cancel it never arranged — answered, like the real call.
+  api.cancelEmbed.mockResolvedValue(undefined);
   window.history.replaceState({}, '', '/embed?token=tok');
 });
 
 afterEach(() => {
+  // Unmount BEFORE the mocks are restored: the view lets go of a held lock
+  // on its way out, and that call must still meet the stubbed API.
+  cleanup();
   vi.restoreAllMocks();
 });
 

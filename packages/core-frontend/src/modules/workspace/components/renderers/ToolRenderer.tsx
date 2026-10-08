@@ -334,6 +334,9 @@ export function ToolRenderer({
         )}
       </div>
 
+      {/* On a surface the aside holds the scaffolds at most, so a read-only
+          embedded view draws no empty column beside the document. */}
+      {!(surface && readOnly) && (
       <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto p-3">
         {!readOnly && (
           <section>
@@ -433,6 +436,7 @@ export function ToolRenderer({
         </section>
         )}
       </aside>
+      )}
     </Surface>
   );
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import type { AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
 import { embedApiBase, resetEmbedConfig } from '../embed-config';
@@ -123,6 +123,27 @@ describe('mountEmbed', () => {
     handle.unmount();
     handle = null;
     expect(embedApiBase()).toBe('');
+    second.remove();
+  });
+
+  /**
+   * A view taken down mid-edit — replaced by a second mount, or unmounted
+   * outright — lets go of its edit lock on the way out, rather than leaving
+   * the file shut to other writers until the lock's TTL.
+   */
+  it('releases an edit lock the view holds when it is taken down', async () => {
+    api.loadEmbed.mockResolvedValue({ ...VIEW, canWrite: true });
+    api.lockEmbed.mockResolvedValue({ acquired: true });
+    api.cancelEmbed.mockResolvedValue(undefined);
+    const first = mountEmbed(el, { registry: EMPTY_REGISTRY, baseUrl: ORIGIN, token: 'tok' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Save' });
+    expect(api.cancelEmbed).not.toHaveBeenCalled();
+    const second = document.createElement('div');
+    document.body.appendChild(second);
+    handle = mountEmbed(second, { registry: EMPTY_REGISTRY, baseUrl: ORIGIN, token: 'tok2' });
+    await waitFor(() => expect(api.cancelEmbed).toHaveBeenCalledWith('tok'));
+    expect(first).toBeDefined();
     second.remove();
   });
 

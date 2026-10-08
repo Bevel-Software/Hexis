@@ -40,7 +40,7 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe('the .tool renderer on a renderer surface', () => {
   it('draws no session-backed panel and makes no session call', async () => {
-    render(
+    const { container } = render(
       <RendererSurfaceContext.Provider value={SURFACE}>
         <ToolRenderer content={TOOL} filePath="knowledge-base/Tools/my_tool.tool" onSave={async () => undefined} />
       </RendererSurfaceContext.Provider>,
@@ -50,7 +50,21 @@ describe('the .tool renderer on a renderer surface', () => {
     expect(screen.queryByText('Secrets for this tool')).toBeNull();
     expect(screen.queryByText('Secret variables')).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
-    // The file itself is still there to read and edit.
+    // The file itself is still there to read and edit, and a writer keeps the
+    // scaffolds — the one panel that needs no session.
+    expect(screen.getByText('my_tool.tool')).toBeTruthy();
+    expect(screen.getByText('Scaffold')).toBeTruthy();
+    expect(container.querySelector('aside')).not.toBeNull();
+  });
+
+  it('read-only on a surface, draws no side column at all', async () => {
+    const { container } = render(
+      <RendererSurfaceContext.Provider value={SURFACE}>
+        <ToolRenderer content={TOOL} filePath="knowledge-base/Tools/my_tool.tool" onSave={async () => undefined} readOnly />
+      </RendererSurfaceContext.Provider>,
+    );
+    await settle();
+    expect(container.querySelector('aside')).toBeNull();
     expect(screen.getByText('my_tool.tool')).toBeTruthy();
   });
 
@@ -59,7 +73,10 @@ describe('the .tool renderer on a renderer surface', () => {
     await settle();
     expect(screen.getByText('Preview')).toBeTruthy();
     expect(screen.getByText('Secrets for this tool')).toBeTruthy();
+    expect(screen.getByText('Secret variables')).toBeTruthy();
     const urls = fetchMock.mock.calls.map((c) => String(c[0]));
-    expect(urls.some((u) => u.includes('/api/secrets'))).toBe(true);
+    // The palette's own call, exactly — not satisfied by the tool-secrets
+    // catalog call that shares the prefix.
+    expect(urls).toContain('/api/secrets');
   });
 });

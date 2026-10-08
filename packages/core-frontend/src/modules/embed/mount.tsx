@@ -37,7 +37,7 @@ let active: EmbedMount | null = null;
  * `/embed` page there (Claude pins the sandbox's `frame-src` to `'self'`), so
  * the app's renderers run in the sandbox document itself — the same
  * `EmbedView`, under the same registry, with every address prefixed by the
- * deployment's and every link handed to the host's `ui/open-link`.
+ * deployment's address and every link handed to the host's `ui/open-link`.
  *
  * The router is in memory: the view never navigates, and the sandbox's own
  * address is not one the app's routes should read.

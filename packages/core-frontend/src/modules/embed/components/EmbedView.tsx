@@ -215,6 +215,11 @@ export function EmbedView() {
     return () => {
       window.removeEventListener('pagehide', release);
       document.removeEventListener('visibilitychange', onVisibility);
+      // Taken down mid-edit — a chat view replaced by another mount, a
+      // route left — the lock goes with it, rather than shutting the file
+      // to other writers until the TTL. Nothing the page did fires for a
+      // React unmount, so this is where it has to happen.
+      release();
     };
   }, [token]);
 
