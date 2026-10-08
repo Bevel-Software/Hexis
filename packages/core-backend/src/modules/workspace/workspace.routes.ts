@@ -13,6 +13,7 @@ import {
   canonicalRelativePath,
   folderPlaceholderPath,
   isPlatformFile,
+  isPlatformFolder,
   isPlatformRestoreShape,
   isRepositoryOwnFile,
   repositoryOwnFileDeleteRefusal,
@@ -1132,11 +1133,14 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        // The repository root is the one folder whose sweep would take the
-        // root's `access.md` and `roles.yaml` with it — refused, as
-        // delete_folder refuses it. Every other folder holds neither.
-        if (filePath.replace(/\/+$/, '') === kbDirName) {
-          res.status(409).json({ error: platformFolderRefusal('') });
+        // A platform folder — the repository root, whose sweep would take the
+        // root's `access.md` and `roles.yaml` with it, or one of the reserved
+        // top-level folders that hold a whole section of the knowledge base —
+        // is refused here as `delete_folder` refuses it, by the same rule.
+        const trimmedFolder = filePath.replace(/\/+$/, '');
+        const folderRel = trimmedFolder === kbDirName ? '' : toKbRelative(trimmedFolder, kbDirName);
+        if (folderRel !== null && isPlatformFolder(folderRel, kb.layout)) {
+          res.status(409).json({ error: platformFolderRefusal(folderRel) });
           return;
         }
         const branch = branchForWorkspaceId(id);

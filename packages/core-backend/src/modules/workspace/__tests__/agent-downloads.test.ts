@@ -506,8 +506,12 @@ describe('a download link answers once', () => {
     for (const url of [...body.files.map((f) => f.downloadUrl), body.folders[0]!.downloadUrl]) {
       await (await fetchLink(h.base, url)).arrayBuffer();
     }
-    // `finish` runs as the response closes; give the event loop a turn.
-    await new Promise((r) => setTimeout(r, 20));
+    // `finish` runs as the response closes: wait for the state, not a fixed
+    // number of milliseconds a loaded machine may need more of.
+    const deadline = Date.now() + 5000;
+    while ((await readdir(h.downloadsRoot)).length > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(await readdir(h.downloadsRoot)).toEqual([]);
     expect(h.store.openRequestsOf(ANA.id)).toBe(0);
     h.store.stopSweeping();

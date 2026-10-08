@@ -713,6 +713,13 @@ export async function createCoreServices(
   // upload root — outside every workspace, for the same reason — until their
   // one-time link is fetched or expires.
   const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  // An upload root that is itself named `agent-downloads` would make the two
+  // stores one directory, each sweeping the other's files.
+  if (agentDownloadsRoot === path.resolve(config.agentUploadsRoot)) {
+    throw new Error(
+      'AGENT_UPLOADS_ROOT must not be a directory named `agent-downloads`: that name, beside it, is the agent download root.',
+    );
+  }
   await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
     name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
     why:

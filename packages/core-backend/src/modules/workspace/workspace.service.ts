@@ -1369,6 +1369,25 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Whether a FILE is at `wsPath` — the same guards as a read, without the
+   * read: for a caller that only has to know the file is there (the embed
+   * mint), on a file that may be hundreds of megabytes.
+   */
+  async isFile(workspaceId: string, wsPath: string): Promise<boolean> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertNoGitInternalsSegment(relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
+    try {
+      return (await fs.stat(absolutePath)).isFile();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+      throw err;
+    }
+  }
+
+  /**
    * Refuse a path that reaches its file through a symbolic link — as the
    * final component, or as any directory between the workspace root and it.
    * `resolveInsideRepo`'s containment is lexical: `knowledge-base/notes.md`
