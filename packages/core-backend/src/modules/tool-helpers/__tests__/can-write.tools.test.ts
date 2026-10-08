@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import express from 'express';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
@@ -288,6 +288,16 @@ describe('get_skill carries canWrite for the whole skill', () => {
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ENG)).skill.canWrite).toBe(false);
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ADMIN)).skill.canWrite).toBe(true);
     expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
+  });
+
+  it('a blank `version` is the latest default copy: no second lookup of the released skill', async () => {
+    const loads = vi.spyOn(skills, 'getSkill');
+    try {
+      expect((await call<Got>('get_skill', { name: 'notes', version: '  ' }, ENG)).skill.canWrite).toBe(true);
+      expect(loads).toHaveBeenCalledTimes(1);
+    } finally {
+      loads.mockRestore();
+    }
   });
 });
 

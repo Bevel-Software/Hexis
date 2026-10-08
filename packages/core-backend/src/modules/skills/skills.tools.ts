@@ -159,7 +159,8 @@ export function registerSkillsTools(
       // skill's history, a `branch` is a draft nobody has released — asked for
       // together, neither answer is the one the caller meant, and guessing
       // would serve instructions under a label that does not describe them.
-      if (branch !== undefined && version !== undefined && version.trim().length > 0) {
+      const versioned = version !== undefined && version.trim().length > 0;
+      if (branch !== undefined && versioned) {
         throw new ToolError(
           'get_skill takes `branch` or `version`, not both: `branch` loads the skill as that draft has it ' +
             'now, `version` loads a version the released skill declared. Pass one of them.',
@@ -177,7 +178,7 @@ export function registerSkillsTools(
       // version) that drops a write-denied bundled file does not turn the
       // verdict true. A skill only on the draft is judged by its draft files,
       // where they would land.
-      const paths = await skillFilesOnDefault(ctx, name, result.skill, branch !== undefined || version !== undefined);
+      const paths = await skillFilesOnDefault(ctx, name, result.skill, branch !== undefined || versioned);
       const verdicts = paths === null ? new Map<string, boolean>() : await verdictsFor(ctx, paths);
       const skill = { ...result.skill, canWrite: paths !== null && paths.every((p) => verdicts.get(p) === true) };
       if (!allowedTools) return { ...result, skill };
