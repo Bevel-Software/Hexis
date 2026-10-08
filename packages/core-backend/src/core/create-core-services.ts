@@ -17,6 +17,10 @@ import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { AccountLinkService } from '../modules/embed/account-link.service.js';
+import { EmbedService } from '../modules/embed/embed.service.js';
+import { McpAppService } from '../modules/embed/mcp-app.js';
+import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
@@ -335,6 +339,14 @@ export interface CoreServices {
   connectionProbeService: ConnectionProbeService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
+  /**
+   * The embed surface: the token-minted page a chat host frames, and the
+   * account links that let an outside identity reach it. Exposed so an
+   * overlay can mint for its own consumers and register a node-id resolver.
+   */
+  embedService: EmbedService;
+  /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
+  mcpAppService: McpAppService;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -1192,6 +1204,30 @@ export async function createCoreServices(
   const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
     retentionDaysFrom(settings.resolve('auditRetentionDays')),
   );
+  // The embed surface. It reads files through the workspace service and
+  // judges them with the same access resolver the app file page uses, so what
+  // a reader may see and change inside a chat is what they may see and change
+  // in the app — never a second answer to the same question.
+  const embedService = new EmbedService(
+    // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+    // the environment value, empty on a deployment that took the default or
+    // named it in setup, and every path the embed builds starts with it.
+    { ...config, kbDirName },
+    kb,
+    workspaceService,
+    accessControl,
+    authService,
+    workflowService,
+    gitService,
+    new AccountLinkService(db),
+    // The SAME extension-to-reader registry `read_file` dispatches on, so the
+    // embed answer to "is this text, or bytes a renderer fetches?" cannot
+    // disagree with what a read of the file returns.
+    createFileReaderRegistry(docExtractService),
+  );
+  // The `ui://` view `open_page` carries, with the one origin it may frame:
+  // this deployment own public origin.
+  const mcpAppService = new McpAppService({ publicFrontendUrl: config.publicFrontendUrl });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1225,6 +1261,9 @@ export async function createCoreServices(
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
     // Every attributable call lands in the Audit log through this.
     agentAuditService,
+    // The views the endpoint serves over resources/read, and the tools that
+    // carry them.
+    mcpAppService,
   );
   // A changed secret invalidates what the proxy built from the old value for
   // that user (null = shared secret → everyone): remembered manual failures,
@@ -1499,6 +1538,8 @@ export async function createCoreServices(
     connectionProbeService,
     externalApiKeyService,
     internalTokenService,
+    embedService,
+    mcpAppService,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,

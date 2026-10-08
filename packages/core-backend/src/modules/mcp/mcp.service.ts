@@ -8,6 +8,8 @@ import {
   ListToolsRequestSchema,
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
   McpError,
   ErrorCode,
   isInitializeRequest,
@@ -39,6 +41,9 @@ import {
   retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
+  toListedResource,
+  toReadResourceResult,
+  type McpAppManifest,
   type ProxiedTool,
   type SkillSummary,
   type LoadedSkill,
@@ -315,6 +320,18 @@ export class McpService {
     // of a request that arrived with a key or an agent connection goes
     // through it. Optional like the others; without it nothing is recorded.
     private readonly auditRecorder?: IAgentEventRecorder,
+    /**
+     * The MCP Apps this deployment serves — the views a tool's `_meta` names
+     * and `resources/list` / `resources/read` answer for.
+     *
+     * Optional, and absence is a real state rather than a test convenience:
+     * with no manifest the endpoint declares no `resources` capability and
+     * every tool is listed exactly as before, which is also what a
+     * deployment whose packaged view could not be read must look like. A
+     * `resourceUri` advertised without a resource behind it would have a
+     * host preload a failure and show an empty frame.
+     */
+    private readonly mcpApps?: { manifest(): Promise<McpAppManifest> },
   ) {
     this.downstream = new DownstreamPool<PooledDownstream>({
       ...opts.downstreamPool,
@@ -421,10 +438,24 @@ export class McpService {
       }));
 
     const initializing = (Array.isArray(messages) ? messages : [messages]).some((m) => isInitializeRequest(m));
+    // The deployment's MCP Apps, read once per request. Declaring the
+    // `resources` capability is what permits the two handlers below, and a
+    // deployment with no view must not declare it — a client would then list
+    // resources and be told the method does not exist.
+    const apps = this.mcpApps ? await this.mcpApps.manifest().catch(() => null) : null;
+    const servesApps = (apps?.resources.length ?? 0) > 0;
     const server = new Server(
       { name: 'bevel-mcp', version: '0.1.0' },
       {
-        capabilities: { tools: {}, prompts: {} },
+        capabilities: {
+          tools: {},
+          prompts: {},
+          // Resources exist here for ONE purpose: serving the MCP App views
+          // the tools carry. The knowledge base's own files are not
+          // resources — they are what the file TOOLS read, under the access
+          // rules, which a resource listing has no way to express.
+          ...(servesApps ? { resources: {} } : {}),
+        },
         // `instructions` rides the initialize result; clients that honour it
         // place the text in the model's system prompt without the model acting.
         ...(initializing ? { instructions: (await agentInstructions()).instructions } : {}),
@@ -464,7 +495,12 @@ export class McpService {
       const direct: McpTool[] = [];
       const examplePool: ProxiedTool[] = [];
       for (const t of listed) {
-        const entry = toListedTool(t); // logs its own reason on a name/schema drop
+        // The MCP App view this tool's result renders in, by tool name. Not
+        // part of the UTCP manual the tool was discovered from (UTCP has no
+        // place for it), so it is joined on here — the one point where a
+        // discovered tool becomes a listing entry.
+        const ui = apps && Object.hasOwn(apps.tools, t.mcpName) ? apps.tools[t.mcpName] : undefined;
+        const entry = toListedTool(ui ? { ...t, ui } : t); // logs its own reason on a name/schema drop
         if (!entry) {
           dropped.push(t.mcpName);
           continue;
@@ -530,6 +566,25 @@ export class McpService {
         tools: [...metaTools, ...direct],
       };
     });
+
+    // The MCP App views. Registered only when this deployment serves one, so
+    // the handlers and the declared capability agree.
+    if (servesApps && apps) {
+      server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+        resources: apps.resources.map((r) => toListedResource(r)),
+      }));
+      server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+        const resource = apps.resources.find((r) => r.uri === request.params.uri);
+        if (!resource) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `No resource at ${request.params.uri}. This endpoint serves the MCP App views its tools ` +
+              `name and nothing else: ${apps.resources.map((r) => r.uri).join(', ')}.`,
+          );
+        }
+        return toReadResourceResult(resource);
+      });
+    }
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { client, tools, unavailable, catalogNames, hidden: hiddenTools } = await requestSurface();
@@ -610,7 +665,10 @@ export class McpService {
         if (audit) await audit.denied(proxied.utcpName, args);
         return needsAuth;
       }
-      const run = () => this.dispatch(client, proxied, request, extra);
+      // A tool with an MCP App view answers structured content too — the
+      // view reads its fields from there.
+      const structured = apps !== null && Object.hasOwn(apps.tools, proxied.mcpName);
+      const run = () => this.dispatch(client, proxied, request, extra, structured);
       return audit ? audit.call(proxied.utcpName, args, run, isErrorResult) : run();
     });
 
@@ -1362,17 +1420,23 @@ export class McpService {
     // payload without a `progressToken` is accepted — same approach the prior
     // handler used; the strict ServerNotification type requires the token.
     extra: { sendNotification: (n: any) => Promise<void> },
+    structured = false,
   ): Promise<CallToolResult> {
     const progressToken = request.params._meta?.progressToken;
-    return dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
-      extra.sendNotification({
-        method: 'notifications/progress',
-        params: {
-          ...(progressToken !== undefined ? { progressToken } : {}),
-          progress,
-          message,
-        },
-      }),
+    return dispatchToolCall(
+      client,
+      tool,
+      request.params.arguments ?? {},
+      (progress, message) =>
+        extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            ...(progressToken !== undefined ? { progressToken } : {}),
+            progress,
+            message,
+          },
+        }),
+      { structured },
     );
   }
 

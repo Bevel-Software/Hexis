@@ -39,7 +39,7 @@ import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReaderRegistry, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
@@ -53,6 +53,8 @@ import {
   platformFileRefusal,
   platformFileUploadRefusal,
   platformFolderRefusal,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   entryExistsMessage,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
@@ -825,6 +827,33 @@ function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } |
 }
 
 /**
+ * A read of ONE workspace file, exactly as `read_file` performs it: the read
+ * hook, the access gate, the not-found refusal and the per-extension reader,
+ * in that order. Rejects with the same `ToolError`s `read_file` rejects with.
+ *
+ * `offset`/`limit` and the `__tool_chain_spill__/…` ref are deliberately NOT
+ * here: they are `read_file`'s own arguments, not part of what reading a file
+ * means.
+ */
+export type ReadForTool = (
+  branch: string,
+  path: string,
+  ctx: ToolContext,
+) => Promise<ReadResult>;
+
+/**
+ * What the workspace tool registration hands back for another module to build
+ * on, rather than re-deriving.
+ *
+ * One member today, and it is the only kind of thing that belongs here: a
+ * behaviour the platform promises TWICE in the same words (`open_page`
+ * answers "the way `read_file` does") and must therefore implement once.
+ */
+export interface WorkspaceToolsPorts {
+  readForTool: ReadForTool;
+}
+
+/**
  * Workspace domain tools: the file primitives (replacing Mastra's auto-injected
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
  * methods Mastra's tools call (via `ctx.getFilesystem(a.branch as string)`), so behaviour is
@@ -875,7 +904,7 @@ export function registerWorkspaceTools(
    * tools read the disk and nothing else.
    */
   agentGuide?: AgentGuideReader,
-): void {
+): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -1241,6 +1270,24 @@ export function registerWorkspaceTools(
     if (norm === '' || norm === kbDirName) return platformFolderRefusal('');
     const rel = toKbRelative(norm, kbDirName);
     return rel !== null && isPlatformFolder(rel, kb.layout) ? platformFolderRefusal(rel) : undefined;
+  };
+
+  /**
+   * Why `delete_file` may not delete the FILE at `path` whoever asks, or
+   * undefined when the caller's write access decides. Narrower than
+   * {@link managedReason}: a nested `access.md` never moves, but whoever may
+   * write it may delete it — as in the app — and its folder then follows its
+   * parent's rules. The root's `access.md` and `roles.yaml` are deleted by
+   * nobody. Judged on the on-disk spelling, as `managedReason` is.
+   */
+  const fileDeleteRefusal = (path: string): string | undefined => {
+    const norm = path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
+    if (isGitMetadata(norm)) return managedReason(norm, 'file');
+    const rel = toKbRelative(norm, kbDirName);
+    if (rel === null || !isPlatformFile(rel, kb.layout)) return undefined;
+    if (isRepositoryOwnFile(rel, kb.layout)) return repositoryOwnFileDeleteRefusal(rel);
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    return name === 'access.md' ? undefined : `${name} is a platform file and cannot be deleted through the agent tools.`;
   };
 
   /** The workspace root on disk for `branch`. */
@@ -1673,6 +1720,41 @@ export function registerWorkspaceTools(
   );
 
   // ── reads ──────────────────────────────────────────────────────────────
+
+  /**
+   * What reading a workspace file ANSWERS, gate and all — `read_file`'s whole
+   * behaviour minus the spill ref and the `offset`/`limit` slice, which are
+   * that tool's own arguments.
+   *
+   * Factored out because a second tool has to answer the same way: `open_page`
+   * (see `modules/embed`) promises the file's text "the way `read_file` does",
+   * and the refusals `read_file` gives for a path the caller may not read or
+   * one that does not exist. Any of that re-derived there would be a second
+   * answer to a question with one correct answer — the access gate, the read
+   * hook, the extraction and the not-found message all have to match, and a
+   * copy drifts on the first change to any of them.
+   */
+  const readForTool: ReadForTool = async (branch, p, ctx) => {
+    // The guide's name at the repository root answers with the platform's
+    // guide, which is text the code owns and every agent may read: no gate
+    // and no read hook for it. A file the knowledge base keeps under that
+    // name is ITS OWN conventions page and is read as any file is — gated,
+    // noted — and comes first, with the guide after it. A copy of the
+    // guide an earlier release wrote to disk (still on a draft, say) is
+    // recognised by its header and not served a second time.
+    if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+      return { kind: 'text', text: await guideAt(branch, ctx, p) };
+    }
+    await notifyAgentRead(agentAccessGate, ctx, branch, p);
+    await assertCanRead(readGateFor(branch, ctx), p);
+    const fs = await ctx.getFilesystem(branch);
+    // Reading (extraction, image and binary handling included) happens AFTER
+    // the access gate and the read hook above — a document read is still a
+    // KB read. ONE registry dispatch picks the reader by extension.
+    const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
+    return readers.readerFor(p).read(bytes, p);
+  };
+
   mount({
     name: 'read_file',
     gated: true,
@@ -1715,26 +1797,7 @@ export function registerWorkspaceTools(
           ? content.slice(start, limit !== undefined ? start + limit : undefined)
           : content;
       };
-      // The guide's name at the repository root answers with the platform's
-      // guide, which is text the code owns and every agent may read: no gate
-      // and no read hook for it. A file the knowledge base keeps under that
-      // name is ITS OWN conventions page and is read as any file is — gated,
-      // noted — and comes first, with the guide after it. A copy of the
-      // guide an earlier release wrote to disk (still on a draft, say) is
-      // recognised by its header and not served a second time.
-      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
-        return { path: p, content: slice(await guideAt(a.branch as string, ctx, p)) };
-      }
-      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
-      await assertCanRead(readGateFor(a.branch as string, ctx), p);
-      const fs = await ctx.getFilesystem(a.branch as string);
-      // Reading (extraction, image and binary handling included) happens AFTER
-      // the access gate and the read hook above — a document read is still a
-      // KB read. ONE registry dispatch picks the reader by
-      // extension; everything below just maps its ReadResult onto the tool's
-      // result shape.
-      const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-      const result = await readers.readerFor(p).read(bytes, p);
+      const result = await readForTool(a.branch as string, p, ctx);
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -2058,7 +2121,11 @@ export function registerWorkspaceTools(
       // `mime` below, so it is never passed through.
       delete stat.mimeType;
       const kind = stat.type === 'directory' ? 'folder' : 'file';
-      const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
+      const onDisk = await onDiskSpelling(root, p);
+      const managed = managedReason(onDisk, kind) !== undefined;
+      // A nested `access.md` is managed — it never moves — yet deleted by
+      // whoever may write it, so a FILE's delete is judged on its own rule.
+      const undeletable = kind === 'file' ? fileDeleteRefusal(onDisk) !== undefined : managed;
       const verdicts = await accessAt(branch, ctx, p);
       const access =
         a.explainAccess === true ? { ...verdicts, ...(await explainAccessAt(branch, ctx, p, kind)) } : verdicts;
@@ -2078,7 +2145,7 @@ export function registerWorkspaceTools(
       //     `movable`/`deletable` false rather than judging part of a folder
       //     and calling it the whole (`delete_folder`'s dry run, which walks
       //     uncapped, remains the authority for a folder that large).
-      const decided = managed || link;
+      const decided = (managed && undeletable) || link;
       const { files, links, truncated } =
         kind === 'folder'
           ? await filesUnder(fs, p, DESCENDANTS_CAP)
@@ -2100,9 +2167,9 @@ export function registerWorkspaceTools(
       const out: Record<string, unknown> = {
         ...stat,
         managed,
-        movable: open,
+        movable: open && !managed,
         // delete_folder also refuses a folder holding a link.
-        deletable: open && links.length === 0,
+        deletable: open && !undeletable && links.length === 0,
         access,
       };
       if (kind === 'folder') {
@@ -2680,10 +2747,8 @@ export function registerWorkspaceTools(
         throw new ToolError(`"${path}" is a folder, not a file — use delete_folder to delete it and the files under it.`, 400);
       }
       const onDisk = await onDiskSpelling(root, path);
-      if (isGitMetadata(onDisk)) throw new ToolError(managedReason(onDisk, 'file')!, 400);
-      if (managedReason(onDisk, 'file') !== undefined) {
-        throw new ToolError(`${onDisk.slice(onDisk.lastIndexOf('/') + 1)} is a platform file and cannot be deleted through the agent tools.`, 400);
-      }
+      const refused = fileDeleteRefusal(onDisk);
+      if (refused !== undefined) throw new ToolError(refused, 400);
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
       await orNotFound(path, () => fs.deleteFile(path), 'Nothing to delete');
@@ -3737,4 +3802,7 @@ export function registerWorkspaceTools(
       });
     },
   });
+
+  // The one read `open_page` borrows — see `readForTool` above.
+  return { readForTool };
 }

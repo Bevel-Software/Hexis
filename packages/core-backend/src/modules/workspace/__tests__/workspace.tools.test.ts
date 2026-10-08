@@ -15,6 +15,7 @@ import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
@@ -27,7 +28,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
@@ -333,6 +334,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   /* fresh per test via start() */
+  guideText = 'THE PLATFORM GUIDE\n';
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -1127,6 +1129,15 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
     // Sliced like any content.
     expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it('answers with the platform\'s composed guide, HTML views section and all', async () => {
+    guideText = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const { content } = await read(base, 'AGENTS.md');
+    expect(content).toBe(guideText);
+    expect(content).toContain('## HTML views');
+    expect(content).toContain('**A bare fragment scrolls the page.**');
   });
 
   it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
@@ -3355,6 +3366,80 @@ describe('preflight for moves and deletes', () => {
       const run = await call(base, 'delete_file', { path: KB('Sales/deal.md') });
       expect(run.status).toBe(403);
       expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
+    });
+
+    // A nested access.md is deleted the way a person deletes it in the app:
+    // by whoever may write it, through the same one-file delete (the locking
+    // filesystem's, which commits and pushes as the caller) as any file.
+    it('a nested access.md is deleted by a caller who may write it, like any file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/access.md'), '---\nread: Admin\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Sales/access.md') })).body).toMatchObject({
+        managed: true, movable: false, deletable: true,
+      });
+      const deleted: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string) => { deleted.push(p); return deleteFile(p); };
+
+      const run = await call(base, 'delete_file', { path: KB('Sales/access.md') });
+
+      expect(run.status).toBe(200);
+      expect(run.body).toEqual({ path: KB('Sales/access.md'), deleted: true });
+      expect(deleted).toEqual([KB('Sales/access.md')]);
+      expect(await exists(KB('Sales/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a nested access.md the caller may not write is the ordinary write refusal, and stays', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Locked/access.md'), '---\nread: everyone\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Locked/access.md') })).body).toMatchObject({
+        managed: true, deletable: false,
+      });
+
+      const run = await call(base, 'delete_file', { path: KB('Locked/access.md') });
+
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/access.md'), canPropose: true });
+      expect(JSON.stringify(run.body)).not.toContain('platform file');
+      expect(await exists(KB('Locked/access.md'))).toBe(true);
+    });
+
+    it('the root access.md and roles.yaml are the repository\'s own: refused for everyone, and they stay', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      for (const name of ['access.md', 'roles.yaml']) {
+        // The caller here may write and own everything: the refusal is not about who asks.
+        expect((await call(base, 'file_stat', { path: KB(name) })).body).toMatchObject({
+          managed: true, movable: false, deletable: false,
+          access: { read: true, write: true, download: true, owner: true },
+        });
+        const run = await call(base, 'delete_file', { path: KB(name) });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(`${name} is the repository's own file and cannot be deleted.`);
+        expect(await exists(KB(name))).toBe(true);
+      }
+    });
+
+    it('a nested roles.yaml is content, and .bevelignore stays refused as before', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      expect((await call(base, 'delete_file', { path: KB('Sales/roles.yaml') })).status).toBe(200);
+      const ignore = await call(base, 'delete_file', { path: KB('Sales/.bevelignore') });
+      expect(ignore.status).toBe(400);
+      expect(ignore.body.error).toBe('.bevelignore is a platform file and cannot be deleted through the agent tools.');
+      expect((await call(base, 'file_stat', { path: KB('Sales/.bevelignore') })).body).toMatchObject({ deletable: false });
+    });
+
+    it('delete_folder still refuses the repository root, which keeps its access.md', async () => {
+      const base = await seeded();
+      for (const args of [{ dryRun: true }, { confirm: true }]) {
+        const run = await call(base, 'delete_folder', { path: KB_DIR, ...args });
+        expect(run.body.allowed === false || run.status === 400).toBe(true);
+        expect(JSON.stringify(run.body)).toContain('The repository root is a platform folder and cannot be moved or deleted.');
+      }
+      expect(await exists(KB('access.md'))).toBe(true);
     });
   });
 

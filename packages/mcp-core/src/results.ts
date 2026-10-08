@@ -418,7 +418,19 @@ function noteText(value: unknown): string | undefined {
   return undefined;
 }
 
-export function toCallToolResult(value: unknown): CallToolResult {
+export function toCallToolResult(
+  value: unknown,
+  options?: {
+    /**
+     * Also answer a plain-object result as `structuredContent`. Asked for by
+     * a tool that carries an MCP App view: the view reads the result's fields
+     * from `structuredContent` (it has no other place to read them), while
+     * the model keeps reading the text block. Off for every other tool, so no
+     * client is handed each result twice.
+     */
+    structured?: boolean;
+  },
+): CallToolResult {
   // An image sentinel (see McpImageResult): the tool's result IS a picture.
   // Emit a native image content block so a multimodal client renders it, plus
   // the note as a text block so the transcript stays self-describing.
@@ -473,7 +485,11 @@ export function toCallToolResult(value: unknown): CallToolResult {
     return value as CallToolResult;
   }
   const text = typeof value === 'string' ? value : safeJsonText(value ?? null);
-  return { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+  const result: CallToolResult = { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+  if (options?.structured && value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    result.structuredContent = value as Record<string, unknown>;
+  }
+  return result;
 }
 
 /**

@@ -41,6 +41,21 @@ export {
 } from './schema-validity.js';
 
 export {
+  MCP_APP_UI_META_KEY,
+  MCP_APP_MIME_TYPE,
+  MCP_APP_URI_SCHEME,
+  type McpAppToolUi,
+  type McpAppResourceUi,
+  type McpAppResource,
+  type McpAppManifest,
+  toolUiMeta,
+  resourceUiMeta,
+  toListedResource,
+  toReadResourceResult,
+  parseMcpAppManifest,
+} from './mcp-app.js';
+
+export {
   describeToolFailure,
   withTransportDetail,
   toCallToolResult,

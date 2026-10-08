@@ -799,3 +799,30 @@ describe('results that answer differently the second time they are read', () => 
     expect(res.content[1]).toEqual({ type: 'text', text: '42' });
   });
 });
+
+/**
+ * A tool with an MCP App view: the VIEW reads the result's fields from
+ * `structuredContent` — it has nowhere else to read them — while the model
+ * keeps reading the text. Off for every other tool.
+ */
+describe('toCallToolResult with structured content', () => {
+  const value = { path: 'Data/Thing.md', embedUrl: 'https://hexis.example/embed?token=t' };
+
+  it('answers an object as structured content too, when asked', () => {
+    const result = toCallToolResult(value, { structured: true });
+    expect(result.structuredContent).toEqual(value);
+    expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(value) }]);
+  });
+
+  it('adds none by default', () => {
+    expect(toCallToolResult(value)).not.toHaveProperty('structuredContent');
+  });
+
+  it.each([
+    ['a string', 'plain text'],
+    ['an array', [1, 2]],
+    ['null', null],
+  ])('adds none for %s, which is not an object', (_label, v) => {
+    expect(toCallToolResult(v, { structured: true })).not.toHaveProperty('structuredContent');
+  });
+});

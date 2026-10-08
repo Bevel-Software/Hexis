@@ -1,5 +1,6 @@
 import type { HexisMcpConfig } from './config.js';
 import { renewConnectionKeyNow } from './renewal.js';
+import { parseMcpAppManifest, type McpAppManifest } from '@bevel-software/platform-mcp-core';
 
 /**
  * The REST surface this server reads before it can serve anything. Everything
@@ -106,6 +107,7 @@ async function getJson(
             // permission answer about a key that verified.
             `${label} denied access (HTTP 403) to this connection key. ` +
             'The key itself is valid — ask a workspace admin for access; minting a new key will not change the answer.',
+      res.status,
     );
   }
   if (!res.ok) {
@@ -515,4 +517,85 @@ export async function callKbTool(
     body: JSON.stringify(args),
     renew: renewer(config),
   });
+}
+
+const NO_APPS: McpAppManifest = { tools: {}, resources: [] };
+
+/** Statuses that say the manifest route is definitely not serving this caller. */
+const MANIFEST_GONE = new Set([403, 404, 410]);
+
+/**
+ * The deployment's MCP Apps: which of its tools carry a `ui://` view, and the
+ * views themselves.
+ *
+ * The local server bridges a host to a deployment over HTTP. It discovers the
+ * tools as UTCP manuals, and a UTCP manual has nowhere to carry a view — so
+ * the metadata has to arrive as data, keyed by tool name, and the view's HTML
+ * has to arrive with it (this server answers `resources/read` itself).
+ *
+ * DEGRADES TO NOTHING, loudly but harmlessly. A deployment that predates the
+ * route 404s; one behind a proxy may answer HTML. Either way the right outcome
+ * is NO apps: every tool is still listed and still callable, `resources/list`
+ * answers an empty list (this server declares the capability unconditionally,
+ * since a later catalog refresh may bring a view), and a host shows the
+ * tool's text answer —
+ * which is exactly what a host without the extension does anyway. Advertising
+ * a `resourceUri` this server could not serve would be worse than advertising
+ * none: the host would preload a failure and show an empty frame where the
+ * text used to be.
+ *
+ * `previous` is what a TRANSIENT failure answers — the manifest already
+ * being served, on a catalog refresh. A refresh that hit a deployment
+ * mid-redeploy (a 5xx, a dropped connection, a proxy's error page) must not
+ * turn every view off until the next catalog change: the refresh is marked
+ * applied either way, so nothing would read the manifest again.
+ *
+ * A DEFINITE answer replaces it, though, because the same "applied either
+ * way" would otherwise keep a removed view advertised indefinitely: a
+ * manifest that reads as empty, and a route that answers 404/410 (gone) or
+ * 403 (this identity may not have it), all turn the views off.
+ */
+export async function fetchMcpApps(
+  config: HexisMcpConfig,
+  previous: McpAppManifest = NO_APPS,
+): Promise<McpAppManifest> {
+  try {
+    const body = await getJson(`${config.baseUrl}/api/agent/mcp-app`, {
+      label: 'the MCP App manifest',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+    // The top-level shape is checked HERE, before parsing: the parser answers
+    // an empty manifest for anything it does not recognise, which is right for
+    // a bad entry and wrong for a wrong document — a proxy's `{}` or another
+    // protocol's answer would otherwise turn every view off without a word.
+    const shape = body as { tools?: unknown; resources?: unknown } | null;
+    if (
+      !shape ||
+      typeof shape !== 'object' ||
+      Array.isArray(shape) ||
+      !shape.tools ||
+      typeof shape.tools !== 'object' ||
+      Array.isArray(shape.tools) ||
+      !Array.isArray(shape.resources)
+    ) {
+      throw new Error('the answer is not an MCP App manifest (expected { tools: {…}, resources: […] })');
+    }
+    return parseMcpAppManifest(body);
+  } catch (err) {
+    // A rejected key is the one failure that is not about this route: it ends
+    // the process everywhere else, and swallowing it here would turn a clear
+    // "mint a new key" into a silently app-less server.
+    if (err instanceof ConnectionKeyRejectedError) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    const definite = err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0);
+    const kept = definite ? NO_APPS : previous;
+    console.error(
+      `[hexis-mcp] could not read the deployment's MCP App manifest (${reason}); ` +
+        (kept.resources.length
+          ? 'keeping the views read before.'
+          : 'tools that would render a view will answer with their text instead.'),
+    );
+    return kept;
+  }
 }

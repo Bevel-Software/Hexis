@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
 import { sanitizeAgentHtml, buildSandboxedHtml } from '../htmlSandbox';
+import { runBridge } from './bridgeHarness';
 
 describe('sanitizeAgentHtml', () => {
   it('keeps inline scripts and tags them as modules so they run after the lib', () => {
@@ -418,50 +419,118 @@ describe('buildSandboxedHtml', () => {
     // Posts to the parent rather than navigating the (sandboxed) host window.
     expect(out).toContain("type: 'bevel.navigate'");
     expect(out).toContain('parent.postMessage');
-    // Delegated anchor-click interception, leaving in-page fragments alone.
+    // Delegated anchor-click interception; a bare fragment is jumped to here.
     expect(out).toContain("a[href]");
-    expect(out).toContain("href.charAt(0) === '#'");
+    expect(out).toContain('jumpTo(href)');
   });
 
   // The bridge half of the one-rule promise. The sanitizer keeps a padded
   // href by reading past the padding; the bridge has to hand the parent the
   // same reading, or the resolver builds a path out of the spaces. A padded
-  // `#goal` is still an in-page anchor and stays with the browser to scroll.
-  it('posts the href a browser would follow, and leaves a padded fragment alone', () => {
-    // No lib sources: `okOpts` carries an `export`, which a vm script cannot
-    // parse. The bridge is appended after the lib either way.
-    const out = buildSandboxedHtml({ ...okOpts, libModuleSources: [] });
-    const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+  // `#goal` is still an in-page anchor, scrolled to in the frame.
+  it('posts the href a browser would follow, and scrolls to a padded fragment', () => {
+    const bridge = runBridge({ ids: ['goal'] });
 
-    type ClickEvent = { target: { closest: () => unknown }; preventDefault: () => void };
-    const handlers: ((e: ClickEvent) => void)[] = [];
-    const posted: unknown[] = [];
-    const ctx: Record<string, unknown> = {
-      document: {
-        addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
-          if (type === 'click') handlers.push(fn);
-        },
-      },
-      parent: { postMessage: (msg: unknown) => posted.push(msg) },
-    };
-    vm.createContext(ctx);
-    vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
-    expect(handlers).toHaveLength(1);
+    bridge.click('\n      Board.html\n    ');
+    bridge.click('  #goal  ');
+    bridge.click('  https://example.com/docs  ');
+    // An empty href goes nowhere, and its default is still cancelled: left to
+    // the browser it would reload the frame against the app's URL.
+    expect(bridge.click('  ')).toEqual({ prevented: true });
+    expect(bridge.click('')).toEqual({ prevented: true });
 
-    const click = (href: string) => {
-      const anchor = { getAttribute: () => href };
-      handlers[0]({ target: { closest: () => anchor }, preventDefault: () => {} });
-    };
-
-    click('\n      Board.html\n    ');
-    click('  #goal  ');
-    click('  https://example.com/docs  ');
-    click('  ');
-
-    expect(posted).toEqual([
+    expect(bridge.posted).toEqual([
       { type: 'bevel.navigate', href: 'Board.html' },
       { type: 'bevel.navigate', href: 'https://example.com/docs' },
     ]);
+    expect(bridge.scrolled).toEqual(['goal']);
+  });
+
+  /**
+   * A bare fragment is an in-page jump by either route. Left to the browser, a
+   * `srcdoc` frame resolves `#totals` against the APP's URL and navigates
+   * itself away; handed to the parent, the app re-opens the same file with
+   * the fragment on its URL and the page does not move. So the bridge
+   * cancels the click, scrolls in the frame, and posts nothing.
+   */
+  describe('a bare fragment scrolls the page inside the frame', () => {
+    it('on a click: the element scrolls into view, the default is cancelled, nothing is posted', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      expect(bridge.click('#totals')).toEqual({ prevented: true });
+      expect(bridge.scrolled).toEqual(['totals']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('through window.bevel.openNode and window.bevel.navigate the same', () => {
+      for (const member of ['openNode', 'navigate']) {
+        const bridge = runBridge({ ids: ['totals'] });
+        (bridge.bevel[member] as (href: string) => void)('#totals');
+        expect(bridge.scrolled, member).toEqual(['totals']);
+        expect(bridge.posted, member).toEqual([]);
+      }
+    });
+
+    it('a fragment naming no element does nothing: no scroll, no navigation, and the default still cancelled', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      expect(bridge.click('#nowhere')).toEqual({ prevented: true });
+      (bridge.bevel.openNode as (href: string) => void)('#nowhere');
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.scrolledToTop()).toBe(0);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('`#` and `#top` with no such element scroll to the top; an element named top wins', () => {
+      const bridge = runBridge();
+      bridge.click('#');
+      bridge.click('#top');
+      bridge.click('#TOP');
+      expect(bridge.scrolledToTop()).toBe(3);
+      expect(bridge.posted).toEqual([]);
+      const withTop = runBridge({ ids: ['top'] });
+      withTop.click('#top');
+      expect(withTop.scrolled).toEqual(['top']);
+      expect(withTop.scrolledToTop()).toBe(0);
+    });
+
+    it('finds the target by a percent-encoded id and by an anchor name', () => {
+      const bridge = runBridge({ ids: ['Q3 totals'], names: ['legacy'] });
+      bridge.click('#Q3%20totals');
+      bridge.click('#legacy');
+      expect(bridge.scrolled).toEqual(['Q3 totals', 'legacy']);
+      // A malformed escape is looked up as written, and nothing breaks.
+      bridge.click('#100%');
+      expect(bridge.scrolled).toEqual(['Q3 totals', 'legacy']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    // The HTML standard's order: the fragment as written names the target
+    // first, its decoding only when that finds nothing.
+    it('prefers the id as written over its percent-decoding, as a browser does', () => {
+      const bridge = runBridge({ ids: ['Q3%20totals', 'Q3 totals'] });
+      bridge.click('#Q3%20totals');
+      expect(bridge.scrolled).toEqual(['Q3%20totals']);
+    });
+
+    it('leaves a click the page already cancelled to the page: no scroll, nothing posted', () => {
+      const bridge = runBridge({ ids: ['panel'] });
+      bridge.click('#panel', { alreadyPrevented: true });
+      bridge.click('#', { alreadyPrevented: true });
+      bridge.click('../Knowledge/Alice.md', { alreadyPrevented: true });
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.scrolledToTop()).toBe(0);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('a document link with a trailing fragment still goes to the app, and scrolls nothing', () => {
+      const bridge = runBridge({ ids: ['goal'] });
+      expect(bridge.click('../Knowledge/Alice.md#goal')).toEqual({ prevented: true });
+      (bridge.bevel.openNode as (href: string) => void)('../Knowledge/Alice.md#goal');
+      expect(bridge.posted).toEqual([
+        { type: 'bevel.navigate', href: '../Knowledge/Alice.md#goal' },
+        { type: 'bevel.navigate', href: '../Knowledge/Alice.md#goal' },
+      ]);
+      expect(bridge.scrolled).toEqual([]);
+    });
   });
 
   it('embeds the body HTML verbatim (sanitization happens upstream)', () => {
