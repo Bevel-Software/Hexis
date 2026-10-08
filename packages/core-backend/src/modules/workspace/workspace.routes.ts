@@ -1029,10 +1029,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      // A traversal refusal, or the access tree failing to load while the
-      // entries were judged (`AccessConfigError`): each carries its own status
-      // and payload, the same ones the single-file gate answers with.
-      if (error instanceof PathTraversalError || error instanceof WorkflowDomainError) {
+      // A traversal refusal (`PathTraversalError`), or the access tree failing
+      // to load while the entries were judged (`AccessConfigError`): both are
+      // domain errors carrying their own status and payload, the same ones
+      // the single-file gate answers with.
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
