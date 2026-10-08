@@ -276,6 +276,33 @@ describe('ExternalApiKeyService', () => {
       expect(warn).toHaveBeenCalled();
       warn.mockRestore();
     });
+
+    /**
+     * A key's FIRST use is an agent arriving — what the onboarding waits for
+     * — so the owner is told once the stamp has landed, and once only: a key
+     * stamped before was announced then.
+     */
+    it("announces a key's first use to its owner, once the stamp has landed, and never a later one", async () => {
+      const row = { tokenId: 'tok-1', label: 'Laptop', lastUsedAt: null, userId: 'user-7', email: 'a@x.io', name: 'Alice', avatarUrl: null };
+      const events = { emit: vi.fn() };
+      const first = makeFakeDb([[row], undefined]);
+      await new ExternalApiKeyService(first.db, 'bevel_', {}, events).verifyAndLoadUser('bevel_abc');
+      await flushMicrotasks();
+      expect(events.emit).toHaveBeenCalledTimes(1);
+      expect(events.emit).toHaveBeenCalledWith({
+        kind: 'agent-connected',
+        forUserId: 'user-7',
+        client: 'Laptop',
+        agentKind: 'key',
+        at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      });
+
+      const again = makeFakeDb([[{ ...row, lastUsedAt: new Date('2026-10-07T12:00:00Z') }], undefined]);
+      const laterEvents = { emit: vi.fn() };
+      await new ExternalApiKeyService(again.db, 'bevel_', {}, laterEvents).verifyAndLoadUser('bevel_abc');
+      await flushMicrotasks();
+      expect(laterEvents.emit).not.toHaveBeenCalled();
+    });
   });
 
   describe('listForUser', () => {

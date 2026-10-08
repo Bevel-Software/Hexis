@@ -95,20 +95,21 @@ export function WelcomePage() {
   /**
    * The answer to "did it work?", without having to go and check.
    *
-   * Asked every few seconds while this page is open (and visible), and never
-   * again once an agent has made its first call — which every client does on
-   * connecting. Connecting IS the onboarding, so it concludes it: the pill
-   * goes and the Get set up step ticks, without asking for Done as well.
-   * Once per visit — `markDone` drops its optimism again when the server
-   * refuses, and a refusal must not turn into a request on every render.
+   * The server says so the moment an agent makes its first call — which
+   * every client does on connecting — through the `agent-connected` event
+   * this page listens for; it asks once on arrival, and again on a return to
+   * the tab, never on a timer. Connecting IS the onboarding, so it concludes
+   * it: the pill goes and the Get set up step ticks, without asking for Done
+   * as well. Once per visit — `markDone` drops its optimism again when the
+   * server refuses, and a refusal must not turn into a request on every
+   * render.
    *
    * Only while the onboarding is open: someone who finished it and came back
-   * to copy a snippet is waiting on nothing, and a page polling every three
-   * seconds for them is load with no reader. A connection this session has
+   * to copy a snippet is waiting on nothing. A connection this session has
    * already seen still shows.
    */
   const { showPill, markDone } = onboarding;
-  const agent = useAgentConnection({ poll: true, enabled: showPill });
+  const agent = useAgentConnection({ enabled: showPill });
   const concluded = useRef(false);
   useEffect(() => {
     if (!agent.connected || concluded.current) return;

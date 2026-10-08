@@ -24,14 +24,16 @@ export interface AgentConnectionResponse {
  * GET /api/onboarding/agent-connection — "has an agent of mine reached the
  * platform yet?", JWT-only (mounted behind the session middleware).
  *
- * The connect-your-agent page polls it while someone sets up their client,
- * and the Get set up list asks it once, so connecting from anywhere counts.
- * It answers for the CALLER alone: the user is the token's, and nothing in
- * the request can name anyone else — there is no parameter to try.
+ * The connect-your-agent page and the Get set up list ask it once on
+ * arrival, and again when the person comes back to the tab; the moment it
+ * changes is told by the `agent-connected` event the use-stamp paths emit
+ * over the event stream, so nothing asks on a timer. It answers for the
+ * CALLER alone: the user is the token's, and nothing in the request can name
+ * anyone else — there is no parameter to try.
  *
- * `no-store` because the answer is expected to change between two polls a
- * few seconds apart; a cached "not yet" would keep the page waiting on an
- * agent that has already arrived.
+ * `no-store` because the answer is expected to change between two asks; a
+ * cached "not yet" would keep a page waiting on an agent that has already
+ * arrived.
  */
 export function createAgentConnectionRoutes(status: IAgentConnectionStatus): express.Router {
   const router = express.Router();

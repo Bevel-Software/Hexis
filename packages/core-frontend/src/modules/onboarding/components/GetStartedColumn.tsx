@@ -197,12 +197,12 @@ export function GetStartedColumn() {
   const invite = useInviteDialog();
 
   /**
-   * Whether the person's agent has reached the platform — asked on mount and
-   * again when the person comes back to the tab, never on a timer (the
-   * welcome page is the one that polls), so someone who connected without
-   * ever opening that page still gets the tick. Connecting is what
-   * the onboarding asked for, so it concludes it too: the pill goes. Once
-   * per mount, for the reason the welcome page gives.
+   * Whether the person's agent has reached the platform — told by the
+   * server's `agent-connected` event, and asked on mount and again when the
+   * person comes back to the tab, never on a timer — so someone who
+   * connected without ever opening the welcome page still gets the tick.
+   * Connecting is what the onboarding asked for, so it concludes it too: the
+   * pill goes. Once per mount, for the reason the welcome page gives.
    */
   const gone = checklist.dismissed || checklist.completionClosed;
   const agent = useAgentConnection({ enabled: !gone });

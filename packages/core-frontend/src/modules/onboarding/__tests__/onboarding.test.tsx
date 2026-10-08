@@ -15,8 +15,10 @@ import { resetOnboardingForTests } from '../state/onboarding';
 import { configureMcpUrl } from '../../../shared/mcp';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
-import { AGENT_BACKOFF_MAX_MS, AGENT_MAX_FAILURES, AGENT_POLL_MS } from '../state/agent-connection';
+import { AGENT_RECHECK_MS } from '../state/agent-connection';
 import type { AgentConnection } from '../services/agent-connection.api';
+import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
+import type { WorkflowEvent, WorkflowEventPayload } from '@bevel-software/platform-shared';
 
 /**
  * The onboarding contract, end to end on the client:
@@ -37,7 +39,7 @@ const { authFetchMock } = vi.hoisted(() => ({
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 
 /**
- * The agent-connection question has its own seam, so the page's polling never
+ * The agent-connection question has its own seam, so the page's one ask never
  * shows up in `authFetch` — every assertion above about what DID or did NOT
  * reach the server stays about the onboarding write alone. Default: nobody
  * has connected yet.
@@ -649,68 +651,101 @@ describe('WelcomePage', () => {
 });
 
 /**
+ * A stand-in for the tab's event stream: what the server would push, pushed
+ * by the test.
+ */
+function fakeBus() {
+  const handlers = new Map<string, Set<(e: WorkflowEvent) => void>>();
+  const value: EventBusContextValue = {
+    subscribe: (kind, handler) => {
+      const set = handlers.get(kind) ?? new Set();
+      set.add(handler as (e: WorkflowEvent) => void);
+      handlers.set(kind, set);
+      return () => set.delete(handler as (e: WorkflowEvent) => void);
+    },
+    setFocus: () => {},
+    watchWorkspace: () => () => {},
+  };
+  const emit = (event: WorkflowEventPayload) => {
+    act(() => {
+      for (const h of handlers.get(event.kind) ?? []) {
+        h({ id: 1, ts: new Date().toISOString(), ...event } as WorkflowEvent);
+      }
+    });
+  };
+  return { value, emit, listening: (kind: string) => (handlers.get(kind)?.size ?? 0) > 0 };
+}
+
+const ARRIVED: WorkflowEventPayload = {
+  kind: 'agent-connected',
+  forUserId: 'u1',
+  client: 'Claude',
+  agentKind: 'agent',
+  at: '2026-10-07T12:00:00.000Z',
+};
+
+/**
  * "Did it work?" answered on the page: a quiet waiting line that turns into
- * a plain "Connected" the moment the agent's first call lands — and that
- * conclusion does what Done does to the onboarding, once.
+ * a plain "Connected" the moment the server says the agent's first call
+ * landed — and that conclusion does what Done does to the onboarding, once.
+ * The page asks once on arrival and listens from then on; it never asks on
+ * a timer.
  */
 describe('WelcomePage: is your agent connected?', () => {
-  const mountPage = (auth = newUser()) =>
-    mount(
-      <Routes>
-        <Route path={WELCOME_PATH} element={<WelcomePage />} />
-      </Routes>,
+  const mountPage = (auth = newUser(), bus = fakeBus()) => {
+    const rendered = mount(
+      <EventBusContext.Provider value={bus.value}>
+        <Routes>
+          <Route path={WELCOME_PATH} element={<WelcomePage />} />
+        </Routes>
+      </EventBusContext.Provider>,
       auth,
       WELCOME_PATH,
     );
+    return { ...rendered, bus };
+  };
 
   /** Calls to the onboarding write — the one `markDone` makes. */
   const doneWrites = () =>
     authFetchMock.mock.calls.filter((c) => (c as unknown[])[0] === '/api/auth/onboarding-done').length;
 
-  /** Let the pending answer land, then move the clock `ms` on. */
-  async function advance(ms = 0) {
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(ms);
-    });
-  }
+  /** Let the pending answer land. */
+  const settle = () => act(async () => {});
 
-  /** Pretend the tab went into the background (or came back). */
-  function setHidden(hidden: boolean) {
-    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
-    document.dispatchEvent(new Event('visibilitychange'));
-  }
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
   afterEach(() => {
     vi.useRealTimers();
     Reflect.deleteProperty(document, 'hidden');
   });
 
-  it('waits quietly, turns green when the agent arrives, concludes once and stops asking', async () => {
-    fetchAgentConnectionMock
-      .mockResolvedValueOnce({ connected: false })
-      .mockResolvedValueOnce({ connected: true, at: '2026-10-07T12:00:00.000Z', client: 'Claude' });
-    mountPage();
-    await advance();
+  it('waits quietly, turns green when the server says the agent arrived, and concludes once', async () => {
+    const { bus } = mountPage();
+    await settle();
     // One live region, the same element in both states, so the change is announced.
     const status = screen.getByText('Waiting for your agent…').closest('[role="status"]') as HTMLElement;
     expect(status).toHaveAttribute('aria-live', 'polite');
     expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
     expect(doneWrites()).toBe(0);
+    expect(bus.listening('agent-connected')).toBe(true);
 
-    await advance(AGENT_POLL_MS);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(2);
+    bus.emit(ARRIVED);
     expect(status).toHaveTextContent('Connected. Your agent reached this knowledge base.');
     expect(status).not.toHaveTextContent('Waiting');
     expect(doneWrites()).toBe(1);
     expect(fetchInit(0)?.body).toBe(JSON.stringify({ userId: 'u1' }));
 
-    // Connected is final: no more questions, and no second conclusion.
-    await advance(AGENT_POLL_MS * 5);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(2);
+    // Connected is final: nothing more is asked, and no second conclusion.
+    bus.emit(ARRIVED);
+    await settle();
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
     expect(doneWrites()).toBe(1);
+  });
+
+  it("stays waiting on another account's agent", async () => {
+    const { bus } = mountPage();
+    await settle();
+    bus.emit({ ...ARRIVED, forUserId: 'u2' });
+    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
+    expect(doneWrites()).toBe(0);
   });
 
   it('shows the green state straight away for an agent connected before you arrived', async () => {
@@ -718,94 +753,64 @@ describe('WelcomePage: is your agent connected?', () => {
     mountPage();
     // Before the first answer the line is empty, never a flash of "Waiting".
     expect(screen.queryByText('Waiting for your agent…')).not.toBeInTheDocument();
-    await advance();
+    await settle();
     expect(screen.getByText('Connected. Your agent reached this knowledge base.')).toBeInTheDocument();
     expect(doneWrites()).toBe(1);
-    await advance(AGENT_POLL_MS * 3);
     expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
   });
 
   /**
    * Someone who finished the onboarding and came back to copy a snippet is
-   * waiting on nothing: no polling, no "Waiting" line, no second conclusion.
+   * waiting on nothing: no ask, no listening, no "Waiting" line, no second
+   * conclusion.
    */
   it('asks nothing for an account that already finished the onboarding', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
-    mountPage(doneUser());
-    await advance(AGENT_POLL_MS * 5);
+    const { bus } = mountPage(doneUser());
+    await settle();
     expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
+    expect(bus.listening('agent-connected')).toBe(false);
     expect(screen.queryByText('Waiting for your agent…')).not.toBeInTheDocument();
     expect(doneWrites()).toBe(0);
   });
 
-  it('keeps asking every few seconds while nobody has connected, and reads a failure as "not yet"', async () => {
-    fetchAgentConnectionMock
-      .mockResolvedValueOnce({ connected: false })
-      .mockRejectedValueOnce(new Error('503'))
-      .mockResolvedValue({ connected: false });
-    mountPage();
-    await advance();
-    await advance(AGENT_POLL_MS);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(2);
-    // A failure waits twice as long before the next ask.
-    await advance(AGENT_POLL_MS * 2);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(3);
-    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
-    expect(doneWrites()).toBe(0);
-    // An answer — even a "no" — puts it back on the ordinary beat.
-    await advance(AGENT_POLL_MS);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(4);
-  });
-
   /**
-   * A server that is down, or a session that has expired, answers every ask
-   * with a failure. The page backs off — doubling, up to a cap — and after a
-   * few in a row stops altogether, until the person comes back to the tab.
+   * A failed ask reads as "not yet", and nothing retries it on a timer: the
+   * event says when it changes, and a return to the tab asks again — once
+   * per {@link AGENT_RECHECK_MS} at most — for an agent that connected
+   * while the stream was down.
    */
-  it('backs off on failures in a row, gives up after a few, and starts afresh on return', async () => {
-    fetchAgentConnectionMock.mockRejectedValue(new Error('401'));
+  it('reads a failed ask as "not yet", never retries on a timer, and asks again on a return to the tab', async () => {
+    vi.useFakeTimers();
+    fetchAgentConnectionMock.mockRejectedValueOnce(new Error('503')).mockResolvedValue({ connected: false });
     mountPage();
-    await advance();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
-    for (let failures = 1; failures < AGENT_MAX_FAILURES; failures++) {
-      const wait = Math.min(AGENT_POLL_MS * 2 ** failures, AGENT_BACKOFF_MAX_MS);
-      await advance(wait - 1);
-      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(failures);
-      await advance(1);
-      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(failures + 1);
-    }
-    // Given up: however long the tab stays open, nothing more is asked…
-    await advance(AGENT_BACKOFF_MAX_MS * 10);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(AGENT_MAX_FAILURES);
-    // …until the person comes back to it.
-    fetchAgentConnectionMock.mockResolvedValue({ connected: false });
+    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AGENT_RECHECK_MS * 10);
+    });
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+
     act(() => {
       window.dispatchEvent(new Event('focus'));
     });
-    await advance();
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(AGENT_MAX_FAILURES + 1);
-    await advance(AGENT_POLL_MS);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(AGENT_MAX_FAILURES + 2);
-  });
-
-  it('pauses while the tab is hidden and asks at once on return', async () => {
-    mountPage();
-    await advance();
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
-    setHidden(true);
-    await advance(AGENT_POLL_MS * 10);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
-    setHidden(false);
-    await advance();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(2);
+    expect(doneWrites()).toBe(0);
   });
 
-  it('stops asking when you leave the page', async () => {
-    const { unmount } = mountPage();
-    await advance();
+  it('stops listening when you leave the page', async () => {
+    const { unmount, bus } = mountPage();
+    await settle();
     unmount();
-    await advance(AGENT_POLL_MS * 5);
-    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+    expect(bus.listening('agent-connected')).toBe(false);
+    bus.emit(ARRIVED);
+    expect(doneWrites()).toBe(0);
   });
 });
 

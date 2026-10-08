@@ -70,15 +70,19 @@ function render(fragment: SQL): { sql: string; params: unknown[] } {
   return { sql: q.sql, params: q.params };
 }
 
-function makeProvider(queue: any[] = []) {
-  const { db, captured } = makeFakeDb(queue);
-  const provider = new BevelOAuthProvider({
+function providerDeps(db: Database) {
+  return {
     db,
     crypto: null,
     stateSecret: STATE_SECRET,
     publicFrontendUrl: FRONTEND,
     tokenPrefix: PREFIX,
-  });
+  };
+}
+
+function makeProvider(queue: any[] = []) {
+  const { db, captured } = makeFakeDb(queue);
+  const provider = new BevelOAuthProvider(providerDeps(db));
   return { provider, captured, db };
 }
 
@@ -292,9 +296,10 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured, db } = makeProvider([
       [oldRow] /* revoke.returning */,
       [{ id: 'conn-1' }] /* the token's connection, still live */,
-      undefined /* the (throttled) use stamp */,
+      [{ userId: 'user-1', client: 'Claude', lastUsedAt: new Date() }] /* the (throttled) use stamp's read */,
       undefined, undefined, /* prunes */
       undefined /* token insert */,
+      undefined /* the use stamp */,
     ]);
     const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp']);
     expect(tokens.scope).toBe('mcp');
@@ -303,11 +308,13 @@ describe('BevelOAuthProvider', () => {
     // second row is inserted for it.
     expect(captured.values).toHaveLength(1);
     expect(captured.values[0]).toMatchObject({ connectionId: 'conn-1' });
-    // The liveness check is a read of THAT connection, live rows only…
-    expect((db as any).select).toHaveBeenCalledTimes(1);
+    // The liveness check is a read of THAT connection, live rows only (the
+    // second read is the use stamp's own, see `noteConnectionUse`)…
+    expect((db as any).select).toHaveBeenCalledTimes(2);
     expect(render(captured.where[1])).toMatchObject({ params: ['conn-1'] });
     expect(render(captured.where[1]).sql).toMatch(/"agent_connections"."revoked_at" is null/);
     // …and the use is stamped separately, off the refresh's own path.
+    await new Promise((r) => setTimeout(r, 0));
     expect(captured.updateTargets).toEqual([oauthTokens, agentConnections]);
     expect(Object.keys(captured.set[1])).toEqual(['lastUsedAt']);
 
@@ -363,6 +370,7 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured } = makeProvider([
       [row] /* select */,
       undefined /* token lastUsedAt touch */,
+      [{ userId: 'user-1', client: 'Claude', lastUsedAt: new Date() }] /* the connection, read before its stamp */,
       undefined /* connection lastUsedAt touch */,
       [row] /* a second verify a moment later */,
       undefined /* its token touch — and NO second connection touch */,
@@ -384,13 +392,56 @@ describe('BevelOAuthProvider', () => {
     expect(captured.updateTargets).toEqual([oauthTokens, agentConnections]);
     expect(captured.set.map((s) => Object.keys(s))).toEqual([['lastUsedAt'], ['lastUsedAt']]);
     expect(render(captured.where[1])).toMatchObject({ params: ['tok-row-1'] });
+    // The connection is read, then stamped: both by its id.
     expect(render(captured.where[2])).toMatchObject({ params: ['conn-1'] });
     expect(render(captured.where[2]).sql).toMatch(/"agent_connections"."id" = \$1/);
+    expect(render(captured.where[3])).toMatchObject({ params: ['conn-1'] });
     // The connection's stamp is throttled: a verify a moment later touches
     // the token row again but not the connection — a minute has not passed.
     await provider.verifyAccessToken('bevel-mcp_live');
     await new Promise((r) => setTimeout(r, 0));
     expect(captured.updateTargets).toEqual([oauthTokens, agentConnections, oauthTokens]);
+  });
+
+  /**
+   * The FIRST stamp of a connection is the agent arriving — what the
+   * onboarding waits for — so the owner is told, once. A connection stamped
+   * before was announced then; this stamp says nothing.
+   */
+  it('announces an agent connection to its owner on its first use, and never again', async () => {
+    const row = {
+      id: 'tok-row-1', clientId: 'client-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+      expiresAt: new Date(Date.now() + 60_000), userId: 'user-1', userEmail: 'alice@example.com',
+    };
+    const events = { emit: vi.fn() };
+    const fresh = makeProvider([
+      [row],
+      undefined /* token touch */,
+      [{ userId: 'user-1', client: 'Claude', lastUsedAt: null }] /* never used before */,
+      undefined /* the stamp */,
+    ]);
+    const freshProvider = new BevelOAuthProvider({ ...providerDeps(fresh.db), events });
+    await freshProvider.verifyAccessToken('bevel-mcp_live');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events.emit).toHaveBeenCalledTimes(1);
+    expect(events.emit).toHaveBeenCalledWith({
+      kind: 'agent-connected',
+      forUserId: 'user-1',
+      client: 'Claude',
+      agentKind: 'agent',
+      at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    });
+
+    const used = makeProvider([
+      [row],
+      undefined,
+      [{ userId: 'user-1', client: null, lastUsedAt: new Date(Date.now() - 3_600_000) }] /* stamped an hour ago */,
+      undefined,
+    ]);
+    const usedEvents = { emit: vi.fn() };
+    await new BevelOAuthProvider({ ...providerDeps(used.db), events: usedEvents }).verifyAccessToken('bevel-mcp_live');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(usedEvents.emit).not.toHaveBeenCalled();
   });
 
   it('revokeToken (RFC 7009) ends the agent connection once no live token remains on it, as the owner\'s doing', async () => {

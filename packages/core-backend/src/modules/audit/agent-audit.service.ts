@@ -245,8 +245,9 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
   }
 
   /**
-   * Whether one person's agent has reached the platform yet — the onboarding
-   * page polls it every few seconds, so it is two single-row reads on the
+   * Whether one person's agent has reached the platform yet — what the
+   * onboarding asks once on arrival (the `agent-connected` event the stamp
+   * paths emit tells it the moment it changes). Two single-row reads on the
    * per-user indexes, never a scan of the event log.
    *
    * Read from the `last_used_at` stamps, not from `agent_events`: an agent

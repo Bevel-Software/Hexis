@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('external-api-key');
 import { and, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
-import type { AuthUser } from '@bevel-software/platform-shared';
+import type { AgentConnectedEvent, AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
 import {
@@ -51,6 +51,12 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     private readonly db: Database,
     private readonly keyPrefix: string,
     private readonly kinds: Readonly<Record<string, KeyKindSpec>> = {},
+    /**
+     * Where a key's FIRST use is announced to its owner (`agent-connected`,
+     * see `verifyAndLoadToken`). Optional: without it the stamp is written
+     * and nobody is told.
+     */
+    private readonly events?: { emit(event: AgentConnectedEvent): void },
   ) {
     this.prefixes = [keyPrefix, ...Object.values(kinds).map((k) => k.prefix)];
   }
@@ -114,6 +120,8 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     const [row] = await this.db
       .select({
         tokenId: externalApiKeys.id,
+        label: externalApiKeys.label,
+        lastUsedAt: externalApiKeys.lastUsedAt,
         userId: users.id,
         email: users.email,
         name: users.name,
@@ -130,9 +138,26 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // the UPDATE. A failed touch is logged but never blocks the caller —
     // the worst case is a slightly stale `last_used_at`, which is fine for
     // a "when was this key last used" audit view.
-    this.touchLastUsed(row.tokenId).catch((err) => {
-      log.warn('touchLastUsed failed:', { err });
-    });
+    //
+    // A key's FIRST use is an agent that has just reached the platform —
+    // what the onboarding waits for — so its owner is told once the stamp
+    // has landed, and only for the use that found the key never stamped.
+    const firstUse = row.lastUsedAt === null;
+    this.touchLastUsed(row.tokenId).then(
+      () => {
+        if (!firstUse) return;
+        this.events?.emit({
+          kind: 'agent-connected',
+          forUserId: row.userId,
+          client: row.label,
+          agentKind: 'key',
+          at: new Date().toISOString(),
+        });
+      },
+      (err) => {
+        log.warn('touchLastUsed failed:', { err });
+      },
+    );
 
     return {
       tokenId: row.tokenId,
