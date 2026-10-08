@@ -57,11 +57,14 @@ export interface CommandAction {
   /** Faint text after the label, naming where the command belongs (a distribution's area, say). */
   group?: string;
   /**
-   * The keys that run it outside the menu, for the row's hint — DISPLAY
-   * only: `['C']`, or `['G', 'K']` for a sequence. Core's are filled in from
-   * {@link COMMAND_SHORTCUTS}, the table `useCommandShortcuts` binds; a
-   * distribution that sets one binds the keys itself, since a hint for a
-   * binding that does not exist would teach a key that does nothing.
+   * The keys that run it outside the menu: `['C']`, or `['G', 'K']` for a
+   * sequence of two. Shown on the row as its hint AND bound by
+   * `useCommandShortcuts`, under the same guards as core's, so a hint is
+   * never a key that does nothing. Core's are filled in from
+   * {@link COMMAND_SHORTCUTS}. A registry command's that would collide with
+   * keys already bound — the same keys, or a sequence one of them begins — is
+   * dropped at merge time, hint and all, and said so in the console: give it
+   * other keys.
    */
   shortcut?: string[];
   /** The row's icon; a generic arrow when absent. */
@@ -217,17 +220,38 @@ export function coreCommandActions({
   );
 }
 
+/** A command's keys as `useCommandShortcuts` matches them: lower-cased, space-joined (`g k`); null without a shortcut. */
+export function shortcutSequence(action: Pick<CommandAction, 'shortcut'>): string | null {
+  return action.shortcut && action.shortcut.length > 0 ? action.shortcut.map((k) => k.toLowerCase()).join(' ') : null;
+}
+
+/**
+ * Whether `seq` could not be bound beside `bound`: the same keys, or a
+ * sequence one of them begins (a bare `g` would swallow `g k`, and `c x`
+ * would never be reached past `c`).
+ */
+function shortcutCollides(seq: string, bound: Iterable<string>): boolean {
+  for (const b of bound) {
+    if (b === seq || b.startsWith(`${seq} `) || seq.startsWith(`${b} `)) return true;
+  }
+  return false;
+}
+
 /**
  * Core's commands, then the registry's — a distribution adds to the list
  * rather than reordering it. A registry command reusing an id core already
  * has is dropped (and said so in the console): two rows with one id would
- * share a DOM id, and the suggestions could not tell them apart.
+ * share a DOM id, and the suggestions could not tell them apart. A registry
+ * command whose keys collide with ones already bound keeps its row and loses
+ * its shortcut, hint included, so the menu never shows a key that does
+ * nothing.
  */
 export function mergeCommandActions(
   core: readonly CommandAction[],
   extra: readonly CommandAction[],
 ): CommandAction[] {
   const ids = new Set(core.map((a) => a.id));
+  const bound = new Set(core.map(shortcutSequence).filter((s): s is string => s !== null));
   const merged = [...core];
   for (const action of extra) {
     if (ids.has(action.id)) {
@@ -235,6 +259,13 @@ export function mergeCommandActions(
       continue;
     }
     ids.add(action.id);
+    const seq = shortcutSequence(action);
+    if (seq !== null && shortcutCollides(seq, bound)) {
+      console.error(`[commands] the shortcut "${seq}" of ${action.id} collides with keys already bound; it is not bound`);
+      merged.push({ ...action, shortcut: undefined });
+      continue;
+    }
+    if (seq !== null) bound.add(seq);
     merged.push(action);
   }
   return merged;

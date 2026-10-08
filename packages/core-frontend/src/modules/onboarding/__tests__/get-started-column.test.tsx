@@ -356,6 +356,20 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(openWorkspacePathMock).not.toHaveBeenCalled();
   });
 
+  // Mid-switch, the URL names the destination branch while the workspace on
+  // screen (and `createFile`) is still the branch being left; a page made in
+  // that gap would land on the old branch and open on the new one, nowhere.
+  it('"New page" creates nothing while the workspace on screen is not the branch the URL names', async () => {
+    const createFile = vi.fn(async () => {});
+    mount({ createFile, route: '/workspace/alice%2Fdraft' });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
+      'Couldn’t create the page: the workspace is still loading.',
+    );
+    expect(createFile).not.toHaveBeenCalled();
+    expect(openWorkspacePathMock).not.toHaveBeenCalled();
+  });
+
   it('"New page" does not retry a refusal that is not about the name', async () => {
     const createFile = vi.fn(async () => {
       throw new WorkspaceApiError(403, 'You don’t have permission to write to "KnowledgeBase/Untitled.md".');

@@ -653,4 +653,50 @@ describe('SearchPalette: single-key shortcuts', () => {
       vi.useRealTimers();
     }
   });
+
+  // A distribution's command gets a working key for the `shortcut` it set,
+  // under the same guards: the hint on its row is never a key that does
+  // nothing.
+  it('binds a registry command’s own keys, and leaves them alone in a field', () => {
+    const run = vi.fn();
+    renderPalette({
+      commandActions: [{ id: 'new-ontology', label: 'New ontology', shortcut: ['O'], visible: () => true, run }],
+    });
+    press('o');
+    expect(run).toHaveBeenCalledTimes(1);
+    const field = document.createElement('input');
+    document.body.appendChild(field);
+    try {
+      press('o', {}, field);
+    } finally {
+      field.remove();
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a registry shortcut that collides with keys already bound, hint and all, and keeps the core key', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const run = vi.fn();
+    const user = userEvent.setup();
+    renderPalette({
+      commandActions: [
+        // The same key as New page.
+        { id: 'clash', label: 'Clash', shortcut: ['C'], visible: () => true, run },
+        // A bare G would swallow G then K.
+        { id: 'swallow', label: 'Swallow', shortcut: ['g'], visible: () => true, run },
+      ],
+    });
+    press('c');
+    expect(createPage).toHaveBeenCalledTimes(1);
+    press('g');
+    press('k');
+    expect(screen.getByTestId('location').textContent).toBe('/workspace');
+    expect(run).not.toHaveBeenCalled();
+    // The rows stay, with no key shown.
+    await user.click(trigger());
+    await user.type(input(), 'clash');
+    expect(groupRows('Actions')).toEqual(['Clash']);
+    expect(error).toHaveBeenCalledTimes(2);
+    error.mockRestore();
+  });
 });

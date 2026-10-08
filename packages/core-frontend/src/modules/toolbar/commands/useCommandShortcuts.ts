@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useLatestRef } from '../../../shared/components';
-import { COMMAND_SHORTCUTS, type CommandAction, type CommandContext } from './actions';
+import { shortcutSequence, type CommandAction, type CommandContext } from './actions';
 
 /** How long the second key of a sequence (G, then K) is waited for. */
 export const SEQUENCE_TIMEOUT_MS = 1000;
@@ -19,9 +19,11 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 /**
- * Bind {@link COMMAND_SHORTCUTS} on the document: `C` for New page, `G` then
- * `K` for Knowledge, `G` then `S` for Skills & Tools. Mounted once, by the
- * toolbar's palette.
+ * Bind every offered command's `shortcut` on the document: `C` for New
+ * page, `G` then `K` for Knowledge, `G` then `S` for Skills & Tools, and
+ * whatever keys a distribution gave its own commands (`mergeCommandActions`
+ * has already dropped the ones that would collide). The keys a row shows
+ * are the keys bound, one field. Mounted once, by the toolbar's palette.
  *
  * A bare letter is a lot to claim, so it is claimed only when nobody could
  * mean it as text or as anything else:
@@ -58,17 +60,18 @@ export function useCommandShortcuts({
       window.clearTimeout(timer);
     };
 
+    // The commands on offer now, by their keys; read per key press, since
+    // what is offered follows the page on screen.
+    const bound = (seq: string): CommandAction | undefined =>
+      latest.current.actions.find((a) => shortcutSequence(a) === seq);
+
     const runBound = (keys: readonly string[]): boolean => {
-      const id = Object.keys(COMMAND_SHORTCUTS).find((candidate) => {
-        const bound = COMMAND_SHORTCUTS[candidate];
-        return bound.length === keys.length && bound.every((k, i) => k === keys[i]);
-      });
-      const { actions, ctx, run } = latest.current;
-      const action = id ? actions.find((a) => a.id === id) : undefined;
+      const action = bound(keys.join(' '));
       if (!action) return false;
-      run(action, ctx);
+      run(action, latest.current.ctx);
       return true;
     };
+    const run = (action: CommandAction, ctx: CommandContext) => latest.current.run(action, ctx);
 
     function onKeyDown(e: KeyboardEvent) {
       if (!latest.current.enabled || e.defaultPrevented || e.repeat) return;
@@ -92,7 +95,10 @@ export function useCommandShortcuts({
         return;
       }
       // The first key of a sequence: hold it for the second.
-      const opensSequence = Object.values(COMMAND_SHORTCUTS).some((keys) => keys.length === 2 && keys[0] === key);
+      const opensSequence = latest.current.actions.some((a) => {
+        const keys = a.shortcut ?? [];
+        return keys.length === 2 && keys[0]?.toLowerCase() === key;
+      });
       if (opensSequence) {
         first = key;
         timer = window.setTimeout(forget, SEQUENCE_TIMEOUT_MS);

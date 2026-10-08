@@ -145,6 +145,28 @@ describe('mergeCommandActions / visibleActions', () => {
     error.mockRestore();
   });
 
+  it('keeps a registry command whose keys collide with bound ones, but drops its shortcut', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const withKeys = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
+    const extra: CommandAction[] = [
+      { id: 'clash', label: 'Clash', shortcut: ['c'], visible: () => true, run: vi.fn() },
+      { id: 'prefix', label: 'Prefix', shortcut: ['G'], visible: () => true, run: vi.fn() },
+      { id: 'longer', label: 'Longer', shortcut: ['g', 'k', 'x'], visible: () => true, run: vi.fn() },
+      { id: 'fine', label: 'Fine', shortcut: ['O'], visible: () => true, run: vi.fn() },
+      { id: 'also-fine', label: 'Also fine', shortcut: ['g', 'o'], visible: () => true, run: vi.fn() },
+    ];
+    const merged = mergeCommandActions(withKeys, extra);
+    const shortcutOf = (id: string) => merged.find((a) => a.id === id)?.shortcut;
+    expect(merged.map((a) => a.id).slice(-5)).toEqual(['clash', 'prefix', 'longer', 'fine', 'also-fine']);
+    expect(shortcutOf('clash')).toBeUndefined();
+    expect(shortcutOf('prefix')).toBeUndefined();
+    expect(shortcutOf('longer')).toBeUndefined();
+    expect(shortcutOf('fine')).toEqual(['O']);
+    expect(shortcutOf('also-fine')).toEqual(['g', 'o']);
+    expect(error).toHaveBeenCalledTimes(3);
+    error.mockRestore();
+  });
+
   it('drops a command whose visible() throws, and keeps the rest', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const broken: CommandAction = {

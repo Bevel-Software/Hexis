@@ -1,8 +1,9 @@
 import { useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import { KNOWLEDGE_BASE_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
-import { useFileNav } from '../routing/kb-routes';
+import { branchFromPathname, useFileNav } from '../routing/kb-routes';
 import { useMergedWorkspaceTree } from './useMergedWorkspaceTree';
 import { pathExistsInTree } from '../utils/fileTree';
 
@@ -44,7 +45,11 @@ function isNameTaken(err: unknown): boolean {
 }
 
 export interface CreatePage {
-  /** The Knowledge folder pages are created in, or null before the workspace has bootstrapped. */
+  /**
+   * The Knowledge folder pages are created in, or null while there is nowhere
+   * safe to create one: before the workspace has bootstrapped, and while the
+   * workspace on screen is not yet the branch the URL names.
+   */
   knowledgeRoot: string | null;
   /**
    * Create `Untitled.md` (or the next free `Untitled N.md`) in the Knowledge
@@ -69,10 +74,21 @@ export interface CreatePage {
  * column keeps it on its step, the menu reopens with it.
  */
 export function useCreatePage(): CreatePage {
-  const { kbDirName, createFile } = useWorkspace();
+  const { kbDirName, createFile, workspaceBranch } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
   const { openWorkspacePath } = useFileNav();
-  const knowledgeRoot = kbDirName ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
+  const { pathname } = useLocation();
+  // Where the page would be WRITTEN against where it would OPEN. `createFile`
+  // writes to the workspace on screen (`workspaceBranch`), while the page
+  // opens on the branch the URL names; mid-switch those differ, the URL
+  // already naming the destination. A page made in that gap lands on the
+  // branch the person just left, and the viewer then looks for it on the new
+  // one and finds nothing. So there is no folder to create in until the two
+  // agree. No branch in the URL (the Library) means the workspace on screen
+  // is the destination, as `openWorkspacePath` reads it.
+  const destination = branchFromPathname(pathname) ?? workspaceBranch;
+  const ready = kbDirName !== null && workspaceBranch !== null && destination === workspaceBranch;
+  const knowledgeRoot = ready ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
 
   const createPage = useCallback(async (): Promise<string> => {
     if (!knowledgeRoot) throw new Error('Couldn’t create the page: the workspace is still loading.');
