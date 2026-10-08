@@ -13,13 +13,14 @@ import {
   entryExistsMessage,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
-import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
 import {
   DestinationTakenError,
   inspectDestination,
   renameNoReplace,
 } from '../../shared/rename-no-replace.js';
-import type { IGitRunner } from '../../shared/git.contract.js';
+import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
@@ -47,6 +48,7 @@ import { setAsideClone, setAsideRootFor, setAsideStamp } from './set-aside-clone
 import {
   cloneCredentialArgs,
   cloneCredentialConfigArgs,
+  credentialHelperValue,
   cloneTrackingConfigArgs,
   SAFE_IMPLICIT_FETCH_ARGS,
 } from '../kb-fs/clone-config.js';
@@ -98,7 +100,12 @@ const UNZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500 MB across the whole arch
 // Folder-download cap. The whole zip is built in memory by adm-zip (no
 // streaming) so the cap also bounds peak heap usage for one download.
 // Reuses the unzip total as a single "fits in a workspace" budget.
-const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+export const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+
+// How many files one agent download request may carry: what one zip may hold
+// for `apply_file_upload` to unzip it back, and a bound on the lists a
+// request builds before anything is judged.
+export const DOWNLOAD_MAX_FILES = UNZIP_MAX_ENTRIES;
 
 /**
  * Which of a folder's files a zip may pack: handed every file the walk found
@@ -434,6 +441,50 @@ export class WorkspaceService implements IWorkspaceService {
       // stays the 500 the operator reads.
       if (isAbsence(err)) return false;
       throw err;
+    }
+  }
+
+  /**
+   * Does `branch` certainly not exist? Asked by the tool handler before a tool
+   * runs, so a call naming a branch nobody ever pushed is answered 404 without
+   * a workspace being created for it.
+   *
+   * Never clones and never creates a directory. A branch this platform has a
+   * clone of, is cloning, or has ever heard of is NOT missing: one that origin
+   * has since deleted is left to the open, which answers its 410. Anything
+   * else is asked of origin with `ls-remote`, and only origin's "no such ref"
+   * makes it missing. A name that is malformed, or a remote that could not be
+   * asked, is `false` too: the open then answers for it, exactly as before.
+   * A storage fault reading what this platform has heard of is NOT read as
+   * either answer: it propagates, the 500 the operator reads.
+   */
+  async isBranchMissing(branch: string): Promise<boolean> {
+    try {
+      assertValidBranchName(branch);
+    } catch {
+      return false;
+    }
+    if (this.branchDirs.has(branch) || this.inFlightBootstraps.has(branch)) return false;
+    if (await this.hasHeardOfBranch(branch)) return false;
+    const helper = credentialHelperValue(this.gitRunner.credentials);
+    try {
+      const { stdout } = await this.gitRunner.run(this.workspacesRoot, [
+        ...(helper ? ['-c', `credential.helper=${helper}`] : []),
+        'ls-remote',
+        '--exit-code',
+        '--heads',
+        '--end-of-options',
+        this.kbRepoUrl(),
+        `refs/heads/${branch}`,
+      ]);
+      // The argument is a PATTERN, matched at any slash boundary: it also
+      // lists `refs/heads/refs/heads/<branch>`. Only the exact ref counts.
+      const ref = `refs/heads/${branch}`;
+      return !stdout.split('\n').some((line) => line.split('\t')[1]?.trim() === ref);
+    } catch (err) {
+      // `--exit-code`: 2 is "the remote answered, and has no matching ref".
+      // Every other failure is a remote we could not ask.
+      return err instanceof GitRunError && err.exitCode === 2;
     }
   }
 
@@ -1482,6 +1533,57 @@ export class WorkspaceService implements IWorkspaceService {
       zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
     }
     return zip.toBuffer();
+  }
+
+  /**
+   * What is at `wsPath`, for an agent download: nothing, one file, or a folder
+   * and every file the explorer shows under it (the folder download's walk —
+   * no `.git/`, no `.gitkeep`, no `.bevelignore`d path, no link). Files come
+   * back repository-relative, with their size on disk; nothing is read, and
+   * nothing is judged — the caller judges every path on its own.
+   *
+   * The `.bevelignore` rules are those in force at the folder, its ancestors'
+   * included, as the explorer's walk from the root has them: a folder an
+   * ancestor's rule hides holds no files. The walk stops once it has found
+   * more than `maxFiles` files; the caller refuses such a request.
+   *
+   * A path that reaches its target through a link, or names the git folder,
+   * is refused as the reads refuse it; a path with nothing at it is
+   * `missing`, which the caller answers exactly as a path it may not read.
+   */
+  async downloadCandidatesAt(
+    workspaceId: string,
+    wsPath: string,
+    maxFiles: number,
+  ): Promise<{ kind: 'missing' } | { kind: 'file' | 'folder'; files: { path: string; bytes: number }[] }> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertNoGitInternalsSegment(relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
+    let stat;
+    try {
+      stat = await fs.lstat(absolutePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') {
+        return { kind: 'missing' };
+      }
+      throw err;
+    }
+    const inRepo = (relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1)).replace(/\/+$/, '');
+    if (stat.isFile()) return { kind: 'file', files: [{ path: inRepo, bytes: stat.size }] };
+    if (!stat.isDirectory()) return { kind: 'missing' };
+    const files: { path: string; bytes: number }[] = [];
+    const rules = await ignoreRulesAbove(path.join(workspaceDir, this.kbDirName), inRepo);
+    if (!rules) return { kind: 'folder', files };
+    await this.disk.walk(absolutePath, { ...explorerWalk(), ignore: rules, until: () => files.length > maxFiles }, [
+      {
+        async onFile(dir, name) {
+          const size = (await fs.lstat(path.join(absolutePath, dir, name))).size;
+          files.push({ path: [inRepo, dir, name].filter(Boolean).join('/'), bytes: size });
+        },
+      },
+    ]);
+    return { kind: 'folder', files };
   }
 
   /**
@@ -2549,6 +2651,24 @@ export class WorkspaceService implements IWorkspaceService {
     };
     return finish(top);
   }
+}
+
+/**
+ * The `.bevelignore` rules in force ABOVE the folder `inRepo` (repository-
+ * relative, `''` for the root) — the root's file and every ancestor's, not
+ * the folder's own, which a walk from the folder layers itself — or null when
+ * one of those rules hides the folder or an ancestor, as the explorer's walk
+ * from the root would never enter it.
+ */
+async function ignoreRulesAbove(repoRoot: string, inRepo: string): Promise<IgnoreRules | null> {
+  let rules: IgnoreRules = BevelIgnoreStack.empty();
+  let dir = repoRoot;
+  for (const segment of inRepo.split('/').filter(Boolean)) {
+    rules = await rules.extendedWith(dir);
+    dir = path.join(dir, segment);
+    if (rules.isIgnored(dir, true)) return null;
+  }
+  return rules;
 }
 
 /**

@@ -30,6 +30,7 @@ import {
   stripHtmlComments,
   type KbLayout,
 } from '@bevel-software/platform-shared';
+import { splitCallLine } from '@bevel-software/platform-mcp-core';
 import { sharedFileRulesSection } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
@@ -48,7 +49,13 @@ export const PLATFORM_HEADER =
   'Before answering a question about the organisation, its people, customers, products, processes, projects or internal terms, ' +
   'search the knowledge base: call `start_session` once, then `grep` for the key terms, `list_files` to orient, and `read_file` what matches. ' +
   'Prefer what you find there over memory or the web, and say so when the knowledge base is silent on something the organisation should have documented. ' +
-  'Skills are available as prompts and through `list_skills` and `get_skill`.';
+  'Skills are available as prompts and through `list_skills` and `get_skill`. ' +
+  // There is no one calling shape to state: the knowledge-base tools take
+  // their arguments under `body`, a tool that calls another service takes them
+  // flat, and an agent told one rule for all of them sends a GET with a body.
+  // The per-tool `Call:` line is generated from each tool's own input schema,
+  // so pointing at it is both shorter and always right.
+  'Tools do not share one calling shape: call each tool exactly as the `Call:` line at the top of its description shows.';
 
 /**
  * The fixed first line of the tool prefix. It always leads, so an admin's
@@ -167,9 +174,17 @@ export function composeAgentInstructions(
  * A tool description with the prefix ahead of it: the prefix, a blank line,
  * then the original. Purpose line first, because claude.ai cuts descriptions
  * near 500 characters.
+ *
+ * Except for the `Call:` line, which stays the very first line whatever else
+ * is prepended: it is how an agent learns the shape this tool's arguments take,
+ * and a description that opens with the purpose prefix instead would bury the
+ * one line the refusal for a wrong call points back to.
  */
 export function prefixToolDescription(toolPrefix: string, description: string | undefined): string {
-  return description ? `${toolPrefix}\n\n${description}` : toolPrefix;
+  if (!description) return toolPrefix;
+  const { call, rest } = splitCallLine(description);
+  if (call === null) return `${toolPrefix}\n\n${description}`;
+  return rest === '' ? `${call}\n\n${toolPrefix}` : `${call}\n\n${toolPrefix}\n\n${rest}`;
 }
 
 /** An ATX heading line: `#` to `######`, then a space or the end. */

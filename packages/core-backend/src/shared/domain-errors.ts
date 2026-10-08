@@ -250,8 +250,18 @@ const STRINGIFIED_ABSENT_VALUES = new Set(['undefined', 'null']);
  * nothing", which is the one case where naming the branch back is impossible.
  */
 export function assertBranchProvided(branch: unknown): asserts branch is string {
-  if (typeof branch !== 'string' || branch.length === 0) throw new BranchRequiredError();
-  if (STRINGIFIED_ABSENT_VALUES.has(branch)) throw new BranchRequiredError();
+  if (!branchProvided(branch)) throw new BranchRequiredError();
+}
+
+/**
+ * The same question as {@link assertBranchProvided}, answered rather than
+ * thrown — for a caller that must know whether the branch refusal is the one
+ * this call is going to get, without being the one to raise it. The generic
+ * argument check asks it so that refusal keeps coming first.
+ */
+export function branchProvided(branch: unknown): branch is string {
+  if (typeof branch !== 'string' || branch.length === 0) return false;
+  return !STRINGIFIED_ABSENT_VALUES.has(branch);
 }
 
 /**
@@ -271,6 +281,23 @@ export class BranchNotFoundError extends WorkflowDomainError {
       branch,
     });
     this.name = 'BranchNotFoundError';
+  }
+}
+
+/**
+ * A tool that defaults its branch was called without one, and the deployment
+ * has no default branch configured to fall back on. Not `BranchRequiredError`:
+ * the tool's schema says the branch is optional, so "you must pass one" would
+ * misdescribe the call — the caller did nothing wrong, the deployment is not
+ * set up. 503 with kind `default-branch-unset`; passing a branch works.
+ */
+export class DefaultBranchUnsetError extends WorkflowDomainError {
+  readonly kind = 'default-branch-unset' as const;
+  constructor() {
+    super('This deployment has no default branch configured: pass `branch` to name the one to use.', 503, {
+      kind: 'default-branch-unset',
+    });
+    this.name = 'DefaultBranchUnsetError';
   }
 }
 

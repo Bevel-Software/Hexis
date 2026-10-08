@@ -9,6 +9,7 @@ import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
 import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
+import { registerEmbedTools } from '../../embed/embed.tools.js';
 import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -93,6 +94,17 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
     register: (registry) => registerSkillsTools(registry, express.Router(), pass, handler, nothing),
   },
   { name: 'registerPluginsTools', register: (registry) => registerPluginsTools(registry, testKbContext()) },
+  {
+    name: 'registerEmbedTools',
+    register: (registry) =>
+      registerEmbedTools(registry, express.Router(), pass, handler, {
+        embedService: nothing,
+        kb: testKbContext(),
+        readForTool: nothing,
+        canBeFramed: () => true,
+        appUrlFor: (repoRelative) => `https://example.test/workspace/main/knowledge-base/${repoRelative}`,
+      }),
+  },
   {
     name: 'registerToolManualsTools',
     register: (registry) =>

@@ -3492,9 +3492,90 @@ export class WorkflowService implements IWorkflowService {
     }
   }
 
+  /**
+   * How long `mergeBranch` waits for the source's queued commits, and how
+   * often it asks. The worker polls every half second and a commit takes a few
+   * seconds; twenty seconds of waiting is an outage, not latency.
+   *
+   * Twenty, not thirty, because of who is waiting on THIS call: an agent over
+   * `/api/mcp` reaches the tool through `@utcp/http`, whose request timeout is
+   * a fixed 30 seconds (its call-template schema drops any `timeout` field).
+   * The wait plus the merge after it (fetch, merge, push) must fit inside
+   * that, or the agent hears "timeout of 30000ms exceeded" instead of the
+   * `pending-commits` answer this wait exists to give. Mutable for tests only.
+   */
+  mergeWaitForPendingCommits = { timeoutMs: 20_000, pollMs: 250 };
+
+  /**
+   * Wait until no commit is queued on `branch`, or the bound runs out. A
+   * commit escalated to a person ends the wait at once: nothing will land it.
+   *
+   * Polls the queue rather than draining it: the worker's own per-workspace
+   * serialization stays the only writer to the clone, and the row is deleted
+   * only after its push, so "no row" means the remote holds the commit.
+   */
+  private async awaitPendingCommits(
+    branch: string,
+  ): Promise<{ ok: true } | { ok: false; pending: number; needsAttention?: string }> {
+    const { timeoutMs, pollMs } = this.mergeWaitForPendingCommits;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const { queued, stuck, needsAttention } = await this.pendingCommits.queuedOnBranch(branch);
+      if (needsAttention !== null) return { ok: false, pending: queued + stuck, needsAttention };
+      if (queued === 0) return { ok: true };
+      if (Date.now() >= deadline) return { ok: false, pending: queued };
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
+    }
+  }
+
+  /** The one question `mergeBranch` refuses on: is a request from `source` into `target` open? */
+  private async openRequestBlockingMerge(sourceBranch: string, targetBranch: string): Promise<number | null> {
+    const [open] = await this.db
+      .select({ number: changeRequests.number })
+      .from(changeRequests)
+      .where(
+        and(
+          eq(changeRequests.sourceBranch, sourceBranch),
+          eq(changeRequests.targetBranch, targetBranch),
+          eq(changeRequests.state, 'open'),
+        ),
+      )
+      .limit(1);
+    return open ? open.number : null;
+  }
+
   async mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome> {
     if (sourceBranch === targetBranch) {
       throw new WorkflowValidationError(`\`source\` and \`target\` are both "${sourceBranch}" — name two different branches.`);
+    }
+
+    // Asked once BEFORE waiting, so a merge the open request forbids is refused
+    // at once rather than after the source's commits have landed. Not the
+    // answer that counts — that one is asked again under the locks below.
+    const openBefore = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
+    if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, openBefore);
+
+    // Writes are committed asynchronously: a write tool answers once the bytes
+    // are on disk and the pending-commits worker commits and pushes them a few
+    // seconds later. The merge below merges what the REMOTE holds of the
+    // source, so issued in those seconds it would find nothing new and land
+    // nothing. Wait for them first — OUTSIDE the lifecycle locks, which guard
+    // creating, deleting and opening requests on these branches, and must not
+    // be held for seconds of waiting on a queue.
+    const settled = await this.awaitPendingCommits(sourceBranch);
+    if (!settled.ok) {
+      const message = settled.needsAttention
+        ? `A commit queued on "${sourceBranch}" failed and needs a person: ${settled.needsAttention} ` +
+          `Nothing was merged. Tell the user; merge again once it has been resolved.`
+        : `${settled.pending} write(s) on "${sourceBranch}" are still being committed. ` +
+          `Nothing was merged. Retry the merge shortly.`;
+      return {
+        kind: 'pending-commits',
+        branch: sourceBranch,
+        pending: settled.pending,
+        ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
+        message,
+      };
     }
 
     // Under the lifecycle lock of BOTH branches, the same protocol
@@ -3510,18 +3591,8 @@ export class WorkflowService implements IWorkflowService {
       // A person merges a change request. Only the request's OWN direction is
       // blocked: the target merged into the source is how a draft under review
       // stays current, and that must keep working while the request is open.
-      const [open] = await this.db
-        .select({ number: changeRequests.number })
-        .from(changeRequests)
-        .where(
-          and(
-            eq(changeRequests.sourceBranch, sourceBranch),
-            eq(changeRequests.targetBranch, targetBranch),
-            eq(changeRequests.state, 'open'),
-          ),
-        )
-        .limit(1);
-      if (open) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open.number);
+      const open = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
+      if (open !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open);
 
       // The merge runs in the target's own workspace, like a change request's.
       const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
@@ -3601,6 +3672,10 @@ export class WorkflowService implements IWorkflowService {
         return { kind: 'conflicts-need-resolution', conflictedPaths: result.paths };
       }
       await this.pullMergeTarget(targetBranch, user);
+      // No merge commit: the target already held everything on the source, and
+      // `sha` is its unchanged tip. Reported as such — a `merged` that applied
+      // nothing is what sent agents on as if their write had landed.
+      if (result.mergeCommit === null) return { kind: 'nothing-to-merge', sha: result.sha };
       return { kind: 'merged', sha: result.sha };
     });
   }

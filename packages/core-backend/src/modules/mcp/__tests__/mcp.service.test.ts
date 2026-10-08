@@ -14,7 +14,7 @@ import { toolDef } from '../../tool-helpers/tool-def.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { TOOL_PREFIX_LINE, platformInstructions } from '../../agent-instructions/index.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { splitCallLine } from '@bevel-software/platform-mcp-core';
 import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
 
 /** The platform-owned part of the handshake text: the header plus the shared file rules. */
@@ -279,7 +279,9 @@ describe('McpService (UTCP→MCP proxy)', () => {
     const { tools } = await client.listTools();
     for (const name of ['call_tool_chain', 'list_tools', 'tools_info']) {
       const served = tools.find((t) => t.name === name)!;
-      expect(served.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      // Behind its `Call:` line, the first line of every description.
+      expect(served.description!.startsWith(`Call: ${name}(`), name).toBe(true);
+      expect(splitCallLine(served.description!).rest.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
       expect(served.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
     }
     const chain = tools.find((t) => t.name === 'call_tool_chain')!;
@@ -614,33 +616,40 @@ describe('McpService — agent instructions', () => {
       expect.stringContaining('mcp-description.md'),
       expect.objectContaining({ message: 'disk' }),
     );
-    // And the four tools carry the fixed line alone, ahead of the guide-first
+    // And the four tools carry the fixed line alone — behind the call line,
+    // which stays first whatever is prepended, and ahead of the guide-first
     // opening every listed tool has.
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {
       expect(tools.find((t) => t.name === name)?.description).toBe(
-        `${TOOL_PREFIX_LINE}\n\n${GUIDE_FIRST_SENTENCE} original ${name} description`,
+        `Call: KNOWLEDGE_BASE.${name}({})\n\n${TOOL_PREFIX_LINE}\n\n${GUIDE_FIRST_SENTENCE} original ${name} description`,
       );
     }
   });
 
-  it('prefixes exactly the four knowledge-base tools; every other description is as the catalog lists it', async () => {
+  it('prefixes exactly the four knowledge-base tools; every other description gains only its call line and the guide-first opening', async () => {
     const client = await setup({ readAgentPreamble: async () => 'Acme builds solar farms.', extraTools: KB_TOOLS });
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t.description]));
     const prefix = `${TOOL_PREFIX_LINE} Acme builds solar farms.`;
     for (const name of KB_TOOLS) {
-      expect(byName[name], name).toBe(`${prefix}\n\n${GUIDE_FIRST_SENTENCE} original ${name} description`);
+      expect(byName[name], name).toBe(
+        `Call: KNOWLEDGE_BASE.${name}({})\n\n${prefix}\n\n${GUIDE_FIRST_SENTENCE} original ${name} description`,
+      );
     }
     // Regression: the rest carries only what the catalog gives every tool —
-    // the guide-first opening — and never the purpose prefix; the meta-tools
-    // open with that sentence too.
-    expect(byName.ask).toBe(`${GUIDE_FIRST_SENTENCE} echo the prompt`);
-    expect(byName.boom).toBe(`${GUIDE_FIRST_SENTENCE} always errors`);
-    expect(byName.refy).toBe(`${GUIDE_FIRST_SENTENCE} has $defs/$ref in its schema`);
+    // its own call line, then the guide-first opening — and never the purpose
+    // prefix; the meta-tools open the same way.
+    expect(byName.ask).toBe(`Call: KNOWLEDGE_BASE.ask({ body: { prompt: "..." } })\n\n${GUIDE_FIRST_SENTENCE} echo the prompt`);
+    expect(byName.boom).toBe(`Call: KNOWLEDGE_BASE.boom({})\n\n${GUIDE_FIRST_SENTENCE} always errors`);
+    // Its `to` is an array of a `$ref`'d shape: the example takes the type at
+    // the top and says nothing about what is inside — the interface does that.
+    expect(byName.refy).toBe(
+      `Call: KNOWLEDGE_BASE.refy({ body: { to: [] } })\n\n${GUIDE_FIRST_SENTENCE} has $defs/$ref in its schema`,
+    );
     for (const meta of ['call_tool_chain', 'list_tools', 'tools_info']) {
       expect(byName[meta], meta).not.toContain(TOOL_PREFIX_LINE);
-      expect(byName[meta]!.startsWith(`${GUIDE_FIRST_SENTENCE} `), meta).toBe(true);
+      expect(splitCallLine(byName[meta]!).rest.startsWith(`${GUIDE_FIRST_SENTENCE} `), meta).toBe(true);
     }
   });
 
@@ -658,7 +667,8 @@ describe('McpService — agent instructions', () => {
     });
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {
-      expect(tools.find((t) => t.name === name)?.description.startsWith(`${TOOL_PREFIX_LINE} Acme.`)).toBe(true);
+      expect(tools.find((t) => t.name === name)?.description).toContain(`\n\n${TOOL_PREFIX_LINE} Acme.`);
+      expect(tools.find((t) => t.name === name)?.description.startsWith('Call: ')).toBe(true);
     }
   });
 });

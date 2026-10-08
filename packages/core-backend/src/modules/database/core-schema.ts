@@ -1,11 +1,11 @@
 /**
  * CORE platform tables — the git-backed workspace/workflow, auth, access,
  * change requests, locks, the pending-commits queue, connection keys, MCP
- * OAuth, and the Secrets Vault. A core-only deployment migrates and runs on
- * exactly these tables.
+ * OAuth, the Secrets Vault, and the embed's Atlassian account links. A
+ * core-only deployment migrates and runs on exactly these tables.
  *
  * Enterprise-only tables (chat, routines, watchlist, connectors, LLM config,
- * SharePoint/Atlassian links, feedback, upload, kb-revalidation) live in
+ * SharePoint links, feedback, upload, kb-revalidation) live in
  * `enterprise-schema.ts`, which imports the FK targets (`users`,
  * `externalApiKeys`) from here. `schema.ts` re-exports both, so existing
  * imports keep working unchanged.
@@ -828,4 +828,34 @@ export const pluginJoinRequests = pgTable('plugin_join_requests', {
     'plugin_join_requests_status',
     sql`${t.status} IN ('pending', 'opened', 'failed')`,
   ),
+}));
+
+/**
+ * Links an account from an outside system — today an Atlassian (Forge)
+ * account id — to a Hexis user, so an embed minted for that account resolves
+ * to a person whose read and write access the view obeys.
+ *
+ * KEPT UNDER ITS ENTERPRISE NAME, deliberately. The table was created by the
+ * Bevel Platform's own migration history before the embed moved into Hexis;
+ * an upgraded database already holds every link its Jira users made, and
+ * nobody is going to re-link. So the core migration creates it only if it is
+ * absent and adopts what is there otherwise (see
+ * `0017_atlassian_account_links.sql`), and the generic name this table
+ * deserves is not worth a data migration for a column nobody reads by name.
+ *
+ * Not sealed: an Atlassian account id is an opaque identifier from another
+ * system, which is the same reason the rest of those are left in the clear.
+ *
+ * PK is the account id — one Hexis user per Atlassian account — while one
+ * user may hold several account ids across sites, which is what `by_user`
+ * serves. Links die with the user (`onDelete: 'cascade'`): an erasure request
+ * must never be blocked by a leftover embed link.
+ */
+export const atlassianAccountLinks = pgTable('atlassian_account_links', {
+  atlassianAccountId: text('atlassian_account_id').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  byUser: index('atlassian_account_links_by_user').on(t.userId),
 }));

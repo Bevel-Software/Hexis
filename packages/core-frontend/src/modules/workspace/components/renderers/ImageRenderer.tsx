@@ -1,10 +1,9 @@
 import { useState, useEffect } from 'react';
-import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { RetryReadButton } from './RetryReadButton';
 import { useReadRetry } from './useReadRetry';
 import { useImageRevision } from '../../hooks/useImageRevision';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { useRendererRawRead } from './rendererRawRead';
 import type { FileRendererProps } from './types';
 
 /** How the read of one image ended. */
@@ -33,28 +32,21 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
    */
   const revision = useImageRevision(workspaceId);
   /**
-   * A past save, when Version history mounted this. The revision above is
-   * then deliberately NOT folded in: the bytes at a commit cannot change, so
-   * `&v=` would only defeat the browser cache, and the revision bumps on every
-   * save of the file — which for a version pane means a re-read of a version
-   * that is not what changed.
+   * Where the picture's bytes come from — the workspace raw route under the
+   * session in the app, the surface's own route in an embed. It folds the
+   * save this viewer is bound to in itself, so a version pane needs nothing
+   * extra here.
    */
-  const fileRef = useRendererFileRef();
-  /**
-   * The save as PRIMITIVES, hoisted out of the object so the read effect can
-   * depend on exactly what it reads. Depending on `fileRef` itself would put
-   * a context object in the dependency list.
-   */
-  const versionRef = fileRef?.ref ?? null;
-  const versionSide = fileRef?.side;
+  const rawRead = useRendererRawRead();
   /**
    * The cache key of a WORKING-TREE read, and nothing else. Folding the
    * revision into a version read would not just waste a request: a teammate
    * saving the file while a past save is on screen would bump it, the read
    * effect would re-run, and the picture the reader is looking at would blink
-   * back to "Loading image…" for bytes that cannot have changed.
+   * back to "Loading image…" for bytes that cannot have changed. Which kind
+   * of read this is belongs to the raw source, so that is what is asked.
    */
-  const revisionKey = versionRef === null ? revision : null;
+  const revisionKey = rawRead?.pinnedToVersion ? null : revision;
   // Blob and failure in ONE value, so the cleanup that drops the old blob
   // drops the old failure with it — a second `useState` would need a reset in
   // the effect body, which costs a cascading render on every path change.
@@ -63,20 +55,12 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
   const { attempt, retry } = useReadRetry();
 
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let revoked = false;
     (async () => {
       try {
-        const res = await authFetch(
-          rawFileUrl(
-            workspaceId,
-            filePath,
-            versionRef === null
-              ? { version: revisionKey ?? undefined }
-              : { ref: versionRef, side: versionSide },
-          ),
-        );
+        const res = await rawRead.fetch(filePath, { version: revisionKey ?? undefined });
         if (revoked) return;
         if (!res.ok) {
           setRead({ objectUrl: null, error: `Couldn't load this image (HTTP ${res.status}).` });
@@ -99,7 +83,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
         return prev === NOT_READ ? prev : NOT_READ;
       });
     };
-  }, [workspaceId, filePath, revisionKey, versionRef, versionSide, attempt]);
+  }, [rawRead, filePath, revisionKey, attempt]);
 
   if (read.error) {
     return (

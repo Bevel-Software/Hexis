@@ -8,6 +8,7 @@ import {
   createAgentUploadRoutes,
   isAgentUploadRawBodyPath,
 } from '../modules/workspace/agent-upload.routes.js';
+import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
@@ -79,6 +80,10 @@ import { createReadiness } from './readiness.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/write-access/write-access.js';
+import { createEmbedRoutes, createEmbedLinkRoutes } from '../modules/embed/embed.routes.js';
+import { registerEmbedTools } from '../modules/embed/embed.tools.js';
+import { createMcpAppRoutes } from '../modules/embed/mcp-app.routes.js';
+import { isFrameableOrigin } from '../modules/embed/mcp-app.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -86,6 +91,11 @@ type ExpressApp = ReturnType<typeof express>;
  * The context handed to {@link ServerExtensions.tools}: everything an overlay
  * needs to register its own tool defs + endpoint routes on the unified tool
  * surface, exactly like the core modules do.
+ *
+ * A tool that works on a branch declares it on its `toolDef` (`branch:
+ * 'required'` or, read-only tools only, `'defaults-to-default-branch'`), and
+ * `toolHandler` resolves the branch before the tool runs — see "The branch"
+ * in `modules/tool-helpers/index.ts`.
  */
 export interface ToolSurfaceCtx {
   registry: CoreServices['toolRegistry'];
@@ -462,7 +472,24 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore);
+  // `open_page` — the knowledge-base page shown inside a chat. Registered
+  // here, on the same router as the file tools, because it answers with
+  // `read_file`'s own read: the read hook, the access gate and the
+  // not-found refusal come from that registration rather than from a copy.
+  registerEmbedTools(core.toolRegistry, toolsRouter, ta, th, {
+    embedService: core.embedService,
+    kb: core.kb,
+    readForTool: workspaceTools.readForTool,
+    // A plain-http deployment cannot be framed by any host's https sandbox,
+    // so the tool answers the text and the app address and says so.
+    canBeFramed: () => isFrameableOrigin(core.config.publicFrontendUrl),
+    appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+  });
+  // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
+  // a host to this deployment over HTTP and has no other way to learn which
+  // tools carry a view. Same router, same `manualAuth` as `all-tools`.
+  toolsRouter.use(createMcpAppRoutes(core.mcpAppService, core.manualAuthMiddleware));
   // The guide on its own, beside the file tools that serve it by name.
   registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
   // The agent upload route, on the same router as the tool endpoints so it
@@ -472,6 +499,10 @@ export async function createCoreServer(
   // no workspace and writes into none; every access, platform-file and branch
   // rule is applied later by `apply_file_upload`.
   toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
+  // Its outgoing twin, mounted the same way and for the same reason: the
+  // one-time link is the whole credential an agent's `curl` carries. Every
+  // file behind it was judged when `request_file_download` issued it.
+  toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -554,6 +585,12 @@ export async function createCoreServer(
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
+  // The embed surface, ahead of every JWT mount and of the static
+  // catch-all: its data routes authenticate by the embed token ALONE (a
+  // session reaching them must be refused, not honoured), and the two SPA
+  // routes need their framing headers stamped before `index.html` is served.
+  app.use(createEmbedRoutes(core.embedService));
+
   ext.postTools?.(app, core);
 
   // The plugin creation doors — `POST /api/plugins`, `POST /api/plugins/personal`
@@ -821,6 +858,12 @@ export async function createCoreServer(
   }));
 
   // JWT-protected overlay routes.
+  // Linking an outside account to the signed-in user, and managing those
+  // links. Under the JWT middleware, deliberately: the link acts AS the
+  // session, which is exactly why the page it is called from refuses every
+  // framing ancestor.
+  app.use('/api', core.authMiddleware, createEmbedLinkRoutes(core.embedService));
+
   ext.authed?.(app, core);
 
   // In production, serve the frontend static build

@@ -108,6 +108,7 @@ export interface TenantConfig {
   readonly allowedEmailDomains: string[];
   readonly secretsEncKey: string;
   readonly internalTokenSecret: string;
+  readonly embedSharedSecret: string;
   readonly trustProxy: string;
   readonly gitTimeoutMs: number;
   readonly publicBackendUrl: string;
@@ -338,6 +339,17 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    */
   readonly internalTokenSecret: string;
   /**
+   * The shared secret the Atlassian connector presents to \`POST
+   * /api/embed/token\` (\`EMBED_SHARED_SECRET\`). Unset on a deployment that
+   * has no connector pointed at it, which 404s that one route — the embed
+   * surface itself needs no secret, because the MCP App mints through the
+   * authenticated MCP session instead.
+   *
+   * There is deliberately NO framing setting beside it: any site may frame
+   * the embed page (see the embed module), so there is no allowlist to keep.
+   */
+  readonly embedSharedSecret: string;
+  /**
    * Express `trust proxy` setting, from `TRUST_PROXY`: the number of reverse
    * proxy hops in front of this backend (e.g. `1`), or an address/CIDR list
    * (`loopback`, `10.0.0.0/8`). Unset (default) → forwarded headers are
@@ -503,6 +515,7 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     // key never gets past this line.
     assertKeyDecodesTo32Bytes(this.secretsEncKey, secretsKeySource);
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
+    this.embedSharedSecret = (process.env.EMBED_SHARED_SECRET || '').trim();
     // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
     // deployment" — one proxy hop, and the public origin IS that domain. The
     // three values below therefore default from it, so `DOMAIN=x.example.com`

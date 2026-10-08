@@ -215,13 +215,24 @@ export type MergeChangeRequestOutcome =
   | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
 
 /**
- * What a direct branch-to-branch merge (`mergeBranch`) did: landed as `sha`
- * on the target (the target's own tip when it already contained the source),
- * or stopped on conflicts, nothing written.
+ * What a direct branch-to-branch merge (`mergeBranch`) did:
+ *
+ *  - `merged`                    — a merge commit `sha` was made and published
+ *                                  on the target.
+ *  - `nothing-to-merge`          — the target already contained the source;
+ *                                  `sha` is the target's unchanged tip.
+ *  - `conflicts-need-resolution` — stopped on conflicts, nothing written.
+ *  - `pending-commits`           — writes on the source are still being
+ *                                  committed (the merge waited for them and
+ *                                  they did not land in time), or one of them
+ *                                  failed and `needsAttention` carries the
+ *                                  worker's message. Nothing was merged.
  */
 export type MergeBranchOutcome =
   | { kind: 'merged'; sha: string }
-  | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
+  | { kind: 'nothing-to-merge'; sha: string }
+  | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] }
+  | { kind: 'pending-commits'; branch: string; pending: number; needsAttention?: string; message: string };
 
 /**
  * What a remote sync did to one branch's clone. One entry per branch in the

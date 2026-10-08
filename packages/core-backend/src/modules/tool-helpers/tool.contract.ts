@@ -48,6 +48,15 @@ export interface ToolContext {
    * still fails closed regardless of this).
    */
   focusedBranch?: string;
+  /**
+   * The branch this call runs on, resolved by the tool handler before the tool
+   * ran from the tool's branch declaration (see `BranchDeclaration`): the one
+   * the caller named, or the deployment's default branch for a
+   * `defaults-to-default-branch` tool called without one. Set for every tool
+   * that declares a branch, and always a non-empty string then; absent for a
+   * tool that takes no branch.
+   */
+  branch?: string;
   abortSignal: AbortSignal;
   workspaceService: WorkspaceService;
   workflowService: IWorkflowService;

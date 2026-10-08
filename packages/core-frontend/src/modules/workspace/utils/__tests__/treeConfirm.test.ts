@@ -8,6 +8,7 @@ import {
   moveQuestion,
   moveSentence,
   moveWarnings,
+  platformFileDeleteRefusal,
   platformFileDragRefusal,
   platformFileMoveRefusal,
   principalLabel,
@@ -224,6 +225,21 @@ const KB = 'knowledge-base';
  * The refusal is the server's sentence, decided by the shared predicate, so
  * the sidebar cannot drift from the endpoint it would have called.
  */
+describe('platformFileDeleteRefusal', () => {
+  it('refuses only the repository\'s own files: the root access.md and roles.yaml', () => {
+    expect(platformFileDeleteRefusal(`${KB}/access.md`, KB)).toBe("access.md is the repository's own file and cannot be deleted.");
+    expect(platformFileDeleteRefusal(`${KB}/roles.yaml`, KB)).toBe("roles.yaml is the repository's own file and cannot be deleted.");
+  });
+
+  it('leaves a nested access.md, any .bevelignore and content to the server\'s write gate', () => {
+    expect(platformFileDeleteRefusal(`${KB}/Team/access.md`, KB)).toBeNull();
+    expect(platformFileDeleteRefusal(`${KB}/Team/roles.yaml`, KB)).toBeNull();
+    expect(platformFileDeleteRefusal(`${KB}/.bevelignore`, KB)).toBeNull();
+    expect(platformFileDeleteRefusal(`${KB}/Access.md`, KB)).toBeNull();
+    expect(platformFileDeleteRefusal('access.md', KB)).toBeNull();
+  });
+});
+
 describe('platformFileMoveRefusal', () => {
   it('refuses the three platform files where the platform reads them', () => {
     expect(platformFileMoveRefusal(`${KB}/access.md`, KB))
