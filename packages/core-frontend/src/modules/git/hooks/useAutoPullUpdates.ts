@@ -66,15 +66,16 @@ export function useAutoPullUpdates(
         if (cancelled) return;
         // What the banner shows under "Couldn’t get the latest changes": the
         // reader's words for it, not the sanitized error, which still speaks git.
-        const sanitizedReason = pullFailureDetail(err) ?? 'Something unexpected went wrong.';
         setAutoUpdate({
           status: 'failed',
           branch: status.branch,
-          reason: sanitizedReason,
+          reason: pullFailureDetail(err) ?? 'Something unexpected went wrong.',
         });
-        // Log only the sanitized text — raw err.message can contain urls,
-        // tokens, or local paths we just stripped from the user-facing reason.
-        console.debug('[git] auto-pull skipped:', sanitizedReason, {
+        // The log keeps git's own words, scrubbed: that is the diagnostic, and
+        // the summary above would fold distinct failures into one sentence.
+        // Only the sanitized text — raw err.message can contain urls, tokens,
+        // or local paths.
+        console.debug('[git] auto-pull skipped:', sanitizeErrorText(err), {
           branch: status.branch,
         });
         return;

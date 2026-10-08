@@ -14,7 +14,7 @@ export function pullFailureKind(error: unknown): PullFailureKind {
   if (/\b(conflict|conflicts|merge conflict|would be overwritten)\b/.test(sanitized)) return 'conflict';
   if (/\b(uncommitted|local changes|working tree|dirty|stash)\b/.test(sanitized)) return 'local-changes';
   if (
-    /\b(network|auth|credential|permission denied|unauthorized|forbidden|timeout|timed out|could not resolve host|failed to connect|401|403)\b/.test(
+    /\b(network|auth(?:entication|orization)?|credential|permission denied|unauthorized|forbidden|timeout|timed out|could not resolve host|failed to connect|401|403)\b/.test(
       sanitized,
     )
   ) {

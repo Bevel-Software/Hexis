@@ -49,13 +49,16 @@ function repoSegments(path: string, kbDirName: string | null): string[] | null {
  * Whether repository-relative `segments` name a plugin's own manifest: a
  * `plugin.json` under the plugins root, in a plugin's folder at any depth
  * (plugins sit under grouping folders too), and not inside a plugin's
- * `skills/`, where one is a skill's bundled example.
+ * `skills/`, where one is a skill's bundled example. A skill's example sits
+ * at least one folder below a `skills` segment (`<plugin>/skills/<skill>/…`),
+ * so only a `skills` segment ABOVE the file's own folder excludes it: a
+ * plugin that is itself called `skills` keeps its settings.
  */
 function isPluginManifest(segments: string[]): boolean {
   if (segments.length < 3) return false;
   if (segments[0] !== currentKbLayout().pluginsDir) return false;
   if (segments[segments.length - 1] !== PLUGIN_MANIFEST_FILE) return false;
-  return !segments.slice(1, -1).includes(PLUGIN_SKILLS_DIR);
+  return !segments.slice(1, -2).includes(PLUGIN_SKILLS_DIR);
 }
 
 /** The plain name of a platform file, or null for every other file. */

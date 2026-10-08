@@ -20,6 +20,9 @@ describe('displayFileName', () => {
   it("leaves a skill's bundled plugin.json alone: it is an example, not a plugin's settings", () => {
     expect(displayFileName('knowledge-base/Plugins/GTM/skills/demo/plugin.json', KB)).toBe('plugin.json');
     expect(displayFileName('Plugins/departments/ado/skills/demo/assets/plugin.json')).toBe('plugin.json');
+    // A plugin that is itself called skills is still a plugin.
+    expect(displayFileName('Plugins/skills/plugin.json')).toBe('Plugin settings');
+    expect(displayFileName('knowledge-base/Plugins/departments/skills/plugin.json', KB)).toBe('Plugin settings');
   });
 
   it('knows the plugins root only at the top of the repository', () => {
