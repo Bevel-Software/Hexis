@@ -73,7 +73,13 @@ export function createAccountRoutes(
       const msg = error instanceof Error ? error.message : 'Unknown error';
       // The deployment has no place for the account (a seat limit, say): the
       // port's own words, as a refusal rather than a malformed request.
-      res.status(error instanceof AccountAdmissionRefusedError ? 403 : 400).json({ error: msg });
+      // `kind` tells it apart from `requireAdmin`'s 403, which a caller must
+      // not read as "no seat left".
+      if (error instanceof AccountAdmissionRefusedError) {
+        res.status(403).json({ error: msg, kind: 'admission' });
+        return;
+      }
+      res.status(400).json({ error: msg });
     }
   });
 
@@ -107,7 +113,8 @@ export function createAccountRoutes(
 
   // POST /api/admin/accounts/:userId/reactivate — switch it back on, if the
   // deployment has room: the admission port is asked, as for a new account
-  // (a host that sells seats answers from its plan; 403 with its words).
+  // (a host that sells seats answers from its plan; 403 with its words and
+  // `kind: 'admission'`).
   router.post('/admin/accounts/:userId/reactivate', requireAdmin, async (req, res) => {
     const userId = String(req.params.userId);
     try {
@@ -119,7 +126,7 @@ export function createAccountRoutes(
       res.status(204).end();
     } catch (error) {
       if (error instanceof AccountAdmissionRefusedError) {
-        res.status(403).json({ error: error.message });
+        res.status(403).json({ error: error.message, kind: 'admission' });
         return;
       }
       log.error('switching an account on failed:', { err: error });

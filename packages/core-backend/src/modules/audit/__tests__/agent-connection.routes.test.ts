@@ -10,8 +10,8 @@ import type { AgentUse, IAgentConnectionStatus } from '../audit.contract.js';
  *
  *  - it answers for the AUTHENTICATED user (req.userId) and nobody else;
  *    nothing in the request — query or otherwise — can name another account;
- *  - "not yet" and "connected" are the two shapes, the second with when and
- *    as what;
+ *  - "not yet" and "connected" are the two shapes, the second with when, as
+ *    what, and whether that name is an agent's or a connection key's label;
  *  - the answer is never cached, since the next poll expects it to change;
  *  - a failure is a generic 500, never the driver's message.
  */
@@ -20,7 +20,7 @@ const ALICE = 'u-alice';
 const BOB = 'u-bob';
 
 const USES: Record<string, AgentUse> = {
-  [BOB]: { at: new Date(Date.UTC(2026, 9, 7, 12, 0, 0)), client: 'Claude' },
+  [BOB]: { at: new Date(Date.UTC(2026, 9, 7, 12, 0, 0)), client: 'Claude', kind: 'agent' },
 };
 
 const status = {
@@ -63,7 +63,7 @@ describe('GET /onboarding/agent-connection', () => {
   it('says connected, with when and as what, once one has', async () => {
     const base = await listen(BOB);
     const res = await fetch(`${base}/api/onboarding/agent-connection`);
-    expect(await res.json()).toEqual({ connected: true, at: '2026-10-07T12:00:00.000Z', client: 'Claude' });
+    expect(await res.json()).toEqual({ connected: true, at: '2026-10-07T12:00:00.000Z', client: 'Claude', kind: 'agent' });
   });
 
   it("answers for the caller alone — a named account in the query is not asked about", async () => {

@@ -48,38 +48,51 @@ describe('firstPageRoute', () => {
   it.each(['Claude', 'claude', ' CLAUDE ', 'claude.ai', 'Claude Desktop', 'claude-desktop'])(
     'leads with Claude for %j',
     (client) => {
-      expect(firstPageRoute(client).primary).toBe('claude');
+      expect(firstPageRoute(client, 'agent').primary).toBe('claude');
     },
   );
 
   it.each(['ChatGPT', 'chatgpt', 'ChatGPT Connector'])('leads with ChatGPT for %j', (client) => {
-    expect(firstPageRoute(client).primary).toBe('chatgpt');
+    expect(firstPageRoute(client, 'agent').primary).toBe('chatgpt');
   });
 
   it.each(['Claude Code', 'claude code', 'Cursor', 'Windsurf', 'Codex', 'My laptop key', 'Claudette'])(
     'leads with Copy prompt for %j',
     (client) => {
-      expect(firstPageRoute(client)).toEqual({ primary: 'copy', agentName: client });
+      expect(firstPageRoute(client, 'agent')).toEqual({ primary: 'copy', agentName: client });
     },
   );
 
   it('leads with Copy prompt for any agent on the local server, Claude included, naming the agent alone', () => {
-    expect(firstPageRoute('Claude Code · local server on LAPTOP-1')).toEqual({
+    expect(firstPageRoute('Claude Code · local server on LAPTOP-1', 'agent')).toEqual({
       primary: 'copy',
       agentName: 'Claude Code',
     });
-    expect(firstPageRoute('Claude Desktop · local server on LAPTOP-1')).toEqual({
+    expect(firstPageRoute('Claude Desktop · local server on LAPTOP-1', 'agent')).toEqual({
       primary: 'copy',
       agentName: 'Claude Desktop',
     });
-    expect(firstPageRoute('Claude · LOCAL SERVER ON mac.local')).toEqual({ primary: 'copy', agentName: 'Claude' });
+    expect(firstPageRoute('Claude · LOCAL SERVER ON mac.local', 'agent')).toEqual({ primary: 'copy', agentName: 'Claude' });
   });
 
   it('has no name to offer for an unnamed or unknown agent, or none at all', () => {
-    expect(firstPageRoute('Unnamed agent')).toEqual({ primary: 'copy', agentName: null });
-    expect(firstPageRoute('Unknown agent · local server on LAPTOP-1')).toEqual({ primary: 'copy', agentName: null });
-    expect(firstPageRoute(undefined)).toEqual({ primary: 'copy', agentName: null });
-    expect(firstPageRoute(null)).toEqual({ primary: 'copy', agentName: null });
-    expect(firstPageRoute('   ')).toEqual({ primary: 'copy', agentName: null });
+    expect(firstPageRoute('Unnamed agent', 'agent')).toEqual({ primary: 'copy', agentName: null });
+    expect(firstPageRoute('Unknown agent · local server on LAPTOP-1', 'agent')).toEqual({ primary: 'copy', agentName: null });
+    expect(firstPageRoute(undefined, 'agent')).toEqual({ primary: 'copy', agentName: null });
+    expect(firstPageRoute(null, 'agent')).toEqual({ primary: 'copy', agentName: null });
+    expect(firstPageRoute('   ', 'agent')).toEqual({ primary: 'copy', agentName: null });
+  });
+
+  it.each(['Claude', 'ChatGPT', 'ChatGPT CLI', 'Claude Desktop', 'My laptop key'])(
+    'leads with Copy prompt, naming no agent, for a connection key labelled %j',
+    (label) => {
+      // A key's label is free text: it names the key, not the app holding it.
+      expect(firstPageRoute(label, 'key')).toEqual({ primary: 'copy', agentName: null });
+    },
+  );
+
+  it('leads with Copy prompt when the answer does not say which kind of connection it is', () => {
+    expect(firstPageRoute('Claude', undefined)).toEqual({ primary: 'copy', agentName: null });
+    expect(firstPageRoute('ChatGPT', null)).toEqual({ primary: 'copy', agentName: null });
   });
 });

@@ -67,6 +67,8 @@ describe('account routes — admin gate', () => {
       body: JSON.stringify({ email: 'x@example.com', password: 'long-enough-pw' }),
     });
     expect(create.status).toBe(403);
+    // Not an admission refusal: nothing here may read as "no seat left".
+    expect(await create.json()).toEqual({ error: 'Admins only' });
     expect(authService.createAccount).not.toHaveBeenCalled();
   });
 
@@ -151,7 +153,7 @@ describe('account routes — admin gate', () => {
     expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('u2');
   });
 
-  it('an account the admission port refuses → 403 carrying the port\'s own words', async () => {
+  it('an account the admission port refuses → 403 carrying the port\'s own words, marked as an admission refusal', async () => {
     const base = await listen(makeApp({ admin: true }));
     vi.mocked(authService.createAccount).mockRejectedValueOnce(
       new AccountAdmissionRefusedError('No seat left on this plan'),
@@ -162,7 +164,7 @@ describe('account routes — admin gate', () => {
       body: JSON.stringify({ email: 'b@example.com', password: 'long-enough-pw' }),
     });
     expect(refused.status).toBe(403);
-    expect(((await refused.json()) as { error: string }).error).toBe('No seat left on this plan');
+    expect(await refused.json()).toEqual({ error: 'No seat left on this plan', kind: 'admission' });
   });
 
   it('erasure failure → 500 with a generic body (no internal error text)', async () => {
@@ -370,7 +372,7 @@ describe('account routes — switching an account off and on', () => {
     const base = await listen(makeApp({ admin: true }));
     const res = await post(base, 'u2/reactivate');
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toBe('All 3 seats are taken');
+    expect(await res.json()).toEqual({ error: 'All 3 seats are taken', kind: 'admission' });
   });
 
   it('answers a refused deactivation (the deployment admin, say) with 400 and the reason', async () => {

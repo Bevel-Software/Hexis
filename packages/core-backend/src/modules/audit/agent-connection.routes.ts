@@ -5,13 +5,19 @@ import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId
 
 const log = logger('audit');
 
-/** What the onboarding reads: connected or not, and — once connected — when and as what. */
+/** What the onboarding reads: connected or not, and — once connected — when, as what, and through which kind of credential. */
 export interface AgentConnectionResponse {
   connected: boolean;
   /** The agent's most recent call, ISO 8601. */
   at?: string;
   /** The agent's registered client name, or the connection key's label. */
   client?: string;
+  /**
+   * Which of the two `client` is: `agent` for an OAuth connection's
+   * registered name, `key` for a connection key's free-text label. Only an
+   * `agent` name says which app connected.
+   */
+  kind?: 'agent' | 'key';
 }
 
 /**
@@ -35,7 +41,7 @@ export function createAgentConnectionRoutes(status: IAgentConnectionStatus): exp
     try {
       const use = await status.lastAgentUse(req.userId!);
       const body: AgentConnectionResponse = use
-        ? { connected: true, at: use.at.toISOString(), client: use.client }
+        ? { connected: true, at: use.at.toISOString(), client: use.client, kind: use.kind }
         : { connected: false };
       res.json(body);
     } catch (err) {
