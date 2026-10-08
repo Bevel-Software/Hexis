@@ -2,7 +2,7 @@ import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import type { StarterPackService } from './starter-pack.service.js';
+import type { IStarterPackService } from './onboarding.contract.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId)
 
 const log = logger('starter-packs');
@@ -20,7 +20,7 @@ const log = logger('starter-packs');
  * no longer asked, and `id: "none"` is "I'll start from scratch".
  */
 export function createOnboardingRoutes(
-  starterPacks: Pick<StarterPackService, 'status' | 'choose'>,
+  starterPacks: IStarterPackService,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
 ): express.Router {
   const router = express.Router();

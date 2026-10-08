@@ -3,7 +3,8 @@ import express from 'express';
 import type { Server } from 'node:http';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { createOnboardingRoutes } from '../onboarding.routes.js';
-import { StarterPackError, type StarterPackService } from '../starter-pack.service.js';
+import type { IStarterPackService } from '../onboarding.contract.js';
+import { StarterPackError } from '../starter-pack.service.js';
 
 /**
  * The two starter-pack routes: the caller is the session's, the GET is never
@@ -20,7 +21,7 @@ afterEach(() => {
 });
 
 async function listen(
-  svc: Pick<StarterPackService, 'status' | 'choose'>,
+  svc: IStarterPackService,
   as: AuthUser | null | (() => Promise<AuthUser | null>) = ADA,
 ): Promise<string> {
   const app = express();

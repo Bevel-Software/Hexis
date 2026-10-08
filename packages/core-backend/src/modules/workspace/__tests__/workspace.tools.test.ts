@@ -2273,6 +2273,8 @@ describe('start_session', () => {
     defaultWorkspaceDir?: string,
     // The starter pack the knowledge base was filled from, for the note.
     starterPacks?: FirstRunStarterSource,
+    // Who may read what: everything, unless a test about the note's gate says otherwise.
+    access: IAccessControl = allowAll,
   ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
@@ -2309,7 +2311,7 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), access, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
@@ -2535,6 +2537,38 @@ describe('start_session', () => {
       await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n\nAcme.\n');
       const second = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
       expect(second).not.toHaveProperty('firstRun');
+    });
+
+    /**
+     * The note is a read: it says what the knowledge folder holds. A caller
+     * who may not read the folder gets the id alone, and a pack page the
+     * caller may not read is judged as anybody's page, so the note never
+     * tells them it is still a placeholder.
+     */
+    it('is withheld from a caller who may not read the knowledge folder', async () => {
+      const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
+
+    it("counts a starter page the caller may not read as somebody's page: no note", async () => {
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n');
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const pageClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Customers.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
     });
 
     it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {

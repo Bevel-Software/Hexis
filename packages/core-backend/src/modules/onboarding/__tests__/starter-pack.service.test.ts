@@ -303,6 +303,24 @@ describe('choosing a pack', () => {
     expect(fresh.workflow.commitChanges).not.toHaveBeenCalled();
   });
 
+  it('judges the question under the claim: an answer recorded meanwhile is found, not written over', async () => {
+    const store: Record<string, string> = {};
+    const { svc, settings, workflow } = harness({ store });
+    // Another replica answered `none` and released while this call was on its way to its claim.
+    settings.recordIfAbsent.mockImplementationOnce(async (key: string, value: string) => {
+      store[key] = value;
+      store.starterPack = 'none';
+      return true;
+    });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
+    expect(settings.recordIfAbsent.mock.invocationCallOrder[0]!).toBeLessThan(
+      settings.reload.mock.invocationCallOrder.find((_, i) => settings.reload.mock.calls[i]![0] === 'starterPack')!,
+    );
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(store.starterPack).toBe('none');
+    expect(store.starterPackClaim).toBeUndefined();
+  });
+
   it('two quick clicks add the pack once', async () => {
     const { svc, workflow } = harness();
     const results = await Promise.allSettled([svc.choose(ADMIN, 'sales'), svc.choose(ADMIN, 'sales')]);

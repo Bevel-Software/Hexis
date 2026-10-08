@@ -80,8 +80,8 @@ import {
   starterPackFiles,
   type StarterPack,
   type StarterPackFile,
-  type StarterPackSummary,
 } from './starter-packs.js';
+import type { IStarterPackService, StarterPackApplied, StarterPacksAnswer } from './onboarding.contract.js';
 
 const log = logger('starter-packs');
 
@@ -98,42 +98,7 @@ export const CLAIM_TTL_MS = 10 * 60_000;
  */
 const CATCH_ALL_PACK = 'general';
 
-/** `GET /api/onboarding/starter-packs`. */
-export interface StarterPacksAnswer {
-  /** Whether the caller should be asked: an admin, nothing chosen yet, a knowledge folder still new. */
-  offered: boolean;
-  /** The recorded answer — a pack's id, or `none` — or null while nobody has answered. */
-  chosen: string | null;
-  /** The packs to choose from, in chip order. Empty for a member, who is never asked. */
-  packs: StarterPackSummary[];
-  /** The chosen pack, for the first-page prompt — null when none was (or `none` was). */
-  chosenPack: ChosenStarterPack | null;
-}
-
-export interface ChosenStarterPack {
-  id: string;
-  name: string;
-  /** The team's own "write your first page" request. */
-  firstPagePrompt: string;
-  /**
-   * The pack's pages that still hold exactly what the pack wrote, as
-   * workspace-relative paths: placeholders, not pages anyone wrote, so they
-   * do not tick "Write your first page".
-   */
-  starterPages: string[];
-}
-
-/** `POST /api/onboarding/starter-pack`. */
-export interface StarterPackApplied {
-  id: string;
-  /** The chosen pack's name; null for `none`. */
-  name: string | null;
-  /** Pages and skills the commit added — what was absent, not what the pack holds. */
-  pages: number;
-  skills: number;
-  /** What to tell the person: "Added 4 pages and 4 skills for Engineering." Empty for `none`. */
-  summary: string;
-}
+export type { ChosenStarterPack, IStarterPackService, StarterPackApplied, StarterPacksAnswer } from './onboarding.contract.js';
 
 /** A refusal the route passes through as its status. */
 export class StarterPackError extends WorkflowDomainError {
@@ -168,7 +133,7 @@ export interface StarterPackServiceDeps {
   fileChanges?: FileChangeNotifier;
 }
 
-export class StarterPackService implements FirstRunStarterSource {
+export class StarterPackService implements IStarterPackService, FirstRunStarterSource {
   /**
    * One choice at a time on this replica: the second of two quick clicks
    * finds the first one's answer recorded. Across replicas the recorded
@@ -213,19 +178,24 @@ export class StarterPackService implements FirstRunStarterSource {
       throw new StarterPackError('Only an admin can add starter pages.', 403);
     }
     return this.choosing.run('starter-pack', async () => {
-      if ((await this.recordedChoice()) !== null) throw alreadyChosen();
-      if (!(await this.knowledgeIsNew(true))) {
-        throw new StarterPackError('This knowledge base already has pages, so starter pages are no longer offered.', 409);
-      }
-      const pack = id === NO_STARTER_PACK ? null : (await loadStarterPacks(this.deps.packsDir)).find((p) => p.id === id);
-      if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
       const claim = await this.claim(user);
+      let pack: StarterPack | null = null;
       let added: string[] = [];
       try {
+        // Judged UNDER the claim, so an answer another replica recorded and
+        // released between this call's start and its claim — a `none`, say
+        // — is found here rather than written over with a pack.
+        if ((await this.recordedChoice()) !== null) throw alreadyChosen();
+        if (!(await this.knowledgeIsNew(true))) {
+          throw new StarterPackError('This knowledge base already has pages, so starter pages are no longer offered.', 409);
+        }
+        pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.packsDir)).find((p) => p.id === id) ?? null);
+        if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
         if (pack) added = await this.apply(user, pack);
         else await this.deps.settings.record({ [STARTER_PACK_SETTING]: id }, user.id);
       } catch (err) {
-        // Nothing landed: the claim goes, and the question is open again.
+        // Refused, or nothing landed: the claim goes, and the question is
+        // open again (or answered, as the refusal said).
         await this.release(claim);
         throw err;
       }

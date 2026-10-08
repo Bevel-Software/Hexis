@@ -26,6 +26,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { renderKbLayoutPlaceholders, type KbLayout } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { utf8Text } from '../../shared/utf8-text.js';
 
 const log = logger('starter-packs');
 
@@ -162,7 +163,7 @@ export async function starterPackFiles(pack: StarterPack, layout: Required<KbLay
     const base = path.join(pack.dir, root);
     for (const rel of await filesUnder(base)) {
       const bytes = await fs.readFile(path.join(base, ...rel.split('/')));
-      const text = asText(bytes);
+      const text = utf8Text(bytes);
       out.push({
         repoPath: `${layout[layoutKey]}/${rel}`,
         root,
@@ -205,12 +206,3 @@ async function filesUnder(dir: string): Promise<string[]> {
   return out.sort();
 }
 
-/** The bytes as text when they ARE text — strict UTF-8, no NUL — else null. */
-function asText(bytes: Buffer): string | null {
-  if (bytes.includes(0)) return null;
-  try {
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return null;
-  }
-}

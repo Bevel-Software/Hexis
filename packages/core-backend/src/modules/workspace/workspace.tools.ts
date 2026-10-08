@@ -1757,12 +1757,20 @@ export function registerWorkspaceTools(
       const workspaceId = kb.defaultWorkspaceId();
       if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceId))) return null;
       const knowledgeDir = kb.layout.knowledgeBaseDir;
+      // GATED LIKE A READ. The note says what the knowledge folder holds —
+      // nothing, or a pack's pages still as the pack wrote them — so it goes
+      // only to a caller who may read that folder, and names only the pack
+      // pages they may read. A pack page the caller may not read is judged
+      // as anybody's page: the note stays silent about it rather than tell
+      // them it is a placeholder.
+      if (!(await accessControl.canRead(workspaceId, ctx.user.email, knowledgeDir))) return null;
       const root = await ctx.workspaceService.getWorkspacePath(workspaceId);
       // A starter pack's pages, still as the pack wrote them, are tasks to
       // fill in rather than pages anyone wrote: they leave the note standing,
       // and the note names what the pack suggests drafting first.
       const starter = (await starterPacks?.firstRunStarter()) ?? null;
-      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), starter?.pages))) return null;
+      const pages = starter ? await readableStarterPages(ctx, workspaceId, knowledgeDir, starter.pages) : undefined;
+      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), pages))) return null;
       return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
     } catch (err) {
       log.debug('start_session: could not tell whether the knowledge base is new', {
@@ -1770,6 +1778,18 @@ export function registerWorkspaceTools(
       });
       return null;
     }
+  };
+
+  /** The starter pages (paths below the knowledge folder → text) the caller may read, and no other. */
+  const readableStarterPages = async (
+    ctx: ToolContext,
+    workspaceId: string,
+    knowledgeDir: string,
+    pages: ReadonlyMap<string, string>,
+  ): Promise<ReadonlyMap<string, string>> => {
+    const rels = [...pages.keys()];
+    const verdicts = await accessControl.canReadBatch(workspaceId, ctx.user.email, rels.map((rel) => `${knowledgeDir}/${rel}`));
+    return new Map(rels.filter((rel) => verdicts.get(`${knowledgeDir}/${rel}`)).map((rel) => [rel, pages.get(rel)!]));
   };
 
   // ── reads ──────────────────────────────────────────────────────────────
