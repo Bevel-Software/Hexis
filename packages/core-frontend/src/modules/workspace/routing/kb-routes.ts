@@ -431,12 +431,20 @@ export function useFileNav() {
    * drops anyone into the editor; `FileViewer` honours it once and clears it.
    * The path rides along (`startEditingPath`) because the URL does not keep
    * naming it: `FileRoute` swaps a node's path URL for its id URL.
+   *
+   * `replace` swaps the current history entry instead of adding one — for
+   * asking to edit the page already on screen, where a second entry for the
+   * same URL would make Back look like it did nothing.
    */
   const openWorkspacePath = useCallback(
-    (path: string, options?: { edit?: boolean }) => {
+    (path: string, options?: { edit?: boolean; replace?: boolean }) => {
       if (!branch) return;
-      if (options?.edit) navigate(kbFileUrl(branch, path), { state: { startEditing: true, startEditingPath: path } });
-      else navigate(kbFileUrl(branch, path));
+      const url = kbFileUrl(branch, path);
+      const replace = options?.replace === true;
+      const state = { startEditing: true, startEditingPath: path };
+      if (options?.edit) navigate(url, replace ? { state, replace } : { state });
+      else if (replace) navigate(url, { replace });
+      else navigate(url);
     },
     [branch, navigate],
   );

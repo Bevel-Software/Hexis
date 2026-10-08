@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPageRoute } from '../first-page-prompt';
+import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
 
 /**
  * The first-page prompt links: the prompt must arrive in the chat exactly as
@@ -94,5 +94,16 @@ describe('firstPageRoute', () => {
   it('leads with Copy prompt when the answer does not say which kind of connection it is', () => {
     expect(firstPageRoute('Claude', undefined)).toEqual({ primary: 'copy', agentName: null });
     expect(firstPageRoute('ChatGPT', null)).toEqual({ primary: 'copy', agentName: null });
+  });
+});
+
+describe('firstPagePromptFor', () => {
+  it("is the chosen starter pack's own request, without the YAML block's trailing newline", () => {
+    expect(firstPagePromptFor({ firstPagePrompt: 'Fill in the Customers page.\n' })).toBe('Fill in the Customers page.');
+  });
+
+  it('is the generic request without a pack, or with one that has none to give', () => {
+    expect(firstPagePromptFor(null)).toBe(FIRST_PAGE_PROMPT);
+    expect(firstPagePromptFor({ firstPagePrompt: '  ' })).toBe(FIRST_PAGE_PROMPT);
   });
 });

@@ -27,6 +27,7 @@ import {
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
@@ -463,7 +464,7 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.starterPackService);
   // The guide on its own, beside the file tools that serve it by name.
   registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
   // The agent upload route, on the same router as the tool endpoints so it
@@ -733,6 +734,15 @@ export async function createCoreServer(
   // The onboarding's "is your agent connected yet?" — the caller's own
   // agents only, read off the same connections and keys the Audit log lists.
   app.use('/api', core.authMiddleware, createAgentConnectionRoutes(core.agentAuditService));
+  // "What does your team do?" — the starter-pack question a new knowledge
+  // base's admin is asked, and the pack it adds (admin-gated inside).
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createOnboardingRoutes(core.starterPackService, async (req) =>
+      req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    ),
+  );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists. The startup runner rides along for

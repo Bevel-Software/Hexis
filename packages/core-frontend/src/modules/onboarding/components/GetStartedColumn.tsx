@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Check, Copy, X } from 'lucide-react';
 import {
   KNOWLEDGE_BASE_DIR,
+  currentBranchModel,
   currentKbLayout,
   isPersonalPluginDir,
   type FileTreeEntry,
@@ -18,23 +19,19 @@ import { usePluginsRevision } from '../../library/state/plugins-revision';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { SETUP_COLUMN_HIDDEN_QUERY } from '../../layout/breakpoints';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { useFileNav } from '../../workspace/routing/kb-routes';
+import { useCreatePage } from '../../workspace/hooks/useCreatePage';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
-import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPageRoute } from '../first-page-prompt';
+import { chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
+import { useStarterPacks } from '../state/starter-packs';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
+import { COMMAND_MENU_SHORTCUT_LABEL, openCommandMenu } from '../../toolbar/commands/command-menu';
 
 /** The starter page every new knowledge base is seeded with (`kb-template/`). */
 const GUIDE_FILE = 'How to get started.md';
-
-/**
- * What "New page" writes: a title, so the page is a page from its first save,
- * and a blank line under it for the cursor to land on.
- */
-const NEW_PAGE_CONTENT = '# Untitled\n\n';
 
 interface SetupAction {
   label: string;
@@ -59,19 +56,26 @@ interface SetupItem {
  * Whether the Knowledge folder holds anything a person put there: any file
  * other than the starter guide, the repository's dot-files and the folder
  * access rules. A dropped PDF counts — "write your first page" is about the
- * knowledge base having the team's content in it, not about Markdown.
+ * knowledge base having the team's content in it, not about Markdown. A
+ * starter pack's page still as the pack wrote it (`placeholders`) is a task
+ * to fill in, not content, so it does not count either.
  */
-function hasOwnContent(entry: FileTreeEntry | null | undefined, guidePath: string): boolean {
+function hasOwnContent(
+  entry: FileTreeEntry | null | undefined,
+  guidePath: string,
+  placeholders: ReadonlySet<string> = new Set(),
+): boolean {
   if (!entry) return false;
   for (const child of entry.children ?? []) {
     if (child.name.startsWith('.')) continue;
     if (child.type === 'directory') {
-      if (hasOwnContent(child, guidePath)) return true;
+      if (hasOwnContent(child, guidePath, placeholders)) return true;
       continue;
     }
     // Exactly `access.md`: the platform reserves that name and no other
     // spelling, so an `Access.md` someone wrote is a page like any other.
     if (child.relativePath === guidePath || child.name === 'access.md') continue;
+    if (placeholders.has(child.relativePath)) continue;
     return true;
   }
   return false;
@@ -87,37 +91,6 @@ function findEntry(tree: FileTreeEntry | null, path: string): FileTreeEntry | nu
     }
   }
   return null;
-}
-
-/** `Untitled.md` for the first page, `Untitled N.md` after it. */
-function untitledPath(folder: string, n: number): string {
-  return n === 1 ? `${folder}/Untitled.md` : `${folder}/Untitled ${n}.md`;
-}
-
-/**
- * The first number, from `from` on, whose untitled name the tree does not
- * already hold — a second click makes a second page rather than reusing the
- * first one's name.
- */
-function freeUntitledNumber(tree: FileTreeEntry | null, folder: string, from = 1): number {
-  let n = from;
-  while (findEntry(tree, untitledPath(folder, n))) n++;
-  return n;
-}
-
-/**
- * How many names New page tries before it gives up. The tree it picks from
- * can be a moment behind (a teammate or an agent creating pages too), so a
- * refusal moves on to the next name; a handful covers any real race.
- */
-const NEW_PAGE_ATTEMPTS = 5;
-
-/**
- * The exclusive create's "that name is taken": 409, for a file that exists
- * now — or one somebody holds the lock on, which is a page being made there.
- */
-function isNameTaken(err: unknown): boolean {
-  return err instanceof WorkspaceApiError && err.status === 409;
 }
 
 /** A plugin for a team, not somebody's personal shelf. */
@@ -198,8 +171,9 @@ function useHasTeammate(enabled: boolean, revision: number): { found: boolean; s
  * Every tick is DERIVED — the server's onboarding flag, the file tree, the
  * plugin catalog, the account list — so doing a step anywhere in the app
  * counts, and the column never claims something the workspace does not show.
- * Only "read the guide" has no server fact behind it; that one, and the two
- * ways of closing the column, are per-browser notes (see `useSetupChecklist`).
+ * Only "read the guide" and "open the command menu" have no server fact
+ * behind them; those two, and the two ways of closing the column, are
+ * per-browser notes (see `useSetupChecklist`).
  *
  * It gets out of the way on its own terms: on the welcome page (which is the
  * same instructions, full-size), below the width where a 288px column still
@@ -216,9 +190,10 @@ export function GetStartedColumn() {
   const onboarding = useOnboarding();
   const checklist = useSetupChecklist();
   const { isAdmin, isAdminLoading = false } = useAdmin();
-  const { kbDirName, openFilePath, createFile } = useWorkspace();
+  const { kbDirName, openFilePath, workspaceBranch } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
   const { openWorkspacePath } = useFileNav();
+  const { createPage } = useCreatePage();
   const invite = useInviteDialog();
 
   /**
@@ -262,8 +237,30 @@ export function GetStartedColumn() {
   const guideExists = guidePath !== null && findEntry(tree, guidePath) !== null;
 
   /**
+   * The starter pack the team chose, if any: its first-page request replaces
+   * the generic one, and its pages stay placeholders — not a first page —
+   * until someone fills one in. Which are still untouched is the server's
+   * answer (it compares them with the pack), asked again whenever the tree
+   * changes while any are left. That answer describes the DEFAULT branch,
+   * where the pack landed; the tree here is the branch on screen, so on any
+   * other branch the step reads that tree alone rather than apply the
+   * default branch's placeholders to pages that may well be filled in there.
+   */
+  const starter = useStarterPacks({ enabled: !gone });
+  const chosenPack = starter.answer?.chosenPack ?? null;
+  const onDefaultBranch = workspaceBranch !== null && workspaceBranch === currentBranchModel().defaultBranch;
+  const placeholders = new Set(onDefaultBranch ? (chosenPack?.starterPages ?? []) : []);
+  const { reload: reloadStarter } = starter;
+  const waitingOnPlaceholders = placeholders.size > 0;
+  const firstTree = useRef(tree);
+  useEffect(() => {
+    if (!waitingOnPlaceholders || tree === firstTree.current) return;
+    void reloadStarter();
+  }, [tree, waitingOnPlaceholders, reloadStarter]);
+
+  /**
    * "New page": create a Markdown page in the Knowledge folder and open it
-   * already in the editor. The failure is kept here and shown on the step
+   * already in the editor (`useCreatePage`, shared with the command menu). The failure is kept here and shown on the step
    * because nothing else would say it — toasts only speak inside the
    * Library, and a refusal (a protected branch's write gate) is exactly what
    * the person needs to read.
@@ -272,30 +269,14 @@ export function GetStartedColumn() {
   const createFirstPage = async () => {
     if (!knowledgeRoot || newPage.busy) return;
     setNewPage({ busy: true, error: null });
-    // An exclusive create: the name comes from the tree on screen, which may
-    // not yet show a page someone else just made — and a plain write would
-    // replace that page with an empty one.
-    let n = freeUntitledNumber(tree, knowledgeRoot);
-    let path = untitledPath(knowledgeRoot, n);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await createFile(path, NEW_PAGE_CONTENT, { ifAbsent: true });
-        break;
-      } catch (err) {
-        if (isNameTaken(err) && attempt < NEW_PAGE_ATTEMPTS) {
-          n = freeUntitledNumber(tree, knowledgeRoot, n + 1);
-          path = untitledPath(knowledgeRoot, n);
-          continue;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        setNewPage({ busy: false, error: `Couldn’t create the page: ${msg}` });
-        return;
-      }
+    try {
+      // The step ticks itself from the refreshed tree (any page but the guide
+      // counts); the page opens in the editor with the cursor in it.
+      await createPage();
+      setNewPage({ busy: false, error: null });
+    } catch (err) {
+      setNewPage({ busy: false, error: err instanceof Error ? err.message : String(err) });
     }
-    setNewPage({ busy: false, error: null });
-    // The step ticks itself from the refreshed tree (any page but the guide
-    // counts); `edit` opens the page with the cursor in it.
-    openWorkspacePath(path, { edit: true });
   };
 
   // Opening the guide by any route counts — the tree, a link, this column.
@@ -348,15 +329,32 @@ export function GetStartedColumn() {
    * lands in the tree. Before then that button would open a chat
    * that cannot reach this knowledge base, so the step says what connecting
    * would add instead.
+   *
+   * Not ticked before the starter-pack answer is in: until then a pack's
+   * untouched pages would read as content, and a fast tree could complete
+   * the whole list — and let it be closed — on the strength of placeholders.
+   * A failed request settles too, and the pages count as the app counted
+   * them before there were packs.
    */
   items.push({
     id: 'page',
     title: 'Write your first page',
-    done: knowledgeRoot !== null && guidePath !== null && hasOwnContent(findEntry(tree, knowledgeRoot), guidePath),
+    done:
+      knowledgeRoot !== null &&
+      guidePath !== null &&
+      starter.settled &&
+      hasOwnContent(findEntry(tree, knowledgeRoot), guidePath, placeholders),
     ...(agent.connected
       ? {
           hint: 'Have your agent write it, or start one here.',
-          extra: <FirstPagePromptActions client={agent.client} kind={agent.kind} newPage={newPageAction} />,
+          extra: (
+            <FirstPagePromptActions
+              client={agent.client}
+              kind={agent.kind}
+              prompt={firstPagePromptFor(chosenPack)}
+              newPage={newPageAction}
+            />
+          ),
         }
       : {
           hint: 'Start one here, or drop files into the file tree.',
@@ -364,6 +362,19 @@ export function GetStartedColumn() {
           extra: <span className="text-meta text-ink-faint">Connect your agent and it can write pages for you.</span>,
         }),
     error: newPage.error,
+  });
+  /**
+   * The command menu is how anything else gets found or done, so the list
+   * teaches it — by having it opened, which is the whole lesson. The tick is
+   * raised by the palette itself on ANY open (the box, the shortcut, this
+   * button), so someone who already knew the shortcut is never asked to.
+   */
+  items.push({
+    id: 'command-menu',
+    title: `Find or do anything with ${COMMAND_MENU_SHORTCUT_LABEL}`,
+    done: checklist.openedCommandMenu,
+    hint: 'Type what you want: a page, a skill, or an action like Invite people.',
+    action: { label: 'Try it', onClick: openCommandMenu },
   });
   if (isAdmin) {
     items.push({
@@ -565,10 +576,13 @@ function PromptLink({ href, primary, children }: { href: string; primary?: boole
 function FirstPagePromptActions({
   client,
   kind,
+  prompt,
   newPage,
 }: {
   client?: string;
   kind?: 'agent' | 'key';
+  /** The request: the chosen starter pack's, or the generic one. */
+  prompt: string;
   newPage?: SetupAction;
 }) {
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
@@ -577,7 +591,7 @@ function FirstPagePromptActions({
   const { primary, agentName } = firstPageRoute(client, kind);
 
   async function copy() {
-    const ok = await copyToClipboard(FIRST_PAGE_PROMPT);
+    const ok = await copyToClipboard(prompt);
     window.clearTimeout(resetTimer.current);
     setCopied(ok ? 'ok' : 'fail');
     resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
@@ -602,12 +616,12 @@ function FirstPagePromptActions({
     </Button>
   );
   const claudeLink = (lead: boolean) => (
-    <PromptLink href={claudePromptUrl(FIRST_PAGE_PROMPT)} primary={lead}>
+    <PromptLink href={claudePromptUrl(prompt)} primary={lead}>
       {lead ? 'Ask Claude to write it' : 'Open in Claude'}
     </PromptLink>
   );
   const chatGptLink = (lead: boolean) => (
-    <PromptLink href={chatGptPromptUrl(FIRST_PAGE_PROMPT)} primary={lead}>
+    <PromptLink href={chatGptPromptUrl(prompt)} primary={lead}>
       {lead ? 'Ask ChatGPT to write it' : 'Open in ChatGPT'}
     </PromptLink>
   );

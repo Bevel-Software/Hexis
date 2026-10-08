@@ -12,6 +12,7 @@ import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api'
 import { pathForPlugin, urlForLibraryItem } from '../../library/routes/library-paths';
 import { pluginLabel, pluginNameForPath } from '../../library/utils/plugin-summary';
 import { PERSONAL_PLUGIN_NAME } from '../../library/utils/personal-plugin';
+import { displayFileName } from '../../../shared/display-file-name';
 
 /**
  * What the search palette lists, flattened out of the two places it reads:
@@ -40,8 +41,8 @@ export interface SearchResult {
 }
 
 /** What a page is called, without the extension the reader did not choose. */
-function pageTitle(fileName: string): string {
-  return fileName.replace(/\.(md|markdown)$/i, '');
+function pageTitle(path: string, kbDirName: string | null): string {
+  return displayFileName(path, kbDirName).replace(/\.(md|markdown)$/i, '');
 }
 
 /**
@@ -74,7 +75,7 @@ export function pageResults(
     .map((f) => ({
       key: `page:${f.relativePath}`,
       kind: 'page',
-      name: pageTitle(f.name),
+      name: pageTitle(f.relativePath, kbDirName),
       location: pageLocation(f.relativePath, kbDirName),
       target: { kind: 'workspace', path: f.relativePath },
     }));

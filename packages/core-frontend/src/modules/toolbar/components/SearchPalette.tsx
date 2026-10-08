@@ -10,7 +10,7 @@ import {
   type RefObject,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, Puzzle, Search, Sparkles, Wrench } from 'lucide-react';
+import { ChevronRight, FileText, Puzzle, Search, Sparkles, Wrench } from 'lucide-react';
 import { MenuPanel, useDismissableMenu, useLatestRef } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -20,7 +20,7 @@ import { knowledgeFiles } from '../../workspace/utils/fileTree';
 import { listSkills } from '../../library/services/library.api';
 import { listPlugins } from '../../library/services/plugins.api';
 import { listToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
-import { rankByName } from '../search/rank';
+import { rankByName, rankByNames } from '../search/rank';
 import {
   libraryResults,
   pageResults,
@@ -28,25 +28,32 @@ import {
   type SearchResult,
   type SearchResultKind,
 } from '../search/sources';
+import { actionNames, suggestedActions, type CommandAction, type CommandContext } from '../commands/actions';
+import { useCommandActions } from '../commands/useCommandActions';
+import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import {
+  COMMAND_MENU_SHORTCUT_ARIA,
+  COMMAND_MENU_SHORTCUT_LABEL,
+  isCommandMenuShortcut,
+  onCommandMenuRequest,
+} from '../commands/command-menu';
+import { useSetupChecklist } from '../../onboarding/state/onboarding';
 
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;
 
-const PLACEHOLDER = 'Search pages, skills, tools and plugins';
-
 /**
- * The shortcut belongs to ⌘ on Apple platforms and to Ctrl everywhere else —
- * and ONLY to that one. Ctrl+K on a Mac is the text fields' "delete to end of
- * line", which nobody pressing it there means as "search".
+ * Commands get a little more room: the settings alone are nine rows for an
+ * admin, and "settings" should list them all rather than drop one.
  */
-const APPLE = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
-const SHORTCUT_LABEL = APPLE ? '⌘K' : 'Ctrl K';
-const SHORTCUT_ARIA = APPLE ? 'Meta+K' : 'Control+K';
+const ACTION_LIMIT = 12;
 
-function isShortcut(e: KeyboardEvent): boolean {
-  if (e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k') return false;
-  return APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-}
+/** No row highlighted — what an empty query opens on (see `activeIndex`). */
+const NO_ROW = -1;
+
+/** The box's own words, and the input's (which ends on an ellipsis: it is waiting for you). */
+const TRIGGER_LABEL = 'Search or run a command';
+const PLACEHOLDER = 'Search or run a command…';
 
 const byName = (r: SearchResult) => r.name;
 
@@ -56,6 +63,17 @@ const ICONS: Record<SearchResultKind, ReactNode> = {
   tool: <Wrench size={15} />,
   plugin: <Puzzle size={15} />,
 };
+
+/** One row of the listbox: a command to run, or a page or item to open. */
+type PaletteRow =
+  | { key: string; action: CommandAction; result?: never }
+  | { key: string; result: SearchResult; action?: never };
+
+const actionRow = (action: CommandAction): PaletteRow => ({ key: `action:${action.id}`, action });
+const resultRow = (result: SearchResult): PaletteRow => ({ key: result.key, result });
+
+/** A shortcut as a screen reader should hear it: "C", "G then K". */
+const spokenShortcut = (keys: readonly string[]) => keys.join(' then ');
 
 interface CatalogState {
   /** A load is in flight. The previous catalog, if any, stays on screen meanwhile. */
@@ -68,7 +86,9 @@ interface CatalogState {
 /**
  * The toolbar's search box and the palette it opens — the prototype's
  * `.search-box` and `searchPop()`: one place to find a page, a skill, a tool
- * or a plugin BY NAME, from anywhere in the app. Ctrl+K (⌘K on a Mac) opens it
+ * or a plugin BY NAME, from anywhere in the app — and to run a command ("New
+ * page", "Invite people", "Settings: Secrets"; see `commands/actions`), which
+ * are listed first. Ctrl+K (⌘K on a Mac) opens it
  * from anywhere too, which is how it is reached on a narrow window, where the
  * box itself does not fit in the toolbar.
  *
@@ -124,6 +144,15 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     );
   }, []);
 
+  // Why the last command failed, shown when the palette reopens to say so.
+  // Commands run with the palette already shut, and nothing else in core
+  // would carry the message (toasts only speak inside the Library).
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Opening it by any route — the box, the shortcut, the Get set up list's
+  // "Try it" — ticks that list's "Find or do anything" step.
+  const { markCommandMenuOpened } = useSetupChecklist();
+
   const openPalette = useCallback(() => {
     if (open) {
       // Already open: the shortcut is a way back INTO it, not a toggle.
@@ -134,8 +163,9 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     const active = document.activeElement;
     restoreFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
     setOpen(true);
+    markCommandMenuOpened();
     loadCatalog();
-  }, [open, loadCatalog]);
+  }, [open, loadCatalog, markCommandMenuOpened]);
 
   /**
    * Close, optionally handing focus back. `'previous'` is Escape — return to
@@ -147,6 +177,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
    */
   const close = useCallback((focus?: 'previous' | 'trigger') => {
     setOpen(false);
+    setNotice(null);
     if (!focus) return;
     const previous = restoreFocusRef.current?.isConnected ? restoreFocusRef.current : null;
     const target = focus === 'previous' ? (previous ?? triggerRef.current) : (triggerRef.current ?? previous);
@@ -154,9 +185,42 @@ export function SearchPalette({ compact }: { compact: boolean }) {
   }, []);
 
   const openRef = useLatestRef(openPalette);
+
+  /**
+   * Run a command once the palette has closed. A failure — thrown or
+   * rejected — opens the palette again with the reason under the rows, so a
+   * command that could not do its job never fails in silence.
+   */
+  const runAction = useCallback(
+    (action: CommandAction, ctx: CommandContext) => {
+      const fail = (err: unknown) => {
+        setNotice(err instanceof Error ? err.message : String(err));
+        // A command that throws synchronously fails inside the click that
+        // closed the palette, before that close has rendered: opened at once,
+        // `openPalette` would see it still open and only refocus an input on
+        // its way out. The reopen waits for the close to commit.
+        queueMicrotask(() => openRef.current());
+      };
+      try {
+        void Promise.resolve(action.run(ctx)).catch(fail);
+      } catch (err) {
+        fail(err);
+      }
+    },
+    [openRef],
+  );
+
+  // The commands are read here, not in the panel, because the single-key
+  // shortcuts (C, G K, G S) run them while the palette is shut.
+  const { actions, ctx } = useCommandActions();
+  useCommandShortcuts({ actions, ctx, enabled: !open, run: runAction });
+
+  // `openCommandMenu()` from outside the toolbar opens it as the shortcut does.
+  useEffect(() => onCommandMenuRequest(() => openRef.current()), [openRef]);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (!isShortcut(e) || e.defaultPrevented) return;
+      if (!isCommandMenuShortcut(e) || e.defaultPrevented) return;
       // A modal dialog owns the keyboard while it is up; opening a palette
       // underneath its scrim would move focus somewhere nobody can see.
       if (document.querySelector('[aria-modal="true"]')) return;
@@ -191,15 +255,15 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={open ? panelId : undefined}
-          aria-keyshortcuts={SHORTCUT_ARIA}
+          aria-keyshortcuts={COMMAND_MENU_SHORTCUT_ARIA}
         >
           <Search aria-hidden size={14} className="flex-none" />
-          <span className="min-w-0 flex-1 truncate">{PLACEHOLDER}</span>
+          <span className="min-w-0 flex-1 truncate">{TRIGGER_LABEL}</span>
           <kbd
             aria-hidden
             className="flex-none rounded-xs border border-line-strong px-[5px] font-mono text-meta text-ink-faint"
           >
-            {SHORTCUT_LABEL}
+            {COMMAND_MENU_SHORTCUT_LABEL}
           </kbd>
         </button>
       )}
@@ -209,7 +273,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           ref={panelRef}
           id={panelId}
           role="dialog"
-          aria-label="Search"
+          aria-label="Command menu"
           // A press anywhere in the panel but the input keeps focus IN the
           // input, as the rows already do for themselves: every key the
           // palette answers — the arrows, Enter, and Escape back to where
@@ -227,7 +291,11 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           <SearchPanel
             inputRef={inputRef}
             catalogState={catalogState}
+            notice={notice}
+            actions={actions}
+            ctx={ctx}
             onClose={close}
+            onRunAction={runAction}
           />
         </div>
       )}
@@ -242,18 +310,33 @@ export function SearchPalette({ compact }: { compact: boolean }) {
 function SearchPanel({
   inputRef,
   catalogState,
+  notice,
+  actions,
+  ctx,
   onClose,
+  onRunAction,
 }: {
   inputRef: RefObject<HTMLInputElement | null>;
   catalogState: CatalogState;
+  notice: string | null;
+  /** The commands on offer, and the context they run with (`useCommandActions`). */
+  actions: readonly CommandAction[];
+  ctx: CommandContext;
   onClose: (focus?: 'previous' | 'trigger') => void;
+  onRunAction: (action: CommandAction, ctx: CommandContext) => void;
 }) {
   const navigate = useNavigate();
   const { openWorkspacePath } = useFileNav();
   const { kbDirName } = useWorkspace();
   const { tree, suggestionOnlyPaths } = useMergedWorkspaceTree();
   const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
+  /**
+   * The highlighted row. An EMPTY query highlights nothing until ↑/↓ or the
+   * pointer picks a row: its first row is a suggested command (New page), and
+   * Ctrl+K then Enter must never make a page nobody asked for. Once something
+   * is typed, the best match is highlighted and Enter takes it.
+   */
+  const [activeIndex, setActiveIndex] = useState(NO_ROW);
   const listboxId = useId();
   const optionId = (key: string) => `${listboxId}-${key}`;
 
@@ -270,12 +353,21 @@ function SearchPanel({
     [catalogState.catalog, kbDirName],
   );
 
-  const pageHits = useMemo(() => rankByName(pages, query, byName, GROUP_LIMIT), [pages, query]);
-  const itemHits = useMemo(() => rankByName(items, query, byName, GROUP_LIMIT), [items, query]);
-  const flat = useMemo(() => [...pageHits, ...itemHits], [pageHits, itemHits]);
+  // Commands first: with nothing typed, a short set of the commonest; with a
+  // query, every offered command ranked by its label and keywords.
+  const actionHits = useMemo(
+    () =>
+      (query.trim() ? rankByNames(actions, query, actionNames, ACTION_LIMIT) : suggestedActions(actions, ctx)).map(
+        actionRow,
+      ),
+    [actions, ctx, query],
+  );
+  const pageHits = useMemo(() => rankByName(pages, query, byName, GROUP_LIMIT).map(resultRow), [pages, query]);
+  const itemHits = useMemo(() => rankByName(items, query, byName, GROUP_LIMIT).map(resultRow), [items, query]);
+  const flat = useMemo(() => [...actionHits, ...pageHits, ...itemHits], [actionHits, pageHits, itemHits]);
   // Clamped rather than reset when the rows change under it: the catalog can
   // land while the reader is already arrowing through the pages.
-  const active = flat.length === 0 ? -1 : Math.min(activeIndex, flat.length - 1);
+  const active = flat.length === 0 || activeIndex === NO_ROW ? NO_ROW : Math.min(activeIndex, flat.length - 1);
   const activeKey = active >= 0 ? flat[active].key : null;
 
   useEffect(() => {
@@ -283,10 +375,15 @@ function SearchPanel({
     document.getElementById(`${listboxId}-${activeKey}`)?.scrollIntoView?.({ block: 'nearest' });
   }, [activeKey, listboxId]);
 
-  const choose = (result: SearchResult) => {
+  const choose = (row: PaletteRow) => {
     onClose('trigger');
-    if (result.target.kind === 'workspace') openWorkspacePath(result.target.path);
-    else navigate(result.target.url);
+    if (row.action) {
+      onRunAction(row.action, ctx);
+      return;
+    }
+    const { target } = row.result;
+    if (target.kind === 'workspace') openWorkspacePath(target.path);
+    else navigate(target.url);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -297,7 +394,10 @@ function SearchPanel({
         break;
       case 'ArrowUp':
         e.preventDefault();
-        if (flat.length > 0) setActiveIndex((active - 1 + flat.length) % flat.length);
+        // From no row at all, ↑ starts at the bottom, as ↓ starts at the top.
+        if (flat.length > 0) {
+          setActiveIndex(active === NO_ROW ? flat.length - 1 : (active - 1 + flat.length) % flat.length);
+        }
         break;
       case 'Enter':
         e.preventDefault();
@@ -323,7 +423,7 @@ function SearchPanel({
   const trimmed = query.trim();
   const loadingItems = catalogState.loading && !catalogState.catalog;
 
-  const renderGroup = (label: string, rows: SearchResult[], offset: number) => {
+  const renderGroup = (label: string, rows: PaletteRow[], offset: number) => {
     if (rows.length === 0) return null;
     const labelId = `${listboxId}-${label.replace(/\W+/g, '-')}`;
     return (
@@ -334,6 +434,8 @@ function SearchPanel({
         {rows.map((r, i) => {
           const index = offset + i;
           const selected = index === active;
+          const shortcut = r.action?.shortcut;
+          const location = r.action ? r.action.group : r.result.location;
           return (
             <div
               key={r.key}
@@ -352,12 +454,31 @@ function SearchPanel({
               )}
             >
               <span aria-hidden className="flex-none text-ink-faint">
-                {ICONS[r.kind]}
+                {r.action ? (r.action.icon ?? <ChevronRight size={15} />) : ICONS[r.result.kind]}
               </span>
-              <span className="min-w-0 truncate">{r.name}</span>
-              <span className="ml-auto max-w-[45%] flex-none truncate pl-2 text-meta text-ink-faint">
-                {r.location}
-              </span>
+              <span className="min-w-0 truncate">{r.action ? r.action.label : r.result.name}</span>
+              {location && (
+                <span className="ml-auto max-w-[45%] flex-none truncate pl-2 text-meta text-ink-faint">
+                  {location}
+                </span>
+              )}
+              {shortcut && shortcut.length > 0 && (
+                <>
+                  {/* Drawn as keys for the eye, said as words for the ear:
+                      `aria-keyshortcuts` cannot express a sequence like G K. */}
+                  <span aria-hidden className={cn('flex flex-none items-center gap-1 pl-2', !location && 'ml-auto')}>
+                    {shortcut.map((key, k) => (
+                      <kbd
+                        key={k}
+                        className="rounded-xs border border-line-strong px-[5px] font-mono text-meta text-ink-faint"
+                      >
+                        {key}
+                      </kbd>
+                    ))}
+                  </span>
+                  <span className="sr-only"> (shortcut {spokenShortcut(shortcut)})</span>
+                </>
+              )}
             </div>
           );
         })}
@@ -368,20 +489,16 @@ function SearchPanel({
   // One line under the rows for whatever they cannot say themselves: the
   // catalog still on its way, the catalog unreachable, or no match at all.
   // Outside the listbox, which holds options and nothing else.
-  // The failure comes before "no match": with the catalog unreachable, only
-  // the pages were searched, and "No pages or items match" would claim the
-  // skills, tools and plugins were searched too.
+  // A failed catalog is said whether or not there are rows: with nothing
+  // typed the suggested commands fill the list, and the person would never
+  // learn that skills, tools and plugins could not be found. With a query
+  // and no rows, the failure follows the "nothing matches" line, so a reader
+  // is not told that the catalog was searched when it was not.
+  const emptiness = flat.length === 0 ? (trimmed ? `Nothing matches “${trimmed}”.` : 'Nothing to search yet.') : null;
+  const failure = catalogState.failed && !catalogState.catalog ? 'Couldn’t load skills, tools and plugins.' : null;
   const status = loadingItems
     ? 'Loading skills, tools and plugins…'
-    : catalogState.failed && !catalogState.catalog
-      ? flat.length === 0 && trimmed
-        ? `No pages match “${trimmed}”, and skills, tools and plugins couldn’t be loaded.`
-        : 'Couldn’t load skills, tools and plugins.'
-      : flat.length === 0
-        ? trimmed
-          ? `No pages or items match “${trimmed}”`
-          : 'Nothing to search yet.'
-        : null;
+    : [emptiness, failure].filter(Boolean).join(' ') || null;
 
   return (
     <MenuPanel className="flex max-h-[min(480px,calc(100dvh-72px))] flex-col">
@@ -389,7 +506,7 @@ function SearchPanel({
         ref={inputRef}
         type="text"
         role="combobox"
-        aria-label={PLACEHOLDER}
+        aria-label={TRIGGER_LABEL}
         aria-expanded
         aria-controls={listboxId}
         aria-autocomplete="list"
@@ -398,17 +515,23 @@ function SearchPanel({
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
-          setActiveIndex(0);
+          setActiveIndex(e.target.value.trim() ? 0 : NO_ROW);
         }}
         onKeyDown={onKeyDown}
         autoComplete="off"
         spellCheck={false}
         className="mb-1 w-full flex-none border-b border-line bg-transparent px-2 pt-1.5 pb-2.5 text-body text-ink placeholder:text-ink-faint focus:outline-none"
       />
-      <div id={listboxId} role="listbox" aria-label="Search results" className="min-h-0 overflow-y-auto">
-        {renderGroup('Pages', pageHits, 0)}
-        {renderGroup('Skills, tools & plugins', itemHits, pageHits.length)}
+      <div id={listboxId} role="listbox" aria-label="Commands and results" className="min-h-0 overflow-y-auto">
+        {renderGroup('Actions', actionHits, 0)}
+        {renderGroup('Pages', pageHits, actionHits.length)}
+        {renderGroup('Skills, tools & plugins', itemHits, actionHits.length + pageHits.length)}
       </div>
+      {notice && (
+        <div role="alert" className="flex-none px-2 pt-2 text-ui text-danger">
+          {notice}
+        </div>
+      )}
       <div role="status" className={cn('flex-none px-2 text-ui text-ink-muted', status && 'py-2')}>
         {status}
       </div>

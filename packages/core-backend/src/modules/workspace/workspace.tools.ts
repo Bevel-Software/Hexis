@@ -66,7 +66,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew } from './first-run.js';
+import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
@@ -876,6 +876,13 @@ export function registerWorkspaceTools(
    * tools read the disk and nothing else.
    */
   agentGuide?: AgentGuideReader,
+  /**
+   * The starter pack the knowledge base was filled from, if any (see
+   * `modules/onboarding`): its untouched pages do not end the `firstRun`
+   * note, and the note names the pages it suggests. Optional; without it the
+   * note reads the knowledge folder alone.
+   */
+  starterPacks?: FirstRunStarterSource,
 ): void {
   const { kbDirName } = kb;
   /**
@@ -1649,7 +1656,7 @@ export function registerWorkspaceTools(
       properties: {
         sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.'),
         firstRun: str(
-          `Present only while the knowledge base holds nothing but its starter guide: what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
+          `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
       },
       required: ['sessionId'],
@@ -1691,8 +1698,12 @@ export function registerWorkspaceTools(
       if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceId))) return null;
       const knowledgeDir = kb.layout.knowledgeBaseDir;
       const root = await ctx.workspaceService.getWorkspacePath(workspaceId);
-      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir)))) return null;
-      return firstRunNote(`${kbDirName}/${knowledgeDir}`);
+      // A starter pack's pages, still as the pack wrote them, are tasks to
+      // fill in rather than pages anyone wrote: they leave the note standing,
+      // and the note names what the pack suggests drafting first.
+      const starter = (await starterPacks?.firstRunStarter()) ?? null;
+      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), starter?.pages))) return null;
+      return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
     } catch (err) {
       log.debug('start_session: could not tell whether the knowledge base is new', {
         error: err instanceof Error ? err.message : String(err),

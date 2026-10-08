@@ -3162,6 +3162,8 @@ describe('FileExplorer: platform files stay put', () => {
   });
 
   const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore'];
+  /** What a platform file's row says: access.md reads as "Who has access". */
+  const shown = (name: string) => (name === 'access.md' ? 'Who has access' : name);
 
   let alertSpy: ReturnType<typeof vi.spyOn>;
 
@@ -3180,7 +3182,7 @@ describe('FileExplorer: platform files stay put', () => {
 
   it.each(PLATFORM)('%s cannot be dragged: the row refuses to start one', (name) => {
     renderExplorer({ fileTree: TREE });
-    expect(row(name)).toHaveAttribute('draggable', 'false');
+    expect(row(shown(name))).toHaveAttribute('draggable', 'false');
   });
 
   it.each(PLATFORM)('a drop carrying %s is refused with the sentence, and nothing is sent', async (name) => {
@@ -3200,7 +3202,7 @@ describe('FileExplorer: platform files stay put', () => {
 
   it.each(PLATFORM)('the Rename action on %s says the sentence and opens nothing', async (name) => {
     const { moveEntry } = renderExplorer({ fileTree: TREE });
-    fireEvent.contextMenu(row(name));
+    fireEvent.contextMenu(row(shown(name)));
     const rename = screen.getByRole('menuitem', { name: /Rename/i });
     expect(rename).toHaveAttribute('aria-disabled', 'true');
     expect(rename).toHaveAttribute('title', sentence(name));
@@ -3208,7 +3210,7 @@ describe('FileExplorer: platform files stay put', () => {
       fireEvent.click(rename);
     });
     // No rename box: the row still shows its name, and nothing was sent.
-    expect(screen.getAllByText(name)[0]).toBeInTheDocument();
+    expect(screen.getAllByText(shown(name))[0]).toBeInTheDocument();
     expect(moveEntry).not.toHaveBeenCalled();
   });
 
@@ -3311,7 +3313,7 @@ describe('FileExplorer: platform files stay put', () => {
 
     it("the root's own copy still cannot be dragged, admin or not", () => {
       renderExplorer({ fileTree: MISPLACED, isAdmin: true });
-      expect(row('access.md')).toHaveAttribute('draggable', 'false');
+      expect(row('Who has access')).toHaveAttribute('draggable', 'false');
     });
 
     it('a non-admin gets no exception: the misplaced row is refused like any other', async () => {
@@ -3363,6 +3365,16 @@ describe('FileExplorer: platform files stay put', () => {
     const rename = screen.getByRole('menuitem', { name: /Rename/i });
     expect(rename).toHaveAttribute('aria-disabled', 'true');
     expect(rename).toHaveAttribute('title', sentence('access.md'));
+  });
+
+  it('an access.md row reads Who has access, with the file name on hover', () => {
+    renderExplorer({ fileTree: TREE });
+    const access = row('Who has access');
+    expect(access).toHaveAttribute('data-tree-path', `${KB}/access.md`);
+    expect(access).toHaveAttribute('title', 'access.md');
+    expect(screen.queryByText('access.md')).not.toBeInTheDocument();
+    // Other platform files are not renamed for display.
+    expect(row('roles.yaml')).not.toHaveAttribute('title');
   });
 
   it('an AGENTS.md is content, not a platform file, at the root and nested: it drags like any other row', () => {

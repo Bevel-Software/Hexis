@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir } from '../assets.js';
+import { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir, defaultStarterPacksDir } from '../assets.js';
 
 /**
  * Every asset folder this package reads at run time has to reach the places
@@ -22,13 +22,13 @@ const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 const repoRoot = path.resolve(packageRoot, '..', '..');
 
 /** The folders assets.ts locates, as names under the package root. */
-const ASSET_DIRS = [coreMigrationsDir(), defaultKbTemplateDir(), agentGuideDir()].map((dir) =>
+const ASSET_DIRS = [coreMigrationsDir(), defaultKbTemplateDir(), agentGuideDir(), defaultStarterPacksDir()].map((dir) =>
   path.basename(dir),
 );
 
 describe('the asset folders this package reads at run time', () => {
-  it('are the three assets.ts names', () => {
-    expect(ASSET_DIRS.sort()).toEqual(['agent-guide', 'kb-template', 'migrations']);
+  it('are the four assets.ts names', () => {
+    expect(ASSET_DIRS.sort()).toEqual(['agent-guide', 'kb-template', 'migrations', 'starter-packs']);
   });
 
   it('exist in the source tree', () => {

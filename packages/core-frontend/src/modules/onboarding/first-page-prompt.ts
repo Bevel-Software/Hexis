@@ -10,6 +10,16 @@
 export const FIRST_PAGE_PROMPT =
   "Using our Hexis knowledge base, write a page in Knowledge about our company: what we do, who we work with, and our main products. Ask me for anything you don't know, then save it.";
 
+/**
+ * The request for the team that answered "What does your team do?": its
+ * starter pack's own (`firstPagePrompt` — for Sales, "fill in the Customers
+ * page…"), else the generic one above. Trimmed: a pack writes it as a YAML
+ * block, which ends in a newline nobody wants in a URL.
+ */
+export function firstPagePromptFor(pack: { firstPagePrompt: string } | null | undefined): string {
+  return pack?.firstPagePrompt.trim() || FIRST_PAGE_PROMPT;
+}
+
 /** A new Claude chat with `prompt` typed into it (claude.ai's `q` parameter prefills; the person still sends). */
 export function claudePromptUrl(prompt: string): string {
   return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;

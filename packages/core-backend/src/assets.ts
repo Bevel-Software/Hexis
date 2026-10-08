@@ -3,8 +3,9 @@ import { fileURLToPath } from 'node:url';
 
 /**
  * Locations of the assets shipped INSIDE this package (`files` in
- * package.json): the squashed core migration history (`migrations/`) and the
- * KB seed template (`kb-template/`). Both live at the PACKAGE ROOT, and this
+ * package.json): the squashed core migration history (`migrations/`), the
+ * KB seed template (`kb-template/`) and the starter packs (`starter-packs/`).
+ * All live at the PACKAGE ROOT, and this
  * module is a direct child of either `src/` (in-repo / tsx) or `dist/`
  * (compiled) — so one `..` hop from the module URL reaches the package root
  * in BOTH layouts. Resolved lazily so bundlers that rewrite `import.meta.url`
@@ -32,4 +33,14 @@ export function defaultKbTemplateDir(): string {
  */
 export function agentGuideDir(): string {
   return path.join(packageRoot(), 'agent-guide');
+}
+
+/**
+ * The starter packs a new knowledge base may be filled from — one folder per
+ * team (`engineering/`, `sales/`, …), each a `pack.yaml` beside the pages and
+ * the plugin it adds (see `modules/onboarding/starter-packs.ts`). Beside
+ * `kb-template/` for the same reason: read at run time, shipped as files.
+ */
+export function defaultStarterPacksDir(): string {
+  return path.join(packageRoot(), 'starter-packs');
 }

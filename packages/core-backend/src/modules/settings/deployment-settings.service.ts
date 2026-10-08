@@ -372,6 +372,35 @@ export const CORE_SETTINGS: SettingDef[] = [
     validate: (v) =>
       parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
   },
+
+  {
+    /**
+     * Which starter pack the first admin chose for a new knowledge base — a
+     * pack's id, or `none` for "I'll start from scratch" — written once, by
+     * the deployment, when the choice landed (see
+     * `modules/onboarding/starter-pack.service.ts`). Its presence is what
+     * retires the "What does your team do?" card for good; its value is what
+     * the first-page prompt and the agent's first-run note follow. Internal:
+     * a fact about what happened, not something the setup screen offers.
+     */
+    key: 'starterPack',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v) ? null : 'A starter pack id is lowercase letters, digits and hyphens.'),
+  },
+  {
+    /**
+     * The claim an admin holds while their starter-pack choice is being
+     * written: `<user id> <epoch ms>`, inserted only if absent so two replicas
+     * cannot both write, and released once the choice is recorded. A claim
+     * nobody released in time is a process that died mid-write and is taken
+     * over (see `starter-pack.service.ts`). Internal, like the choice.
+     */
+    key: 'starterPackClaim',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^\S+ \d+$/.test(v) ? null : 'A claim is a user id and a time.'),
+  },
 ];
 
 /**
@@ -724,6 +753,29 @@ export class DeploymentSettingsService {
     await this.save(entries, updatedBy, 'deployment');
   }
 
+  /**
+   * {@link record} one value ONLY IF NOTHING IS THERE, and say whether it was
+   * this call that put it there. The row is the claim for a flow that must
+   * happen once across every replica (the starter-pack choice): the insert
+   * yields to a row already there, so of two replicas claiming at once the
+   * database lets exactly one through. Validated as `record` is; a blank
+   * value is no claim (it would be a clear) and answers false.
+   */
+  async recordIfAbsent(key: string, value: string, updatedBy: string | null): Promise<boolean> {
+    const write = this.plan({ [key]: value }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const encrypted = write.def.secret === true;
+    const stored = encrypted ? this.crypto!.encrypt(write.value) : write.value;
+    const inserted = await this.db
+      .insert(deploymentSettings)
+      .values({ key, value: stored, encrypted, updatedBy })
+      .onConflictDoNothing({ target: deploymentSettings.key })
+      .returning({ key: deploymentSettings.key });
+    if (inserted.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
   /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
   private plan(
     entries: Record<string, string>,
@@ -950,6 +1002,25 @@ export class DeploymentSettingsService {
       .update(tuple)
       .digest('hex');
     return `${OIDC_VERIFICATION_PREFIX}${fingerprint}`;
+  }
+
+  /**
+   * One plain (never sealed) setting as the DATABASE has it now, taken into
+   * this replica's cache on the way: for the rare setting a running
+   * deployment writes, so a replica that did not serve the write still
+   * answers with it. The environment still wins, as in {@link resolve}.
+   */
+  async reload(key: string): Promise<string> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return this.resolve(key);
+    const rows = await this.db
+      .select({ value: deploymentSettings.value, encrypted: deploymentSettings.encrypted })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    const row = rows.find((r) => !r.encrypted);
+    if (row) this.stored.set(key, row.value);
+    else this.stored.delete(key);
+    return this.resolve(key);
   }
 
   /** Remove one stored row (used by tests and by `prune`). */

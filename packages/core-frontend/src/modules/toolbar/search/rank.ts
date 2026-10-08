@@ -73,12 +73,32 @@ export function rankByName<T>(
   nameOf: (item: T) => string,
   limit: number,
 ): T[] {
+  return rankByNames(items, query, (item) => [nameOf(item)], limit);
+}
+
+/**
+ * {@link rankByName} for items known by more than one name — a command's
+ * label and the words someone might type for it instead ("Invite people" for
+ * `team`). An item ranks at the BEST tier any of its names reaches; ties are
+ * broken on the FIRST name, the one on screen, so two rows that matched
+ * equally still read in a sensible order.
+ */
+export function rankByNames<T>(
+  items: readonly T[],
+  query: string,
+  namesOf: (item: T) => readonly string[],
+  limit: number,
+): T[] {
   if (!normalizeForMatch(query)) return items.slice(0, limit);
   const scored: { item: T; tier: number; name: string; index: number }[] = [];
   items.forEach((item, index) => {
-    const name = nameOf(item);
-    const tier = matchTier(name, query);
-    if (tier !== null) scored.push({ item, tier, name, index });
+    const names = namesOf(item);
+    let tier: number | null = null;
+    for (const n of names) {
+      const t = matchTier(n, query);
+      if (t !== null && (tier === null || t < tier)) tier = t;
+    }
+    if (tier !== null) scored.push({ item, tier, name: names[0] ?? '', index });
   });
   scored.sort(
     (a, b) =>

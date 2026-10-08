@@ -18,6 +18,10 @@ import type { AccountSummary } from '../../auth/services/account.api';
 import type { PluginSummary } from '../../library/services/plugins.api';
 import type { AgentConnection } from '../services/agent-connection.api';
 import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
+import type { StarterPacksAnswer } from '../services/starter-packs.api';
+import { resetStarterPacksForTests } from '../state/starter-packs';
+import { SearchPalette } from '../../toolbar/components/SearchPalette';
+import { COMMAND_MENU_SHORTCUT_LABEL } from '../../toolbar/commands/command-menu';
 import { AGENT_RECHECK_MS } from '../state/agent-connection';
 import { notePluginCreated } from '../../library/state/plugins-revision';
 
@@ -39,9 +43,24 @@ const { listAccountsMock, listPluginsMock, openWorkspacePathMock, fetchAgentConn
 
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
+const { fetchStarterPacksMock } = vi.hoisted(() => ({
+  fetchStarterPacksMock: vi.fn<() => Promise<StarterPacksAnswer>>(),
+}));
+vi.mock('../services/starter-packs.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/starter-packs.api')>()),
+  fetchStarterPacks: fetchStarterPacksMock,
+}));
 vi.mock('../../auth/services/account.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../auth/services/account.api')>()),
   listAccounts: listAccountsMock,
+}));
+vi.mock('../../library/services/library.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../library/services/library.api')>()),
+  listSkills: vi.fn(async () => []),
+}));
+vi.mock('../../secrets-vault/services/tool-secrets.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../secrets-vault/services/tool-secrets.api')>()),
+  listToolSecrets: vi.fn(async () => []),
 }));
 vi.mock('../../library/services/plugins.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../library/services/plugins.api')>()),
@@ -157,7 +176,14 @@ type MountOptions = {
   openFilePath?: string | null;
   route?: string;
   createFile?: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
+  /** Mount the toolbar's command menu beside the column, as the app does. */
+  withPalette?: boolean;
+  /** The branch on screen; the default one (the test setup's) unless a test is about a draft. */
+  workspaceBranch?: string | null;
 };
+
+/** The default branch the test setup pins: where a starter pack lands. */
+const DEFAULT_BRANCH = 'target-company-state';
 
 /** The column in every context it reads; `rerender` it to move the app's state under it. */
 function columnUi({
@@ -167,6 +193,8 @@ function columnUi({
   openFilePath = null as string | null,
   route = '/workspace',
   createFile = async () => {},
+  withPalette = false,
+  workspaceBranch = DEFAULT_BRANCH,
 }: MountOptions = {}) {
   const auth = authValue({
     user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
@@ -181,9 +209,11 @@ function columnUi({
               fileTree: files ? treeOf(files) : null,
               openFilePath,
               createFile,
+              workspaceBranch,
             })}
           >
             <InviteDialogProvider>
+              {withPalette && <SearchPalette compact />}
               <GetStartedColumn />
               <LocationProbe />
               <NavigateHandle />
@@ -212,6 +242,8 @@ const isDone = (title: RegExp | string) => within(row(title)!).queryByText('(don
 
 beforeEach(() => {
   resetOnboardingForTests();
+  resetStarterPacksForTests();
+  fetchStarterPacksMock.mockReset().mockResolvedValue({ offered: false, chosen: null, packs: [], chosenPack: null });
   setViewportWidth(1400);
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software')]);
   listPluginsMock.mockReset().mockResolvedValue([]);
@@ -225,13 +257,14 @@ const doneWrites = () =>
   authFetchMock.mock.calls.filter((c) => (c as unknown[])[0] === '/api/auth/onboarding-done').length;
 
 describe('GetStartedColumn: what a member sees', () => {
-  it('lists the four member steps, hides the admin-only ones, and asks the server nothing', () => {
+  it('lists the five member steps, hides the admin-only ones, and asks the server nothing', () => {
     mount();
-    expect(screen.getByText('1 of 4')).toBeInTheDocument();
+    expect(screen.getByText('1 of 5')).toBeInTheDocument();
     expect(row('Create your workspace')).not.toBeNull();
     expect(row('Connect your agent')).not.toBeNull();
     expect(row('Read “How to get started”')).not.toBeNull();
     expect(row('Write your first page')).not.toBeNull();
+    expect(row(/^Find or do anything with/)).not.toBeNull();
     expect(row('Choose where your knowledge lives')).toBeNull();
     expect(row('Create a plugin for your team')).toBeNull();
     expect(row('Invite your team')).toBeNull();
@@ -243,7 +276,7 @@ describe('GetStartedColumn: what a member sees', () => {
     mount({ onboardingDone: true });
     expect(isDone('Connect your agent')).toBe(true);
     expect(isDone('Create your workspace')).toBe(true);
-    expect(screen.getByText('2 of 4')).toBeInTheDocument();
+    expect(screen.getByText('2 of 5')).toBeInTheDocument();
   });
 
   it('sends "Connect" to the welcome page', async () => {
@@ -271,11 +304,12 @@ describe('GetStartedColumn: what a member sees', () => {
   it('leaves the guide step out when the knowledge base has no such page', () => {
     mount({ files: [`${KB}/KnowledgeBase/.gitkeep`] });
     expect(row('Read “How to get started”')).toBeNull();
-    expect(screen.getByText('1 of 3')).toBeInTheDocument();
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
   });
 
-  it('ticks "Write your first page" only for content other than the starter page', () => {
+  it('ticks "Write your first page" only for content other than the starter page', async () => {
     const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/access.md`] });
+    await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
     expect(isDone('Write your first page')).toBe(false);
     expect(
       within(row('Write your first page')!).getByText(
@@ -284,7 +318,8 @@ describe('GetStartedColumn: what a member sees', () => {
     ).toBeInTheDocument();
     unmount();
     mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Product/Roadmap.md`] });
-    expect(isDone('Write your first page')).toBe(true);
+    // Ticked once the starter-pack answer is in (none chosen here).
+    await waitFor(() => expect(isDone('Write your first page')).toBe(true));
   });
 
   it('"New page" creates Untitled.md in the Knowledge folder and opens it for editing', async () => {
@@ -347,6 +382,20 @@ describe('GetStartedColumn: what a member sees', () => {
       `Couldn’t create the page: "${KB}/KnowledgeBase/Untitled 5.md" already exists.`,
     );
     expect(createFile).toHaveBeenCalledTimes(5);
+    expect(openWorkspacePathMock).not.toHaveBeenCalled();
+  });
+
+  // Mid-switch, the URL names the destination branch while the workspace on
+  // screen (and `createFile`) is still the branch being left; a page made in
+  // that gap would land on the old branch and open on the new one, nowhere.
+  it('"New page" creates nothing while the workspace on screen is not the branch the URL names', async () => {
+    const createFile = vi.fn(async () => {});
+    mount({ createFile, route: '/workspace/alice%2Fdraft' });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
+      'Couldn’t create the page: the workspace is still loading.',
+    );
+    expect(createFile).not.toHaveBeenCalled();
     expect(openWorkspacePathMock).not.toHaveBeenCalled();
   });
 
@@ -495,6 +544,103 @@ describe('GetStartedColumn: a connected agent', () => {
     expect(within(page).queryByText('Connect your agent and it can write pages for you.')).not.toBeInTheDocument();
   });
 
+  /**
+   * A team that chose a starter pack gets the pack's own request, and the
+   * pack's pages — placeholders until someone fills one in — do not count as
+   * the first page.
+   */
+  describe('after a starter pack', () => {
+    const SALES_PAGES = [`${KB}/KnowledgeBase/Customers.md`, `${KB}/KnowledgeBase/Pricing.md`];
+    const SALES_PROMPT = 'Using our Hexis knowledge base, fill in the Customers page.';
+    const chosen = (starterPages: string[]): StarterPacksAnswer => ({
+      offered: false,
+      chosen: 'sales',
+      packs: [],
+      chosenPack: { id: 'sales', name: 'Sales', firstPagePrompt: `${SALES_PROMPT}\n`, starterPages },
+    });
+
+    it("asks the agent with the pack's prompt", async () => {
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
+      fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
+      mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
+      const page = row('Write your first page')!;
+      await waitFor(() =>
+        expect(within(page).getByRole('link', { name: 'Ask Claude to write it' })).toHaveAttribute(
+          'href',
+          claudePromptUrl(SALES_PROMPT),
+        ),
+      );
+      expect(within(page).getByRole('link', { name: 'Open in ChatGPT' })).toHaveAttribute(
+        'href',
+        chatGptPromptUrl(SALES_PROMPT),
+      );
+    });
+
+    it("leaves the step open while the pack's pages are untouched, and ticks it once one is filled in", async () => {
+      fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
+      const files = [...STARTER_TREE, ...SALES_PAGES];
+      const { rerender } = mount({ files });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalledTimes(1));
+      expect(isDone('Write your first page')).toBe(false);
+
+      // Somebody fills in Customers: the tree is fetched again, and the
+      // server no longer lists the page as a placeholder.
+      fetchStarterPacksMock.mockResolvedValue(chosen([SALES_PAGES[1]!]));
+      rerender(columnUi({ files }));
+      await waitFor(() => expect(isDone('Write your first page')).toBe(true));
+      expect(fetchStarterPacksMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the generic prompt when the team skipped', async () => {
+      fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
+      fetchStarterPacksMock.mockResolvedValue({ offered: false, chosen: 'none', packs: [], chosenPack: null });
+      mount();
+      const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
+      expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
+    });
+
+    it('does not tick the step before the answer is in: untouched pack pages are not a first page', async () => {
+      let answer!: (a: StarterPacksAnswer) => void;
+      fetchStarterPacksMock.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
+      expect(isDone('Write your first page')).toBe(false);
+      answer(chosen(SALES_PAGES));
+      // Still open: both pages are placeholders. Filling one in would tick it.
+      await act(async () => {});
+      expect(isDone('Write your first page')).toBe(false);
+    });
+
+    it('reads the tree alone on a draft branch, where the default branch’s placeholders do not apply', async () => {
+      fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
+      mount({ files: [...STARTER_TREE, ...SALES_PAGES], workspaceBranch: 'alice/draft' });
+      await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
+      await waitFor(() => expect(isDone('Write your first page')).toBe(true));
+    });
+
+    it('asks again for a tree change that lands while the previous answer is still on its way', async () => {
+      const resolvers: ((a: StarterPacksAnswer) => void)[] = [];
+      fetchStarterPacksMock.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+      const files = [...STARTER_TREE, ...SALES_PAGES];
+      const { rerender } = mount({ files });
+      await waitFor(() => expect(resolvers).toHaveLength(1));
+      resolvers[0]!(chosen(SALES_PAGES));
+      await waitFor(() => expect(isDone('Write your first page')).toBe(false));
+
+      // Two tree changes in a row: the first starts a request, the second
+      // lands while it is out. One more request follows, and it is that one
+      // which reports the page filled in.
+      rerender(columnUi({ files: [...files] }));
+      await waitFor(() => expect(resolvers).toHaveLength(2));
+      rerender(columnUi({ files: [...files] }));
+      resolvers[1]!(chosen(SALES_PAGES));
+      await waitFor(() => expect(resolvers).toHaveLength(3));
+      resolvers[2]!(chosen([SALES_PAGES[1]!]));
+      await waitFor(() => expect(isDone('Write your first page')).toBe(true));
+    });
+  });
+
   it('leads with "Ask ChatGPT to write it" for a ChatGPT connection, Claude quiet beside Copy prompt', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT', kind: 'agent' });
     mount();
@@ -580,10 +726,10 @@ describe('GetStartedColumn: a connected agent', () => {
 });
 
 describe('GetStartedColumn: what an admin sees', () => {
-  it('lists all seven steps, storage already done', async () => {
+  it('lists all eight steps, storage already done', async () => {
     mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
-    expect(screen.getByText('2 of 7')).toBeInTheDocument();
+    expect(screen.getByText('2 of 8')).toBeInTheDocument();
     expect(isDone('Choose where your knowledge lives')).toBe(true);
     expect(isDone('Create a plugin for your team')).toBe(false);
     expect(isDone('Invite your team')).toBe(false);
@@ -670,14 +816,19 @@ describe('GetStartedColumn: all done', () => {
   const WITH_PAGE = [...STARTER_TREE, `${KB}/KnowledgeBase/Notes.md`];
   const complete = () => screen.queryByRole('heading', { name: 'You’re set up' });
 
+  // The command menu has been opened, by whatever route.
+  beforeEach(() => {
+    window.localStorage.setItem('bevel.onboarding.commandMenuOpened.juan@bevel.software', '1');
+  });
+
   it('says "You’re set up" when the last step ticks, in place of the list', async () => {
     listPluginsMock.mockResolvedValue([plugin('Plugins/GTM')]);
     listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('ana@bevel.software')]);
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     const everythingBut = { admin: true, onboardingDone: true, openFilePath: GUIDE };
-    // One step short, the settled column shows the six it has...
+    // One step short, the settled column shows the seven it has...
     const { rerender } = mount(everythingBut);
-    expect(await screen.findByText('6 of 7')).toBeInTheDocument();
+    expect(await screen.findByText('7 of 8')).toBeInTheDocument();
     expect(complete()).toBeNull();
     // ...and the page landing in the tree finishes it.
     rerender(columnUi({ ...everythingBut, files: WITH_PAGE }));
@@ -725,6 +876,44 @@ describe('GetStartedColumn: all done', () => {
 });
 
 /**
+ * The command menu is taught by being opened: "Try it" opens it, and the
+ * step ticks once it has been opened by any route — and stays ticked.
+ */
+describe('GetStartedColumn: the command menu', () => {
+  const STEP = `Find or do anything with ${COMMAND_MENU_SHORTCUT_LABEL}`;
+
+  it('is a step for everyone, named with this platform’s keys', async () => {
+    mount();
+    expect(row(STEP)).not.toBeNull();
+    expect(isDone(STEP)).toBe(false);
+    expect(
+      within(row(STEP)!).getByText('Type what you want: a page, a skill, or an action like Invite people.'),
+    ).toBeInTheDocument();
+  });
+
+  it('"Try it" opens the command menu, and that ticks the step', async () => {
+    const user = userEvent.setup();
+    mount({ withPalette: true });
+    await user.click(within(row(STEP)!).getByRole('button', { name: 'Try it' }));
+    expect(screen.getByRole('combobox', { name: 'Search or run a command' })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(isDone(STEP)).toBe(true);
+  });
+
+  it('ticks when the menu is opened any other way, and remembers it per account', async () => {
+    const user = userEvent.setup();
+    const { unmount } = mount({ withPalette: true });
+    await user.keyboard('{Control>}k{/Control}');
+    expect(screen.getByRole('combobox', { name: 'Search or run a command' })).toBeInTheDocument();
+    expect(isDone(STEP)).toBe(true);
+    expect(window.localStorage.getItem('bevel.onboarding.commandMenuOpened.juan@bevel.software')).toBe('1');
+    unmount();
+    mount();
+    expect(isDone(STEP)).toBe(true);
+  });
+});
+
+/**
  * The first-page step reads the file tree. Until the tree is in, the guide
  * looks absent and the first page unwritten, so the list waits for it rather
  * than showing a shorter, falsely open one.
@@ -738,12 +927,13 @@ describe('GetStartedColumn: the file tree', () => {
     expect(row('Read “How to get started”')).not.toBeNull();
   });
 
-  it('skips exactly `access.md`, the name the platform reserves — not another spelling', () => {
+  it('skips exactly `access.md`, the name the platform reserves — not another spelling', async () => {
     const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/access.md`] });
+    await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
     expect(isDone('Write your first page')).toBe(false);
     unmount();
     mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/Access.md`] });
-    expect(isDone('Write your first page')).toBe(true);
+    await waitFor(() => expect(isDone('Write your first page')).toBe(true));
   });
 });
 

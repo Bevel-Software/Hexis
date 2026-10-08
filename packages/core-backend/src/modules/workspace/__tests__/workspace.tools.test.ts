@@ -18,7 +18,7 @@ import { sharedFileRules, sharedFileRulesSection } from '../../agent-instruction
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
-import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote } from '../first-run.js';
+import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
@@ -2207,6 +2207,8 @@ describe('start_session', () => {
     // the note's check cannot use, which is what every other test here wants:
     // the call answers with the id alone.
     defaultWorkspaceDir?: string,
+    // The starter pack the knowledge base was filled from, for the note.
+    starterPacks?: FirstRunStarterSource,
   ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
@@ -2247,6 +2249,11 @@ describe('start_session', () => {
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      starterPacks,
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -2442,6 +2449,26 @@ describe('start_session', () => {
 
       expect(res.sessionId).toBe('thread-xyz');
       expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it("after a starter pack, stays while the pack's pages are untouched and names its suggestions", async () => {
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n');
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers', 'Pricing'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const base = await startSessionApp('external', undefined, wsDir, starter);
+      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(first.firstRun).toBe(
+        firstRunNote(`${KB_DIR}/KnowledgeBase`, { name: 'Sales', suggestedPages: ['Customers', 'Pricing'] }),
+      );
+
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n\nAcme.\n');
+      const second = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(second).not.toHaveProperty('firstRun');
     });
 
     it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {

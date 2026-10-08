@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Change, FileLock } from '@bevel-software/platform-shared';
 import {
   acquireLock as acquireLockApi,
+  EDITING_ENDED_MESSAGE,
   checkpointLockedFile,
   getLock as getLockApi,
   heartbeatLock,
@@ -35,8 +36,8 @@ interface UseFileLockArgs {
    * by me" responses from the server during the brief window between a
    * tab-switch cleanup releasing the lock and the backend actually
    * committing the release — without this, switching away and back to a
-   * file you were just editing would flicker an amber "Locked by [your
-   * own name]" banner. Optional so test harnesses without auth context
+   * file you were just editing would flicker an amber "[your own name]
+   * is editing this page" banner. Optional so test harnesses without auth context
    * still work; in that case nothing is filtered.
    */
   currentUserId?: string | null;
@@ -116,7 +117,7 @@ interface UseFileLockReturn {
  *     a heartbeat fails (lock expired, stolen, branch deleted) we drop
  *     `holdingLock` so the UI can re-arm.
  *   - External holder polling when we don't hold the lock. The editor
- *     surface shows "Locked by X" via `externalLock`.
+ *     surface shows "X is editing this page" via `externalLock`.
  *   - Autosave checkpoints. Every minute while holding the lock, persist
  *     the latest buffer + commit. The lock stays held — releasing here
  *     would race against the next keystroke.
@@ -164,7 +165,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
         holder: result.lock.holderName,
         holderUserId: result.lock.holderUserId,
       });
-      const msg = `Locked by ${result.lock.holderName}`;
+      const msg = `${result.lock.holderName} is editing this page`;
       setHoldingLock(false);
       setExternalLock(result.lock);
       setLockError(msg);
@@ -245,7 +246,9 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
         // on the next dirty edit.
         const msg = err instanceof Error ? err.message : String(err);
         console.warn('[useFileLock] heartbeat lost', { workspaceId, branch, path, error: msg });
-        setLockError(`Lost lock: ${msg}`);
+        // The session-ended sentence already says editing stopped; anything
+        // else is a reason, and gets the prefix that makes it one.
+        setLockError(msg === EDITING_ENDED_MESSAGE ? msg : `Editing stopped: ${msg}`);
         setHoldingLock(false);
       }
     }, HEARTBEAT_INTERVAL_MS);
@@ -268,7 +271,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
   //      time without per-tab polling traffic.
   //
   // We bail on the subscription path when the bus isn't mounted (tests),
-  // and the initial fetch is enough to render a static "Locked by X" if
+  // and the initial fetch is enough to render a static "X is editing this page" if
   // anyone holds it at mount time.
   const bus = useEventBus();
   useEffect(() => {
@@ -277,7 +280,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     // "Lock held by me" means the previous tab's cleanup hasn't finished
     // committing the release on the backend yet — we just switched away
     // and back fast enough that the persist+release is still in flight.
-    // We don't want to render an amber "Locked by [yourself]" banner
+    // We don't want to render an amber "[you] is editing this page" banner
     // for that fraction of a second; the SSE `lock-released` event
     // will arrive shortly and we'll be back to a clean state.
     const isSelfLock = (lock: FileLock | null): boolean =>

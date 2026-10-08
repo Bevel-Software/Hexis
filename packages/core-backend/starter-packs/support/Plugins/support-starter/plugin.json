@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "support-starter",
+  "displayName": "Support starter",
+  "description": "Triage tickets, draft responses, escalate issues, research customer questions and turn resolved issues into knowledge base articles.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Anthropic, adapted for Hexis by Bevel"
+  }
+}

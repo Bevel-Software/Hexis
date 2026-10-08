@@ -19,6 +19,7 @@ import {
 } from 'react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
+import type { CommandAction } from '../modules/toolbar/commands/actions';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */
 export interface RouteDef {
@@ -520,6 +521,20 @@ export interface AppRegistry {
    * renders nothing there.
    */
   inviteExtras?: ComponentType<{ inviting: number }>;
+  /**
+   * Commands a distribution adds to the toolbar's command menu (Ctrl/⌘K),
+   * listed after core's own.
+   *
+   * Core's commands are the verbs every deployment has — New page, Invite
+   * people, the apps, the settings pages. A verb like "New ontology" belongs
+   * to the distribution that has ontologies, so core offers the place rather
+   * than the command, as it does for folder-menu entries. Each one is plain
+   * data plus `visible` and `run`, both handed the menu's context (router,
+   * admin verdict, page on screen) — see `CommandAction`. An id core already
+   * uses is dropped; a `visible` that throws costs only its own row. Absent
+   * means the menu offers core's commands and no others.
+   */
+  commandActions?: CommandAction[];
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {
