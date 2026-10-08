@@ -514,12 +514,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   const closeTab = useCallback(async (
     tab: OpenTab,
-    options?: { skipConfirm?: boolean },
+    options?: { skipConfirm?: boolean; workspaceId?: string | null },
   ): Promise<{ closed: boolean; newActivePath: string | null }> => {
+    // Pin the workspace the close was decided in. The question waits on the
+    // person; if the workspace moves to another branch meanwhile, a tab with
+    // the same path there is not the one they agreed to close.
+    const closeWorkspaceId =
+      options?.workspaceId !== undefined ? options.workspaceId : workspaceIdRef.current;
+    const notClosed = () => ({ closed: false, newActivePath: activeTabPathRef.current });
+    if (workspaceIdRef.current !== closeWorkspaceId) return notClosed();
     if (tab.isDirty && !options?.skipConfirm) {
-      if (askingClosePathsRef.current.has(tab.path)) {
-        return { closed: false, newActivePath: activeTabPathRef.current };
-      }
+      if (askingClosePathsRef.current.has(tab.path)) return notClosed();
       askingClosePathsRef.current.add(tab.path);
       let confirmed: boolean;
       try {
@@ -532,7 +537,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       } finally {
         askingClosePathsRef.current.delete(tab.path);
       }
-      if (!confirmed) return { closed: false, newActivePath: activeTabPathRef.current };
+      if (!confirmed || workspaceIdRef.current !== closeWorkspaceId) return notClosed();
     }
     const tabs = openTabsRef.current;
     const idx = tabs.findIndex((t) => t.path === tab.path);

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from './Button';
 import { Dialog } from './Dialog';
+import { useLatestRef } from './useLatestRef';
 import {
   ConfirmContext,
   type ConfirmAnswer,
@@ -28,11 +29,10 @@ const CANCELLED: ConfirmAnswer = { confirmed: false, dontAskAgain: false };
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [queue, setQueue] = useState<Pending[]>([]);
   const nextId = useRef(0);
-  // Mirrors `queue` for the unmount sweep below, which must not depend on it.
-  const queueRef = useRef<Pending[]>([]);
-  useEffect(() => {
-    queueRef.current = queue;
-  }, [queue]);
+  // Mirrors `queue` for `answer` and the unmount sweep below, which must not
+  // depend on it. Written in a layout effect: a click on a dialog that has
+  // just come up from the queue must already see it at the head.
+  const queueRef = useLatestRef(queue);
 
   const confirm = useCallback<ConfirmFn>(
     (request) =>
@@ -50,7 +50,8 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     () => () => {
       for (const p of queueRef.current) p.resolve(CANCELLED);
     },
-    [],
+    // The ref is stable for the provider's life; listed for the linter.
+    [queueRef],
   );
 
   const current = queue[0];
@@ -59,7 +60,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     if (!head || head.id !== id) return;
     head.resolve(value);
     setQueue((q) => (q[0]?.id === id ? q.slice(1) : q));
-  }, []);
+  }, [queueRef]);
 
   return (
     <ConfirmContext.Provider value={confirm}>
@@ -88,12 +89,14 @@ function ConfirmDialog({
   onAnswer(answer: ConfirmAnswer): void;
 }) {
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  const messageId = useId();
   const cancel = () => onAnswer(CANCELLED);
   return (
     <Dialog
       open
       size="md"
       title={request.title}
+      describedBy={messageId}
       // Escape, the scrim and the header's X all count as Cancel.
       onClose={cancel}
       footer={
@@ -123,11 +126,15 @@ function ConfirmDialog({
         </div>
       }
     >
-      {typeof request.message === 'string' ? (
-        <p className="text-detail text-ink whitespace-pre-line break-words">{request.message}</p>
-      ) : (
-        request.message
-      )}
+      {/* The question itself is the dialog's description, so a screen reader
+          announces it with the title, as it did the browser's confirm(). */}
+      <div id={messageId}>
+        {typeof request.message === 'string' ? (
+          <p className="text-detail text-ink whitespace-pre-line break-words">{request.message}</p>
+        ) : (
+          request.message
+        )}
+      </div>
     </Dialog>
   );
 }

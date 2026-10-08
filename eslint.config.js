@@ -34,7 +34,7 @@ export default defineConfig([
     // shared components). A local function that happens to be called
     // `confirm` (the file tree's, `useConfirm()`'s result) is not the global
     // and is not flagged. `alert()` stays allowed: it refuses nothing.
-    // `pnpm test` runs this rule over core-frontend's source
+    // `pnpm test` runs this rule over core-frontend's and apps/web's source
     // (`shared/__tests__/no-builtin-confirm.test.ts`), so CI fails on a new use.
     files: ['packages/core-frontend/**/*.{ts,tsx}', 'apps/web/**/*.{ts,tsx}'],
     rules: {

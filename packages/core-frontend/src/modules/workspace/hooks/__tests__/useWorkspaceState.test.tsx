@@ -210,6 +210,51 @@ describe('useWorkspaceState multi-tab', () => {
     expect(result.current.openTabs).toHaveLength(0);
   });
 
+  it('closeTab closes nothing when the workspace moved to another branch while it asked', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState(), {
+      wrapper: ({ children }: { children: ReactNode }) => <ConfirmProvider>{children}</ConfirmProvider>,
+    });
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    act(() => { result.current.setPersistenceBranch('main'); });
+    await act(async () => { await result.current.addTab('Knowledge/A.md'); });
+    await act(async () => { result.current.setHasUnsavedFileChanges?.(true); });
+    let closing!: Promise<{ closed: boolean }>;
+    act(() => { closing = result.current.closeTab(result.current.openTabs[0]); });
+    await screen.findByRole('dialog');
+
+    // The person switches branch with the question still up, and the same
+    // path is open there.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    await act(async () => { await result.current.addTab('Knowledge/A.md'); });
+
+    await answer('Close anyway');
+    await act(async () => { expect((await closing).closed).toBe(false); });
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['Knowledge/A.md']);
+  });
+
+  it('a bulk close pinned to a workspace that moved on closes nothing', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.addTab('Knowledge/A.md'); });
+    let outcome!: { closed: boolean };
+    await act(async () => {
+      outcome = await result.current.closeTab(result.current.openTabs[0], {
+        skipConfirm: true,
+        workspaceId: 'some-other-branch',
+      });
+    });
+    expect(outcome.closed).toBe(false);
+    expect(result.current.openTabs).toHaveLength(1);
+  });
+
   it('closeTab activates the left neighbor when closing the active tab', async () => {
     const result = await mountReady();
     await act(async () => { await result.current.addTab('a.md'); });

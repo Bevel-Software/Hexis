@@ -196,8 +196,9 @@ describe('EditorTabs', () => {
     await user.click(screen.getByText('Close others'));
 
     expect(closeTab).toHaveBeenCalledTimes(2);
-    expect(closeTab.mock.calls[0]).toEqual([tabs[0], { skipConfirm: true }]);
-    expect(closeTab.mock.calls[1]).toEqual([tabs[2], { skipConfirm: true }]);
+    // Pinned to the workspace the tabs were picked in.
+    expect(closeTab.mock.calls[0]).toEqual([tabs[0], { skipConfirm: true, workspaceId: 'ws-1' }]);
+    expect(closeTab.mock.calls[1]).toEqual([tabs[2], { skipConfirm: true, workspaceId: 'ws-1' }]);
   });
 
   it('"Close tabs to the right" only closes tabs after the target', async () => {
@@ -244,6 +245,9 @@ describe('EditorTabs', () => {
       // All three tabs requested for close, with skipConfirm.
       await vi.waitFor(() => expect(closeTab).toHaveBeenCalledTimes(3));
       expect(closeTab.mock.calls.every((c) => c[1]?.skipConfirm === true)).toBe(true);
+      // Pinned to the workspace the question was asked in, so a branch switch
+      // while it was up closes nothing on the new branch.
+      expect(closeTab.mock.calls.every((c) => c[1]?.workspaceId === 'ws-1')).toBe(true);
       expect(confirmSpy).not.toHaveBeenCalled();
     });
 

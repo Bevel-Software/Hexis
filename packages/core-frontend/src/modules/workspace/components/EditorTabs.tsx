@@ -31,6 +31,7 @@ export function EditorTabs() {
     activeTab,
     closeTab,
     reorderTab,
+    workspaceId,
   } = useWorkspace();
   const { openFile: navigateToFile, closeFile: navigateToBranchRoot } = useFileNav();
   const confirm = useConfirm();
@@ -143,6 +144,9 @@ export function EditorTabs() {
             else navigateToBranchRoot();
           }}
           onCloseMany={async (tabs) => {
+            // The workspace these tabs were picked in. `closeTab` closes
+            // nothing if the question below outlives it.
+            const askedInWorkspaceId = workspaceId;
             const dirty = tabs.filter((t) => t.isDirty);
             if (dirty.length > 0) {
               const { confirmed } = await confirm({
@@ -161,21 +165,30 @@ export function EditorTabs() {
             const activePath = activeTab?.path ?? null;
             const closingActive = activePath !== null && tabs.some((t) => t.path === activePath);
             let lastActivePath = activePath;
+            let closedAny = false;
             // Store only the path + error metadata — the full OpenTab carries
             // file content/pendingFileContent which we don't want in logs or
             // any future telemetry sink.
             const failures: { path: string; message: string; stack?: string }[] = [];
             for (const t of tabs) {
               try {
-                const { closed, newActivePath } = await closeTab(t, { skipConfirm: true });
-                if (closed) lastActivePath = newActivePath;
+                const { closed, newActivePath } = await closeTab(t, {
+                  skipConfirm: true,
+                  workspaceId: askedInWorkspaceId,
+                });
+                if (closed) {
+                  lastActivePath = newActivePath;
+                  closedAny = true;
+                }
               } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
                 const stack = err instanceof Error ? err.stack : undefined;
                 failures.push({ path: t.path, message, stack });
               }
             }
-            if (closingActive) {
+            // Nothing closed (the workspace moved on while asked): the URL
+            // belongs to the new branch now, leave it alone.
+            if (closingActive && closedAny) {
               if (lastActivePath) navigateToFile(lastActivePath);
               else navigateToBranchRoot();
             }

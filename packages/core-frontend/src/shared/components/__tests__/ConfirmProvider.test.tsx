@@ -90,6 +90,31 @@ describe('ConfirmProvider', () => {
     await expect(second).resolves.toMatchObject({ confirmed: true });
   });
 
+  it('answers a queued question on the first click once it comes up', async () => {
+    const { result } = renderHook(() => useConfirm(), { wrapper });
+    let first!: Promise<ConfirmAnswer>;
+    let second!: Promise<ConfirmAnswer>;
+    act(() => {
+      first = result.current({ title: 'One', message: 'First?' });
+      second = result.current({ title: 'Two', message: 'Second?' });
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'OK' }));
+    await expect(first).resolves.toMatchObject({ confirmed: true });
+    // Clicked in the same tick the second dialog commits: no second click
+    // needed, nothing dropped.
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    });
+    await expect(second).resolves.toMatchObject({ confirmed: false });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('gives the dialog its question as the accessible description', async () => {
+    ask({ title: 'Delete branch', message: 'Delete "alice/draft"?' });
+    const dialog = await screen.findByRole('dialog', { name: 'Delete branch' });
+    expect(dialog).toHaveAccessibleDescription('Delete "alice/draft"?');
+  });
+
   it('keeps line breaks in a string question', async () => {
     ask({ title: 'Unsaved', message: 'You have unsaved changes in:\n  - a.md\nClose anyway?' });
     const dialog = await screen.findByRole('dialog');

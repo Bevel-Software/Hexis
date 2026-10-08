@@ -12,12 +12,14 @@ import { ESLint } from 'eslint';
  * dialogs"), after which every call answers false without showing anything —
  * the branch delete stopped working that way. The rule lives in the repo's
  * `eslint.config.js`; `pnpm lint` is not part of CI, so this suite runs that
- * same rule from that same config over the package's source, and the test
- * job fails on a new use.
+ * same rule from that same config over the package's source and apps/web's,
+ * and the test job fails on a new use.
  */
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const REPO_ROOT = resolve(SRC, '..', '..', '..');
+// The rule covers apps/web too (it mounts the app), so the scan does.
+const WEB_SRC = join(REPO_ROOT, 'apps', 'web', 'src');
 const RULES = new Set(['no-restricted-globals', 'no-restricted-properties']);
 
 function eslint(): ESLint {
@@ -28,9 +30,9 @@ function eslint(): ESLint {
 }
 
 /** Lint `code` as if it were a file in this package, with the repo's config. */
-async function lintFixture(code: string): Promise<string[]> {
+async function lintFixture(code: string, dir = SRC): Promise<string[]> {
   const [result] = await eslint().lintText(code, {
-    filePath: join(SRC, '__lint_fixture__.tsx'),
+    filePath: join(dir, '__lint_fixture__.tsx'),
   });
   return result.messages.map((m) => `${m.ruleId}:${m.line}`);
 }
@@ -55,6 +57,10 @@ describe('lint: no built-in confirm', () => {
     expect(await lintFixture("export const c = globalThis.confirm('Delete?');\n")).toEqual([
       'no-restricted-properties:1',
     ]);
+    // apps/web is under the same rule.
+    expect(await lintFixture("export const d = confirm('Delete?');\n", WEB_SRC)).toEqual([
+      'no-restricted-globals:1',
+    ]);
   });
 
   it("allows a local function called confirm (useConfirm()'s result, the file tree's)", async () => {
@@ -69,16 +75,18 @@ describe('lint: no built-in confirm', () => {
     expect(await lintFixture(code)).toEqual([]);
   });
 
-  it('finds no built-in confirm anywhere in core-frontend', async () => {
+  it('finds no built-in confirm anywhere in core-frontend or apps/web', async () => {
     // Only files that mention the word can break the rule; lint just those so
     // the suite stays quick, with the real config.
-    const candidates = sourceFiles(SRC).filter((f) => /\bconfirm\b/.test(readFileSync(f, 'utf8')));
+    const candidates = [...sourceFiles(SRC), ...sourceFiles(WEB_SRC)].filter((f) =>
+      /\bconfirm\b/.test(readFileSync(f, 'utf8')),
+    );
     expect(candidates.length).toBeGreaterThan(0);
     const results = await eslint().lintFiles(candidates);
     const hits = results.flatMap((r) =>
       r.messages
         .filter((m) => m.ruleId && RULES.has(m.ruleId))
-        .map((m) => `${relative(SRC, r.filePath)}:${m.line} ${m.message}`),
+        .map((m) => `${relative(REPO_ROOT, r.filePath)}:${m.line} ${m.message}`),
     );
     expect(hits).toEqual([]);
   }, 120_000);
