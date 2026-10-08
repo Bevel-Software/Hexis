@@ -3314,6 +3314,80 @@ describe('preflight for moves and deletes', () => {
       expect(run.status).toBe(403);
       expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
     });
+
+    // A nested access.md is deleted the way a person deletes it in the app:
+    // by whoever may write it, through the same one-file delete (the locking
+    // filesystem's, which commits and pushes as the caller) as any file.
+    it('a nested access.md is deleted by a caller who may write it, like any file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/access.md'), '---\nread: Admin\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Sales/access.md') })).body).toMatchObject({
+        managed: true, movable: false, deletable: true,
+      });
+      const deleted: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string) => { deleted.push(p); return deleteFile(p); };
+
+      const run = await call(base, 'delete_file', { path: KB('Sales/access.md') });
+
+      expect(run.status).toBe(200);
+      expect(run.body).toEqual({ path: KB('Sales/access.md'), deleted: true });
+      expect(deleted).toEqual([KB('Sales/access.md')]);
+      expect(await exists(KB('Sales/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a nested access.md the caller may not write is the ordinary write refusal, and stays', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Locked/access.md'), '---\nread: everyone\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Locked/access.md') })).body).toMatchObject({
+        managed: true, deletable: false,
+      });
+
+      const run = await call(base, 'delete_file', { path: KB('Locked/access.md') });
+
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/access.md'), canPropose: true });
+      expect(JSON.stringify(run.body)).not.toContain('platform file');
+      expect(await exists(KB('Locked/access.md'))).toBe(true);
+    });
+
+    it('the root access.md and roles.yaml are the repository\'s own: refused for everyone, and they stay', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      for (const name of ['access.md', 'roles.yaml']) {
+        // The caller here may write and own everything: the refusal is not about who asks.
+        expect((await call(base, 'file_stat', { path: KB(name) })).body).toMatchObject({
+          managed: true, movable: false, deletable: false,
+          access: { read: true, write: true, download: true, owner: true },
+        });
+        const run = await call(base, 'delete_file', { path: KB(name) });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(`${name} is the repository's own file and cannot be deleted.`);
+        expect(await exists(KB(name))).toBe(true);
+      }
+    });
+
+    it('a nested roles.yaml is content, and .bevelignore stays refused as before', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      expect((await call(base, 'delete_file', { path: KB('Sales/roles.yaml') })).status).toBe(200);
+      const ignore = await call(base, 'delete_file', { path: KB('Sales/.bevelignore') });
+      expect(ignore.status).toBe(400);
+      expect(ignore.body.error).toBe('.bevelignore is a platform file and cannot be deleted through the agent tools.');
+      expect((await call(base, 'file_stat', { path: KB('Sales/.bevelignore') })).body).toMatchObject({ deletable: false });
+    });
+
+    it('delete_folder still refuses the repository root, which keeps its access.md', async () => {
+      const base = await seeded();
+      for (const args of [{ dryRun: true }, { confirm: true }]) {
+        const run = await call(base, 'delete_folder', { path: KB_DIR, ...args });
+        expect(run.body.allowed === false || run.status === 400).toBe(true);
+        expect(JSON.stringify(run.body)).toContain('The repository root is a platform folder and cannot be moved or deleted.');
+      }
+      expect(await exists(KB('access.md'))).toBe(true);
+    });
   });
 
   describe('what counts as the platform\'s own, and what a move or delete may reach', () => {

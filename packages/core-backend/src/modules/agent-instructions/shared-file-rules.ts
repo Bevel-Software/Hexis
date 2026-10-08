@@ -170,15 +170,15 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       id: 'managed-items',
       heading: 'What these tools never move or delete',
       body:
-        `A platform file (${platformFileList(layout)}) is refused with ` +
-        '"<name> is a platform file and stays in its folder." — a folder that moves ' +
-        'takes its own platform files along, still in their folder, and a folder that is deleted takes them with it in ' +
-        'the same one change, so its files are never left ungoverned part-way. A platform folder (the repository root ' +
-        `or a reserved root folder such as \`${layout.knowledgeBaseDir}/\`) and git metadata are refused, and so is creating a ` +
-        'platform file or folder at a destination (renaming a note to `access.md` is refused). A path that is, or goes ' +
-        'through, a symbolic link is refused: links are never followed or removed. On a protected branch you must be ' +
-        'able to write everything the call touches — for a folder, every file under it, at its old and its new path. ' +
-        'file_stat reports `managed`, `movable` and `deletable` so you can tell before the call.',
+        `A platform file (${platformFileList(layout)}) is never moved: "<name> is a platform file and stays in its folder." ` +
+        'A folder moved or deleted takes its own along, in one change. delete_file deletes a nested `access.md` for ' +
+        "whoever may write it (its folder then follows its parent's rules) and refuses `.bevelignore`; the repository " +
+        "root's `access.md` and `roles.yaml` are deleted by nobody: \"<name> is the repository's own file and cannot be " +
+        'deleted." A platform folder (the root, or a reserved one like ' +
+        `\`${layout.knowledgeBaseDir}/\`), git metadata, and making a platform file or folder at a destination are ` +
+        'refused; so is a path that is or crosses a symlink: links are never followed or removed. On a protected ' +
+        'branch you must be able to write all a call touches — for a folder, every file under it, at its old and new ' +
+        'path. file_stat reports `managed`, `movable` and `deletable` up front.',
     },
     {
       id: 'refused-for-permissions',

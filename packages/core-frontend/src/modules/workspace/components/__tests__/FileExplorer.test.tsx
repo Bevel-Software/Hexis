@@ -4069,3 +4069,74 @@ describe("FileExplorer folder menu: a deployment's own entries", () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });
+
+// Delete follows its own rule, narrower than the move's: the root's
+// `access.md` and `roles.yaml` are the repository's own and deleted by nobody,
+// with the sentence the server refuses with; a nested `access.md` is deleted
+// like any file its caller may write — the server's write gate decides.
+describe('FileExplorer: deleting platform files', () => {
+  const KB = 'knowledge-base';
+  const sentence = (name: string) => `${name} is the repository's own file and cannot be deleted.`;
+  const file = (p: string): FileTreeEntry => ({ name: p.slice(p.lastIndexOf('/') + 1), relativePath: p, type: 'file' });
+
+  const TREE: FileTreeEntry = rootedAtCheckout({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          file(`${KB}/access.md`),
+          file(`${KB}/roles.yaml`),
+          {
+            name: 'Team',
+            relativePath: `${KB}/Team`,
+            type: 'directory',
+            children: [file(`${KB}/Team/access.md`), file(`${KB}/Team/roles.yaml`)],
+          },
+        ],
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  it.each(['access.md', 'roles.yaml'])('the root %s shows Delete disabled with the sentence, for an admin too', async (name) => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
+    // The root's copy is the first row of that name.
+    fireEvent.contextMenu(screen.getAllByText(name)[0].closest('button')!);
+    const del = screen.getByRole('menuitem', { name: /Delete/i });
+    expect(del).toHaveAttribute('aria-disabled', 'true');
+    expect(del).toHaveAttribute('title', sentence(name));
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(deleteEntry).not.toHaveBeenCalled();
+  });
+
+  it('a nested access.md offers Delete, and deletes once confirmed', async () => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
+    const rows = screen.getAllByText('access.md');
+    expect(rows).toHaveLength(2);
+    fireEvent.contextMenu(rows[1].closest('button')!);
+    const del = screen.getByRole('menuitem', { name: /Delete/i });
+    expect(del).not.toHaveAttribute('aria-disabled');
+    expect(del).not.toHaveAttribute('title');
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Team/access.md`);
+  });
+});

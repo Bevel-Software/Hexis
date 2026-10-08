@@ -53,6 +53,8 @@ import {
   platformFileRefusal,
   platformFileUploadRefusal,
   platformFolderRefusal,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   entryExistsMessage,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
@@ -1270,6 +1272,24 @@ export function registerWorkspaceTools(
     return rel !== null && isPlatformFolder(rel, kb.layout) ? platformFolderRefusal(rel) : undefined;
   };
 
+  /**
+   * Why `delete_file` may not delete the FILE at `path` whoever asks, or
+   * undefined when the caller's write access decides. Narrower than
+   * {@link managedReason}: a nested `access.md` never moves, but whoever may
+   * write it may delete it — as in the app — and its folder then follows its
+   * parent's rules. The root's `access.md` and `roles.yaml` are deleted by
+   * nobody. Judged on the on-disk spelling, as `managedReason` is.
+   */
+  const fileDeleteRefusal = (path: string): string | undefined => {
+    const norm = path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
+    if (isGitMetadata(norm)) return managedReason(norm, 'file');
+    const rel = toKbRelative(norm, kbDirName);
+    if (rel === null || !isPlatformFile(rel, kb.layout)) return undefined;
+    if (isRepositoryOwnFile(rel, kb.layout)) return repositoryOwnFileDeleteRefusal(rel);
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    return name === 'access.md' ? undefined : `${name} is a platform file and cannot be deleted through the agent tools.`;
+  };
+
   /** The workspace root on disk for `branch`. */
   const workspaceRoot = (branch: string, ctx: ToolContext): Promise<string> =>
     ctx.workspaceService.getWorkspacePath(workspaceIdForBranch(branch));
@@ -2098,7 +2118,11 @@ export function registerWorkspaceTools(
       // `mime` below, so it is never passed through.
       delete stat.mimeType;
       const kind = stat.type === 'directory' ? 'folder' : 'file';
-      const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
+      const onDisk = await onDiskSpelling(root, p);
+      const managed = managedReason(onDisk, kind) !== undefined;
+      // A nested `access.md` is managed — it never moves — yet deleted by
+      // whoever may write it, so a FILE's delete is judged on its own rule.
+      const undeletable = kind === 'file' ? fileDeleteRefusal(onDisk) !== undefined : managed;
       const verdicts = await accessAt(branch, ctx, p);
       const access =
         a.explainAccess === true ? { ...verdicts, ...(await explainAccessAt(branch, ctx, p, kind)) } : verdicts;
@@ -2118,7 +2142,7 @@ export function registerWorkspaceTools(
       //     `movable`/`deletable` false rather than judging part of a folder
       //     and calling it the whole (`delete_folder`'s dry run, which walks
       //     uncapped, remains the authority for a folder that large).
-      const decided = managed || link;
+      const decided = (managed && undeletable) || link;
       const { files, links, truncated } =
         kind === 'folder'
           ? await filesUnder(fs, p, DESCENDANTS_CAP)
@@ -2140,9 +2164,9 @@ export function registerWorkspaceTools(
       const out: Record<string, unknown> = {
         ...stat,
         managed,
-        movable: open,
+        movable: open && !managed,
         // delete_folder also refuses a folder holding a link.
-        deletable: open && links.length === 0,
+        deletable: open && !undeletable && links.length === 0,
         access,
       };
       if (kind === 'folder') {
@@ -2714,10 +2738,8 @@ export function registerWorkspaceTools(
         throw new ToolError(`"${path}" is a folder, not a file — use delete_folder to delete it and the files under it.`, 400);
       }
       const onDisk = await onDiskSpelling(root, path);
-      if (isGitMetadata(onDisk)) throw new ToolError(managedReason(onDisk, 'file')!, 400);
-      if (managedReason(onDisk, 'file') !== undefined) {
-        throw new ToolError(`${onDisk.slice(onDisk.lastIndexOf('/') + 1)} is a platform file and cannot be deleted through the agent tools.`, 400);
-      }
+      const refused = fileDeleteRefusal(onDisk);
+      if (refused !== undefined) throw new ToolError(refused, 400);
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
       await orNotFound(path, () => fs.deleteFile(path), 'Nothing to delete');
