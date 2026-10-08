@@ -521,8 +521,13 @@ export async function callKbTool(
 
 const NO_APPS: McpAppManifest = { tools: {}, resources: [] };
 
-/** Statuses that say the manifest route is definitely not serving this caller. */
-const MANIFEST_GONE = new Set([403, 404, 410]);
+/**
+ * Statuses that say the manifest route is definitely not there. A 403 is not
+ * among them: it is this identity's authorisation RIGHT NOW, which a
+ * permission change can restore without any catalog revision, so a view
+ * already served is kept rather than turned off for good.
+ */
+const MANIFEST_GONE = new Set([404, 410]);
 
 /**
  * The deployment's MCP Apps: which of its tools carry a `ui://` view, and the
@@ -583,10 +588,18 @@ export async function fetchMcpApps(
     }
     return parseMcpAppManifest(body);
   } catch (err) {
-    // A rejected key is the one failure that is not about this route: it ends
-    // the process everywhere else, and swallowing it here would turn a clear
-    // "mint a new key" into a silently app-less server.
-    if (err instanceof ConnectionKeyRejectedError) throw err;
+    // A 401 HERE is not a dead key: this fetch runs right after a discovery
+    // the same key just passed, and a deployment from before this route may
+    // answer an unknown `/api/agent/…` address with 401 rather than 404. A
+    // dead key fails the discovery, where it belongs; this route is optional
+    // and answers "no apps" like any other refusal of it.
+    if (err instanceof ConnectionKeyRejectedError) {
+      console.error(
+        '[hexis-mcp] the deployment answered the MCP App manifest route with 401; ' +
+          'treating it as a deployment without the route (tools render as text).',
+      );
+      return NO_APPS;
+    }
     const reason = err instanceof Error ? err.message : String(err);
     const definite = err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0);
     const kept = definite ? NO_APPS : previous;
