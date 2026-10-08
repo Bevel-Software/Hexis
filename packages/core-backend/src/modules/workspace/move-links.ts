@@ -23,6 +23,7 @@
 
 import {
   htmlLinksAffectedByMove,
+  maskMarkdownCode,
   rewriteMdLinks,
   type MdLinkEdit,
 } from '@bevel-software/platform-shared';
@@ -148,8 +149,9 @@ export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPla
     }
     // Raw HTML inside a markdown page (`<img src>`, `<a href>`) renders like
     // a link but is not one the grammar rewrites: named with those links and
-    // left, as an HTML page is, so a stale target is never silent.
-    const html = htmlLinksAffectedByMove(text, opts);
+    // left, as an HTML page is, so a stale target is never silent. Code is
+    // blanked first: a tag inside a fence or a code span is an example.
+    const html = htmlLinksAffectedByMove(maskMarkdownCode(text), opts);
     if (html.length > 0) notRewritten.push({ path: newPath, reason: 'html in markdown', links: html });
     const rewritten = rewriteMdLinks(text, opts);
     if (rewritten.edits.length === 0) continue;

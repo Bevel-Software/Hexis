@@ -126,6 +126,20 @@ describe('planMoveLinks', () => {
     ]);
   });
 
+  it('raw HTML inside code — a fence, an indented block, a code span — is an example, not reported', async () => {
+    const files = {
+      [`${KB}/Old/One.md`]: 'x\n',
+      [`${KB}/Howto.md`]:
+        'Write it like `<a href="Old/One.md">` or:\n\n```html\n<a href="Old/One.md">one</a>\n```\n\n' +
+        '    <img src="Old/One.md">\n\nAnd a live one: <a href="Old/One.md">one</a>\n',
+    };
+    const plan = await planMoveLinks(inputOf(files));
+    expect(plan.edits).toEqual([]);
+    expect(plan.report.notRewritten).toEqual([
+      { path: `${KB}/Howto.md`, reason: 'html in markdown', links: ['Old/One.md'] },
+    ]);
+  });
+
   it(`more than ${MOVE_LINK_EDIT_CAP} edited files is refused, saying how to split or switch off`, async () => {
     const files: Record<string, string> = { [`${KB}/Old/One.md`]: 'x\n' };
     for (let i = 0; i <= MOVE_LINK_EDIT_CAP; i++) files[`${KB}/Pages/P${i}.md`] = '[one](../Old/One.md)\n';

@@ -74,8 +74,60 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
       lineStart = lineEnd + 1;
     }
   }
-  scanBody(text, bodyStart, out);
+  scanBody(text, bodyStart, {
+    prose: (from, to) => scanInline(text, from, to, false, out),
+    definition: (span) => out.push(span),
+  });
   return out;
+}
+
+/**
+ * `text` with every code context blanked to spaces — fenced and indented
+ * blocks, inline code spans — and the frontmatter with them, every other
+ * character at its offset. For a scan that must see prose only: the HTML
+ * scan of a markdown page, where `<a href>` inside a code example is an
+ * example and not a link.
+ */
+export function maskMarkdownCode(text: string): string {
+  const chars: string[] = Array.from({ length: text.length }, (_, i) => (text[i] === '\n' ? '\n' : ' '));
+  const keep = (from: number, to: number) => {
+    let i = from;
+    while (i < to) {
+      const c = text[i];
+      if (c === '\\') {
+        chars[i] = c;
+        if (i + 1 < to) chars[i + 1] = text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c === '`') {
+        let n = 1;
+        while (i + n < to && text[i + n] === '`') n += 1;
+        const close = findBacktickRun(text, i + n, to, n);
+        if (close < 0) {
+          for (let k = i; k < i + n; k += 1) chars[k] = text[k];
+          i += n;
+        } else {
+          i = close + n;
+        }
+        continue;
+      }
+      chars[i] = c;
+      i += 1;
+    }
+  };
+  const fm = extractFrontmatter(text);
+  scanBody(text, fm ? text.length - fm.body.length : 0, {
+    prose: keep,
+    definition: (span) => keep(span.start, span.end),
+  });
+  return chars.join('');
+}
+
+/** Where `scanBody` hands what it finds: prose runs (code left out) and reference definitions. */
+interface BodySink {
+  prose: (from: number, to: number) => void;
+  definition: (span: MdLinkSpan) => void;
 }
 
 /**
@@ -120,7 +172,7 @@ function indentOf(line: string): number {
   return col;
 }
 
-function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
+function scanBody(text: string, from: number, sink: BodySink): void {
   let fence: { char: string; len: number } | null = null;
   // An indented code block: four columns past where the enclosing list item's
   // text starts (column 0 outside a list), opened where a paragraph cannot be
@@ -135,7 +187,7 @@ function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
   let chunkStart = -1;
   let chunkEnd = -1;
   const flush = () => {
-    if (chunkStart >= 0) scanInline(text, chunkStart, chunkEnd, false, out);
+    if (chunkStart >= 0) sink.prose(chunkStart, chunkEnd);
     chunkStart = -1;
   };
   let lineStart = from;
@@ -181,7 +233,7 @@ function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
         const def = matchDefinition(line, lineStart);
         if (def) {
           flush();
-          out.push(def);
+          sink.definition(def);
           mayOpenCode = false;
         } else {
           if (chunkStart < 0) chunkStart = lineStart;
