@@ -543,12 +543,12 @@ export function registerWorkflowTools(
     name: 'merge_branch',
     description:
       'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
-      'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
-      'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
+      'a person merges: this tool never lands a change request. It refuses while a change request from `source` ' +
+      'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
-      'SYNC — `source` = the change request\'s target, `target` = your draft — is always allowed, even with ' +
-      'that draft\'s request open. ' +
-      'Writes are committed asynchronously; the merge first waits up to 20s for `source`\'s pending commits. ' +
+      'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
+      'is always allowed, even with the draft\'s request open. ' +
+      'Writes are committed asynchronously; the merge first waits up to 20s for those on `source`. ' +
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
       'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
       'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
