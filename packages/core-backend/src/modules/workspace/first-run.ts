@@ -21,6 +21,7 @@
 
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
+import { NEW_KNOWLEDGE_BASE_SECTION_ID } from '../agent-guide/agent-guide.js';
 
 /**
  * The starter guide the template seeds at the top of the knowledge folder
@@ -30,8 +31,11 @@ import { join } from 'node:path';
  */
 export const STARTER_GUIDE_FILE = 'How to get started.md';
 
-/** The guide section the note points at (`agent-guide/new-knowledge-base.md`). */
-export const FIRST_RUN_SECTION_ID = 'new-knowledge-base';
+/**
+ * The guide section the note points at (`agent-guide/new-knowledge-base.md`):
+ * the guide's own id, so the note cannot name a section the guide renamed.
+ */
+export const FIRST_RUN_SECTION_ID = NEW_KNOWLEDGE_BASE_SECTION_ID;
 
 /**
  * Files that are configuration, not content, wherever they sit: a folder's
@@ -41,12 +45,15 @@ export const FIRST_RUN_SECTION_ID = 'new-knowledge-base';
 const NOT_CONTENT = new Set(['access.md']);
 
 /**
- * How many folders the check opens before it calls the knowledge base
- * established. A knowledge base with this many folders and no page in any of
- * them is not one an agent should greet as new, and `start_session` must stay
- * cheap whatever the tree looks like.
+ * How many folders the check opens, and how many entries it reads across
+ * them, before it calls the knowledge base established. A knowledge base with
+ * this many folders or entries and no page among them is not one an agent
+ * should greet as new, and `start_session` must stay cheap whatever the tree
+ * looks like: the entries are streamed, so a folder of a hundred thousand
+ * costs no more than the budget.
  */
 const FOLDER_BUDGET = 200;
+export const ENTRY_BUDGET = 1000;
 
 /**
  * Whether the knowledge folder at `dir` (absolute) holds nothing but the
@@ -57,10 +64,12 @@ const FOLDER_BUDGET = 200;
  */
 export async function knowledgeFolderIsNew(dir: string): Promise<boolean> {
   let opened = 0;
+  let read = 0;
   const holdsNothing = async (folder: string, top: boolean): Promise<boolean> => {
     if (++opened > FOLDER_BUDGET) return false;
-    const entries = await nodeFs.readdir(folder, { withFileTypes: true });
-    for (const entry of entries) {
+    // `for await` closes the handle however the loop ends, an early return included.
+    for await (const entry of await nodeFs.opendir(folder)) {
+      if (++read > ENTRY_BUDGET) return false;
       const name = entry.name;
       if (name.startsWith('.') || NOT_CONTENT.has(name)) continue;
       if (top && name === STARTER_GUIDE_FILE && entry.isFile()) continue;
@@ -87,7 +96,7 @@ export async function knowledgeFolderIsNew(dir: string): Promise<boolean> {
  */
 export function firstRunNote(knowledgeFolder: string): string {
   return (
-    `This knowledge base is new: \`${knowledgeFolder}/\` holds nothing yet but the starter guide. ` +
+    `This knowledge base is new: \`${knowledgeFolder}/\` has no pages yet, the starter guide aside. ` +
     "Once in this conversation, offer to draft its first pages (what the organisation does, its customers, its products, a glossary, how it works) from the person's website or a few sentences of theirs, for them to review. " +
     'If they asked for something else, answer that first and make the offer in one line. ' +
     `The guide's \`${FIRST_RUN_SECTION_ID}\` section says how.`

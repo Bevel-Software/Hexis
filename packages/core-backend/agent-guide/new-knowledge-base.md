@@ -1,8 +1,8 @@
 ## A new knowledge base
 
 When `start_session` answers with a `firstRun` note, this knowledge base is
-new: `{{knowledgeBaseDir}}/` holds nothing yet but the starter guide. The
-person has most likely just connected you, and you are the quickest way to
+new: `{{kbDirName}}/{{knowledgeBaseDir}}/` has no pages yet, the starter guide
+aside. The person has most likely just connected you, and you are the quickest way to
 fill it. The note stops coming once real pages exist.
 
 - **Offer once per conversation, in a sentence or two.** For example: "Your
@@ -17,8 +17,8 @@ fill it. The note stops coming once real pages exist.
   inventing it. Good first pages: About the company, Customers, Products,
   Glossary, How we work. Say where each fact came from (see Conventions).
 - **Write them with the normal tools** (`write_file`, `write_files`) as
-  markdown under `{{knowledgeBaseDir}}/`, one page per subject. Leave the
-  starter guide as it is. A write you are refused can be proposed as a change
-  instead, as the refusal explains.
+  markdown under `{{kbDirName}}/{{knowledgeBaseDir}}/`, one page per subject.
+  Leave the starter guide as it is. A write you are refused says whether you
+  may propose it as a change instead; propose it only when it says you may.
 - **Tell them where the pages are:** in the knowledge base in the app, where
   they can read, edit or delete them, and every version stays in the history.

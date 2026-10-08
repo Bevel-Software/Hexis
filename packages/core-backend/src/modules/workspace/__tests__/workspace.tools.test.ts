@@ -2425,7 +2425,16 @@ describe('start_session', () => {
       expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
     });
 
-    it('is gone once another page exists, at the top or in a folder', async () => {
+    it('is gone once another page exists beside the starter guide', async () => {
+      await writeFile(join(knowledge(), 'Glossary.md'), '# Glossary\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it('is gone once another page exists in a folder', async () => {
       await mkdir(join(knowledge(), 'Company'), { recursive: true });
       await writeFile(join(knowledge(), 'Company', 'About.md'), '# About us\n');
 

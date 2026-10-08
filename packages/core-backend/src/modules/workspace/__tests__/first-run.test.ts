@@ -5,7 +5,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { defaultKbTemplateDir } from '../../../assets.js';
 import { agentGuideSections } from '../../agent-guide/agent-guide.js';
-import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, knowledgeFolderIsNew } from '../first-run.js';
+import {
+  ENTRY_BUDGET,
+  FIRST_RUN_SECTION_ID,
+  STARTER_GUIDE_FILE,
+  firstRunNote,
+  knowledgeFolderIsNew,
+} from '../first-run.js';
 
 /**
  * What makes a knowledge base "new" for the `firstRun` note: nothing in its
@@ -62,6 +68,15 @@ describe('knowledgeFolderIsNew', () => {
   it('is not new when the folder is not there: a shape the template never made is not greeted', async () => {
     expect(await knowledgeFolderIsNew(join(dir, 'missing'))).toBe(false);
   });
+
+  it('stops reading at its entry budget: that many entries and no page is not a new knowledge base', async () => {
+    // Entries that are never pages, so only the budget can end the walk.
+    await Promise.all(Array.from({ length: ENTRY_BUDGET }, (_, i) => writeFile(join(dir, `.note-${i}`), '')));
+    expect(await knowledgeFolderIsNew(dir)).toBe(false);
+    // One fewer, starter guide included, and the walk reads them all.
+    await rm(join(dir, '.note-0'));
+    expect(await knowledgeFolderIsNew(dir)).toBe(true);
+  });
 });
 
 describe('the firstRun note', () => {
@@ -71,16 +86,22 @@ describe('the firstRun note', () => {
   });
 
   it('points at a section the guide has, which says what to do', async () => {
-    const section = (await agentGuideSections(DEFAULT_KB_LAYOUT)).find((s) => s.id === FIRST_RUN_SECTION_ID);
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'kb-checkout' });
+    const section = sections.find((s) => s.id === FIRST_RUN_SECTION_ID);
     expect(section, `the guide has no "${FIRST_RUN_SECTION_ID}" section`).toBeDefined();
     expect(section!.body).toContain('`firstRun`');
-    expect(section!.body).toContain(`${DEFAULT_KB_LAYOUT.knowledgeBaseDir}/`);
+    // The folder spelled as the note spells it: the checkout-prefixed form the file tools report.
+    const folder = `kb-checkout/${DEFAULT_KB_LAYOUT.knowledgeBaseDir}`;
+    expect(section!.body).toContain(`\`${folder}/\``);
+    expect(firstRunNote(folder)).toContain(`\`${folder}/\``);
     expect(section!.body).toMatch(/once per conversation/i);
   });
 
   it('says what to offer and that the person\'s own request comes first', () => {
     const note = firstRunNote('knowledge-base/KnowledgeBase');
     expect(note).toContain('`knowledge-base/KnowledgeBase/`');
+    // True whether the starter guide is still there or someone deleted it.
+    expect(note).toContain('has no pages yet');
     expect(note).toMatch(/offer to draft/);
     expect(note).toMatch(/answer that first/);
     expect(note).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
