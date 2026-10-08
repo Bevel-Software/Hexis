@@ -61,10 +61,10 @@ export interface CommandAction {
    * sequence of two. Shown on the row as its hint AND bound by
    * `useCommandShortcuts`, under the same guards as core's, so a hint is
    * never a key that does nothing. Core's are filled in from
-   * {@link COMMAND_SHORTCUTS}. A registry command's that would collide with
-   * keys already bound — the same keys, or a sequence one of them begins — is
-   * dropped at merge time, hint and all, and said so in the console: give it
-   * other keys.
+   * {@link COMMAND_SHORTCUTS}. A registry command's is dropped at merge time,
+   * hint and all, and said so in the console, when it is longer than two keys
+   * or would collide with keys already bound — the same keys, or a sequence
+   * one of them begins: give it other keys.
    */
   shortcut?: string[];
   /** The row's icon; a generic arrow when absent. */
@@ -260,6 +260,14 @@ export function mergeCommandActions(
     }
     ids.add(action.id);
     const seq = shortcutSequence(action);
+    // Only what `useCommandShortcuts` can bind is kept: one key, or two in
+    // sequence. A longer one would be drawn as "x then y then z" and never
+    // fire.
+    if (seq !== null && seq.split(' ').length > 2) {
+      console.error(`[commands] the shortcut "${seq}" of ${action.id} is longer than two keys; it is not bound`);
+      merged.push({ ...action, shortcut: undefined });
+      continue;
+    }
     if (seq !== null && shortcutCollides(seq, bound)) {
       console.error(`[commands] the shortcut "${seq}" of ${action.id} collides with keys already bound; it is not bound`);
       merged.push({ ...action, shortcut: undefined });

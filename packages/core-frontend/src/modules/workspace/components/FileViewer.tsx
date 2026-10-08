@@ -619,13 +619,16 @@ export function FileViewer() {
 
   // Tell the command menu whether "Edit this page" would do anything — the
   // same conditions the Edit button is drawn and enabled by (see
-  // `editable-page.ts`). `canWrite` null is the button's optimistic Edit too.
+  // `editable-page.ts`), the content tab included: over History or Compare
+  // the button is not drawn, and the menu offers nothing the page does not.
+  // `canWrite` null is the button's optimistic Edit too.
   const lockHolder = fileLock.externalLock?.holderName ?? null;
   const editableNow =
     openFilePath !== null &&
     openFileContent !== null &&
     !!Renderer &&
     !isViewOnlyFile(openFilePath) &&
+    activeTab === 'content' &&
     !editMode &&
     !isEnteringEdit &&
     !proposeMode &&

@@ -195,7 +195,11 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     (action: CommandAction, ctx: CommandContext) => {
       const fail = (err: unknown) => {
         setNotice(err instanceof Error ? err.message : String(err));
-        openRef.current();
+        // A command that throws synchronously fails inside the click that
+        // closed the palette, before that close has rendered: opened at once,
+        // `openPalette` would see it still open and only refocus an input on
+        // its way out. The reopen waits for the close to commit.
+        queueMicrotask(() => openRef.current());
       };
       try {
         void Promise.resolve(action.run(ctx)).catch(fail);
@@ -476,15 +480,12 @@ function SearchPanel({
   // One line under the rows for whatever they cannot say themselves: the
   // catalog still on its way, the catalog unreachable, or no match at all.
   // Outside the listbox, which holds options and nothing else.
-  const status = loadingItems
-    ? 'Loading skills and tools…'
-    : flat.length === 0
-      ? trimmed
-        ? `Nothing matches “${trimmed}”`
-        : 'Nothing to search yet.'
-      : catalogState.failed && !catalogState.catalog
-        ? 'Couldn’t load skills and tools.'
-        : null;
+  // A failed catalog is said whether or not there are rows: with nothing
+  // typed the suggested commands fill the list, and the person would never
+  // learn that skills and tools could not be found.
+  const emptiness = flat.length === 0 ? (trimmed ? `Nothing matches “${trimmed}”.` : 'Nothing to search yet.') : null;
+  const failure = catalogState.failed && !catalogState.catalog ? 'Couldn’t load skills and tools.' : null;
+  const status = loadingItems ? 'Loading skills and tools…' : [emptiness, failure].filter(Boolean).join(' ') || null;
 
   return (
     <MenuPanel className="flex max-h-[min(480px,calc(100dvh-72px))] flex-col">

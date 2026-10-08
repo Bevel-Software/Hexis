@@ -87,8 +87,12 @@ export function useCommandShortcuts({
       if (first !== null) {
         const sequence = [first, key];
         forget();
-        if (runBound(sequence)) e.preventDefault();
-        return;
+        if (runBound(sequence)) {
+          e.preventDefault();
+          return;
+        }
+        // Not a sequence after all: the second key is tried on its own, so
+        // `G` then `C` still makes a page, and `G` then `G` re-arms.
       }
       if (runBound([key])) {
         e.preventDefault();
@@ -110,5 +114,8 @@ export function useCommandShortcuts({
       document.removeEventListener('keydown', onKeyDown);
       forget();
     };
-  }, [latest]);
+    // `enabled` is in the list so a pending first key is forgotten when the
+    // palette opens or closes: a `G` pressed before Ctrl+K must not turn the
+    // `K` typed after Escape into a navigation.
+  }, [latest, enabled]);
 }

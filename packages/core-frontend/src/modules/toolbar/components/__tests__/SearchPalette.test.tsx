@@ -536,7 +536,7 @@ describe('SearchPalette: commands', () => {
       // Core's id: dropped rather than doubled.
       { id: 'new-page', label: 'Impostor page', visible: () => true, run: vi.fn() },
     ];
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const user = userEvent.setup();
     renderPalette({ commandActions });
     await user.click(trigger());
@@ -548,6 +548,38 @@ describe('SearchPalette: commands', () => {
     expect(within(row).getByText('O', { selector: 'kbd' }).parentElement).toHaveAttribute('aria-hidden');
     await user.click(row);
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ isAdmin: true, activeAppId: 'knowledge' }));
+    error.mockRestore();
+  });
+
+  it('says why a command failed when it threw on the spot, not only when it rejected', async () => {
+    const commandActions: CommandAction[] = [
+      {
+        id: 'explode',
+        label: 'Explode',
+        visible: () => true,
+        run: () => {
+          throw new Error('Couldn’t do that: refused');
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    renderPalette({ commandActions });
+    await user.click(trigger());
+    await user.type(input(), 'explode');
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Couldn’t do that: refused');
+    expect(input()).toHaveFocus();
+  });
+
+  it('says that skills and tools could not load even while the suggested commands fill the list', async () => {
+    api.listSkills.mockRejectedValue(new Error('down'));
+    api.listPlugins.mockRejectedValue(new Error('down'));
+    api.listToolSecrets.mockRejectedValue(new Error('down'));
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    expect(groupRows('Actions').length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Couldn’t load skills and tools.'));
   });
 });
 
@@ -652,6 +684,28 @@ describe('SearchPalette: single-key shortcuts', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('tries the second key on its own when it did not complete a sequence: G then C makes a page', () => {
+    renderPalette();
+    press('g');
+    press('c');
+    expect(createPage).toHaveBeenCalledTimes(1);
+    // And G then G re-arms: the second G is the first key of a new sequence.
+    press('g');
+    press('g');
+    press('s');
+    expect(screen.getByTestId('location')).toHaveTextContent('/skills-and-tools');
+  });
+
+  it('forgets a pending G when the palette opens, so a K typed after Escape goes nowhere', async () => {
+    const user = userEvent.setup();
+    renderPalette();
+    press('g');
+    await user.click(trigger());
+    await user.keyboard('{Escape}');
+    press('k');
+    expect(screen.getByTestId('location')).toHaveTextContent('/workspace/main');
   });
 
   // A distribution's command gets a working key for the `shortcut` it set,

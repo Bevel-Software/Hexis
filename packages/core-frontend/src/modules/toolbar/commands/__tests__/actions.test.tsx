@@ -152,18 +152,21 @@ describe('mergeCommandActions / visibleActions', () => {
       { id: 'clash', label: 'Clash', shortcut: ['c'], visible: () => true, run: vi.fn() },
       { id: 'prefix', label: 'Prefix', shortcut: ['G'], visible: () => true, run: vi.fn() },
       { id: 'longer', label: 'Longer', shortcut: ['g', 'k', 'x'], visible: () => true, run: vi.fn() },
+      // Three keys that collide with nothing: still unbindable, so still dropped.
+      { id: 'too-long', label: 'Too long', shortcut: ['x', 'y', 'z'], visible: () => true, run: vi.fn() },
       { id: 'fine', label: 'Fine', shortcut: ['O'], visible: () => true, run: vi.fn() },
       { id: 'also-fine', label: 'Also fine', shortcut: ['g', 'o'], visible: () => true, run: vi.fn() },
     ];
     const merged = mergeCommandActions(withKeys, extra);
     const shortcutOf = (id: string) => merged.find((a) => a.id === id)?.shortcut;
-    expect(merged.map((a) => a.id).slice(-5)).toEqual(['clash', 'prefix', 'longer', 'fine', 'also-fine']);
+    expect(merged.map((a) => a.id).slice(-6)).toEqual(['clash', 'prefix', 'longer', 'too-long', 'fine', 'also-fine']);
     expect(shortcutOf('clash')).toBeUndefined();
     expect(shortcutOf('prefix')).toBeUndefined();
     expect(shortcutOf('longer')).toBeUndefined();
+    expect(shortcutOf('too-long')).toBeUndefined();
     expect(shortcutOf('fine')).toEqual(['O']);
     expect(shortcutOf('also-fine')).toEqual(['g', 'o']);
-    expect(error).toHaveBeenCalledTimes(3);
+    expect(error).toHaveBeenCalledTimes(4);
     error.mockRestore();
   });
 
