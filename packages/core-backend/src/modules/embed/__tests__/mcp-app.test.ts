@@ -31,13 +31,15 @@ describe('the open_page view', () => {
   });
 
   /**
-   * The view frames ONE address: the `/embed` page of the deployment that
-   * served it. Anything wider would buy nothing and widen what a host's
-   * sandbox permits.
+   * The view reaches ONE origin — the deployment that served it — for two
+   * things: fetching its build manifest and the token-only embed API
+   * (connect), and loading the embed bundle (resources). It frames nothing:
+   * Claude's host drops `frameDomains` and pins `frame-src` to `'self'`,
+   * which is why the view runs the bundle in its own document.
    */
-  it('allows framing exactly the deployment own public origin', async () => {
+  it('declares exactly the deployment own public origin for connecting and loading, and no frames', async () => {
     const manifest = await new McpAppService({ publicFrontendUrl: `${PUBLIC}/sub/path` }).manifest();
-    expect(manifest.resources[0].ui.csp?.frameDomains).toEqual([PUBLIC]);
+    expect(manifest.resources[0].ui.csp).toEqual({ connectDomains: [PUBLIC], resourceDomains: [PUBLIC] });
   });
 
   /**
@@ -52,15 +54,20 @@ describe('the open_page view', () => {
     expect(manifest.resources[0].ui.prefersBorder).toBe(false);
   });
 
-  it('is the HTML that frames the embed and relays a link, and nothing that renders content', async () => {
+  it('is the HTML that runs the deployment embed bundle and relays a link, and nothing that renders content', async () => {
     const manifest = await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest();
     const html = manifest.resources[0].text;
     expect(html).toContain('ui/initialize');
     expect(html).toContain('ui/notifications/tool-result');
     expect(html).toContain('ui/open-link');
-    expect(html).toContain('bevel-embed-open');
     expect(html).toContain('structuredContent');
-    // No second rendering path: the view frames the page, it does not draw it.
+    // The deployment's embed bundle, found through its build manifest and
+    // handed the page — not a frame of `/embed`, which a chat host's sandbox
+    // blocks.
+    expect(html).toContain('embed-manifest.json');
+    expect(html).toContain('__HEXIS_EMBED__');
+    expect(html).not.toContain('<iframe');
+    // No second rendering path: the view runs the app's renderers, it does not draw the page itself.
     expect(html).not.toContain('marked');
     expect(html).not.toContain('<markdown');
   });
@@ -120,7 +127,10 @@ describe('the manifest route the local MCP server reads', () => {
     expect(body.tools[OPEN_PAGE_TOOL].resourceUri).toBe(OPEN_PAGE_VIEW_URI);
     expect(body.resources[0].mimeType).toBe(MCP_APP_MIME_TYPE);
     expect(body.resources[0].text).toContain('ui/initialize');
-    expect(body.resources[0].ui).toMatchObject({ csp: { frameDomains: [PUBLIC] }, prefersBorder: false });
+    expect(body.resources[0].ui).toMatchObject({
+      csp: { connectDomains: [PUBLIC], resourceDomains: [PUBLIC] },
+      prefersBorder: false,
+    });
     expect(body.resources[0].ui).not.toHaveProperty('domain');
   });
 

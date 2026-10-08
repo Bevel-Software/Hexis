@@ -30,7 +30,7 @@ export class McpAppService {
 
   constructor(
     private readonly config: {
-      /** The deployment's public frontend address — the ONE origin the view may frame. */
+      /** The deployment's public frontend address — the ONE origin the view may reach. */
       readonly publicFrontendUrl: string;
       /** Where the view's file lives. The packaged `mcp-app/` folder unless a test says otherwise. */
       readonly viewDir?: string;
@@ -78,11 +78,22 @@ export class McpAppService {
           mimeType: MCP_APP_MIME_TYPE,
           text,
           ui: {
-            // EXACTLY this deployment's own public origin, and nothing else.
-            // The view frames one address — the `/embed` page of the
-            // deployment that served the view — so a wider list would buy
-            // nothing and widen what a host's sandbox permits.
-            csp: { frameDomains: origin ? [origin] : [] },
+            // EXACTLY this deployment's own public origin, and nothing else,
+            // for the two things the view asks of the host's sandbox:
+            // FETCHING the build manifest and the token-only embed API
+            // (`connectDomains`), and LOADING the embed bundle's scripts and
+            // stylesheets and the bytes the renderers draw
+            // (`resourceDomains`). No `frameDomains`: the view frames
+            // nothing. Claude's host drops that field and pins the sandbox's
+            // `frame-src` to `'self'`, which turned a framed `/embed` into a
+            // blank box — so the view loads the deployment's embed bundle
+            // into its own document instead. A knowledge-base HTML page
+            // still renders through the renderer's `srcdoc` sandbox, which
+            // that policy allows.
+            csp: {
+              connectDomains: origin ? [origin] : [],
+              resourceDomains: origin ? [origin] : [],
+            },
             // Deliberately NO `domain`. The field asks the host for a
             // dedicated sandbox origin, and the specification leaves its
             // format and validation to each host ("servers MUST consult
@@ -103,8 +114,8 @@ export class McpAppService {
 
 /**
  * `url`'s origin, or null when it does not parse. Only the origin: a
- * `frameDomains` entry is an origin, and a path or a credential in one is
- * either ignored or rejected by the host.
+ * `connectDomains` / `resourceDomains` entry is an origin, and a path or a
+ * credential in one is either ignored or rejected by the host.
  */
 export function originOf(url: string): string | null {
   try {
@@ -115,13 +126,13 @@ export function originOf(url: string): string | null {
 }
 
 /**
- * Whether a public address can be framed inside a host's sandbox at all.
+ * Whether a public address can be reached from inside a host's sandbox at all.
  *
  * Hosts run an MCP App's view in a sandboxed, https iframe, and no browser
- * will let an https document frame a plain-http one. So a deployment reached
- * over http has no embedded view — `open_page` still answers the page's text
- * and its address in the app, and says why there is nothing framed (see
- * Decision 8).
+ * will let an https document load scripts from, or fetch from, a plain-http
+ * origin. So a deployment reached over http has no embedded view —
+ * `open_page` still answers the page's text and its address in the app, and
+ * says why there is nothing rendered (see Decision 8).
  */
 export function isFrameableOrigin(url: string): boolean {
   try {

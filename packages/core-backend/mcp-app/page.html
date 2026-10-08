@@ -14,11 +14,9 @@
           sans-serif;
         color: #3f3f46;
       }
-      #frame {
+      #root {
         display: block;
-        width: 100%;
         height: 100%;
-        border: 0;
       }
       #notice {
         padding: 16px;
@@ -27,8 +25,8 @@
       #notice a {
         color: #2563eb;
       }
-      /* !important: #frame's display rule is an id selector and outranks a
-         class, so without it a "hidden" frame keeps its full height and
+      /* !important: #root's display rule is an id selector and outranks a
+         class, so without it a "hidden" root keeps its full height and
          pushes the notice below the fold. */
       .hidden {
         display: none !important;
@@ -36,15 +34,10 @@
     </style>
   </head>
   <body>
-    <!-- One of the two is shown, never both: the framed page, or a sentence
-         saying why there is no framed page. -->
-    <iframe
-      id="frame"
-      class="hidden"
-      title="Knowledge base page"
-      referrerpolicy="no-referrer"
-      allow="clipboard-write"
-    ></iframe>
+    <!-- One of the two is shown, never both: the page, drawn by the
+         deployment's embed bundle into #root, or a sentence saying why there
+         is no page. -->
+    <div id="root" class="hidden"></div>
     <p id="notice">Opening the page…</p>
 
     <script>
@@ -52,17 +45,32 @@
       // SDK, by decision: what an SDK would hide is the four message names
       // below (see the Specification's Decision 10).
       //
-      // Its whole job is to frame the deployment's own `/embed` page, which
-      // is where the app's renderers live. The view renders NOTHING itself:
-      // a second rendering path would have to be kept in step with the app's,
-      // and would be the one that is wrong.
+      // Its whole job is to run the deployment's own embed — the app's
+      // renderers — on the page `open_page` answered with. It does NOT frame
+      // the deployment's `/embed` page: a chat host's sandbox forbids it
+      // (Claude pins the sandbox's `frame-src` to `'self'` and drops the
+      // `frameDomains` a view declares), and a blocked frame is a blank box.
+      // What the sandbox does allow is fetching from and loading scripts off
+      // the origins a view declares — so the view fetches the deployment's
+      // build manifest, loads its embed bundle into THIS document, and hands
+      // the bundle the token, the origin and the host's way of opening a
+      // link. The view still renders nothing itself: a second rendering path
+      // would have to be kept in step with the app's, and would be the one
+      // that is wrong.
       (function () {
         'use strict';
 
-        var frame = document.getElementById('frame');
+        var root = document.getElementById('root');
         var notice = document.getElementById('notice');
         var hostOrigin = null;
         var shown = false;
+
+        /** The name the deployment's Vite build gives the embed entry. */
+        var EMBED_ENTRY = 'embed';
+        /** Where the deployment serves its build manifest, beside the bundle. */
+        var MANIFEST_PATH = '/embed-manifest.json';
+        /** The global the bundle reads its handoff from (see `embed-config.ts`). */
+        var HANDOFF_GLOBAL = '__HEXIS_EMBED__';
 
         function send(message) {
           // The host is this view's parent; it told us its origin on the
@@ -79,7 +87,7 @@
         function say(text) {
           notice.textContent = text;
           notice.classList.remove('hidden');
-          frame.classList.add('hidden');
+          root.classList.add('hidden');
         }
 
         /** Open a URL the way the host opens links: a new tab, through it. */
@@ -105,26 +113,8 @@
           return out;
         }
 
-        function show(result) {
-          var data = (result && result.structuredContent) || {};
-          if (typeof data.embedUrl === 'string' && data.embedUrl) {
-            frame.src = data.embedUrl;
-            frame.classList.remove('hidden');
-            notice.classList.add('hidden');
-            shown = true;
-            return;
-          }
-          // No embed address: the deployment's public address is plain http,
-          // so no host will frame it (see Decision 8). The tool's own answer
-          // already carries the page's text and its address in the app — say
-          // the same thing here, and make the address clickable.
-          var lines = [];
-          if (typeof data.note === 'string' && data.note) lines.push(data.note);
-          // A refused call (no such page, no access) carries its reason only
-          // as text — errors never get structuredContent. Show that reason
-          // rather than a generic sentence.
-          if (!lines.length && result && result.isError) lines = textOf(result);
-          if (!lines.length) lines.push('This page cannot be shown here.');
+        /** A sentence instead of the page, and the page's app address to click. */
+        function sayWithLink(lines, data) {
           say(lines.join('\n'));
           if (typeof data.appUrl === 'string' && data.appUrl) {
             var link = document.createElement('a');
@@ -139,21 +129,131 @@
           }
         }
 
+        /** The manifest chunk of the embed entry, or null. */
+        function embedEntry(manifest) {
+          if (!manifest || typeof manifest !== 'object') return null;
+          var keys = Object.keys(manifest);
+          for (var i = 0; i < keys.length; i++) {
+            var chunk = manifest[keys[i]];
+            if (!chunk || !chunk.isEntry || typeof chunk.file !== 'string') continue;
+            if (chunk.name === EMBED_ENTRY || /(^|\/)embed\.[jt]sx?$/.test(keys[i])) return chunk;
+          }
+          return null;
+        }
+
+        /** Every stylesheet the entry needs: its own and those of the chunks it imports. */
+        function stylesOf(manifest, entry) {
+          var seen = {};
+          var out = [];
+          (function walk(chunk) {
+            if (!chunk) return;
+            var css = Array.isArray(chunk.css) ? chunk.css : [];
+            for (var i = 0; i < css.length; i++) {
+              if (!seen[css[i]]) {
+                seen[css[i]] = true;
+                out.push(css[i]);
+              }
+            }
+            var imports = Array.isArray(chunk.imports) ? chunk.imports : [];
+            for (var j = 0; j < imports.length; j++) {
+              if (!seen['#' + imports[j]]) {
+                seen['#' + imports[j]] = true;
+                walk(manifest[imports[j]]);
+              }
+            }
+          })(entry);
+          return out;
+        }
+
+        /**
+         * Load the deployment's embed bundle into this document and let it
+         * draw the page. The deployment is whichever one minted the token —
+         * read off the embed address `open_page` answered with, which is the
+         * one origin the view's sandbox metadata lets us reach.
+         */
+        function loadBundle(data) {
+          var url;
+          try {
+            url = new URL(data.embedUrl);
+          } catch (err) {
+            sayWithLink(['The page address could not be read.'], data);
+            return;
+          }
+          var origin = url.origin;
+          var token = url.searchParams.get('token');
+          if (!token) {
+            sayWithLink(['The page address carries no token.'], data);
+            return;
+          }
+          // The handoff, before the bundle: it reads this the moment it runs.
+          window[HANDOFF_GLOBAL] = { origin: origin, token: token, openLink: openLink };
+
+          fetch(origin + MANIFEST_PATH, { credentials: 'omit' })
+            .then(function (res) {
+              if (!res.ok) throw new Error('the build manifest answered HTTP ' + res.status);
+              return res.json();
+            })
+            .then(function (manifest) {
+              var entry = embedEntry(manifest);
+              if (!entry) throw new Error('the build manifest names no embed entry');
+              var styles = stylesOf(manifest, entry);
+              for (var i = 0; i < styles.length; i++) {
+                var link = document.createElement('link');
+                link.rel = 'stylesheet';
+                link.href = origin + '/' + styles[i];
+                document.head.appendChild(link);
+              }
+              var script = document.createElement('script');
+              script.type = 'module';
+              script.crossOrigin = 'anonymous';
+              script.src = origin + '/' + entry.file;
+              script.addEventListener('load', function () {
+                // A module's load fires after it ran, so the bundle has mounted.
+                root.classList.remove('hidden');
+                notice.classList.add('hidden');
+                shown = true;
+              });
+              script.addEventListener('error', function () {
+                blocked(data, 'This chat app did not let the page load.');
+              });
+              document.body.appendChild(script);
+            })
+            .catch(function (err) {
+              blocked(data, 'This chat app did not let the page load (' + (err && err.message ? err.message : String(err)) + ').');
+            });
+        }
+
+        /** The sandbox would not load the page: say so, and offer the app. */
+        function blocked(data, reason) {
+          if (shown) return;
+          sayWithLink([reason, 'The page is in the knowledge base.'], data);
+        }
+
+        function show(result) {
+          var data = (result && result.structuredContent) || {};
+          if (typeof data.embedUrl === 'string' && data.embedUrl) {
+            loadBundle(data);
+            return;
+          }
+          // No embed address: the deployment's public address is plain http,
+          // which an https sandbox will not load from (see Decision 8). The
+          // tool's own answer already carries the page's text and its address
+          // in the app — say the same thing here, and make the address
+          // clickable.
+          var lines = [];
+          if (typeof data.note === 'string' && data.note) lines.push(data.note);
+          // A refused call (no such page, no access) carries its reason only
+          // as text — errors never get structuredContent. Show that reason
+          // rather than a generic sentence.
+          if (!lines.length && result && result.isError) lines = textOf(result);
+          if (!lines.length) lines.push('This page cannot be shown here.');
+          sayWithLink(lines, data);
+        }
+
         window.addEventListener('message', function (event) {
           var message = event.data;
           if (!message || typeof message !== 'object') return;
-
-          // A link clicked INSIDE the framed page. The embed never navigates
-          // itself — it relays the destination here, and the host opens it in
-          // a new tab, which is the only way out of a sandboxed iframe that
-          // forbids popups. Accepted only from our own frame.
-          if (message.type === 'bevel-embed-open') {
-            if (event.source !== frame.contentWindow) return;
-            if (typeof message.url === 'string' && message.url) openLink(message.url);
-            return;
-          }
-
-          // Everything else is the host's half of the extension protocol.
+          // Only the host's half of the extension protocol arrives here.
           if (event.source !== window.parent) return;
           if (hostOrigin === null && event.origin) hostOrigin = event.origin;
 
@@ -165,7 +265,7 @@
             return;
           }
           if (message.method === 'ui/notifications/container-size-changed') {
-            // The frame is 100% of the view, so the host's own sizing is the
+            // The page fills the view, so the host's own sizing is the
             // whole of the layout; nothing to recompute.
             return;
           }

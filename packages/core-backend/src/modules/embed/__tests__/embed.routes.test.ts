@@ -309,3 +309,57 @@ describe('the account-link routes', () => {
     expect((await client.del('/api/embed/links/someone-elses')).status).toBe(404);
   });
 });
+
+/**
+ * The MCP App view runs the embed inside a chat host's SANDBOX — another
+ * origin, and one no deployment can know in advance — so the token routes
+ * answer any origin. Safe for the reason the token-only rule exists: CORS
+ * guards a browser's ambient credentials, and these routes take none; the
+ * token in the request is the whole credential. The shared-secret mint and
+ * the session-backed link routes stay closed to a foreign page.
+ */
+describe('the token routes answer a cross-origin caller', () => {
+  const FOREIGN = { origin: 'https://sandbox.example' };
+
+  it.each(DATA_ROUTES)('%s %s answers any origin', async (method, path) => {
+    const client = await serve(stubService());
+    const res =
+      method === 'GET'
+        ? await client.get(`${path}?token=${TOKEN}`, FOREIGN)
+        : await client.post(path, { token: TOKEN, content: 'x' }, FOREIGN);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('answers the preflight a JSON POST from another origin triggers', async () => {
+    const client = await serve(stubService());
+    const res = await fetch(`${client.base}/api/embed/save`, {
+      method: 'OPTIONS',
+      headers: { ...FOREIGN, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res.headers.get('access-control-allow-methods')).toContain('POST');
+    expect(res.headers.get('access-control-allow-headers')?.toLowerCase()).toContain('content-type');
+  });
+
+  it('lets a renderer read back the path the raw route served', async () => {
+    const client = await serve(stubService());
+    const res = await client.get(`/api/embed/raw?token=${TOKEN}`, FOREIGN);
+    expect(res.headers.get('access-control-expose-headers')).toContain('X-Embed-Path');
+  });
+
+  it('keeps the mint and the account-link routes closed to other origins', async () => {
+    const client = await serve(stubService(), { session: true });
+    const mint = await client.post('/api/embed/token', { accountId: 'a', reference: 'Data/x.md' }, { ...FOREIGN, 'x-embed-secret': 'shh' });
+    expect(mint.status).toBe(200);
+    expect(mint.headers.get('access-control-allow-origin')).toBeNull();
+    const links = await client.get('/api/embed/links', FOREIGN);
+    expect(links.status).toBe(200);
+    expect(links.headers.get('access-control-allow-origin')).toBeNull();
+    const preflight = await fetch(`${client.base}/api/embed/link`, {
+      method: 'OPTIONS',
+      headers: { ...FOREIGN, 'access-control-request-method': 'POST' },
+    });
+    expect(preflight.headers.get('access-control-allow-origin')).toBeNull();
+  });
+});

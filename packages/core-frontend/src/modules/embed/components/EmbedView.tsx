@@ -20,6 +20,7 @@ import {
   type EmbedFileView,
 } from '../services/embed.api';
 import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
+import { embedOrigin, embedToken } from '../embed-config';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
@@ -34,17 +35,17 @@ const READ_WITHDRAWN =
   "You no longer have access to this page, so these changes can't be saved or proposed. " +
   'Copy anything you want to keep before you discard them.';
 
-function tokenFromUrl(): string {
-  return new URLSearchParams(window.location.search).get('token') ?? '';
-}
-
 function lockLostMessage(holder: string): string {
   return `${holder} started editing this page while it was in the background — your draft can't be saved over theirs.`;
 }
 
-/** An app path as an absolute URL, so a host can open it cross-site. */
+/**
+ * An app path as an absolute URL on the deployment, so a host can open it
+ * cross-site — the deployment's origin, not this document's, which inside a
+ * chat host's sandbox is the sandbox's own.
+ */
 function absolute(pathOrUrl: string): string {
-  return /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${window.location.origin}${pathOrUrl}`;
+  return /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${embedOrigin()}${pathOrUrl}`;
 }
 
 /**
@@ -88,7 +89,9 @@ function embedRawPath(
 }
 
 export function EmbedView() {
-  const token = tokenFromUrl();
+  // Handed over by the MCP App view that mounted this, or read from the
+  // page URL on the SPA's `/embed` route — see `embed-config`.
+  const token = embedToken();
   const registry = useAppRegistry();
   const [view, setView] = useState<EmbedFileView | null>(null);
   /** An expired/absent/rejected token — the one state that shows no content. */

@@ -1,5 +1,6 @@
 import { kbFileUrl, resolveKbHref } from '../workspace/routing/kb-routes';
 import { isOpenableExternalHref, normalizeHref } from '../../shared/markdown/hrefs';
+import { embedOpenLink, embedOrigin } from './embed-config';
 
 /**
  * What an expired, missing or rejected embed token shows. One sentence, no
@@ -36,10 +37,11 @@ function hostOrigin(): string | null {
  * frame.
  *
  * Inside a host's sandbox `window.open` and `target=_blank` are blocked (no
- * `allow-popups`), so the embed asks its parent to open it: the MCP App view
- * answers with the extension's `ui/open-link`, and the Atlassian panel with
- * Forge's `router.open`. Standalone — a developer opening `/embed?token=…`
- * directly — falls back to `window.open`.
+ * `allow-popups`), so the embed asks the host to open it. Running inside the
+ * MCP App view's own document, the view lent it the extension's
+ * `ui/open-link` (see `embed-config`); framed by an Atlassian panel, it posts
+ * to the parent, which answers with Forge's `router.open`. Standalone — a
+ * developer opening `/embed?token=…` directly — falls back to `window.open`.
  *
  * `href` is resolved first, against `basePath` (the file the link sits in)
  * and with `kb`'s naming, so a relative knowledge-base link becomes the app's
@@ -57,6 +59,11 @@ export function openThroughHost(
 ): void {
   const url = resolveToAppUrl(href, basePath, kb);
   if (url === null) return;
+  const lent = embedOpenLink();
+  if (lent) {
+    lent(url);
+    return;
+  }
   if (window.parent !== window) {
     window.parent.postMessage({ type: EMBED_OPEN_MESSAGE, url }, hostOrigin() ?? '*');
     return;
@@ -83,7 +90,7 @@ export function resolveToAppUrl(
     // page. A root-relative path is this deployment's; anything absolute
     // still has to pass the scheme allowlist below, for the same reason.
     const url = normalizeHref(href);
-    if (url.startsWith('/') && !url.startsWith('//')) return `${window.location.origin}${url}`;
+    if (url.startsWith('/') && !url.startsWith('//')) return `${embedOrigin()}${url}`;
     // A protocol-relative `//host/path` names another origin without saying
     // so; the embed never builds one, so it is refused rather than relayed.
     return !url.startsWith('//') && isOpenableExternalHref(url) ? url : null;
@@ -109,5 +116,5 @@ export function resolveToAppUrl(
   // A link that named its own branch keeps it; everything else opens on the
   // branch the embed rendered, which is the default branch.
   const branch = target.branch ?? kb.branch;
-  return `${window.location.origin}${kbFileUrl(branch, target.path)}${target.hash}`;
+  return `${embedOrigin()}${kbFileUrl(branch, target.path)}${target.hash}`;
 }

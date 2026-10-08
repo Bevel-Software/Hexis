@@ -37,6 +37,9 @@ import '../auth/auth.middleware.js'; // Express Request augmentation
  * every route here reads `token` and never `req.userId`: a request carrying a
  * perfectly valid session and no token is refused.
  */
+/** The token-only data routes — the ones a cross-origin sandbox may call. */
+const TOKEN_ROUTE = /^\/api\/embed\/(load|raw|lock|heartbeat|cancel|save|propose)$/;
+
 export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   const router = express.Router();
 
@@ -59,6 +62,36 @@ export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   router.get('/embed/link', (_req, res, next) => {
     res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
     res.setHeader('X-Frame-Options', 'DENY');
+    next();
+  });
+
+  // ── cross-origin callers ─────────────────────────────────────────────────
+  //
+  // The MCP App view runs the embed inside a chat host's SANDBOX, whose
+  // origin is the host's (a hash subdomain under Claude's content domain, a
+  // URL-derived one under ChatGPT's) and unknowable in advance. So the
+  // token-only routes answer ANY origin. That is safe for exactly the reason
+  // the token-only rule exists: CORS guards a browser's ambient credentials,
+  // and these routes accept none — no cookie is read, the page sends none,
+  // and the token in the request is the whole credential. The shared-secret
+  // mint (server to server) and the session-backed link routes get no CORS
+  // header and keep refusing a foreign page.
+  router.use((req, res, next) => {
+    if (!TOKEN_ROUTE.test(req.path)) {
+      next();
+      return;
+    }
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    // The one response header a renderer reads back (`/raw` names the file it served).
+    res.setHeader('Access-Control-Expose-Headers', 'X-Embed-Path');
+    if (req.method === 'OPTIONS') {
+      // The preflight a JSON POST triggers from another origin.
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Max-Age', '600');
+      res.status(204).end();
+      return;
+    }
     next();
   });
 

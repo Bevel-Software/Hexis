@@ -1,3 +1,5 @@
+import { embedApiBase } from '../embed-config';
+
 /**
  * The embed page's HTTP surface.
  *
@@ -6,6 +8,11 @@
  * into that frame would let a hostile page read and write as whoever happened
  * to be signed in. Every call below carries the embed token and nothing else,
  * and every route refuses a request without one.
+ *
+ * Every token route is addressed through {@link embedApiBase}: relative in
+ * the app, and the deployment's origin when the embed runs inside a chat
+ * host's sandbox — a different origin, which is why the server answers these
+ * routes to any origin (they carry no cookie to protect).
  */
 
 /** What the embed page renders, as `GET /api/embed/load` answers it. */
@@ -74,7 +81,7 @@ async function failure(res: Response): Promise<EmbedApiError> {
 const TOKEN_ONLY: RequestInit = { credentials: 'omit' };
 
 async function post(path: string, body: Record<string, unknown>): Promise<Response> {
-  const res = await fetch(path, {
+  const res = await fetch(`${embedApiBase()}${path}`, {
     ...TOKEN_ONLY,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -85,7 +92,7 @@ async function post(path: string, body: Record<string, unknown>): Promise<Respon
 }
 
 export async function loadEmbed(token: string): Promise<EmbedFileView> {
-  const res = await fetch(`/api/embed/load?token=${encodeURIComponent(token)}`, TOKEN_ONLY);
+  const res = await fetch(`${embedApiBase()}/api/embed/load?token=${encodeURIComponent(token)}`, TOKEN_ONLY);
   if (!res.ok) throw await failure(res);
   return (await res.json()) as EmbedFileView;
 }
@@ -104,7 +111,7 @@ export function embedRawUrl(
   path?: string,
   options: { version?: number } = {},
 ): string {
-  let url = `/api/embed/raw?token=${encodeURIComponent(token)}`;
+  let url = `${embedApiBase()}/api/embed/raw?token=${encodeURIComponent(token)}`;
   if (path) url += `&path=${encodeURIComponent(path)}`;
   // A cache key, so a replaced picture reaches an open view. Absent or 0 adds
   // nothing, keeping the URL stable and browser-cacheable.
