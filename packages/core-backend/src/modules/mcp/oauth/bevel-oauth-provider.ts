@@ -528,30 +528,32 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * the FIRST time is an agent that has just reached the platform — the
    * `initialize` every client sends on connecting — which is what the
    * onboarding waits for, so its owner is told (`agent-connected`) for
-   * exactly that stamp and never again. The row is read before the write to
-   * know which stamp this is; the read sits behind the throttle above, so
-   * the hot path pays nothing for it.
+   * exactly that stamp and never again.
+   *
+   * The first stamp is CLAIMED in one statement (`… where last_used_at is
+   * null … returning`): of two requests racing it — a parallel
+   * `initialize` and `tools/list`, or two replicas — the database hands the
+   * row to exactly one, and only that one announces. The loser, and every
+   * later use, stamps the ordinary way. Both sit behind the throttle above,
+   * so the hot path pays nothing for them.
    */
   private async stampConnectionUse(connectionId: string, at: Date): Promise<void> {
-    const [before] = await this.deps.db
-      .select({
-        userId: agentConnections.userId,
-        client: agentConnections.clientName,
-        lastUsedAt: agentConnections.lastUsedAt,
-      })
-      .from(agentConnections)
-      .where(eq(agentConnections.id, connectionId))
-      .limit(1);
-    await this.deps.db.update(agentConnections).set({ lastUsedAt: at }).where(eq(agentConnections.id, connectionId));
-    if (before && before.lastUsedAt === null) {
+    const [first] = await this.deps.db
+      .update(agentConnections)
+      .set({ lastUsedAt: at })
+      .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.lastUsedAt)))
+      .returning({ userId: agentConnections.userId, client: agentConnections.clientName });
+    if (first) {
       this.deps.events?.emit({
         kind: 'agent-connected',
-        forUserId: before.userId,
-        client: before.client ?? 'Unnamed agent',
+        forUserId: first.userId,
+        client: first.client ?? 'Unnamed agent',
         agentKind: 'agent',
         at: at.toISOString(),
       });
+      return;
     }
+    await this.deps.db.update(agentConnections).set({ lastUsedAt: at }).where(eq(agentConnections.id, connectionId));
   }
 
   /**

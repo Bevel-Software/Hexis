@@ -4119,11 +4119,16 @@ describe('FileExplorer: deleting platform files', () => {
     mockAuthFetch.mockReset();
   });
 
-  it.each(['access.md', 'roles.yaml'])('the root %s shows Delete disabled with the sentence, for an admin too', async (name) => {
+  // The rows show the file's plain name (`access.md` reads "Who has access");
+  // the sentence keeps the file's own.
+  it.each([
+    ['access.md', 'Who has access'],
+    ['roles.yaml', 'roles.yaml'],
+  ])('the root %s shows Delete disabled with the sentence, for an admin too', async (name, label) => {
     const deleteEntry = vi.fn(async () => {});
     renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
     // The root's copy is the first row of that name.
-    fireEvent.contextMenu(screen.getAllByText(name)[0].closest('button')!);
+    fireEvent.contextMenu(screen.getAllByText(label)[0].closest('button')!);
     const del = screen.getByRole('menuitem', { name: /Delete/i });
     expect(del).toHaveAttribute('aria-disabled', 'true');
     expect(del).toHaveAttribute('title', sentence(name));
@@ -4137,7 +4142,7 @@ describe('FileExplorer: deleting platform files', () => {
   it('a nested access.md offers Delete, and deletes once confirmed', async () => {
     const deleteEntry = vi.fn(async () => {});
     renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
-    const rows = screen.getAllByText('access.md');
+    const rows = screen.getAllByText('Who has access');
     expect(rows).toHaveLength(2);
     fireEvent.contextMenu(rows[1].closest('button')!);
     const del = screen.getByRole('menuitem', { name: /Delete/i });

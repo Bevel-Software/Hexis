@@ -81,11 +81,16 @@ export function useAgentConnection({ enabled = true }: { enabled?: boolean } = {
 
   // The server's word, the moment it happens. The bus is already filtered to
   // this account's sessions; the check here covers a tab that switched
-  // accounts while the subscription stood.
+  // accounts while the subscription stood. An event older than what is
+  // remembered (a replay on reconnect, a key's first use landing after a
+  // newer connection's) changes nothing: the newest use names the client the
+  // first-page prompt should address.
   useEffect(() => {
     if (!enabled || !userId || !bus) return;
     return bus.subscribe('agent-connected', (event) => {
       if (event.forUserId !== userId) return;
+      const known = knownConnected.get(userId);
+      if (known?.at && event.at <= known.at) return;
       rememberConnected(userId, { connected: true, at: event.at, client: event.client, kind: event.agentKind });
     });
   }, [enabled, userId, bus]);

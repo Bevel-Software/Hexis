@@ -141,11 +141,13 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     //
     // A key's FIRST use is an agent that has just reached the platform —
     // what the onboarding waits for — so its owner is told once the stamp
-    // has landed, and only for the use that found the key never stamped.
-    const firstUse = row.lastUsedAt === null;
-    this.touchLastUsed(row.tokenId).then(
-      () => {
-        if (!firstUse) return;
+    // has landed. A key never stamped is CLAIMED (`claimFirstUse`), so of
+    // two requests racing its first use exactly one announces it; a key
+    // stamped before is touched and nobody is told.
+    const stamped = row.lastUsedAt === null ? this.claimFirstUse(row.tokenId) : this.touchLastUsed(row.tokenId).then(() => false);
+    stamped.then(
+      (first) => {
+        if (!first) return;
         this.events?.emit({
           kind: 'agent-connected',
           forUserId: row.userId,
@@ -304,6 +306,23 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       .update(externalApiKeys)
       .set({ lastUsedAt: new Date() })
       .where(eq(externalApiKeys.id, tokenId));
+  }
+
+  /**
+   * The first stamp as ONE statement: the row is taken only while
+   * `last_used_at` is still null, so of two requests (or two replicas)
+   * racing a key's first use the database hands it to exactly one, which
+   * answers true. The loser stamps the ordinary way and answers false.
+   */
+  private async claimFirstUse(tokenId: string): Promise<boolean> {
+    const won = await this.db
+      .update(externalApiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(and(eq(externalApiKeys.id, tokenId), isNull(externalApiKeys.lastUsedAt)))
+      .returning({ id: externalApiKeys.id });
+    if (won.length > 0) return true;
+    await this.touchLastUsed(tokenId);
+    return false;
   }
 }
 
