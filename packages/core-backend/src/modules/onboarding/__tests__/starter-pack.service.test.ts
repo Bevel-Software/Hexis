@@ -58,12 +58,14 @@ function harness({
   const kb = testKbContext({ kbDirName: KB, layout });
   // The plugin creation's identity lock, as `PluginProvisionService.withIdentities` keys it.
   const locks = new WorkspaceMutex();
+  /** The keys the service asked for, in order — noted before the lock is granted. */
+  const lockRequests: string[] = [];
   const pluginLocks = {
-    withIdentities: <T>(names: string[], fn: () => Promise<T>) =>
-      locks.runAll(
-        names.map((n) => `plugin:${n.toLowerCase()}`),
-        fn,
-      ),
+    withIdentities: <T>(names: string[], fn: () => Promise<T>) => {
+      const keys = names.map((n) => `plugin:${n.toLowerCase()}`);
+      lockRequests.push(...keys);
+      return locks.runAll(keys, fn);
+    },
   };
   const workflow = {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderName: 'x' } })),
@@ -90,7 +92,7 @@ function harness({
     accessControl,
     events,
   });
-  return { svc, store, settings, locks, workflow, events, accessControl };
+  return { svc, store, settings, locks, lockRequests, workflow, events, accessControl };
 }
 
 beforeEach(async () => {
@@ -325,16 +327,34 @@ describe('choosing a pack', () => {
   });
 
   it('waits for a plugin creation of the same name, on the lock creations take', async () => {
-    const { svc, locks, workflow } = harness();
+    const { svc, locks, lockRequests, workflow } = harness();
+    let released = false;
     let finishCreating!: () => void;
-    const creating = locks.run('plugin:sales-starter', () => new Promise<void>((resolve) => (finishCreating = resolve)));
+    const creating = locks.run(
+      'plugin:sales-starter',
+      () =>
+        new Promise<void>((resolve) => {
+          finishCreating = () => {
+            released = true;
+            resolve();
+          };
+        }),
+    );
+    const commits: string[] = [];
+    workflow.commitChanges.mockImplementation(async () => {
+      commits.push(released ? 'after the creation released the lock' : 'while the creation held the lock');
+      return { sha: 'abc' };
+    });
+
     const choosing = svc.choose(ADMIN, 'sales');
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The pack has asked for the lock the creation holds, and nothing is
+    // committed until that creation lets go.
+    await vi.waitFor(() => expect(lockRequests).toEqual(['plugin:sales-starter']));
     expect(workflow.commitChanges).not.toHaveBeenCalled();
     finishCreating();
     await creating;
     await expect(choosing).resolves.toMatchObject({ id: 'sales' });
-    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(commits).toEqual(['after the creation released the lock']);
   });
 
   it('adds the pack even when recording the choice fails afterwards: the pages close the question', async () => {
