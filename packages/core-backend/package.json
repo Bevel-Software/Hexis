@@ -24,6 +24,7 @@
     "migrations",
     "kb-template",
     "agent-guide",
+    "mcp-app",
     "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {

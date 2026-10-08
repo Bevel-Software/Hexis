@@ -4,6 +4,8 @@ import {
   ListToolsRequestSchema,
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
   McpError,
   ErrorCode,
   type CallToolResult,
@@ -35,6 +37,9 @@ import {
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
+  toListedResource,
+  toReadResourceResult,
+  type McpAppManifest,
   type ProxiedTool,
   type SkillSummary,
   type LoadedSkill,
@@ -44,6 +49,7 @@ import {
   callKbTool,
   ConnectionKeyRejectedError,
   fetchAllManuals,
+  fetchMcpApps,
   fetchCatalogRevision,
   fetchLocalOnlyManuals,
   resolveDeployment,
@@ -237,13 +243,26 @@ export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
  * client rejects the whole listing over one bad entry rather than telling
  * anyone which one.
  */
-export function listedTools(tools: ProxiedTool[]): McpTool[] {
+export function listedTools(
+  tools: ProxiedTool[],
+  /**
+   * The views the deployment's tools carry, by tool name — `McpAppManifest.tools`.
+   *
+   * Joined on HERE because a UTCP manual has nowhere to carry it: a tool
+   * arrives from discovery with a name, a description and a schema, and this
+   * is the one point where it becomes a listing entry a client reads.
+   */
+  views: Record<string, { resourceUri: string }> = {},
+): McpTool[] {
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
   const dropped: string[] = [];
   const examplePool: ProxiedTool[] = [];
   for (const tool of tools) {
-    const entry = toListedTool(tool); // logs its own reason on a name/schema drop
+    // Own keys only: a tool named `constructor` or `toString` is not one an
+    // app view was published for.
+    const view = Object.hasOwn(views, tool.mcpName) ? views[tool.mcpName] : undefined;
+    const entry = toListedTool(view ? { ...tool, ui: view } : tool); // logs its own reason on a name/schema drop
     if (!entry) {
       dropped.push(tool.mcpName);
       continue;
@@ -500,6 +519,16 @@ export async function createHexisMcpServer(
   /** Why discovery failed, if it did: the sentence every handler answers with. */
   let discoveryError: string | null = null;
   /**
+   * The deployment's MCP Apps: the `ui://` views its tools carry, which this
+   * server forwards on `tools/list` and serves on `resources/read`.
+   *
+   * Read once, with discovery. Empty is the honest default and the degraded
+   * one at the same time — a deployment that serves no app, and one too old
+   * to be asked, look identical from here, and in both cases every tool is
+   * listed and answers its text.
+   */
+  let apps: McpAppManifest = { tools: {}, resources: [] };
+  /**
    * The SDK server, declared up here rather than beside `shutdown`: the
    * catalog refresh below sends notifications on it, and a closure defined
    * before it would otherwise have nothing to reach.
@@ -744,6 +773,11 @@ export async function createHexisMcpServer(
       tools = withoutRemoteMetaTools(
         (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
       );
+      // The views go with the tools: a tool that gained or re-pointed its
+      // `ui://` view since startup must be listed — and its view served — as
+      // the deployment serves it now, not as it did when this process began.
+      // A failed read keeps the views already served (see `fetchMcpApps`).
+      apps = await fetchMcpApps(config, apps);
       console.error(
         `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served ` +
           `(${localByName.size} local-only manual(s) registered here, the rest served by the workspace).`,
@@ -884,6 +918,10 @@ export async function createHexisMcpServer(
       await swapRemoteCredential(config.connectionKey);
     }
     tools = discovered;
+    // The views the discovered tools carry. After `tools`, and never fatal:
+    // `fetchMcpApps` answers an empty manifest for anything but a rejected
+    // key, so a deployment without the route still starts and serves tools.
+    apps = await fetchMcpApps(config);
 
     console.error(
       `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
@@ -1018,7 +1056,17 @@ export async function createHexisMcpServer(
       // reconnect (see `refreshCatalog`), and declaring the capability
       // is what permits the notification that says so.
       {
-        capabilities: { tools: { listChanged: true }, prompts: { listChanged: true } },
+        capabilities: {
+          tools: { listChanged: true },
+          prompts: { listChanged: true },
+          // Resources are declared UNCONDITIONALLY here, unlike on the hosted
+          // endpoint, because this server builds its capabilities BEFORE
+          // discovery has told it whether the deployment serves any view —
+          // and the handshake happens once. The two handlers below answer an
+          // empty list and a plain "no such resource" while there is nothing,
+          // which is what a client must tolerate from any resource server.
+          resources: {},
+        },
         ...(instructions !== undefined ? { instructions } : {}),
       },
     );
@@ -1046,7 +1094,27 @@ export async function createHexisMcpServer(
       // look the notice above exists to prevent. The truth is the same one
       // the call handler gives: this server is going away.
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools) };
+      return { tools: listedTools(tools, apps.tools) };
+    });
+
+    // The deployment's MCP App views, served from here so a host connected
+    // through this server renders a page exactly as one connected straight to
+    // the deployment does.
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      await ready;
+      return { resources: apps.resources.map((r) => toListedResource(r)) };
+    });
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      await ready;
+      const resource = apps.resources.find((r) => r.uri === request.params.uri);
+      if (!resource) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `No resource at ${request.params.uri}. This server serves the workspace's MCP App views ` +
+            `and nothing else${apps.resources.length ? `: ${apps.resources.map((r) => r.uri).join(', ')}` : ' — and this workspace serves none'}.`,
+        );
+      }
+      return toReadResourceResult(resource);
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
@@ -1087,15 +1155,22 @@ export async function createHexisMcpServer(
         const tool = tools.find((t) => t.mcpName === name);
         if (!tool) return toolError(`Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
-        return await dispatchToolCall(live, tool, request.params.arguments ?? {}, (progress, message) =>
-          extra.sendNotification({
-            method: 'notifications/progress',
-            params: {
-              ...(progressToken !== undefined ? { progressToken } : {}),
-              progress,
-              message,
-            },
-          } as never),
+        return await dispatchToolCall(
+          live,
+          tool,
+          request.params.arguments ?? {},
+          (progress, message) =>
+            extra.sendNotification({
+              method: 'notifications/progress',
+              params: {
+                ...(progressToken !== undefined ? { progressToken } : {}),
+                progress,
+                message,
+              },
+            } as never),
+          // A tool with a view answers structured content as well: the view
+          // reads its fields from there, not from the text the model reads.
+          { structured: Object.hasOwn(apps.tools, name) },
         );
       } finally {
         inflightCalls -= 1;
