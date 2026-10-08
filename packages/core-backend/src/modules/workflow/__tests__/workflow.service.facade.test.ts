@@ -15,7 +15,12 @@ import { PendingCommitsService, type PendingCommit } from '../pending-commits.se
 import { PendingCommitsWorker } from '../pending-commits.worker.js';
 import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
-import { PullRebaseConflictError, WorkflowDomainError } from '../../../shared/domain-errors.js';
+import {
+  PullRebaseConflictError,
+  PushNeedsAgentResolutionError,
+  WorkflowDomainError,
+} from '../../../shared/domain-errors.js';
+import type { WorkflowEventBus } from '../event-bus.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
@@ -584,6 +589,7 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
     canWriteAtRef?: boolean | null;
     prState?: string;
     updateRows?: unknown[];
+    events?: WorkflowEventBus;
   } = {}) {
     const git = opts.git ?? makeRevertGit();
     const prs = makePrs();
@@ -610,7 +616,7 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
       returning: vi.fn(async () => updateRows),
     });
     const db = chain as unknown as Database;
-    const svc = new WorkflowService(db, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access, fileLocks, makePendingCommits(), testKbContext(), openChangeGate());
+    const svc = new WorkflowService(db, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access, fileLocks, makePendingCommits(), testKbContext(), openChangeGate(), opts.events);
     return { svc, git, prs, access, fileLocks, db: chain };
   }
 
@@ -745,6 +751,130 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
 
     await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toThrow('commit failed');
     expect(fileLocks.release).toHaveBeenCalledTimes(2);
+  });
+
+  describe('when the repository host refuses the push', () => {
+    // What GitHub answered during its 2026-10-07 incident, credential and all.
+    const REFUSED = new Error(
+      "git push failed: remote: Internal Server Error\nTo https://x-access-token:ghp_abc123@github.com/acme/kb.git\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)",
+    );
+    const kindsOf = (emit: ReturnType<typeof vi.fn>) =>
+      emit.mock.calls
+        .map((c) => (c[0] as { kind: string }).kind)
+        .filter((k) => k.startsWith('git-sync-'));
+
+    it('keeps the revert committed locally, answers 409 with the saved-locally sentence, and raises the banner', async () => {
+      const emit = vi.fn();
+      const git = makeRevertGit({
+        push: vi.fn().mockRejectedValue(REFUSED),
+        // A refused push is not a divergence — but "rejected" reads like one,
+        // so the cooperative pull runs first; it changes nothing here.
+        pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+      });
+      const { svc, fileLocks, prs, db } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+      const refusal = err as PushNeedsAgentResolutionError;
+      expect(refusal.status).toBe(409);
+      expect(refusal.message).toContain('Saved locally on "ali/x"');
+      expect(refusal.message).toContain('the repository host refused the push');
+      // The browser receives message + payload: neither carries git output.
+      const body = JSON.stringify({ ...refusal.payload, error: refusal.message });
+      expect(body).not.toMatch(/Internal Server Error|remote rejected|ghp_|github\.com/);
+
+      // The local result stays: restored, committed, locks dropped, caches fresh.
+      expect(git.restorePathFromRef).toHaveBeenCalledWith('ali%2Fx', 'mb-sha', 'Docs/a.md');
+      expect(git.commitFile).toHaveBeenCalled();
+      expect(fileLocks.release).toHaveBeenCalled();
+      expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+      // Nothing is closed on the strength of a branch the host never received:
+      // the remaining files (read from the published refs) are not even asked.
+      expect(git.changedPathsForPr).toHaveBeenCalledTimes(1);
+      // Nor is a recorded apply failure erased: the published head it
+      // describes did not move.
+      expect(db.update).not.toHaveBeenCalled();
+
+      // The banner, on the request's source branch, in words — not git's.
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed).toMatchObject({ workspaceId: 'ali/x', branch: 'ali/x' });
+      expect(String(failed?.reason)).not.toMatch(/Internal Server Error|remote|ghp_/);
+    });
+
+    it('clears the banner on the next push of that branch that lands', async () => {
+      const emit = vi.fn();
+      const push = vi.fn().mockRejectedValueOnce(REFUSED).mockRejectedValueOnce(REFUSED).mockResolvedValue(undefined);
+      const git = makeRevertGit({ push, pull: vi.fn().mockResolvedValue({ treeChanged: false }) });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
+
+      await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toBeInstanceOf(
+        PushNeedsAgentResolutionError,
+      );
+      // The host is back; the next push of the branch carries the revert.
+      await svc.shareCurrentBranch('ali%2Fx', makeUser());
+      expect(kindsOf(emit)).toEqual(['git-sync-failed', 'git-sync-recovered']);
+      expect(emit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: 'git-sync-recovered', workspaceId: 'ali/x' }),
+      );
+    });
+
+    it('a divergence whose retry push the host then refuses is answered as a refusal, not a divergence', async () => {
+      const push = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('! [rejected] ali/x -> ali/x (non-fast-forward)'))
+        .mockRejectedValueOnce(REFUSED);
+      const git = makeRevertGit({ push, pull: vi.fn().mockResolvedValue({ treeChanged: true }) });
+      const { svc } = makeHarness({ git });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+      expect((err as PushNeedsAgentResolutionError).message).toContain('the repository host refused the push');
+      expect(push).toHaveBeenCalledTimes(2);
+    });
+
+    it('a recovery whose PULL the host refuses says the credentials cannot reach the repository, not "push"', async () => {
+      const emit = vi.fn();
+      const push = vi.fn().mockRejectedValue(new Error('! [rejected] ali/x -> ali/x (non-fast-forward)'));
+      const pull = vi
+        .fn()
+        // The freshen pull is best-effort; the recovery pull is the one that counts.
+        .mockResolvedValueOnce({ treeChanged: false })
+        .mockRejectedValue(
+          new Error("fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403"),
+        );
+      const git = makeRevertGit({ push, pull });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
+
+      await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toBeInstanceOf(
+        PushNeedsAgentResolutionError,
+      );
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed?.reason).toBe(
+        "The repository host did not give this server's credentials access to this repository.",
+      );
+      expect(push).toHaveBeenCalledTimes(1);
+    });
+
+    it('a non-fast-forward still takes the cooperative pull-rebase, then lands', async () => {
+      const emit = vi.fn();
+      const push = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('! [rejected] ali/x -> ali/x (non-fast-forward)'))
+        .mockResolvedValue(undefined);
+      const pull = vi.fn().mockResolvedValue({ treeChanged: true });
+      const git = makeRevertGit({ push, pull });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
+
+      await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).resolves.toMatchObject({ closed: false });
+      expect(push).toHaveBeenCalledTimes(2);
+      // Once to freshen the checkout, once as the cooperative recovery —
+      // both replay merges as merges, so a merge a refused open or update
+      // stranded on the branch is not flattened before this push publishes it.
+      expect(pull).toHaveBeenCalledTimes(2);
+      expect(pull).toHaveBeenNthCalledWith(1, 'ali%2Fx', { preserveMerges: true });
+      expect(pull).toHaveBeenNthCalledWith(2, 'ali%2Fx', { preserveMerges: true });
+      expect(kindsOf(emit)).not.toContain('git-sync-failed');
+    });
   });
 
   it('never reverts a placeholder when that would leave the folder with nothing', async () => {
@@ -1190,6 +1320,77 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
     // requireCleanTarget.
     expect(merge).toHaveBeenCalledTimes(1);
     expect(merge.mock.calls[0][5]).toMatchObject({ requireCleanTarget: true });
+  });
+});
+
+/**
+ * Opening a request pushes its source after the auto-merge. A push the host
+ * refuses must not undo the open: the merge is committed locally, the request
+ * is a DB row, and the next push of the branch carries the commits.
+ */
+describe('WorkflowService.openChangeRequest — when the repository host refuses the push', () => {
+  const INPUT = { sourceBranch: 'ali/x', targetBranch: 'main', title: 'Tidy the glossary' };
+
+  function makeOpenHarness(push: ReturnType<typeof vi.fn>) {
+    const emit = vi.fn();
+    const git = Object.assign(makeGit(), {
+      mergeFromOrigin: vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false }),
+      push,
+      pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+    }) as unknown as GitService;
+    const prs = makePrs();
+    (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ number: 12, branch: 'ali/x', base: 'main' });
+    const values = vi.fn(() => ({ returning: vi.fn(async () => [{ number: 12 }]) }));
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Database;
+    const svc = new WorkflowService(
+      db, git, prs, makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(),
+      makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
+      { emit } as unknown as WorkflowEventBus,
+    );
+    return { svc, git, prs, values, emit };
+  }
+
+  it('creates the request, then answers 409 with the saved-locally sentence and raises the banner', async () => {
+    const refused = new Error(
+      'git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)',
+    );
+    const h = makeOpenHarness(vi.fn().mockRejectedValue(refused));
+
+    const err = await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    const refusal = err as PushNeedsAgentResolutionError;
+    expect(refusal.status).toBe(409);
+    expect(refusal.message).toContain('Saved locally on "ali/x"');
+    expect(JSON.stringify({ ...refusal.payload, error: refusal.message })).not.toMatch(/Internal Server Error|remote rejected/);
+
+    // The request exists — the row was inserted and announced.
+    expect(h.values).toHaveBeenCalledWith(expect.objectContaining({ sourceBranch: 'ali/x', targetBranch: 'main' }));
+    expect(h.prs.invalidateDetailCache).toHaveBeenCalledWith(12);
+    const kinds = h.emit.mock.calls.map((c) => (c[0] as { kind: string }).kind);
+    expect(kinds).toContain('change-request-opened');
+    expect(h.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'git-sync-failed', workspaceId: 'ali/x', branch: 'ali/x' }),
+    );
+  });
+
+  it('a push that lands answers the detail as before, with no banner', async () => {
+    const h = makeOpenHarness(vi.fn().mockResolvedValue(undefined));
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12 });
+    expect(h.git.push).toHaveBeenCalledWith('ali%2Fx', expect.objectContaining({ email: 'alice@example.com' }));
+    const kinds = h.emit.mock.calls.map((c) => (c[0] as { kind: string }).kind);
+    expect(kinds).not.toContain('git-sync-failed');
+  });
+
+  it('a non-fast-forward recovers with a merge-preserving pull, and the request opens', async () => {
+    const push = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('! [rejected] ali/x -> ali/x (fetch first)'))
+      .mockResolvedValue(undefined);
+    const h = makeOpenHarness(push);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12 });
+    expect(h.git.pull).toHaveBeenCalledWith('ali%2Fx', { preserveMerges: true });
+    expect(push).toHaveBeenCalledTimes(2);
   });
 });
 

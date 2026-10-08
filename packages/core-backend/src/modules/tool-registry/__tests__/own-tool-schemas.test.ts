@@ -101,7 +101,7 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         embedService: nothing,
         kb: testKbContext(),
         readForTool: nothing,
-        canBeFramed: () => true,
+        canBeReached: () => true,
         appUrlFor: (repoRelative) => `https://example.test/workspace/main/knowledge-base/${repoRelative}`,
       }),
   },

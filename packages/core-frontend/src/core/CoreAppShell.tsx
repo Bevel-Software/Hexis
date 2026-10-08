@@ -54,6 +54,7 @@ import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
 import { PullRequestsForMe } from '../modules/git/components/PullRequestsForMe';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
+import { ChangeRequestLink } from '../modules/change-requests/components/ChangeRequestLink';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
 import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
@@ -468,6 +469,14 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           and redirect targets, not settings destinations. */}
       <Route path="/" element={<RootLanding />} />
       <Route path="/auth/*" element={<RootLanding />} />
+      {/* The address every change-request link carries (the backend's
+          change-request-link helper: `open_change_request`, the read tools,
+          every summary's `url`). It opens the request itself, in the
+          change-request view, over a quiet page; closing it goes to Knowledge.
+          Before this route existed the catch-all below swallowed the link.
+          OUTSIDE the settings layout and the apps, like `/connect`: a landing
+          target, not a destination with a nav row. */}
+      <Route path="/change-requests/:number" element={<ChangeRequestLink />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );

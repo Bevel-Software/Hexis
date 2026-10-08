@@ -374,7 +374,18 @@ export function registerChangeRequestReadTools(
       required: ['changeRequests', ...pagingRequired],
     },
     handler: async (args, ctx: ToolContext) => {
-      const state = args.state === 'closed' || args.state === 'all' ? args.state : 'open';
+      // The answer spells a merged request `state: merged`, so an agent that
+      // copies that word back into the filter is asking for the applied
+      // ones. Quietly answering the open ones instead reads as "there are no
+      // merged requests" — refuse, and name the filter's own vocabulary.
+      const state = args.state === undefined ? 'open' : args.state;
+      if (state !== 'open' && state !== 'closed' && state !== 'all') {
+        throw new ToolError(
+          `Unknown \`state\` ${JSON.stringify(state)}. Use \`open\` (the default), \`closed\` ` +
+            '(applied and declined alike) or `all`; the answer then says `merged` or `closed` for each.',
+          400,
+        );
+      }
       const head = typeof args.head === 'string' ? args.head : undefined;
       const base = typeof args.base === 'string' ? args.base : undefined;
       const author = typeof args.author === 'string' ? args.author : undefined;

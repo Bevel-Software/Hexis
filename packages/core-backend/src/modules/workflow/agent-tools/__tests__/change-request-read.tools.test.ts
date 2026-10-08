@@ -383,6 +383,19 @@ describe('list_change_requests', () => {
     expect(calls).toContainEqual(['listChangeRequestsByState', ['closed', 'merged', 'open']]);
   });
 
+  it('refuses a `state` it does not know instead of answering the open ones', async () => {
+    const base = await start();
+    // `merged` is what the ANSWER says for an applied request, so it is the
+    // word an agent is most likely to feed back in; a typo is refused too.
+    for (const state of ['merged', 'applied', 'OPEN', '', 7, null]) {
+      calls = [];
+      const { status, json } = await call(base, 'list_change_requests', { state });
+      expect(status, JSON.stringify(state)).toBe(400);
+      expect(JSON.stringify(json), JSON.stringify(state)).toMatch(/open.*closed.*all/);
+      expect(calls, JSON.stringify(state)).toEqual([]);
+    }
+  });
+
   it('filters by target branch and by author', async () => {
     const base = await start();
     summaries = [

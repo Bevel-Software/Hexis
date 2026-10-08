@@ -27,7 +27,7 @@ afterEach(async () => {
 interface Opts {
   /** What `read_file`'s own read answers — or throws. */
   read?: ReadForTool;
-  canBeFramed?: boolean;
+  canBeReached?: boolean;
   /** The caller the tool auth resolves to: a signed-in session, or a connection key's owner. */
   caller?: { id: string; email: string; name: string; tokenId?: string };
 }
@@ -74,7 +74,7 @@ async function serve(opts: Opts = {}) {
     embedService: embedService as never,
     kb: testKbContext({ kbDirName: KB }),
     readForTool,
-    canBeFramed: () => opts.canBeFramed ?? true,
+    canBeReached: () => opts.canBeReached ?? true,
     appUrlFor: (repoRelative, slug) =>
       `https://hexis.example/workspace/${encodeURIComponent(BRANCH)}/${KB}/${repoRelative}` +
       (slug ? `#${slug}` : ''),
@@ -223,7 +223,7 @@ describe('open_page: a deployment that cannot be framed', () => {
    * a token nobody can open is only a token in a transcript.
    */
   it('answers the text and the app address, and says the view needs https', async () => {
-    const { call, embedService } = await serve({ canBeFramed: false });
+    const { call, embedService } = await serve({ canBeReached: false });
     const { status, body } = await call({ path: 'Data/Thing.md' });
     expect(status).toBe(200);
     expect(body.content).toBe(PAGE);

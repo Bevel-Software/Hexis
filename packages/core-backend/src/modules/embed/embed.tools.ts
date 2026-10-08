@@ -26,8 +26,8 @@ export interface EmbedToolsDeps {
   kb: KbContext;
   /** `read_file`'s own read — see {@link ReadForTool}. */
   readForTool: ReadForTool;
-  /** Whether this deployment's public address can be framed at all. */
-  canBeFramed: () => boolean;
+  /** Whether a chat host's sandbox can load from this deployment's public address at all (https). */
+  canBeReached: () => boolean;
   /** The file's address in the app, for the answer and for the view's fallback link. */
   appUrlFor: (repoRelative: string, slug?: string) => string;
 }
@@ -140,10 +140,11 @@ export function registerEmbedTools(
         result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
 
       const appUrl = deps.appUrlFor(repoRelative, heading);
-      // No framing on a plain-http deployment (Decision 8): the text and the
-      // app address are still the answer, and the tool says why there is no
-      // view rather than handing back an address no host can open.
-      if (!deps.canBeFramed()) {
+      // No view on a plain-http deployment (Decision 8): a host's https
+      // sandbox cannot load from it. The text and the app address are still
+      // the answer, and the tool says why there is no view rather than
+      // handing back an address no host can open.
+      if (!deps.canBeReached()) {
         return { path: raw, content, appUrl, branch, note: HTTP_DEPLOYMENT_NOTE };
       }
       // Minted for the identity THIS MCP session authenticated — the
