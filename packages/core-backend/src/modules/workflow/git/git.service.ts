@@ -2098,7 +2098,12 @@ export class GitService implements IGitService {
         }
         throw err;
       }
-      await this.rebaseOntoRemote(cwd, branch, remoteRef);
+      // `preserveMerges` here too: this sync runs on a timer, so it is the
+      // pull most likely to reach a branch while a merge a refused open or
+      // update left local is still waiting for its push. A plain rebase would
+      // flatten that merge before the push ever ran, and the branch would be
+      // "behind" its target again however many times it was updated.
+      await this.rebaseOntoRemote(cwd, branch, remoteRef, { preserveMerges: true });
       this.accessControl?.invalidate(workspaceId);
       const after = await this.revParseOrNull(cwd, 'HEAD');
       const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';

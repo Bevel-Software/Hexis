@@ -411,7 +411,10 @@ describe('GitService.pull — an unpushed merge commit', () => {
     const workspaceDir = path.join(root, workspaceId);
     const repo = path.join(workspaceDir, 'knowledge-base');
     await fs.mkdir(workspaceDir, { recursive: true });
-    await runGit(root, ['clone', '-b', 'alice/deal', upstream, repo]);
+    // `core.autocrlf=false` on the clone itself, not only afterwards: a
+    // Windows git would otherwise check the files out with CRLF, and the
+    // rebase's autostash of that "dirty" tree conflicts on reapply.
+    await runGit(root, ['-c', 'core.autocrlf=false', 'clone', '-b', 'alice/deal', upstream, repo]);
     await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
     await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
     await runGit(repo, ['config', 'core.autocrlf', 'false']);
@@ -454,6 +457,17 @@ describe('GitService.pull — an unpushed merge commit', () => {
       'merge-base', '--is-ancestor', targetTip, 'HEAD',
     ]).then(() => true, () => false);
     expect(contains).toBe(false);
+  });
+
+  it('survives the background sync, which may reach the branch before any push does', async () => {
+    const { repo, targetTip } = await seedUnpushedMerge();
+    await svcFor().syncFromRemote(workspaceId);
+
+    expect(await gitOut(repo, ['rev-list', '--count', '--merges', 'HEAD'])).toBe('1');
+    const contains = await gitOut(repo, [
+      'merge-base', '--is-ancestor', targetTip, 'HEAD',
+    ]).then(() => true, () => false);
+    expect(contains).toBe(true);
   });
 
   it('survives `preserveMerges`, and the branch still contains the target', async () => {
