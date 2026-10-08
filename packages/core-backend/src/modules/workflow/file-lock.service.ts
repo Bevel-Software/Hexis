@@ -75,11 +75,12 @@ export class FileLockService {
    * Three outcomes folded into the same return shape:
    *   - No existing row: insert + return `{ acquired: true, lock }`.
    *   - Existing row, expired: take it over (update) + `{ acquired: true }`.
-   *   - Existing row, live, different user: return `{ acquired: false }`
-   *     with the current holder's lock state so the UI can render
-   *     "Locked by X" without a follow-up call.
-   *   - Existing row, live, same user: refresh TTL + `{ acquired: true }`
-   *     so re-acquiring your own lock is idempotent.
+   *   - Existing row, live — ANY user, the holder included: return
+   *     `{ acquired: false }` with the current holder's lock state so the UI
+   *     can render "Locked by X" without a follow-up call. Re-acquiring your
+   *     own live lock is refused on purpose (see the comment in the body):
+   *     refresh a held lock with `heartbeat()`, and ask "do I already hold
+   *     it?" with `get()`.
    *
    * `opts.coordination` stamps the row's `mode` as `'coordination'` — a
    * pure-mutex hold that grants no write authority (see

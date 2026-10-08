@@ -8,6 +8,7 @@ import {
   useCanonicalFileUrl,
 } from '../../routing/kb-routes';
 import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererSurface } from './rendererSurface';
 import { WorkspaceContext } from '../../state/workspace.context';
 import { markdownLinkForPaste } from '../../utils/pasteLink';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
@@ -166,6 +167,8 @@ export function MarkdownRenderer({
   // new picture.
   const workspaceId = useRendererWorkspaceId();
   const resolveImage = useWorkspaceImageResolver(workspaceId, filePath);
+  // Whether this renderer is mounted outside the app — see `linkPolicy` below.
+  const surface = useRendererSurface();
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -266,6 +269,11 @@ export function MarkdownRenderer({
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
           resolveImage={resolveImage}
+          // On a renderer surface (the embed) EVERY outgoing link is the
+          // surface's to open: there is no `allow-popups` inside a host's
+          // frame, so a plain `target="_blank"` anchor navigates the frame
+          // away instead of opening a tab. In the app the browser keeps them.
+          linkPolicy={surface ? 'surface' : 'browser'}
           containerRef={scrollContainerRef}
           // The document column scrolls; this view does not. See the prop's
           // docstring — the embed and the library dialog keep the default.

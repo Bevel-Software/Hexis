@@ -30,7 +30,7 @@ export const AUTH_COOKIE_NAME = 'bevel_token';
  * beats the dep surface of a middleware. Returns `null` if the cookie
  * is absent or empty.
  */
-function readAuthCookie(req: Request): string | null {
+export function readAuthCookie(req: Request): string | null {
   const header = req.headers.cookie;
   if (!header) return null;
   for (const segment of header.split(';')) {

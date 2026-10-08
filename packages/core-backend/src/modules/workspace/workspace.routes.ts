@@ -14,8 +14,11 @@ import {
   folderPlaceholderPath,
   isPlatformFile,
   isPlatformRestoreShape,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   platformFileCreationRefusal,
   platformFileRefusal,
+  platformFolderRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
@@ -1128,6 +1131,13 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
+        // The repository root is the one folder whose sweep would take the
+        // root's `access.md` and `roles.yaml` with it — refused, as
+        // delete_folder refuses it. Every other folder holds neither.
+        if (filePath.replace(/\/+$/, '') === kbDirName) {
+          res.status(409).json({ error: platformFolderRefusal('') });
+          return;
+        }
         const branch = branchForWorkspaceId(id);
         // In the folder's turn: keeping a folder under this one (a file delete
         // racing this one) waits until the sweep is done, and then finds the
@@ -1194,6 +1204,14 @@ export function createWorkspaceRoutes(
           eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
         }
         res.json({ status: 'deleted', count: filesInDir.length });
+        return;
+      }
+      // The root's `access.md` and `roles.yaml` govern the whole repository:
+      // nobody deletes them, here or through the agent tools. A nested
+      // `access.md` is deleted like any file its caller may write.
+      const rel = toKbRelative(filePath, kbDirName);
+      if (rel !== null && isRepositoryOwnFile(rel, kb.layout)) {
+        res.status(409).json({ error: repositoryOwnFileDeleteRefusal(rel) });
         return;
       }
       await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));

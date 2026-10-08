@@ -1,5 +1,7 @@
 import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js';
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
+import { withCallExample } from './tool-interface.js';
+import { toolUiMeta, type McpAppToolUi } from './mcp-app.js';
 
 /** A tool discovered from a UTCP manual, flattened into what an MCP surface advertises. */
 export interface ProxiedTool {
@@ -10,6 +12,16 @@ export interface ProxiedTool {
   /** The UTCP manual this tool came from (the `<manual>` in `<manual>.<tool>`),
    * used to look up the manual's declared per-user credentials before dispatch. */
   manualName: string;
+  /**
+   * The MCP Apps view this tool's result renders in, when it carries one.
+   *
+   * Not part of the UTCP manual a tool is discovered from — UTCP has no place
+   * for it — so a surface attaches it by tool NAME from the deployment's app
+   * manifest (`McpAppManifest.tools`) after flattening. `toListedTool` turns
+   * it into the `_meta` an MCP client reads; a client without the extension
+   * ignores the field, so carrying it costs nothing.
+   */
+  ui?: McpAppToolUi;
 }
 
 /**
@@ -72,8 +84,18 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   }
   return {
     name: tool.mcpName,
-    description: tool.description,
+    // Every tool an agent can see opens with the one line that shows how it is
+    // called — generated from this tool's own input schema, so the platform's
+    // tools, a deployment's and a connected server's all get one and none of
+    // them can drift from the shape the tool really takes.
+    // From the schema as it is LISTED (sanitized, local `$ref`s inlined), so
+    // the example and the interface the client is shown agree.
+    description: withCallExample(tool.description, tool.utcpName, inputSchema),
     inputSchema: inputSchema as McpTool['inputSchema'],
+    // The MCP Apps view, when this tool carries one. `_meta` is an open map
+    // every client is required to tolerate, so a client without the
+    // extension reads the tool exactly as it did before.
+    ...(tool.ui ? { _meta: toolUiMeta(tool.ui) } : {}),
   };
 }
 

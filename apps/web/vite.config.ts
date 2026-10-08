@@ -24,6 +24,24 @@ export default defineConfig(({ mode }) => {
       // Per-tenant demo expiry. Unset → the demo banner never renders.
       'process.env.DEMO_EXPIRY': JSON.stringify(env.DEMO_EXPIRY ?? ''),
     },
+    build: {
+      // The MCP App view (core-backend's `mcp-app/page.html`) runs inside a
+      // chat host's sandbox, where no frame to this deployment is allowed, so
+      // it loads this app's EMBED bundle into its own document instead. It
+      // finds the bundle's hashed file names through this manifest, served
+      // beside the assets at `/embed-manifest.json`, and looks the entry up
+      // by its name, `embed`. Both are BUILD artifacts: the dev server emits
+      // neither, so a view pointed at `pnpm dev` says the page could not
+      // load — which costs nothing, because no chat host can reach a dev
+      // server anyway (the view needs the deployment's public https address).
+      manifest: 'embed-manifest.json',
+      rollupOptions: {
+        input: {
+          main: path.resolve(__dirname, 'index.html'),
+          embed: path.resolve(__dirname, 'src/embed.tsx'),
+        },
+      },
+    },
     resolve: {
       // One copy of react/router even though core-frontend is consumed as a
       // raw-source workspace package (its own node_modules carries dev copies).

@@ -245,3 +245,24 @@ const VIEW_ONLY_EXTENSIONS = new Set([
 export function isViewOnlyFile(filePath: string): boolean {
   return VIEW_ONLY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());
 }
+
+/**
+ * The renderer a surface should mount for `filePath`: a deployment's own
+ * override for that extension when it registered one, else the built-in map
+ * above.
+ *
+ * ONE lookup, because "which renderer draws this file" has to have one
+ * answer. The file page, Version history and the embed each used to spell the
+ * precedence out — and the embed is the reason it matters: the whole promise
+ * of the page-in-chat is that it renders with the app's renderer for the
+ * type, a registered one included, so a second spelling here would be a
+ * second answer and the embed would be the one that lagged.
+ */
+export function pickFileRenderer(
+  filePath: string,
+  overrides: readonly { extensions: string[]; Component: ComponentType<FileRendererProps> }[] = [],
+): ComponentType<FileRendererProps> {
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  const override = overrides.find((r) => r.extensions.includes(ext));
+  return override?.Component ?? getFileRenderer(filePath);
+}

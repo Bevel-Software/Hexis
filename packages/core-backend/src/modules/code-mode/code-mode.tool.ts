@@ -11,6 +11,7 @@ import {
   chainExample,
   type ChainExampleTool,
   runToolChain,
+  withCallExample,
 } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
@@ -46,7 +47,8 @@ export function createCallToolChainTool(
     id: 'call_tool_chain',
     description: [
       CodeModeUtcpClient.AGENT_PROMPT_TEMPLATE,
-      `Execute JavaScript code with direct access to all registered UTCP tools as hierarchical functions — call them as \`${ns}.<tool>({ body: { ...args } })\`, synchronous, no await.${worked} Every argument a tool declares REQUIRED must be present — for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript — no type annotations or other TypeScript-only syntax — plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser; there is no \`Buffer\`, no \`fetch\` and no \`require\`. Return the final value with \`return\`. Use \`list_tools\` and \`tools_info\` first to discover available tools and their interfaces.`,
+      `Execute JavaScript code with direct access to all registered UTCP tools as hierarchical functions, synchronous, no await.${worked} The runtime is plain JavaScript — no type annotations or other TypeScript-only syntax — plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser; there is no \`Buffer\`, no \`fetch\` and no \`require\`. Return the final value with \`return\`. Use \`list_tools\` and \`tools_info\` first to discover available tools and their interfaces.`,
+      `There is NO single calling shape: some tools take their arguments under a \`body\` object, others take them flat. Call each tool as the \`Call:\` line at the top of its own description shows — it is generated from that tool's input schema, and every tool in \`${ns}\` has one. Every argument a tool declares REQUIRED must be present; for the knowledge-base tools that includes \`branch\`. Arguments that do not match the schema are refused before anything is sent or run, and the refusal carries the tool's interface.`,
       'Error handling inside the chain: a failing tool call THROWS, and the thrown error\'s `.message` holds the server\'s actual reason (e.g. a 403 with the explanation, not just a status code). If you catch it, surface `err.message` (and `err.status` / `err.data` when present) — NEVER `return { error: err }` or otherwise return the raw Error object, because an Error serializes to `{}` (its `message` is non-enumerable) and the reason is lost. If you don\'t need to handle it, just let it throw — the runtime already reports `err.message` back to you.',
       `Failures are answered, never dropped: a chain that throws comes back with \`success: false\` and the reason, and one that outlives \`timeout\` (default ${CHAIN_TIMEOUT_DEFAULT_MS} ms, maximum ${CHAIN_TIMEOUT_MAX_MS} ms) comes back saying it timed out — raise \`timeout\` or split the work and run it again. Either way your next tool call works as usual.`,
       'Large return values: if the returned value exceeds `max_output_size`, the full JSON is auto-spilled to a shared spill store (outside any workspace, never committed) and the response contains only a `__tool_chain_spill__/…` ref + a truncated marker. You can read the spill back with the regular `read_file` tool — pass that ref as `path` (its `branch` is ignored) plus `offset` / `limit` to slice it, never read a multi-MB file in full. Order of preference: (1) re-run `call_tool_chain` with a follow-up code chain that filters/maps the data inline and returns just what you need; (2) narrow the API call — shorter `fields`, tighter date window, lower `limit`; (3) last resort — `read_file` against the spill ref with `offset` / `limit`. The spill is read-only context only; do NOT use it as a way to persist KB content — for KB writes use the regular `write_file` / `edit_file` tools, which go through the lock/commit pipeline.',
@@ -176,7 +178,16 @@ export function createToolsInfoTool(client: CodeModeUtcpClient) {
         try {
           const found = await findToolByName(client, name);
           if (found) {
-            interfaces.push(client.toolToTypeScriptInterface(found.tool));
+            // With its `Call:` line, as on the MCP surface (`meta-tools.ts`):
+            // the chain's description tells the agent to call each tool as
+            // that line shows, and this is where it reads the tool. The
+            // repository's tool is not ours to edit, so a copy carries it.
+            interfaces.push(
+              client.toolToTypeScriptInterface({
+                ...found.tool,
+                description: withCallExample(found.tool.description, found.utcpName, found.tool.inputs),
+              }),
+            );
           } else {
             notFound.push(name);
           }

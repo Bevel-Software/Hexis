@@ -41,6 +41,21 @@ export {
 } from './schema-validity.js';
 
 export {
+  MCP_APP_UI_META_KEY,
+  MCP_APP_MIME_TYPE,
+  MCP_APP_URI_SCHEME,
+  type McpAppToolUi,
+  type McpAppResourceUi,
+  type McpAppResource,
+  type McpAppManifest,
+  toolUiMeta,
+  resourceUiMeta,
+  toListedResource,
+  toReadResourceResult,
+  parseMcpAppManifest,
+} from './mcp-app.js';
+
+export {
   describeToolFailure,
   withTransportDetail,
   toCallToolResult,
@@ -52,6 +67,8 @@ export {
   mcpImageResult,
   isMcpImageResult,
   omitImagePayloads,
+  NOT_JSON_KIND,
+  pageInsteadOfJson,
 } from './results.js';
 
 export {
@@ -92,6 +109,27 @@ export {
 export { registerManual, dispatchToolCall } from './dispatch.js';
 
 export {
+  CALL_LINE_PREFIX,
+  ARGUMENTS_DO_NOT_MATCH_KIND,
+  BODY_AT_TOP_LEVEL_LINE,
+  ARGS_UNDER_BODY_LINE,
+  callExample,
+  exampleArguments,
+  callLine,
+  withCallExample,
+  splitCallLine,
+  describeInterface,
+  argumentsDoNotMatchMessage,
+  compileCheck,
+  checkFor,
+  type CompiledCheck,
+} from './tool-interface.js';
+
+export { installCallGuards, argumentRefusal, ArgumentsDoNotMatchError } from './call-guards.js';
+
+export { installGetHasNoBody, withoutBodyOnGet, NO_BODY_FIELD } from './get-has-no-body.js';
+
+export {
   RETIRED_TOOL_MESSAGES,
   RETIRED_TOOL_NAMES,
   retiredToolMessage,
@@ -115,6 +153,7 @@ export {
   utcpNamespacePrefix,
   utcpNamespacedKey,
   seedBevelHostedManualVars,
+  isPlatformHostedUrl,
 } from './utcp-namespace.js';
 
 export {

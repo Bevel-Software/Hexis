@@ -152,11 +152,12 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
     const def = myPluginDef(DEFAULT_KB_LAYOUT);
     expect((def.tool_call_template as { url: string; http_method: string }).url).toBe('${API_URL}/api/plugins/personal');
     expect((def.tool_call_template as { http_method: string }).http_method).toBe('POST');
-    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin` takes none.
+    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin` takes
+    // none, so the envelope is optional too and `my_plugin({})` is a call
+    // that matches (see `bodyEnvelope`).
     expect(def.inputs).toEqual({
       type: 'object',
       properties: { body: { type: 'object', properties: {}, additionalProperties: false } },
-      required: ['body'],
       additionalProperties: false,
     });
     expect(Object.keys((def.outputs as { properties: Record<string, unknown> }).properties)).toEqual([
@@ -278,5 +279,27 @@ describe('the creation endpoints behind the key-or-session gate', () => {
     const refused = await post(base, '/api/plugins', { name: 'X', parent: 'Nope' }, 'bevel_alice');
     expect(refused.status).toBe(404);
     expect(await refused.json()).toEqual({ error: 'There is no folder "Nope" under Plugins/.' });
+  });
+
+  it('refuses an agent call whose arguments do not match the tool, before anything is provisioned', async () => {
+    // These two routes ARE the tools, so they check a call against what the
+    // tools declare, as every route-hosted tool does. `my_plugin` takes no
+    // arguments; `create_plugin` takes a non-empty `name` and an optional `parent`.
+    myPluginDef(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const stray = await post(base, '/api/plugins/personal', { unexpected: 1 }, 'bevel_alice');
+    expect(stray.status).toBe(400);
+    const strayBody = (await stray.json()) as { kind: string; error: string };
+    expect(strayBody.kind).toBe('arguments-do-not-match');
+    expect(strayBody.error).toContain('"unexpected" is not an argument of this tool.');
+    expect(strayBody.error.split('\n').pop()).toBe('Call: KNOWLEDGE_BASE.my_plugin({})');
+    expect(ensurePersonalPlugin).not.toHaveBeenCalled();
+
+    const empty = await post(base, '/api/plugins', { name: '' }, 'bevel_alice');
+    expect(empty.status).toBe(400);
+    expect(((await empty.json()) as { error: string }).error).toContain(
+      '"name" must be at least 1 character(s) long, but 0 was given.',
+    );
+    expect(createPlugin).not.toHaveBeenCalled();
   });
 });
