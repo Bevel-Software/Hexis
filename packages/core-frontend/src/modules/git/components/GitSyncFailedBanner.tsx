@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { CloudOff, GitMerge } from 'lucide-react';
+import { AlertTriangle, CloudOff } from 'lucide-react';
 import { useEventBusSubscription } from '../../workflow/hooks/useEventBusSubscription';
 import { canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -137,12 +137,10 @@ export function GitSyncFailedBanner() {
         className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
       >
         <div className="flex items-center gap-2">
-          <GitMerge size={13} className="shrink-0" />
+          <AlertTriangle size={13} className="shrink-0" />
           <span className="flex-1">
-            <span className="font-mono font-semibold">{failure.branch}</span> isn’t in sync with
-            the git repository yet: these files were changed both here and there. Hexis is trying
-            to reconcile them. If this notice stays, open each one, keep the content you want, and
-            save.
+            These pages were changed both here and on your git host. Hexis is trying to combine
+            them. If this notice stays, open each one, keep the content you want, and save.
           </span>
         </div>
         <ConflictFiles paths={failure.conflictedPaths} />
@@ -158,9 +156,8 @@ export function GitSyncFailedBanner() {
       <div className="flex items-center gap-2">
         <CloudOff size={13} className="shrink-0" />
         <span className="flex-1">
-          Changes on <span className="font-mono font-semibold">{failure.branch}</span> aren’t
-          reaching the remote repository. Your work is saved here — an administrator should check
-          the server logs.
+          Changes on <span className="font-mono font-semibold">{failure.branch}</span> are saved
+          here but aren’t reaching your git host. An administrator should check the server logs.
         </span>
       </div>
       <div className="mt-1 ml-5 text-ink-muted break-words">{failure.reason}</div>

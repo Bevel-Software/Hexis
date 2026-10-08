@@ -114,6 +114,28 @@ describe('EditorTabs', () => {
     expect(activeTab.getAttribute('aria-selected')).toBe('true');
   });
 
+  it("names a plugin's plugin.json Plugin settings, the path on hover", () => {
+    const tabs = [makeTab('knowledge-base/Plugins/GTM/plugin.json'), makeTab('knowledge-base/Plugins/GTM/mcp.json')];
+    const ws = makeWorkspace(tabs, 'knowledge-base/Plugins/GTM/plugin.json');
+    render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
+
+    const [settings, mcp] = screen.getAllByRole('tab');
+    expect(settings.querySelector('.truncate')?.textContent).toBe('Plugin settings');
+    expect(settings).toHaveAttribute('title', 'knowledge-base/Plugins/GTM/plugin.json');
+    expect(screen.getByRole('button', { name: 'Close Plugin settings' })).toBeInTheDocument();
+    expect(mcp.querySelector('.truncate')?.textContent).toBe('mcp.json');
+  });
+
+  it("names a folder's access.md Who has access", () => {
+    const tabs = [makeTab('knowledge-base/KnowledgeBase/Legal/access.md')];
+    const ws = makeWorkspace(tabs, 'knowledge-base/KnowledgeBase/Legal/access.md');
+    render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
+
+    const tab = screen.getByRole('tab');
+    expect(tab.querySelector('.truncate')?.textContent).toBe('Who has access');
+    expect(tab).toHaveAttribute('title', 'knowledge-base/KnowledgeBase/Legal/access.md');
+  });
+
   it('shows a dirty dot when a tab has unsaved changes', () => {
     const tabs = [makeTab('a.md', { isDirty: true })];
     const ws = makeWorkspace(tabs, 'a.md');

@@ -561,8 +561,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           unsaved changes on{' '}
           <span className="font-mono text-ink">{error.current}</span>. Save the
           files below first (Ctrl/Cmd+S, or click <span className="font-medium">Save</span>{' '}
-          in the editor toolbar). That releases the lock and auto-commits and auto-pushes
-          your changes: then this link will open.
+          in the editor toolbar), and then this link will open.
         </p>
         {error.dirtyFilenames.length > 0 && (
           <Surface tone="sunken" radius="md" elevation="none" className="px-3 py-2 text-left text-detail text-ink">
@@ -583,7 +582,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       <ErrorScreen title="This branch no longer exists">
         <p className="text-ui text-ink-muted">
           <span className="font-mono text-ink">{goneBranch}</span> was deleted in the git
-          repository. Anything merged from it lives on{' '}
+          repository. Anything published from it lives on{' '}
           <span className="font-mono text-ink">{DEFAULT_BRANCH}</span>.
         </p>
         <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
@@ -599,7 +598,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           <span className="font-mono text-ink">{unknownBranch}</span>.
         </p>
         <p className="text-meta text-ink-faint">
-          It may never have been pushed, or this link may have the name wrong.
+          It may never have been published, or this link may have the name wrong.
         </p>
         <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
       </ErrorScreen>

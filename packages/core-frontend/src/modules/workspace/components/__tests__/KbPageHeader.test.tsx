@@ -6,6 +6,7 @@ import { KbPageHeader, type KbPageHeaderProps } from '../KbPageHeader';
 function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
   const props: KbPageHeaderProps = {
     path: 'knowledge-base/Knowledge/Invariant.md',
+    kbDirName: 'knowledge-base',
     canWrite: true,
     editMode: false,
     entering: false,
@@ -35,6 +36,20 @@ describe('KbPageHeader', () => {
   it('leads with the basename, minus a known extension', () => {
     renderHeader();
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Invariant');
+  });
+
+  it("titles a plugin's plugin.json Plugin settings, with the file name on hover", () => {
+    renderHeader({ path: 'knowledge-base/Plugins/GTM/plugin.json' });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Plugin settings');
+    expect(h1).toHaveAttribute('title', 'plugin.json');
+  });
+
+  it("titles a folder's access.md Who has access, with the file name on hover", () => {
+    renderHeader({ path: 'knowledge-base/KnowledgeBase/Legal/access.md' });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Who has access');
+    expect(h1).toHaveAttribute('title', 'access.md');
   });
 
   it('leaves an unknown extension alone', () => {
@@ -95,11 +110,11 @@ describe('KbPageHeader', () => {
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
   });
 
-  it('disables Edit while someone else holds the lock and names the holder', () => {
+  it('disables Edit while someone else is editing and names them', () => {
     renderHeader({ lockedBy: 'Ali Raza' });
     const edit = screen.getByRole('button', { name: 'Edit' });
     expect(edit).toBeDisabled();
-    expect(edit).toHaveAttribute('title', 'Locked by Ali Raza');
+    expect(edit).toHaveAttribute('title', 'Ali Raza is editing this page');
   });
 
   it('swaps Edit for Done in edit mode', () => {

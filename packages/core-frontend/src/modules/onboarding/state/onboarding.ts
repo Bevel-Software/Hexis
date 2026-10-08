@@ -50,13 +50,14 @@ function subscribe(listener: () => void): () => void {
 
 /**
  * The "Get set up" column's per-account notes: the starter guide has been
- * opened, the column was dismissed, and its "You're set up" was seen and
- * closed. All per-browser conveniences, not server truth, so they live beside
+ * opened, the command menu has been opened, the column was dismissed, and its
+ * "You're set up" was seen and closed. All per-browser conveniences, not server truth, so they live beside
  * the session override and wake the same listeners, through one tiny flag
  * pair rather than a hand-written copy of the read/write/try-catch dance per
  * note.
  */
 const READ_GUIDE_PREFIX = 'bevel.onboarding.readGuide.';
+const COMMAND_MENU_PREFIX = 'bevel.onboarding.commandMenuOpened.';
 const SETUP_DISMISSED_PREFIX = 'bevel.onboarding.setupDismissed.';
 const SETUP_COMPLETE_PREFIX = 'bevel.onboarding.setupCompleteClosed.';
 
@@ -140,6 +141,7 @@ export function resetOnboardingForTests(): void {
     for (const key of Object.keys(window.localStorage)) {
       if (
         key.startsWith(READ_GUIDE_PREFIX) ||
+        key.startsWith(COMMAND_MENU_PREFIX) ||
         key.startsWith(SETUP_DISMISSED_PREFIX) ||
         key.startsWith(SETUP_COMPLETE_PREFIX)
       ) {
@@ -196,6 +198,8 @@ export function useOnboarding(): OnboardingController {
 export interface SetupChecklistState {
   /** The starter guide ("How to get started") has been opened on this browser. */
   readGuide: boolean;
+  /** The command menu (Ctrl/⌘K) has been opened on this browser, by any route. */
+  openedCommandMenu: boolean;
   /** The person closed the "Get set up" column; it stays closed. */
   dismissed: boolean;
   /**
@@ -204,15 +208,18 @@ export interface SetupChecklistState {
    */
   completionClosed: boolean;
   markGuideRead(): void;
+  markCommandMenuOpened(): void;
   dismiss(): void;
   closeCompletion(): void;
 }
 
 const NO_CHECKLIST: SetupChecklistState = {
   readGuide: false,
+  openedCommandMenu: false,
   dismissed: false,
   completionClosed: false,
   markGuideRead: () => {},
+  markCommandMenuOpened: () => {},
   dismiss: () => {},
   closeCompletion: () => {},
 };
@@ -230,13 +237,16 @@ export function useSetupChecklist(): SetupChecklistState {
   if (!user) return NO_CHECKLIST;
   const email = user.email.toLowerCase();
   const readKey = `${READ_GUIDE_PREFIX}${email}`;
+  const commandMenuKey = `${COMMAND_MENU_PREFIX}${email}`;
   const dismissedKey = `${SETUP_DISMISSED_PREFIX}${email}`;
   const completeKey = `${SETUP_COMPLETE_PREFIX}${email}`;
   return {
     readGuide: hasFlag(readKey),
+    openedCommandMenu: hasFlag(commandMenuKey),
     dismissed: hasFlag(dismissedKey),
     completionClosed: hasFlag(completeKey),
     markGuideRead: () => setFlag(readKey),
+    markCommandMenuOpened: () => setFlag(commandMenuKey),
     dismiss: () => setFlag(dismissedKey),
     closeCompletion: () => setFlag(completeKey),
   };

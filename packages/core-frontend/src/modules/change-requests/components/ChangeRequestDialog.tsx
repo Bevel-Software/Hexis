@@ -17,6 +17,7 @@ import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
+import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { describeReadFailure } from '../services/denied-file.api';
@@ -674,7 +675,7 @@ export function ChangeRequestDialog({
         : await approvePrFile(cr.number, path);
       setDetail((d) => (d ? { ...d, approvals } : d));
     } catch (err) {
-      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+      setVerbError(err instanceof Error ? friendlyGitError(err) : "Couldn't record that.");
     } finally {
       setVerbBusy(false);
     }
@@ -696,7 +697,7 @@ export function ChangeRequestDialog({
         setDetail((d) => (d ? { ...d, approvals } : d));
       }
     } catch (err) {
-      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+      setVerbError(err instanceof Error ? friendlyGitError(err) : "Couldn't record that.");
     } finally {
       setVerbBusy(false);
     }
@@ -1104,7 +1105,7 @@ export function ChangeRequestDialog({
                 ? `${detail.lastApplyFailure.byName} could not apply this`
                 : 'The last apply did not land'}
             </b>
-            : {detail.lastApplyFailure.reason}
+            : {friendlyGitMessage(detail.lastApplyFailure.reason)}
           </Banner>
         )}
 
@@ -1374,7 +1375,7 @@ export function ChangeRequestDialog({
                   ? `Your approval is needed on ${mine.length} file${mine.length === 1 ? '' : 's'}`
                   : waitingOn.length > 0
                     ? `Waiting on ${waitingOn.join(', ')}`
-                    : (detail.mergeWarnings[0] ??
+                    : ((detail.mergeWarnings[0] && friendlyGitMessage(detail.mergeWarnings[0])) ??
                       'Waiting on approval from the files’ owners — applying is theirs to do.')}
               </p>
               {mine.length > 1 && (

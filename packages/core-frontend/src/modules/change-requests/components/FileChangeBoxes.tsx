@@ -11,6 +11,7 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
+import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
 
 export interface FileChangeBoxesProps {
   /** Repo-root-relative path of the open file (kbDirName stripped). */
@@ -105,7 +106,7 @@ export function FileChangeBoxes({
       {applied && (
         <Banner role="status" tone="ok" aria-live="polite" className="mt-3">
           <div className="flex items-center gap-2">
-            <span className="flex-1">Applied: the file now reads with that change.</span>
+            <span className="flex-1">Published: the file now reads with that change.</span>
             <Button variant="quiet" size="sm" title="Dismiss" onClick={() => setApplied(false)}>
               Dismiss
             </Button>
@@ -128,7 +129,8 @@ export function FileChangeBoxes({
         return (
           <ChangeBox
             key={cr.number}
-            file={repoRelativePath.slice(repoRelativePath.lastIndexOf('/') + 1)}
+            file={displayFileName(repoRelativePath)}
+            fileTitle={fileNameTooltip(repoRelativePath)}
             author={changeAuthorName(cr)}
             when={formatWhen(cr.createdAt)}
             mine={mine}
