@@ -54,6 +54,7 @@ vi.mock('../../access/api', async (importOriginal) => ({
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { BranchUnavailableError } from '../utils/readFailure';
 
 /** What `test-setup.ts` pins the default branch to. */
 const MAIN = 'target-company-state';
@@ -162,6 +163,30 @@ describe('ChangeRequestDialog: a file the request removes', () => {
     expect(document.querySelectorAll('ins')).toHaveLength(0);
     expect(screen.queryByText(/couldn't be read right now/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+
+  /**
+   * The branch itself answers 404 too, when it is gone — and that says
+   * nothing about the file. `readFileOnBranch` tells that apart; the pane must
+   * not read it as "the file is not on the branch, so this is the deletion".
+   */
+  it("reports a removed file whose branch couldn't be opened as a failed read, not a deletion", async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detail,
+      files: [{ ...detail.files[0], status: 'removed' as const, additions: 0, deletions: 2 }],
+    });
+    reads({
+      [CR_BRANCH]: new BranchUnavailableError(CR_BRANCH, new WorkspaceApiError(404, 'There is no branch named ali.raza/payroll-bands.')),
+      [MAIN]: 'bands:\n  - L3\n',
+    });
+
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    const note = await screen.findByText(/couldn't be read right now/);
+    expect(note).toHaveTextContent(
+      "This file couldn't be read right now (the branch ali.raza/payroll-bands couldn't be opened (There is no branch named ali.raza/payroll-bands.)). Try again.",
+    );
+    expect(document.querySelectorAll('del')).toHaveLength(0);
   });
 
   /** Only the 404 is the deletion; any other failure on a removed file is still a failure. */

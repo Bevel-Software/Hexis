@@ -356,10 +356,12 @@ export function ChangeRequestDialog({
         })
         .catch((err: unknown) => {
           if (!current()) return;
-          // A file the request REMOVES is not on its branch, and the branch
+          // A file the request REMOVES is not on its branch, and the FILE read
           // says so with a 404. That is the proposal, not a failed read: the
           // branch copy is empty, and the current copy diffs against it as
-          // every line deleted — the same rule the diff boxes apply.
+          // every line deleted — the same rule the diff boxes apply. A branch
+          // that could not be opened is not a `WorkspaceApiError` here
+          // (`readFileOnBranch` answers that apart), so it stays a failure.
           if (removes && err instanceof WorkspaceApiError && err.status === 404) {
             setBranchContents((c) => ({ ...c, [selected]: '' }));
             return;
