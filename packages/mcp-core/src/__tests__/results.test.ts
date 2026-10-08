@@ -53,6 +53,31 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure(Object.create(null))).toBe('(indescribable tool failure)');
   });
 
+  /**
+   * A service's edge answers a refused request with its own HTML page. That
+   * page used to reach the agent whole, in place of a reason.
+   */
+  it('cuts a non-JSON body to the status, the host and its first 200 characters', () => {
+    const page = `<!DOCTYPE html>\n<html>\n  <head><title>403 Forbidden</title></head>\n  <body>${'pad '.repeat(500)}THE-END</body>\n</html>`;
+    const described = describeToolFailure({
+      message: `HTTP 403 calling tool 'search': ${page}`,
+      response: { status: 403, data: page, config: { url: 'https://api.example.com/rest/search?q=x' } },
+    });
+    expect(described.startsWith('403 from api.example.com: <!DOCTYPE html> <html>')).toBe(true);
+    expect(described).not.toContain('THE-END');
+    expect(described.length).toBeLessThanOrEqual('403 from api.example.com: '.length + 200);
+  });
+
+  it('keeps a JSON body as it is, however long — that text is the service\'s own reason', () => {
+    const data = JSON.stringify({ error: 'x'.repeat(400) });
+    expect(describeToolFailure({ response: { status: 400, data } })).toBe(data);
+  });
+
+  it('cuts a non-JSON body even when nothing says where it came from', () => {
+    const described = describeToolFailure({ response: { data: `<html>${'y'.repeat(900)}</html>` } });
+    expect(described.length).toBeLessThanOrEqual(200);
+  });
+
   it('never throws when reading the body itself throws', () => {
     // A getter on `response` — the outermost read, which used to run outside
     // the guard, so a hostile thrown value escaped this function and turned a

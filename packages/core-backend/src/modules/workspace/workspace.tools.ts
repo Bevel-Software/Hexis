@@ -1556,6 +1556,8 @@ export function registerWorkspaceTools(
      * handler. Every other tool takes the check below.
      */
     resolvesBranchItself?: boolean;
+    /** Arguments this tool refuses by name itself, with its own wording (see `ToolDefSpec.refusesItself`). */
+    refusesItself?: string[];
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
@@ -1576,6 +1578,7 @@ export function registerWorkspaceTools(
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
+      refusesItself: spec.refusesItself,
       tags: spec.write ? ['workspace', 'write'] : ['workspace'],
     });
     // Every tool here declares `branch` required in its inputs, which is how
@@ -1697,7 +1700,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -1977,8 +1980,8 @@ export function registerWorkspaceTools(
       'never move or delete, judged like the dry runs (on a draft branch writes are not gated); `movable` judges the SOURCE ' +
       'side only, so the destination still wants a `move_file` dry run. ' +
       'For a folder, `descendants` counts the files under it at any depth; counting stops at 10000 and ' +
-      '`descendantsTruncated` says so, past which `movable` and `deletable` are false — a folder that large was not judged ' +
-      'in full, so run the `move_file` or `delete_folder` dry run for the real verdict.',
+      '`descendantsTruncated` says so, past which `movable` and `deletable` are false (not judged in full): run the ' +
+      '`move_file` or `delete_folder` dry run for the real verdict.',
     inputs: {
       type: 'object',
       properties: {
@@ -2207,7 +2210,7 @@ export function registerWorkspaceTools(
     name: 'grep',
     gated: true,
     description:
-      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
+      'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
     inputs: {
       type: 'object',
       properties: {
@@ -2372,6 +2375,8 @@ export function registerWorkspaceTools(
   // ── writes (through the lock/commit pipeline) ───────────────────────────
   mount({
     name: 'write_file',
+    // A mode that is not one of the three answers `bad_mode`, which lists them.
+    refusesItself: ['mode'],
     gated: true,
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
@@ -2454,6 +2459,8 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'write_files',
+    // A mode that is not one of the three answers `bad_mode`, which lists them.
+    refusesItself: ['mode'],
     gated: true,
     description:
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
@@ -2515,8 +2522,10 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
-      if (files.length === 0) return { count: 0, files: [] };
+      // The mode is judged before anything else, so an empty batch with a mode
+      // that is not one answers `bad_mode` like any other call would.
       const mode = modeOf(a);
+      if (files.length === 0) return { count: 0, files: [] };
       // The POLICY gate still judges the whole batch: a restricted run is a
       // call that should not have been made at all, not a per-path outcome.
       // The write hook is asked PER PATH, below, so a path it refuses is that
@@ -3549,6 +3558,8 @@ export function registerWorkspaceTools(
 
     mount({
       name: 'apply_file_upload',
+      // A mode that is not one of the three answers `bad_mode`, which lists them.
+      refusesItself: ['mode'],
       gated: true,
       description:
         'Land a file you have already uploaded (see `request_file_upload`) in a folder on a branch, in ONE commit, as you. ' +

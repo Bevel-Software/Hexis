@@ -1033,11 +1033,15 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     mixedAccessRequest();
     summaries = [details.get(1)!];
     for (const tool of TOOLS) {
-      const { status, json } = await call(
-        base,
-        tool,
-        tool === 'list_change_requests' ? {} : { number: 1, include: ['patches'] },
-      );
+      // `include` only where the tool declares it: a call naming an argument
+      // its tool does not have is refused before it runs.
+      const args =
+        tool === 'list_change_requests'
+          ? {}
+          : tool === 'list_change_request_files'
+            ? { number: 1, include: ['patches'] }
+            : { number: 1 };
+      const { status, json } = await call(base, tool, args);
       expect(status, tool).toBe(200);
       const whole = JSON.stringify(json);
       expect(whole, tool).not.toContain('Avi-Checkin');

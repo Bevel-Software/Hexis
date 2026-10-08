@@ -2,6 +2,7 @@ import '@utcp/http';
 import { HttpCallTemplateSerializer } from '@utcp/http';
 import { ToolSerializer } from '@utcp/sdk';
 import type { JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
+import { declareRouteTool } from './route-tool-schemas.js';
 
 const httpTemplate = new HttpCallTemplateSerializer();
 const toolSerializer = new ToolSerializer();
@@ -129,6 +130,14 @@ export interface ToolDefSpec {
   /** The route the owning module hosts, e.g. `/agent/tools/list_branches`. */
   path: string;
   /**
+   * Arguments this tool's own handler refuses by name, with a message of its
+   * own. The generic argument check its route runs then says nothing about
+   * them, so that message is what the caller reads — which is the point of
+   * having written it. A missing `branch` needs no entry here: the route
+   * check leaves a call that names no branch to `branch-required`.
+   */
+  refusesItself?: string[];
+  /**
    * How the tool treats `branch` — see {@link BranchDeclaration}. Given, the
    * `branch` input is added to `inputs` to match. Omitted, a tool whose
    * `inputs` require `branch` is `required`, and one without `branch` takes
@@ -165,15 +174,16 @@ export function toolDef(spec: ToolDefSpec): UtcpTool {
   }
   const inputs = spec.branch ? withBranchDeclaration(spec.inputs, spec.branch) : spec.inputs;
   branchHandlingByPath.set(spec.path, spec.branch ?? inferBranchHandling(inputs));
+  // Declaring the tool IS declaring its arguments to the check that its route
+  // runs, which is why the envelope comes back from the declaration rather than
+  // being built here: a tool declared with this helper — the platform's own and
+  // a deployment's alike — refuses a call whose arguments do not match it on
+  // every way in, the REST route included, with no code of its own.
+  const wire = declareRouteTool(spec.name, inputs, spec.refusesItself, spec.path);
   return toolSerializer.validateDict({
     name: spec.name,
     description: spec.description,
-    inputs: {
-      type: 'object',
-      properties: { body: inputs },
-      required: ['body'],
-      additionalProperties: false,
-    },
+    inputs: wire,
     outputs: spec.outputs ?? { type: 'object', properties: {} },
     tags: spec.tags ?? [],
     tool_call_template: httpTemplate.validateDict({

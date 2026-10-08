@@ -4,6 +4,7 @@ import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from 
 import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
 import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
 import { retiredToolInFailure } from './retired-tools.js';
+import { withCallExample } from './tool-interface.js';
 import {
   CHAIN_TIMEOUT_DEFAULT_MS,
   CHAIN_TIMEOUT_MAX_MS,
@@ -119,7 +120,8 @@ function callToolChainDescription(example: ChainExample, sharedRulesPointer?: st
   // A name the catalog really has, or no name: see `ChainExample.name`.
   const forInstance = name ? ` (e.g. \`${name}\`)` : '';
   const howToWriteOne = [
-    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as \`${ns}.<tool>({ body: { ...args } })\` with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} Every argument a tool declares REQUIRED must be present — \`tools_info\` gives the exact shapes, and for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function, with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `There is NO single calling shape: call each tool as the \`Call:\` line atop its description shows; every tool in \`${ns}\` has one. Mismatched arguments are refused before anything runs.`,
     `Discover first: \`list_tools\` lists every tool in callable form${forInstance}; \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
   ];
   if (sharedRulesPointer !== undefined) return `${howToWriteOne.join('\n\n')}${sharedRulesPointer}`;
@@ -158,7 +160,7 @@ export function codeModeMetaTools(
 ): McpTool[] {
   const example = chainExample(namespace, tools);
   const { name } = example;
-  return [
+  return withCallExamples([
     {
       name: 'list_tools',
       description: `List every UTCP tool currently registered, in TypeScript-accessible form${name ? ` (e.g. \`${name}\`)` : ''} for use inside \`call_tool_chain\`.`,
@@ -196,7 +198,20 @@ export function codeModeMetaTools(
         additionalProperties: false,
       } as McpTool['inputSchema'],
     },
-  ];
+  ]);
+}
+
+/**
+ * Each of the three with its call example ahead of its description, from the
+ * same generator every other tool's comes from — so "every description opens
+ * with its call" holds with no exception an agent has to learn.
+ *
+ * These three are called DIRECTLY over MCP rather than from inside a chain, so
+ * the example shows that shape: the tool's name and its required arguments,
+ * with no namespace in front.
+ */
+function withCallExamples(tools: McpTool[]): McpTool[] {
+  return tools.map((t) => ({ ...t, description: withCallExample(t.description, t.name, t.inputSchema) }));
 }
 
 /**
@@ -267,8 +282,18 @@ export async function dispatchMetaTool(
       const resolved = await findToolsByNames(client, names);
       for (const n of names) {
         const found = resolved.get(n);
-        if (found) interfaces.push(client.toolToTypeScriptInterface(found.tool));
-        else notFound.push(n);
+        // The call example travels with the interface too: `tools_info` is
+        // where an agent writing a chain reads the shape, and reading it there
+        // without the example is how a flat tool's arguments end up in a
+        // `body`. Added to a COPY — the repository's tool is not ours to edit.
+        if (found) {
+          interfaces.push(
+            client.toolToTypeScriptInterface({
+              ...found.tool,
+              description: withCallExample(found.tool.description, found.utcpName, found.tool.inputs),
+            }),
+          );
+        } else notFound.push(n);
       }
       return toCallToolResult({ interfaces: interfaces.join('\n\n'), not_found: notFound });
     }

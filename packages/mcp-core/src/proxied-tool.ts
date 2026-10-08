@@ -1,5 +1,6 @@
 import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js';
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
+import { withCallExample } from './tool-interface.js';
 import { toolUiMeta, type McpAppToolUi } from './mcp-app.js';
 
 /** A tool discovered from a UTCP manual, flattened into what an MCP surface advertises. */
@@ -83,7 +84,13 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   }
   return {
     name: tool.mcpName,
-    description: tool.description,
+    // Every tool an agent can see opens with the one line that shows how it is
+    // called — generated from this tool's own input schema, so the platform's
+    // tools, a deployment's and a connected server's all get one and none of
+    // them can drift from the shape the tool really takes.
+    // From the schema as it is LISTED (sanitized, local `$ref`s inlined), so
+    // the example and the interface the client is shown agree.
+    description: withCallExample(tool.description, tool.utcpName, inputSchema),
     inputSchema: inputSchema as McpTool['inputSchema'],
     // The MCP Apps view, when this tool carries one. `_meta` is an open map
     // every client is required to tolerate, so a client without the

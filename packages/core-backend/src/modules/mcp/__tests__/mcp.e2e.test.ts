@@ -1296,9 +1296,11 @@ describe('a connected tool whose schema is invalid is not offered to agents', ()
     // The same chain, same namespace, on the sibling: bound and callable. This
     // is what makes the line above a statement about the HIDDEN tool rather
     // than about a namespace the chain could not reach at all.
+    // Called the way its `Call:` line shows: a connected tool takes its
+    // arguments flat, and the same call wrapped in `body` is refused.
     const sibling = await client.callTool({
       name: 'call_tool_chain',
-      arguments: { code: 'return notion.srv_fine({ body: {} });' },
+      arguments: { code: 'return notion.srv_fine({});' },
     });
     expect(sibling.isError).toBeFalsy();
   });

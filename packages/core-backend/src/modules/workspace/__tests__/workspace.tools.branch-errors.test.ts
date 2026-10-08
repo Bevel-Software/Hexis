@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import '@utcp/http'; // registers the http CallTemplate serializer + protocol
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { HttpCallTemplateSerializer } from '@utcp/http';
+import { exampleArguments } from '@bevel-software/platform-mcp-core';
 import { CodeModeUtcpClient } from '../../code-mode/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
@@ -433,16 +434,16 @@ describe('workspace tools — a branch that cannot be opened', () => {
   it('404s a branch that does not exist on every mounted tool that takes one, before the tool runs', async () => {
     const base = await start({ source: 'internal', scope: 'write' });
     const takesBranch = internalTools
-      .filter((t) => {
-        const body = (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body;
-        return (body?.required ?? []).includes('branch');
-      })
-      .map((t) => t.name)
+      .map((t) => ({ name: t.name, body: (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body }))
+      .filter(({ body }) => (body?.required ?? []).includes('branch'))
       // Resolves its own branch, and validates it itself first.
-      .filter((name) => name !== 'execute_command');
+      .filter(({ name }) => name !== 'execute_command');
 
-    for (const tool of takesBranch) {
-      const res = await callTool(base, tool, { branch: 'nobody/never-made-this' });
+    for (const { name: tool, body } of takesBranch) {
+      // Every other argument the tool requires, so the call matches the tool
+      // and it is the branch, not a missing argument, that is refused.
+      const args = { ...exampleArguments(body), branch: 'nobody/never-made-this' };
+      const res = await callTool(base, tool, args);
       expect(res.status, `${tool} must 404 a branch that does not exist`).toBe(404);
       expect(res.body, tool).toMatchObject({ kind: 'branch-not-found', branch: 'nobody/never-made-this' });
     }

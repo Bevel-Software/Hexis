@@ -27,6 +27,16 @@ vi.mock('../code-mode-names.js', async (importOriginal) => {
       }
       if (name === 'down.run') throw new Error('repository unavailable: ECONNREFUSED');
       if (name === 'solo.run') return { tool: { name: 'solo.run' }, utcpName: 'solo.run' };
+      if (name === 'kb.read_file') {
+        return {
+          tool: {
+            name: 'kb.read_file',
+            description: 'Read a file.',
+            inputs: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+          },
+          utcpName: 'kb.read_file',
+        };
+      }
       return null;
     }),
   };
@@ -35,7 +45,8 @@ vi.mock('../code-mode-names.js', async (importOriginal) => {
 const { createToolsInfoTool } = await import('../code-mode.tool.js');
 
 const client = {
-  toolToTypeScriptInterface: (tool: { name: string }) => `interface ${tool.name}`,
+  toolToTypeScriptInterface: (tool: { name: string; description?: string }) =>
+    tool.description ? `/** ${tool.description} */ interface ${tool.name}` : `interface ${tool.name}`,
 } as unknown as CodeModeUtcpClient;
 
 type ToolsInfoResult = { interfaces: string; not_found: string[]; errors?: string[] };
@@ -58,9 +69,14 @@ describe('tools_info', () => {
 
   it('omits the errors field entirely when every name resolves or misses cleanly', async () => {
     const result = await run(['solo.run', 'nope']);
-    expect(result.interfaces).toBe('interface solo.run');
+    expect(result.interfaces).toBe('/** Call: solo.run({}) */ interface solo.run');
     expect(result.not_found).toEqual(['nope']);
     expect(result.errors).toBeUndefined();
+  });
+
+  it('shows each tool with its Call: line, as the chain description promises', async () => {
+    const result = await run(['kb.read_file']);
+    expect(result.interfaces).toBe('/** Call: kb.read_file({ query: "..." })\n\nRead a file. */ interface kb.read_file');
   });
 
   it('contains ONLY ambiguity — an outage rethrows instead of posing as partial success', async () => {
