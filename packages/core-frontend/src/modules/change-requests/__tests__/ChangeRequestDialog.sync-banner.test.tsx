@@ -76,7 +76,7 @@ const DETAIL = {
 
 const SENTENCE =
   `Saved locally on "${BRANCH}" but couldn't share with the team automatically — ` +
-  'the repository host refused the push. The next save on this branch shares it.';
+  'the repository host refused the push; the next save on this branch will try sharing it again.';
 
 /** A stand-in for the SSE bus that records watches and lets a test push events. */
 function makeBus() {

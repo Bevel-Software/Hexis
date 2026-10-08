@@ -120,7 +120,7 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
     super(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
         (cause === 'refused'
-          ? `the repository host refused the push. The next save on this branch shares it.`
+          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
           : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
             `The agent will resolve this.`),
       409,

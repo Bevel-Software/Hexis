@@ -120,6 +120,17 @@ describe('describeSyncFailure', () => {
       'remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)',
       'The repository host refused the request.',
     ],
+    // A timeout in git's own standalone wording, and Node's code for one.
+    [
+      "fatal: unable to access 'https://github.com/acme/kb.git/': Operation timed out after 30001 milliseconds",
+      'The repository host could not be reached.',
+    ],
+    ["fatal: unable to access 'https://github.com/acme/kb.git/': timed out", 'The repository host could not be reached.'],
+    ['connect ETIMEDOUT 140.82.121.3:443', 'The repository host could not be reached.'],
+    // A host's "token" wording is a rejected credential, as its "password" wording is.
+    ["remote: Invalid username or token. Password authentication is not supported", "The repository host did not accept this server's credentials."],
+    // "repository … not found" with git's quoted URL between the words.
+    ["remote: Repository 'https://github.com/acme/kb.git/' not found", "The repository host did not give this server's credentials permission to push here."],
   ];
 
   it.each(cases)('describes %j without quoting it', (raw, expected) => {
