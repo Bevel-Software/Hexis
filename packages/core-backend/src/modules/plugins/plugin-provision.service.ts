@@ -151,6 +151,20 @@ export class PluginProvisionService {
    */
   private readonly creations = new WorkspaceMutex();
 
+  /**
+   * Run `fn` holding the creation lock of every plugin name in `names` — for
+   * a writer outside this service that publishes plugins of its own (a
+   * starter pack) and whose name check and commit must be one step against
+   * a creation or a deletion of the same name. The set is taken in one
+   * `runAll`; `fn` must not take this lock again (see `WorkspaceMutex`).
+   */
+  withIdentities<T>(names: string[], fn: () => Promise<T>): Promise<T> {
+    return this.creations.runAll(
+      names.map((name) => `plugin:${pluginManifestName(name)}`),
+      fn,
+    );
+  }
+
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly commits: ProvisionCommitDriver,

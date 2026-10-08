@@ -5,8 +5,9 @@ import path from 'node:path';
 import { DEFAULT_KB_LAYOUT, type AuthUser, type IWorkflowService, type KbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
+import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
-import { StarterPackError, StarterPackService, commitSubjectOf, summaryOf } from '../starter-pack.service.js';
+import { CLAIM_TTL_MS, StarterPackError, StarterPackService, commitSubjectOf, summaryOf } from '../starter-pack.service.js';
 
 /**
  * The starter-pack question end to end against a real checkout folder, with
@@ -42,6 +43,9 @@ function harness({
 } = {}) {
   const settings = {
     reload: vi.fn(async (key: string) => store[key] ?? ''),
+    record: vi.fn(async (entries: Record<string, string>) => {
+      Object.assign(store, entries);
+    }),
     recordIfAbsent: vi.fn(async (key: string, value: string) => {
       if (key in store) return false;
       store[key] = value;
@@ -52,6 +56,15 @@ function harness({
     }),
   };
   const kb = testKbContext({ kbDirName: KB, layout });
+  // The plugin creation's identity lock, as `PluginProvisionService.withIdentities` keys it.
+  const locks = new WorkspaceMutex();
+  const pluginLocks = {
+    withIdentities: <T>(names: string[], fn: () => Promise<T>) =>
+      locks.runAll(
+        names.map((n) => `plugin:${n.toLowerCase()}`),
+        fn,
+      ),
+  };
   const workflow = {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderName: 'x' } })),
     releaseLock: vi.fn(async () => null),
@@ -65,6 +78,7 @@ function harness({
     packsDir,
     kb,
     pluginSource: new KbPluginSource(new NodeFs(), kb),
+    pluginLocks,
     workspaceService: {
       getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-main' })),
       getWorkspacePath: vi.fn(async () => wsDir),
@@ -76,7 +90,7 @@ function harness({
     accessControl,
     events,
   });
-  return { svc, store, settings, workflow, events, accessControl };
+  return { svc, store, settings, locks, workflow, events, accessControl };
 }
 
 beforeEach(async () => {
@@ -152,12 +166,14 @@ describe('choosing a pack', () => {
 
     const applied = await svc.choose(ADMIN, 'sales');
 
-    // The choice is claimed BEFORE the write, so another replica's claim is
-    // found and nothing is written twice (see the module doc).
-    expect(settings.recordIfAbsent).toHaveBeenCalledWith('starterPack', 'sales', ADMIN.id);
+    // The claim is taken BEFORE the write, so another replica's is found and
+    // nothing is written twice; it is released once the choice is recorded.
+    expect(settings.recordIfAbsent).toHaveBeenCalledWith('starterPackClaim', expect.stringMatching(/^u-admin \d+$/), ADMIN.id);
     expect(settings.recordIfAbsent.mock.invocationCallOrder[0]!).toBeLessThan(
       workflow.commitChanges.mock.invocationCallOrder[0]!,
     );
+    expect(settings.record.mock.invocationCallOrder[0]!).toBeGreaterThan(workflow.commitChanges.mock.invocationCallOrder[0]!);
+    expect(store.starterPackClaim).toBeUndefined();
 
     expect(applied).toEqual({ id: 'sales', name: 'Sales', pages: 2, skills: 2, summary: 'Added 2 pages and 2 skills for Sales.' });
     expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
@@ -286,12 +302,50 @@ describe('choosing a pack', () => {
     const store: Record<string, string> = {};
     const one = harness({ store });
     const two = harness({ store });
-    const results = await Promise.allSettled([one.svc.choose(ADMIN, 'sales'), two.svc.choose(ADMIN, 'none')]);
+    const results = await Promise.allSettled([one.svc.choose(ADMIN, 'sales'), two.svc.choose(ADMIN, 'sales')]);
     expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
     const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     expect(refused.reason).toMatchObject({ status: 409 });
-    expect(one.workflow.commitChanges.mock.calls.length + two.workflow.commitChanges.mock.calls.length).toBeLessThanOrEqual(1);
-    expect(['sales', 'none']).toContain(store.starterPack);
+    expect(one.workflow.commitChanges.mock.calls.length + two.workflow.commitChanges.mock.calls.length).toBe(1);
+    expect(store.starterPack).toBe('sales');
+    expect(store.starterPackClaim).toBeUndefined();
+  });
+
+  it('refuses while another admin’s claim is live, and takes over one left by a process that died', async () => {
+    const store: Record<string, string> = { starterPackClaim: `u-other ${Date.now()}` };
+    const { svc, workflow } = harness({ store });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow(/being added right now/);
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+
+    store.starterPackClaim = `u-other ${Date.now() - CLAIM_TTL_MS - 1}`;
+    await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
+    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(store.starterPack).toBe('sales');
+  });
+
+  it('waits for a plugin creation of the same name, on the lock creations take', async () => {
+    const { svc, locks, workflow } = harness();
+    let finishCreating!: () => void;
+    const creating = locks.run('plugin:sales-starter', () => new Promise<void>((resolve) => (finishCreating = resolve)));
+    const choosing = svc.choose(ADMIN, 'sales');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    finishCreating();
+    await creating;
+    await expect(choosing).resolves.toMatchObject({ id: 'sales' });
+    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds the pack even when recording the choice fails afterwards: the pages close the question', async () => {
+    const { svc, store, workflow, settings } = harness();
+    settings.record.mockRejectedValueOnce(new Error('database unreachable'));
+    await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales', pages: 2 });
+    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(store.starterPack).toBeUndefined();
+    expect(store.starterPackClaim).toBeUndefined();
+    expect((await svc.status(ADMIN)).offered).toBe(false);
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
   });
 
   it('refuses a member (403) and a pack that does not exist (404), recording nothing', async () => {
@@ -307,8 +361,9 @@ describe('choosing a pack', () => {
     workflow.commitChanges.mockRejectedValueOnce(new Error('disk full'));
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('disk full');
     expect(settings.recordIfAbsent).toHaveBeenCalledTimes(1);
-    expect(settings.clear).toHaveBeenCalledWith('starterPack');
+    expect(settings.clear).toHaveBeenCalledWith('starterPackClaim');
     expect(store.starterPack).toBeUndefined();
+    expect(store.starterPackClaim).toBeUndefined();
   });
 });
 

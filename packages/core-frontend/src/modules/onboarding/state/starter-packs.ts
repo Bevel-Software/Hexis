@@ -41,15 +41,10 @@ function remember(userId: string, answer: StarterPacksAnswer | null): void {
   listeners.forEach((l) => l());
 }
 
+/** The answer for `userId`, requested once: concurrent first reads (the viewer's and the column's) share one request. */
 function load(userId: string): Promise<void> {
   const running = inFlight.get(userId);
-  if (running) {
-    // Asked again while a request is out: that one may have been answered
-    // before whatever prompted this (a page just filled in), so one more
-    // follows it, and whoever asked waits for the one that saw the change.
-    again.add(userId);
-    return running.then(() => inFlight.get(userId) ?? Promise.resolve());
-  }
+  if (running) return running;
   const request = fetchStarterPacks()
     .then(
       (answer) => remember(userId, answer),
@@ -63,6 +58,18 @@ function load(userId: string): Promise<void> {
     });
   inFlight.set(userId, request);
   return request;
+}
+
+/**
+ * Ask again, because something changed (a page filled in, a choice made):
+ * a request already out may have been answered before the change, so one
+ * more follows it, and whoever asked waits for the one that saw the change.
+ */
+function refresh(userId: string): Promise<void> {
+  const running = inFlight.get(userId);
+  if (!running) return load(userId);
+  again.add(userId);
+  return running.then(() => inFlight.get(userId) ?? Promise.resolve());
 }
 
 /** Test seam: forget every answer. */
@@ -102,7 +109,7 @@ export function useStarterPacks({ enabled = true }: { enabled?: boolean } = {}):
   }, [enabled, userId]);
 
   const reload = useCallback(async () => {
-    if (userId) await load(userId);
+    if (userId) await refresh(userId);
   }, [userId]);
 
   const choose = useCallback(
@@ -115,7 +122,7 @@ export function useStarterPacks({ enabled = true }: { enabled?: boolean } = {}):
         // another tab, say: the answer is read again, so the card goes. A
         // lock refusal wears the same status; its re-read finds the offer
         // still standing, and the card stays to say so.
-        if (err instanceof StarterPackApiError && err.status === 409 && userId) await load(userId);
+        if (err instanceof StarterPackApiError && err.status === 409 && userId) await refresh(userId);
         throw err;
       }
       if (settle) await settle(applied).catch(() => null);
@@ -124,7 +131,7 @@ export function useStarterPacks({ enabled = true }: { enabled?: boolean } = {}):
         // again on the strength of a request that failed.
         const before = answers.get(userId);
         if (before) remember(userId, { ...before, offered: false, chosen: id });
-        await load(userId);
+        await refresh(userId);
       }
       return applied;
     },

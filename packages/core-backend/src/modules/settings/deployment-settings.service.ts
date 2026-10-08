@@ -388,6 +388,19 @@ export const CORE_SETTINGS: SettingDef[] = [
     internal: true,
     validate: (v) => (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v) ? null : 'A starter pack id is lowercase letters, digits and hyphens.'),
   },
+  {
+    /**
+     * The claim an admin holds while their starter-pack choice is being
+     * written: `<user id> <epoch ms>`, inserted only if absent so two replicas
+     * cannot both write, and released once the choice is recorded. A claim
+     * nobody released in time is a process that died mid-write and is taken
+     * over (see `starter-pack.service.ts`). Internal, like the choice.
+     */
+    key: 'starterPackClaim',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^\S+ \d+$/.test(v) ? null : 'A claim is a user id and a time.'),
+  },
 ];
 
 /**

@@ -1071,6 +1071,7 @@ export async function createCoreServices(
     settings,
     accessControl,
     pluginSource,
+    pluginLocks: pluginProvisionService,
     events: eventBus,
     fileChanges: fileChangeNotifier,
   });
