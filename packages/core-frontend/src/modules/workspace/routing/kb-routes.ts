@@ -480,7 +480,11 @@ export function useNodeIdNav() {
   const surface = useRendererSurface();
   const { openFile } = useFileNav();
   const git = useContext(GitContext);
-  const branch = git?.status?.branch ?? null;
+  const location = useLocation();
+  // The URL's branch first, the git status second — the same order as
+  // `useFileNav`: during a branch switch the status still names the branch
+  // being left, and an id resolved against it would open the wrong tree.
+  const branch = branchFromPathname(location.pathname) ?? git?.status?.branch ?? null;
 
   const openNodeId = useCallback(
     async (idOrLink: string) => {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '../../../shared/components';
 import { useAppRegistry } from '../../../core/registry';
 import { isViewOnlyFile, pickFileRenderer } from '../../workspace/components/renderers';
@@ -25,6 +26,9 @@ import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
 const HEARTBEAT_MS = 30_000;
+
+/** Said when a save arrives while the lock is being taken again after a hidden tab. */
+const REACQUIRING = 'Taking the edit lock again after the tab was hidden — try saving in a moment.';
 
 /** Said when a heartbeat finds the viewer's write access withdrawn mid-edit. */
 const WRITE_WITHDRAWN =
@@ -105,6 +109,10 @@ export function EmbedView() {
   const [awaitingLink, setAwaitingLink] = useState(false);
   /** Who took the lock while this frame was hidden — null while we hold it. */
   const [lockLost, setLockLost] = useState<string | null>(null);
+  /** The frame is hidden: the lock was let go, and the heartbeat has nothing to keep alive. */
+  const [hidden, setHidden] = useState(false);
+  /** Back from hidden, the lock is being taken again: Save waits for the answer. */
+  const [reacquiring, setReacquiring] = useState(false);
   // Read access withdrawn mid-edit. The editor stays open on the draft so
   // nothing typed vanishes, but nothing can be sent from it.
   const [accessLost, setAccessLost] = useState(false);
@@ -140,6 +148,17 @@ export function EmbedView() {
 
   useEffect(() => reload(), [reload]);
 
+  // The heading the agent named opens the view there: the renderer's deep
+  // link reads the location's hash, and the embed's own address carries
+  // none — so the heading is put there, once, before that effect runs.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const heading = view?.heading;
+  useEffect(() => {
+    if (!heading || location.hash) return;
+    navigate({ search: location.search, hash: `#${encodeURIComponent(heading)}` }, { replace: true });
+  }, [heading, location.hash, location.search, navigate]);
+
   // Keep the held lock alive while somebody is editing. Not while proposing:
   // a proposal takes no lock, because nothing it does touches the default
   // branch.
@@ -153,7 +172,9 @@ export function EmbedView() {
   // its own reason.
   const holdsLock = mode === 'write' && (view?.canWrite ?? false) && !accessLost;
   useEffect(() => {
-    if (!holdsLock) return;
+    // Nothing to keep alive while the frame is hidden: the lock was let go on
+    // the way out, and a heartbeat now would only renew somebody else's.
+    if (!holdsLock || hidden) return;
     const id = window.setInterval(() => {
       heartbeatEmbed(token).catch((err: unknown) => {
         if (!(err instanceof EmbedApiError && err.status === 403)) return;
@@ -179,7 +200,7 @@ export function EmbedView() {
       });
     }, HEARTBEAT_MS);
     return () => window.clearInterval(id);
-  }, [holdsLock, token]);
+  }, [holdsLock, hidden, token]);
 
   // Best-effort lock release when the frame is hidden or closed mid-edit. The
   // server's lock TTL plus the heartbeat above is the real backstop — a
@@ -200,15 +221,21 @@ export function EmbedView() {
     };
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
+        setHidden(true);
         release();
         return;
       }
+      setHidden(false);
       if (!holdsLockRef.current) return;
+      // Until the lock is held again, Save is refused here rather than by
+      // the server: the editor is on screen, but the claim behind it is not.
+      setReacquiring(true);
       lockEmbed(token)
         .then((result) => {
           setLockLost(result.acquired ? null : (result.holderName ?? 'Someone else'));
         })
-        .catch(() => setLockLost('Someone else'));
+        .catch(() => setLockLost('Someone else'))
+        .finally(() => setReacquiring(false));
     };
     window.addEventListener('pagehide', release);
     document.addEventListener('visibilitychange', onVisibility);
@@ -302,6 +329,9 @@ export function EmbedView() {
       // renderer's own save shortcut, which does not see the disabled button.
       if (accessLost) throw new Error(READ_WITHDRAWN);
       if (view.canWrite && lockLost) throw new Error(lockLostMessage(lockLost));
+      // Back from a hidden tab, the lock is being taken again: a save sent
+      // now would race the answer, and the server would refuse it anyway.
+      if (view.canWrite && reacquiring) throw new Error(REACQUIRING);
       setBusy(true);
       setNotice(null);
       try {
@@ -320,7 +350,7 @@ export function EmbedView() {
         setBusy(false);
       }
     },
-    [view, token, reload, lockLost, accessLost],
+    [view, token, reload, lockLost, accessLost, reacquiring],
   );
 
   const onCancel = useCallback(async () => {

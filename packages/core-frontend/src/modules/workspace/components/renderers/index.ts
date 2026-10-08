@@ -262,6 +262,11 @@ export function pickFileRenderer(
   filePath: string,
   overrides: readonly { extensions: string[]; Component: ComponentType<FileRendererProps> }[] = [],
 ): ComponentType<FileRendererProps> {
+  // The access rules file is plain text on every surface, whatever a
+  // deployment registered for `.md`: rules rendered as a page could hide or
+  // misstate what they grant.
+  const name = filePath.slice(filePath.lastIndexOf('/') + 1).toLowerCase();
+  if (name === ACCESS_RULES_FILE) return TextRenderer;
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   const override = overrides.find((r) => r.extensions.includes(ext));
   return override?.Component ?? getFileRenderer(filePath);
