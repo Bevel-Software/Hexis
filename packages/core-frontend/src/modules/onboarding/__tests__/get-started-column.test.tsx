@@ -19,7 +19,6 @@ import type { PluginSummary } from '../../library/services/plugins.api';
 import type { AgentConnection } from '../services/agent-connection.api';
 import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
 import type { StarterPacksAnswer } from '../services/starter-packs.api';
-import { resetStarterPacksForTests } from '../state/starter-packs';
 import { SearchPalette } from '../../toolbar/components/SearchPalette';
 import { COMMAND_MENU_SHORTCUT_LABEL } from '../../toolbar/commands/command-menu';
 import { AGENT_RECHECK_MS } from '../state/agent-connection';
@@ -196,9 +195,7 @@ function columnUi({
   withPalette = false,
   workspaceBranch = DEFAULT_BRANCH,
 }: MountOptions = {}) {
-  const auth = authValue({
-    user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
-  });
+  const auth = authValue({ user: Object.assign(sessionUser, { onboardingDone }) });
   const ui = (
     <MemoryRouter initialEntries={[route]}>
       <AuthContext.Provider value={auth}>
@@ -240,9 +237,16 @@ function row(title: RegExp | string) {
 
 const isDone = (title: RegExp | string) => within(row(title)!).queryByText('(done)') !== null;
 
+/**
+ * The signed-in user of the test at hand: ONE object per test, so what the
+ * app keeps per signed-in user (the starter-pack answer) lives across a
+ * rerender and never leaks into the next test, which signs in afresh.
+ */
+let sessionUser: { id: string; email: string; name: string; onboardingDone: boolean };
+
 beforeEach(() => {
   resetOnboardingForTests();
-  resetStarterPacksForTests();
+  sessionUser = { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: false };
   fetchStarterPacksMock.mockReset().mockResolvedValue({ offered: false, chosen: null, packs: [], chosenPack: null });
   setViewportWidth(1400);
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software')]);

@@ -61,8 +61,6 @@ import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import type { DeploymentSettingsService } from '../settings/deployment-settings.service.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
@@ -71,8 +69,9 @@ import {
   knowledgeFolderIsNew,
   type FirstRunStarter,
   type FirstRunStarterSource,
+  type MayRead,
 } from '../workspace/first-run.js';
-import { pluginAccessMd, withCreatorGrants, type PluginProvisionService } from '../plugins/plugin-provision.service.js';
+import { pluginAccessMd, withCreatorGrants } from '../plugins/plugin-provision.service.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
 import {
   NO_STARTER_PACK,
@@ -81,7 +80,14 @@ import {
   type StarterPack,
   type StarterPackFile,
 } from './starter-packs.js';
-import type { IStarterPackService, StarterPackApplied, StarterPacksAnswer } from './onboarding.contract.js';
+import type {
+  IStarterPackService,
+  PluginIdentityLocks,
+  StarterPackApplied,
+  StarterPackSettings,
+  StarterPackWorkspaces,
+  StarterPacksAnswer,
+} from './onboarding.contract.js';
 
 const log = logger('starter-packs');
 
@@ -112,21 +118,21 @@ export interface StarterPackServiceDeps {
   /** The packs folder (`STARTER_PACKS_DIR`, else the packaged `starter-packs/`). */
   packsDir: string;
   kb: KbContext;
-  workspaceService: Pick<WorkspaceService, 'getOrCreateForBranch' | 'getWorkspacePath' | 'hasBootstrappedWorkspace'>;
+  workspaceService: StarterPackWorkspaces;
   workflow: IWorkflowService;
   adminAccess: IAdminAccessService;
+  /** The claim and the answer (see the module doc). */
+  settings: StarterPackSettings;
   /**
-   * `recordIfAbsent` takes the claim (see the module doc), `swapIfValue`
-   * takes over an expired one and releases one's own, `record` keeps the
-   * answer.
+   * `canReadBatch`: what the caller may know about at all — which of a
+   * pack's pages (see `untouchedPages`), and which pages make the knowledge
+   * folder old for them (see `knowledgeIsNew`).
    */
-  settings: Pick<DeploymentSettingsService, 'reload' | 'record' | 'recordIfAbsent' | 'swapIfValue'>;
-  /** `canReadBatch`: which of a pack's pages the caller may know about at all (see `untouchedPages`). */
   accessControl: Pick<IAccessControl, 'invalidate' | 'canReadBatch'>;
   /** Plugin discovery over the checkout: what "a plugin by that name is already there" means, at any depth. */
   pluginSource: Pick<PluginSource, 'discover'>;
   /** The plugin creation's identity lock, held over the name check and the commit of the pack's plugins. */
-  pluginLocks: Pick<PluginProvisionService, 'withIdentities'>;
+  pluginLocks: PluginIdentityLocks;
   /** The SSE bus: `fs-tree-changed` sends every open tree on the branch to fetch again. */
   events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void };
   /** The post-commit hook catalogs refresh on — the plugin's skills appear without a restart. */
@@ -150,7 +156,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       this.deps.adminAccess.isAdmin(user.email),
       loadStarterPacks(this.deps.packsDir),
     ]);
-    const offered = isAdmin && chosen === null && packs.length > 0 && (await this.knowledgeIsNew(false));
+    const offered = isAdmin && chosen === null && packs.length > 0 && (await this.knowledgeIsNew(false, user.email));
     const pack = chosen && chosen !== NO_STARTER_PACK ? packs.find((p) => p.id === chosen) : undefined;
     return {
       offered,
@@ -186,7 +192,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
         // released between this call's start and its claim — a `none`, say
         // — is found here rather than written over with a pack.
         if ((await this.recordedChoice()) !== null) throw alreadyChosen();
-        if (!(await this.knowledgeIsNew(true))) {
+        if (!(await this.knowledgeIsNew(true, user.email))) {
           throw new StarterPackError('This knowledge base already has pages, so starter pages are no longer offered.', 409);
         }
         pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.packsDir)).find((p) => p.id === id) ?? null);
@@ -277,14 +283,22 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
    * whether a knowledge base not checked out yet may be (the choice writes to
    * it, so it must); the status question never clones, and answers "no".
    */
-  private async knowledgeIsNew(clone: boolean): Promise<boolean> {
-    const { kb, workspaceService } = this.deps;
+  private async knowledgeIsNew(clone: boolean, userEmail: string): Promise<boolean> {
+    const { kb, workspaceService, accessControl } = this.deps;
     if (!kb.isBranchModelConfigured()) return false;
     const workspaceId = kb.defaultWorkspaceId();
     if (!clone && !(await workspaceService.hasBootstrappedWorkspace(workspaceId))) return false;
     const ws = clone ? await workspaceService.getOrCreateForBranch(kb.defaultBranch) : { id: workspaceId };
     const root = await workspaceService.getWorkspacePath(ws.id);
-    return knowledgeFolderIsNew(path.join(root, kb.kbDirName, kb.layout.knowledgeBaseDir));
+    // As the CALLER may see it: being an admin grants no read of every page,
+    // and "offered" or "already has pages" must not tell them of one they
+    // may not read. The same gate `start_session`'s first-run note keeps.
+    const knowledgeDir = kb.layout.knowledgeBaseDir;
+    const mayRead: MayRead = async (rels) => {
+      const verdicts = await accessControl.canReadBatch(ws.id, userEmail, rels.map((rel) => `${knowledgeDir}/${rel}`));
+      return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));
+    };
+    return knowledgeFolderIsNew(path.join(root, kb.kbDirName, knowledgeDir), undefined, mayRead);
   }
 
   /** The pack's pages: its text files under the knowledge folder. */

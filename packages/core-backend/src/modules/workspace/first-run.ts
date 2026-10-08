@@ -95,12 +95,15 @@ export type MayRead = (relPaths: string[]) => Promise<ReadonlyMap<string, boolea
  * `starterPages` are a starter pack's pages (path below `dir` → the text the
  * pack wrote): one still holding exactly that text is not a page either.
  *
- * With `mayRead`, the answer is the CALLER'S: a page they may not read is
- * not theirs to know of, so it does not make the folder old for them — the
- * walk collects what it finds and asks once at the end, instead of stopping
- * at the first page. Without it the first page found ends the walk. The
- * budgets answer "not new" either way on a tree too large to walk, naming
- * nothing.
+ * With `mayRead`, the answer is the CALLER'S, and nothing they may not read
+ * takes part in it: a folder they may not read is not entered — not walked,
+ * not counted against the budgets, not judged — and a file or a link they
+ * may not read is not theirs to know of, so it does not make the folder old
+ * for them. The walk collects what it finds in the folders it may enter and
+ * asks once per folder for its subfolders and once at the end for the rest,
+ * instead of stopping at the first page. Without `mayRead` the first page
+ * found ends the walk. The budgets answer "not new" on a tree too large to
+ * walk, naming nothing — and with `mayRead` that tree is the caller's own.
  */
 export async function knowledgeFolderIsNew(
   dir: string,
@@ -109,11 +112,14 @@ export async function knowledgeFolderIsNew(
 ): Promise<boolean> {
   let opened = 0;
   let read = 0;
-  /** The pages the disk holds, to be judged by `mayRead` once the walk is done. */
+  /** What the disk holds that could be somebody's, to be judged by `mayRead` once the walk is done. */
   const found: string[] = [];
   const holdsNothing = async (folder: string, rel: string): Promise<boolean> => {
     if (++opened > FOLDER_BUDGET) return false;
-    // `for await` closes the handle however the loop ends, an early return included.
+    const folders: { abs: string; rel: string }[] = [];
+    // `for await` closes the handle however the loop ends, an early return
+    // included — and it is closed before any subfolder is opened, since those
+    // are entered after the loop.
     for await (const entry of await nodeFs.opendir(folder)) {
       if (++read > ENTRY_BUDGET) return false;
       const name = entry.name;
@@ -121,16 +127,21 @@ export async function knowledgeFolderIsNew(
       if (rel === '' && name === STARTER_GUIDE_FILE && entry.isFile()) continue;
       const childRel = rel ? `${rel}/${name}` : name;
       if (entry.isDirectory()) {
-        if (!(await holdsNothing(join(folder, name), childRel))) return false;
+        folders.push({ abs: join(folder, name), rel: childRel });
         continue;
       }
       if (entry.isFile() && (await isUntouchedStarterPage(join(folder, name), starterPages?.get(childRel)))) continue;
-      if (entry.isFile() && mayRead) {
+      if (mayRead) {
         found.push(childRel);
         continue;
       }
-      // A link, anything else — or a file, with nobody to ask: something someone put there.
+      // A file, a link, anything else: something someone put there.
       return false;
+    }
+    const enter = mayRead && folders.length > 0 ? await mayRead(folders.map((f) => f.rel)) : null;
+    for (const child of folders) {
+      if (enter && enter.get(child.rel) !== true) continue;
+      if (!(await holdsNothing(child.abs, child.rel))) return false;
     }
     return true;
   };

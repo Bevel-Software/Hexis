@@ -153,6 +153,15 @@ describe('who is asked', () => {
     expect(await svc.status(MEMBER)).toMatchObject({ offered: false, packs: [] });
   });
 
+  it('still asks an admin who may not read the one page there is: it is not theirs to know of', async () => {
+    const { svc, unreadable } = harness();
+    await put(wsDir, `${KB}/KnowledgeBase/Leadership/Plan.md`, '# Plan\n');
+    unreadable.add('KnowledgeBase/Leadership');
+    expect((await svc.status(ADMIN)).offered).toBe(true);
+    unreadable.clear();
+    expect((await svc.status(ADMIN)).offered).toBe(false);
+  });
+
   it('nobody once the knowledge base has a page', async () => {
     await put(wsDir, `${KB}/KnowledgeBase/Team/Roadmap.md`, '# Roadmap\n');
     const { svc } = harness();

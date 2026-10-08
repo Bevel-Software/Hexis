@@ -6,7 +6,6 @@ import { authValue } from '../../library/__tests__/auth-harness';
 import { WorkspaceContext } from '../../workspace/state/workspace.context';
 import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
 import { StarterPackCard } from '../components/StarterPackCard';
-import { resetStarterPacksForTests } from '../state/starter-packs';
 import {
   StarterPackApiError,
   type StarterPackApplied,
@@ -48,8 +47,9 @@ function mount(refreshFileTree = vi.fn(async () => null)) {
   return { onDone, refreshFileTree };
 }
 
+// Every mount signs in afresh (`authValue()` makes a new user), and the
+// starter answer is kept per signed-in user: no test sees another's.
 beforeEach(() => {
-  resetStarterPacksForTests();
   fetchMock.mockReset().mockResolvedValue({ offered: false, chosen: 'sales', packs: [], chosenPack: null });
   chooseMock.mockReset();
 });

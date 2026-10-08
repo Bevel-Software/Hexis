@@ -45,6 +45,31 @@ export interface StarterPackApplied {
   summary: string;
 }
 
+/** The workspaces the service reads and writes: the default branch's checkout, by its id. */
+export interface StarterPackWorkspaces {
+  getOrCreateForBranch(branch: string): Promise<{ id: string }>;
+  getWorkspacePath(workspaceId: string): Promise<string>;
+  hasBootstrappedWorkspace(workspaceId: string): Promise<boolean>;
+}
+
+/**
+ * The deployment settings the service keeps its answer and its claim in:
+ * `recordIfAbsent` takes the claim, `swapIfValue` takes over an expired one
+ * and releases one's own, `record` keeps the answer, `reload` reads what
+ * the database (every replica) holds.
+ */
+export interface StarterPackSettings {
+  reload(key: string): Promise<string>;
+  record(entries: Record<string, string>, updatedBy: string | null): Promise<void>;
+  recordIfAbsent(key: string, value: string, updatedBy: string | null): Promise<boolean>;
+  swapIfValue(key: string, expected: string, next: string | null, updatedBy: string | null): Promise<boolean>;
+}
+
+/** The plugin creation's identity lock, held over the name check and the commit of a pack's plugins. */
+export interface PluginIdentityLocks {
+  withIdentities<T>(names: string[], fn: () => Promise<T>): Promise<T>;
+}
+
 /**
  * What the onboarding routes depend on. `status` answers anyone signed in;
  * `choose` refuses a member (403), a question no longer asked (409) and a

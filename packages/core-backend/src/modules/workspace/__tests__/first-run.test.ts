@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -96,13 +96,42 @@ describe('knowledgeFolderIsNew', () => {
       return new Map(rels.map((rel) => [rel, false]));
     };
     expect(await knowledgeFolderIsNew(dir, undefined, nobody)).toBe(true);
-    // Asked once, for every page the disk holds, by its path below the folder.
-    expect(seen).toEqual([['Leadership/Plan.md']]);
+    // Asked about the folder before entering it; refused, its page was never seen.
+    expect(seen).toEqual([['Leadership']]);
 
     const everyone = async (rels: string[]) => new Map(rels.map((rel) => [rel, true]));
     expect(await knowledgeFolderIsNew(dir, undefined, everyone)).toBe(false);
     // Without anyone to ask, a page is a page.
     expect(await knowledgeFolderIsNew(dir)).toBe(false);
+  });
+
+  it('does not enter a folder the caller may not read: nothing in it is walked, counted or judged', async () => {
+    await mkdir(join(dir, 'Leadership'), { recursive: true });
+    await writeFile(join(dir, 'Leadership', 'Plan.md'), '# Plan\n');
+    await mkdir(join(dir, 'Team'), { recursive: true });
+    await writeFile(join(dir, 'Team', '.gitkeep'), '');
+    const asked: string[][] = [];
+    const notLeadership = async (rels: string[]) => {
+      asked.push(rels);
+      return new Map(rels.map((rel) => [rel, rel !== 'Leadership']));
+    };
+    expect(await knowledgeFolderIsNew(dir, undefined, notLeadership)).toBe(true);
+    // Asked about the folders once, at the top; the closed one's page was never seen.
+    expect(asked).toEqual([['Leadership', 'Team']]);
+  });
+
+  it('judges a link the caller may not read as not theirs to know of', async () => {
+    await writeFile(join(dir, 'Real.md'), '# Real\n');
+    try {
+      await symlink(join(dir, 'Real.md'), join(dir, 'Alias.md'));
+    } catch {
+      return; // no symlinks on this machine: nothing to judge
+    }
+    const onlyLinks = async (rels: string[]) => new Map(rels.map((rel) => [rel, rel === 'Alias.md']));
+    // The real page is unreadable to them; the link to it is not — and a link is somebody's.
+    expect(await knowledgeFolderIsNew(dir, undefined, onlyLinks)).toBe(false);
+    const nothing = async (rels: string[]) => new Map(rels.map((rel) => [rel, false]));
+    expect(await knowledgeFolderIsNew(dir, undefined, nothing)).toBe(true);
   });
 
   it('stops reading at its entry budget: that many entries and no page is not a new knowledge base', async () => {

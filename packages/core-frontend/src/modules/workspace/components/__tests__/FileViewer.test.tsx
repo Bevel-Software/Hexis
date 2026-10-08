@@ -138,7 +138,6 @@ vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal)
 }));
 
 import { FileViewer } from '../FileViewer';
-import { resetStarterPacksForTests } from '../../../onboarding/state/starter-packs';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
 import { acquireLock as acquireLockMock, getLock as getLockMock, LockApiError } from '../../../workflow/services/lock.api';
@@ -1653,7 +1652,8 @@ describe('FileViewer: nothing open', () => {
  * line saying what was added.
  */
 describe('FileViewer: the starter-pack question', () => {
-  const ADMIN = { id: 'u-admin', email: 'ada@example.com', name: 'Ada' };
+  // A fresh sign-in per test: the starter answer is kept per signed-in user.
+  const admin = () => ({ id: 'u-admin', email: 'ada@example.com', name: 'Ada' });
   const PACKS = [
     { id: 'engineering', name: 'Engineering', description: 'How you build.', order: 1 },
     { id: 'sales', name: 'Sales', description: 'What you sell.', order: 2 },
@@ -1663,7 +1663,6 @@ describe('FileViewer: the starter-pack question', () => {
   const DEFAULT = 'target-company-state';
 
   afterEach(() => {
-    resetStarterPacksForTests();
     starterPacksMock.fetchStarterPacks.mockReset().mockResolvedValue({
       offered: false,
       chosen: null,
@@ -1674,14 +1673,14 @@ describe('FileViewer: the starter-pack question', () => {
 
   it('replaces the empty state while it is offered', async () => {
     starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
-    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={DEFAULT} />);
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
     expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Engineering' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
   });
 
   it('is not there when it is not offered — a member, or a question already answered', async () => {
-    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={DEFAULT} />);
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
     await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
     expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
     expect(screen.queryByText('What does your team do?')).toBeNull();
@@ -1689,7 +1688,7 @@ describe('FileViewer: the starter-pack question', () => {
 
   it('is not asked on another branch, where the pack would not land, even while it is offered', async () => {
     starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
-    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch="alice/draft" />);
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch="alice/draft" />);
     expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
     expect(screen.queryByText('What does your team do?')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Engineering' })).toBeNull();
@@ -1697,7 +1696,7 @@ describe('FileViewer: the starter-pack question', () => {
 
   it('waits for the branch to be known rather than asking on a guess, showing neither state meanwhile', async () => {
     starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
-    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={null} />);
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={null} />);
     await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
     expect(screen.queryByText('What does your team do?')).toBeNull();
     expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
@@ -1706,7 +1705,7 @@ describe('FileViewer: the starter-pack question', () => {
   it('shows no reading empty state before the server has answered: the question must not flash in after it', async () => {
     let answer!: (a: unknown) => void;
     starterPacksMock.fetchStarterPacks.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
-    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={DEFAULT} />);
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
     await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
     expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
     expect(screen.queryByText('What does your team do?')).toBeNull();
@@ -1725,7 +1724,7 @@ describe('FileViewer: the starter-pack question', () => {
       skills: 37,
       summary: 'Added 6 pages and 37 skills for Sales.',
     });
-    render(<ViewerHarness filePath={null} authUser={ADMIN} workspaceBranch={DEFAULT} />);
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
 
     await userEvent.click(await screen.findByRole('button', { name: 'Sales' }));
 
