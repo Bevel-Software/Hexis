@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   htmlLinksAffectedByMove,
-  maskMarkdownCode,
   resolveMdLink,
   rewriteMdLinks,
+  scanMarkdownHtmlLinks,
   scanMarkdownLinks,
 } from '@bevel-software/platform-shared';
 
@@ -252,23 +252,16 @@ describe('md-links — scanning', () => {
       .toEqual(['../Old/Plan.md', '../Old/Plan.md#r']);
   });
 
-  it('maskMarkdownCode blanks the frontmatter and every code context, and keeps prose at its offsets', () => {
+  it('a markdown page: only the raw HTML tags that are live — not in code, not escaped, not a bare href= in prose', () => {
     const page =
-      '---\nnodeType: "[T](../NodeTypes/T.md)"\n---\n\n' +
-      'Prose with `<a href="in-span.md">` and a \\`kept\\` escape.\n\n' +
+      '---\nnodeType: "[T](../NodeTypes/T.md)"\nsrc: in-frontmatter.md\n---\n\n' +
+      'Prose with `<a href="in-span.md">` and an escaped \\<a href="in-escape.md"> tag, and src = in-prose.md.\n\n' +
       '```html\n<a href="in-fence.md">f</a>\n```\n\n' +
       '    <img src="in-indent.md">\n\n' +
-      '> [def]: in-def.md\n\nLive <a href="live.md">x</a>\n';
-    const masked = maskMarkdownCode(page);
-    expect(masked).toHaveLength(page.length);
-    expect(masked.split('\n')).toHaveLength(page.split('\n').length);
-    for (const gone of ['nodeType', 'in-span', 'in-fence', 'in-indent']) expect(masked).not.toContain(gone);
-    for (const kept of ['Prose with', '\\`kept\\`', 'in-def.md', '<a href="live.md">']) {
-      expect(masked).toContain(kept);
-      expect(masked.indexOf(kept)).toBe(page.indexOf(kept));
-    }
-    expect(htmlLinksAffectedByMove(masked, { oldPath: OUTSIDE, newPath: `${KB}/Moved/Index.md`, mapPath: () => null, kbDirName: KB, branch: 'main' }))
-      .toEqual(['live.md']);
+      '> [def]: in-def.md\n\nLive <a href="live.md">x</a> and <img src=\'pic.png\' alt="p"/> and <a href=bare.md>b</a>\n';
+    expect(scanMarkdownHtmlLinks(page)).toEqual(['live.md', 'pic.png', 'bare.md']);
+    expect(htmlLinksAffectedByMove(page, { oldPath: OUTSIDE, newPath: `${KB}/Moved/Index.md`, mapPath: () => null, kbDirName: KB, branch: 'main' }, scanMarkdownHtmlLinks(page)))
+      .toEqual(['live.md', 'pic.png', 'bare.md']);
   });
 });
 

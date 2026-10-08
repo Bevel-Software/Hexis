@@ -126,11 +126,11 @@ describe('planMoveLinks', () => {
     ]);
   });
 
-  it('raw HTML inside code — a fence, an indented block, a code span — is an example, not reported', async () => {
+  it('raw HTML inside code or escaped — a fence, an indented block, a code span, a `\\<` — is an example, not reported', async () => {
     const files = {
       [`${KB}/Old/One.md`]: 'x\n',
       [`${KB}/Howto.md`]:
-        'Write it like `<a href="Old/One.md">` or:\n\n```html\n<a href="Old/One.md">one</a>\n```\n\n' +
+        'Write it like `<a href="Old/One.md">` or \\<a href="Old/One.md"> or:\n\n```html\n<a href="Old/One.md">one</a>\n```\n\n' +
         '    <img src="Old/One.md">\n\nAnd a live one: <a href="Old/One.md">one</a>\n',
     };
     const plan = await planMoveLinks(inputOf(files));

@@ -82,22 +82,26 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
 }
 
 /**
- * `text` with every code context blanked to spaces — fenced and indented
- * blocks, inline code spans — and the frontmatter with them, every other
- * character at its offset. For a scan that must see prose only: the HTML
- * scan of a markdown page, where `<a href>` inside a code example is an
- * example and not a link.
+ * `text` with everything that is not live prose blanked to spaces — fenced
+ * and indented code blocks, inline code spans, the frontmatter, and a
+ * backslash-escaped punctuation character (`\<` is a literal `<`, not a tag)
+ * — every kept character at its offset. For a scan that must see prose only.
  */
-export function maskMarkdownCode(text: string): string {
+function maskMarkdownCode(text: string): string {
   const chars: string[] = Array.from({ length: text.length }, (_, i) => (text[i] === '\n' ? '\n' : ' '));
   const keep = (from: number, to: number) => {
     let i = from;
     while (i < to) {
       const c = text[i];
       if (c === '\\') {
+        // An escape of ASCII punctuation is that character as text; any
+        // other backslash is just a backslash.
+        if (i + 1 < to && /[!-/:-@[-`{-~]/.test(text[i + 1])) {
+          i += 2;
+          continue;
+        }
         chars[i] = c;
-        if (i + 1 < to) chars[i + 1] = text[i + 1];
-        i += 2;
+        i += 1;
         continue;
       }
       if (c === '`') {
@@ -122,6 +126,21 @@ export function maskMarkdownCode(text: string): string {
     definition: (span) => keep(span.start, span.end),
   });
   return chars.join('');
+}
+
+/**
+ * The `href`/`src` values of the raw HTML tags a markdown page carries —
+ * what the app renders as a link or a picture that the markdown grammar does
+ * not rewrite. Only an unescaped `<tag …>` outside code counts: a tag in a
+ * fence, a code span or behind a `\<` is an example, and a bare `href=` in
+ * prose is prose.
+ */
+export function scanMarkdownHtmlLinks(text: string): string[] {
+  const out: string[] = [];
+  const tag = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?>/g;
+  const masked = maskMarkdownCode(text);
+  for (let m = tag.exec(masked); m !== null; m = tag.exec(masked)) out.push(...scanHtmlLinks(m[0]));
+  return out;
 }
 
 /** Where `scanBody` hands what it finds: prose runs (code left out) and reference definitions. */
@@ -669,9 +688,14 @@ export function rewriteMdLinks(text: string, opts: RewriteMdLinksOptions): { tex
  * that moves itself) whose relative target the move would break. Reported,
  * never rewritten.
  */
-export function htmlLinksAffectedByMove(text: string, opts: RewriteMdLinksOptions): string[] {
+export function htmlLinksAffectedByMove(
+  text: string,
+  opts: RewriteMdLinksOptions,
+  /** The destinations to judge: an HTML page's by default, a markdown page's from {@link scanMarkdownHtmlLinks}. */
+  destinations: string[] = scanHtmlLinks(text),
+): string[] {
   const out: string[] = [];
-  for (const destination of scanHtmlLinks(text)) {
+  for (const destination of destinations) {
     const before = resolveMdLink(destination, { basePath: opts.oldPath, kbDirName: opts.kbDirName });
     if (!before || (before.branch !== null && before.branch !== opts.branch)) continue;
     const target = opts.mapPath(before.path) ?? before.path;
