@@ -106,8 +106,12 @@ describe('knowledgeFolderIsNew', () => {
   });
 
   it('does not enter a folder the caller may not read: nothing in it is walked, counted or judged', async () => {
+    // More entries than the budget allows: were the closed folder walked,
+    // the budget alone would answer "not new".
     await mkdir(join(dir, 'Leadership'), { recursive: true });
-    await writeFile(join(dir, 'Leadership', 'Plan.md'), '# Plan\n');
+    await Promise.all(
+      Array.from({ length: ENTRY_BUDGET + 1 }, (_, i) => writeFile(join(dir, 'Leadership', `Plan-${i}.md`), '# Plan\n')),
+    );
     await mkdir(join(dir, 'Team'), { recursive: true });
     await writeFile(join(dir, 'Team', '.gitkeep'), '');
     const asked: string[][] = [];
@@ -116,22 +120,25 @@ describe('knowledgeFolderIsNew', () => {
       return new Map(rels.map((rel) => [rel, rel !== 'Leadership']));
     };
     expect(await knowledgeFolderIsNew(dir, undefined, notLeadership)).toBe(true);
-    // Asked about the folders once, at the top; the closed one's page was never seen.
-    expect(asked).toEqual([['Leadership', 'Team']]);
+    // Asked about the folders once, at the top (in whatever order the disk
+    // lists them); the closed one's pages were never seen.
+    expect(asked.map((rels) => [...rels].sort())).toEqual([['Leadership', 'Team']]);
   });
 
-  it('judges a link the caller may not read as not theirs to know of', async () => {
-    await writeFile(join(dir, 'Real.md'), '# Real\n');
+  it('passes a link over by kind: not a page, never read through, never asked about', async () => {
     try {
-      await symlink(join(dir, 'Real.md'), join(dir, 'Alias.md'));
+      await symlink(join(tmpdir(), 'elsewhere.md'), join(dir, 'Alias.md'));
     } catch {
-      return; // no symlinks on this machine: nothing to judge
+      return; // no symlinks on this machine: nothing to pass over
     }
-    const onlyLinks = async (rels: string[]) => new Map(rels.map((rel) => [rel, rel === 'Alias.md']));
-    // The real page is unreadable to them; the link to it is not — and a link is somebody's.
-    expect(await knowledgeFolderIsNew(dir, undefined, onlyLinks)).toBe(false);
-    const nothing = async (rels: string[]) => new Map(rels.map((rel) => [rel, false]));
-    expect(await knowledgeFolderIsNew(dir, undefined, nothing)).toBe(true);
+    const asked: string[][] = [];
+    const everyone = async (rels: string[]) => {
+      asked.push(rels);
+      return new Map(rels.map((rel) => [rel, true]));
+    };
+    expect(await knowledgeFolderIsNew(dir, undefined, everyone)).toBe(true);
+    expect(asked).toEqual([]);
+    expect(await knowledgeFolderIsNew(dir)).toBe(true);
   });
 
   it('stops reading at its entry budget: that many entries and no page is not a new knowledge base', async () => {

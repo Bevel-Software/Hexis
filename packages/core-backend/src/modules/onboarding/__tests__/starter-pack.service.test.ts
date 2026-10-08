@@ -162,6 +162,13 @@ describe('who is asked', () => {
     expect((await svc.status(ADMIN)).offered).toBe(false);
   });
 
+  it('nobody who may not read the knowledge folder itself, admin or not', async () => {
+    const { svc, unreadable } = harness();
+    unreadable.add('KnowledgeBase');
+    expect((await svc.status(ADMIN)).offered).toBe(false);
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
+  });
+
   it('nobody once the knowledge base has a page', async () => {
     await put(wsDir, `${KB}/KnowledgeBase/Team/Roadmap.md`, '# Roadmap\n');
     const { svc } = harness();

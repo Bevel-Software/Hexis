@@ -292,8 +292,11 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
     const root = await workspaceService.getWorkspacePath(ws.id);
     // As the CALLER may see it: being an admin grants no read of every page,
     // and "offered" or "already has pages" must not tell them of one they
-    // may not read. The same gate `start_session`'s first-run note keeps.
+    // may not read. The same gate `start_session`'s first-run note keeps —
+    // the knowledge folder itself first, then what is in it.
     const knowledgeDir = kb.layout.knowledgeBaseDir;
+    const folder = await accessControl.canReadBatch(ws.id, userEmail, [knowledgeDir]);
+    if (folder.get(knowledgeDir) !== true) return false;
     const mayRead: MayRead = async (rels) => {
       const verdicts = await accessControl.canReadBatch(ws.id, userEmail, rels.map((rel) => `${knowledgeDir}/${rel}`));
       return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));

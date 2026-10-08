@@ -195,7 +195,7 @@ function columnUi({
   withPalette = false,
   workspaceBranch = DEFAULT_BRANCH,
 }: MountOptions = {}) {
-  const auth = authValue({ user: Object.assign(sessionUser, { onboardingDone }) });
+  const auth = authValue({ user: sessionUser(onboardingDone) });
   const ui = (
     <MemoryRouter initialEntries={[route]}>
       <AuthContext.Provider value={auth}>
@@ -238,15 +238,19 @@ function row(title: RegExp | string) {
 const isDone = (title: RegExp | string) => within(row(title)!).queryByText('(done)') !== null;
 
 /**
- * The signed-in user of the test at hand: ONE object per test, so what the
- * app keeps per signed-in user (the starter-pack answer) lives across a
- * rerender and never leaks into the next test, which signs in afresh.
+ * The signed-in user of the test at hand, one object per test and per
+ * onboarding state, never mutated: what the app keeps per signed-in user
+ * (the starter-pack answer) lives across a rerender, and never leaks into
+ * the next test, which signs in afresh.
  */
-let sessionUser: { id: string; email: string; name: string; onboardingDone: boolean };
+type SessionUser = { id: string; email: string; name: string; onboardingDone: boolean };
+let sessionUsers: Record<'done' | 'pending', SessionUser>;
+const sessionUser = (onboardingDone: boolean) => sessionUsers[onboardingDone ? 'done' : 'pending'];
 
 beforeEach(() => {
   resetOnboardingForTests();
-  sessionUser = { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: false };
+  const juan = { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera' };
+  sessionUsers = { done: { ...juan, onboardingDone: true }, pending: { ...juan, onboardingDone: false } };
   fetchStarterPacksMock.mockReset().mockResolvedValue({ offered: false, chosen: null, packs: [], chosenPack: null });
   setViewportWidth(1400);
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software')]);
