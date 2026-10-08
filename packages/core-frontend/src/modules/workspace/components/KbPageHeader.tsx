@@ -16,6 +16,7 @@ import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/
 import { useDismissableMenu } from '../../../shared/components';
 import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
+import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
 
 /**
  * The document's title, and the page's actions beside it.
@@ -36,7 +37,9 @@ import { rootAnchoredPath } from '../utils/pasteLink';
 const KNOWN_EXTENSIONS =
   /\.(md|markdown|txt|csv|tsv|json|yaml|yml|html|htm|pdf|docx|xlsx|pptx|doc|ppt|xls|odt|odp|ods|eml|msg|tool|png|jpe?g|gif|webp|svg)$/i;
 
+/** A platform file keeps its plain name whole: "Plugin settings", not a stripped file name. */
 function titleOf(path: string): string {
+  if (fileNameTooltip(path) !== undefined) return displayFileName(path);
   const base = path.slice(path.lastIndexOf('/') + 1);
   return base.replace(KNOWN_EXTENSIONS, '');
 }
@@ -243,8 +246,9 @@ export function KbPageHeader({
           ref={titleRef}
           tabIndex={-1}
           // `title` because `truncate` hides the rest of a long file name, and
-          // a heading you cannot finish reading needs somewhere to say it.
-          title={titleOf(path)}
+          // a heading you cannot finish reading needs somewhere to say it. A
+          // platform file shown by its plain name hovers its real one.
+          title={fileNameTooltip(path) ?? titleOf(path)}
           className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
         >
           {titleOf(path)}

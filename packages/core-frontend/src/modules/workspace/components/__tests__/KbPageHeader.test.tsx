@@ -37,6 +37,13 @@ describe('KbPageHeader', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Invariant');
   });
 
+  it("titles a plugin's plugin.json Plugin settings, with the file name on hover", () => {
+    renderHeader({ path: 'knowledge-base/Plugins/GTM/plugin.json' });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Plugin settings');
+    expect(h1).toHaveAttribute('title', 'plugin.json');
+  });
+
   it('leaves an unknown extension alone', () => {
     renderHeader({ path: 'Knowledge/roles.unknownext' });
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('roles.unknownext');

@@ -70,6 +70,7 @@ import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
+import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { AdminContext } from '../../admin/state/admin.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
@@ -711,7 +712,7 @@ function ContextMenu({
       style={{ left: pos.left, top: pos.top }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-    <MenuPanel role="menu" aria-label={`Actions for ${entry.name}`} className="min-w-[180px]">
+    <MenuPanel role="menu" aria-label={`Actions for ${displayFileName(entry.relativePath)}`} className="min-w-[180px]">
       {onCreateFile && (
         <MenuItem role="menuitem" onClick={() => { onCreateFile(); onClose(); }}>
           <span className="flex items-center gap-2"><FilePlus size={14} />New file</span>
@@ -1686,7 +1687,7 @@ export function FileTreeNode({
           title="Proposed by you: opens the change request"
         >
           <CaretSlot show={false} />
-          <FileName name={entry.name} />
+          <FileName name={displayFileName(entry.relativePath)} />
           <span
             aria-hidden
             className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
@@ -1730,7 +1731,8 @@ export function FileTreeNode({
         onDragEnd={handleDragEnd}
         onClick={() => { if (!renaming && !isPending) nav.open(entry.relativePath); }}
         onContextMenu={handleContextMenu}
-        title={isPending ? 'Adding…' : undefined}
+        // A platform file shows its plain name; hovering gives the real one.
+        title={isPending ? 'Adding…' : fileNameTooltip(entry.relativePath)}
       >
         {/* The pending spinner is the one glyph that survives the icon cull,
             because it says something no other part of the row says. It takes
@@ -1750,7 +1752,7 @@ export function FileTreeNode({
             onCancel={() => setRenaming(false)}
           />
         ) : (
-          <FileName name={entry.name} />
+          <FileName name={displayFileName(entry.relativePath)} />
         )}
         {/* News about a file you are not looking at (proto:692). Amber, not
             the tab dot's accent: on a tab the dot marks the file you have

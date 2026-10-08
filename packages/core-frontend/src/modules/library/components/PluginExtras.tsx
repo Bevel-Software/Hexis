@@ -55,8 +55,9 @@ export function ManifestButton({
           state: { rawFile: true },
         })
       }
+      title={PLUGIN_MANIFEST_FILE}
     >
-      Manifest
+      Edit plugin settings
     </Button>
   );
 }
@@ -126,8 +127,17 @@ export function ManifestSection({
         <span className="flex w-3 flex-none items-center justify-center">
           <ChevronRight size={11} className={cn('transition-transform duration-150', open && 'rotate-90')} />
         </span>
-        Manifest
-        <span className="font-mono normal-case tracking-normal text-ink-faint">{file}</span>
+        {/* The native manifest is the plugin's settings, by the name the
+            rest of the app gives it; the bundle dialect's file is a format
+            from elsewhere and keeps its technical label. */}
+        {managed ? (
+          <span title={file}>Plugin settings</span>
+        ) : (
+          <>
+            Manifest
+            <span className="font-mono normal-case tracking-normal text-ink-faint">{file}</span>
+          </>
+        )}
       </button>
       {/* The panel is always in the tree, so the button's `aria-controls`
           names an element that exists; only its CONTENT waits for `open`
@@ -143,7 +153,7 @@ export function ManifestSection({
               : 'Read from the bundle format; it is edited in its own repository.'}
           </p>
           {current?.failed ? (
-            <p className="text-detail text-ink-muted">Couldn't read {file}.</p>
+            <p className="text-detail text-ink-muted">Couldn't read {managed ? 'the plugin settings' : file}.</p>
           ) : current?.text == null ? (
             <p className="text-detail text-ink-faint">Loading…</p>
           ) : (
@@ -158,7 +168,7 @@ export function ManifestSection({
               className="mt-2"
               onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH, path), { state: { rawFile: true } })}
             >
-              Edit the manifest
+              Edit plugin settings
             </Button>
           )}
           </>

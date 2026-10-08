@@ -7,6 +7,7 @@ import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
+import { displayFileName, fileNameTooltip } from '../../../shared/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -56,8 +57,8 @@ import { useStarterPacks } from '../../onboarding/state/starter-packs';
 const SUGGESTION_LIMIT = 4;
 
 /** What a page is called, without the extension the reader did not choose. */
-function pageTitle(fileName: string): string {
-  return fileName.replace(/\.(md|markdown)$/i, '');
+function pageTitle(path: string): string {
+  return displayFileName(path).replace(/\.(md|markdown)$/i, '');
 }
 
 /** The folder a page sits in, or '' for one that sits at a root. */
@@ -1048,7 +1049,7 @@ export function FileViewer() {
                       >
                         <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
                         <span className="min-w-0 flex-1 truncate text-ui text-ink">
-                          {pageTitle(page.name)}
+                          {pageTitle(page.relativePath)}
                         </span>
                         {/* The folder it sits in — two pages can share a name,
                             and the one thing that tells them apart is where they
@@ -1095,8 +1096,9 @@ export function FileViewer() {
 
   // What the pane card's bar names — extension kept, unlike the `<h1>` above,
   // because the bar is the technical label (`SKILL.md`, `How to get
-  // started.md`) exactly as the skill page's file bar renders it.
-  const fileBaseName = openFilePath.slice(openFilePath.lastIndexOf('/') + 1);
+  // started.md`) exactly as the skill page's file bar renders it. A platform
+  // file is the exception: it reads by its plain name, its real one on hover.
+  const fileBaseName = displayFileName(openFilePath);
 
   // The repo-relative path (kbDirName stripped) — what the change-request
   // machinery speaks. Null for files outside the KB clone, which cannot have
@@ -1554,7 +1556,7 @@ export function FileViewer() {
           >
             {shellVariant === 'prose' ? (
               <>
-                <FilePaneCard file={fileBaseName} actions={paneActions}>
+                <FilePaneCard file={fileBaseName} fileTitle={fileNameTooltip(openFilePath)} actions={paneActions}>
                   {rendererElement}
                 </FilePaneCard>
                 {/* Every open proposal on this file, under the file it is

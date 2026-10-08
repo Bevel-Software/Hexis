@@ -427,7 +427,7 @@ describe('PluginPage', () => {
   it('opens the manifest at the plugin FOLDER, which is not its identity', async () => {
     pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'go-to-market', displayName: 'GTM', canWrite: true })]);
     renderPlugin('go-to-market');
-    fireEvent.click(await screen.findByRole('button', { name: 'Manifest' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit plugin settings' }));
     await waitFor(() =>
       expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/plugin.json`),
     );
