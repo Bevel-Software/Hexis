@@ -105,7 +105,10 @@ describe('ChangeRequestLink', () => {
   it('leaves no history entry behind through "Back to the knowledge base" either', async () => {
     api.getPullRequest.mockRejectedValue(new GitApiError(404, 'nope'));
     renderAt('/change-requests/276');
-    await userEvent.click(await screen.findByRole('link', { name: 'Back to the knowledge base' }));
+    // Once the answer is on screen: the loading page has the same link, and
+    // a click that lands while the answer replaces it hits a detached node.
+    await screen.findByText(/There is no change request #276/);
+    await userEvent.click(screen.getByRole('link', { name: 'Back to the knowledge base' }));
     expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/workspace$/);
     await userEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/somewhere-before$/);
