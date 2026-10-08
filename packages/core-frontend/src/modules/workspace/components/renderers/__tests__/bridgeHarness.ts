@@ -24,6 +24,8 @@ export interface BridgeRun {
   posted: unknown[];
   /** Ids (or names) of the elements scrolled into view, in order. */
   scrolled: string[];
+  /** The tag of each element scrolled into view, beside `scrolled`: `A`, `INPUT`, `DIV`. */
+  scrolledTags: string[];
   /** How many times the page was scrolled to its top. */
   scrolledToTop: () => number;
 }
@@ -43,8 +45,15 @@ export function runBridge(page: { ids?: string[]; names?: string[]; namedControl
   const handlers: ((e: ClickEvent) => void)[] = [];
   const posted: unknown[] = [];
   const scrolled: string[] = [];
+  const scrolledTags: string[] = [];
   let toTop = 0;
-  const element = (key: string, tagName = 'DIV') => ({ tagName, scrollIntoView: () => scrolled.push(key) });
+  const element = (key: string, tagName = 'DIV') => ({
+    tagName,
+    scrollIntoView: () => {
+      scrolled.push(key);
+      scrolledTags.push(tagName);
+    },
+  });
   const ids = new Set(page.ids ?? []);
   const names = new Set(page.names ?? []);
   const controls = new Set(page.namedControls ?? []);
@@ -84,6 +93,7 @@ export function runBridge(page: { ids?: string[]; names?: string[]; namedControl
     bevel: ctx.bevel as Record<string, unknown>,
     posted,
     scrolled,
+    scrolledTags,
     scrolledToTop: () => toTop,
   };
 }
