@@ -205,7 +205,6 @@ async function headHasNul(file: string): Promise<boolean> {
   }
 }
 
-
 /**
  * Whether `rel` under `templateRoot` resolves inside a git folder — the
  * template entry is a link, and following it would read the repository's own

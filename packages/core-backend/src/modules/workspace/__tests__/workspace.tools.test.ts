@@ -2552,8 +2552,9 @@ describe('start_session', () => {
       expect(res).toEqual({ sessionId: 'thread-xyz' });
     });
 
-    it("counts a starter page the caller may not read as somebody's page: no note", async () => {
-      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n');
+    it('says nothing of a pack whose page the caller may not read, in the checkout or gone from it', async () => {
+      // Absent from the checkout, so the folder reads as new — and the note
+      // would still name the pack and its suggestions.
       const starter: FirstRunStarterSource = {
         firstRunStarter: async () => ({
           name: 'Sales',

@@ -49,7 +49,10 @@ export interface StarterPackApplied {
  * What the onboarding routes depend on. `status` answers anyone signed in;
  * `choose` refuses a member (403), a question no longer asked (409) and a
  * pack that does not exist (404) with a `WorkflowDomainError` carrying that
- * status, and leaves any other failure to the route's generic answer.
+ * status. One failure without a status is read by the route all the same:
+ * the batch write's "locked by …" refusal, which it answers as a 409 to
+ * try again, since nothing was committed. Any other failure is the
+ * route's generic 500.
  */
 export interface IStarterPackService {
   status(user: Pick<AuthUser, 'email'>): Promise<StarterPacksAnswer>;

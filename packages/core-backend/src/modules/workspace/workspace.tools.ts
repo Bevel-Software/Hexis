@@ -1770,6 +1770,11 @@ export function registerWorkspaceTools(
       // and the note names what the pack suggests drafting first.
       const starter = (await starterPacks?.firstRunStarter()) ?? null;
       const pages = starter ? await readableStarterPages(ctx, workspaceId, knowledgeDir, starter.pages) : undefined;
+      // A pack page the caller may not read keeps the note away altogether:
+      // the note names the pack and what it suggests drafting, which is
+      // about pages this caller is not to know of — whether the page is in
+      // the checkout (judged as anybody's above) or gone from it.
+      if (starter && pages && pages.size < starter.pages.size) return null;
       if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), pages))) return null;
       return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
     } catch (err) {
