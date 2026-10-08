@@ -3165,6 +3165,105 @@ describe('preflight for moves and deletes', () => {
   });
 
   describe('move_file', () => {
+    describe('rewrites links', () => {
+      /** A node at Sales/deal.md, linked from a page beside it, a read-only page, and a page the caller cannot read. */
+      async function linked(): Promise<string> {
+        const base = await seeded();
+        await fs.writeFile(KB('NodeTypes/Deal.md'), '# Deal\n');
+        await fs.writeFile(KB('Sales/deal.md'), '---\nnodeType: "[Deal](../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../HR/policy.md).\n');
+        await fs.writeFile(KB('Sales/index.md'), `[d](deal.md "Deal") [r](/${KB_DIR}/Sales/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`);
+        await fs.writeFile(KB('Locked/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Secret/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Sales/transcripts/01.md'), '[d](../deal.md)\n');
+        return base;
+      }
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
+
+      it('by default: links in and out are rewritten, the dry run answering the plan the move carries out', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.status).toBe(200);
+        expect(dry.body.links).toEqual({
+          filesEdited: 2,
+          linksRewritten: 4,
+          edits: [
+            { path: KB('Sales/2026/deal.md'), from: '../NodeTypes/Deal.md', to: '../../NodeTypes/Deal.md' },
+            { path: KB('Sales/2026/deal.md'), from: '../HR/policy.md', to: '../../HR/policy.md' },
+            { path: KB('Sales/index.md'), from: 'deal.md', to: '2026/deal.md' },
+            { path: KB('Sales/index.md'), from: `/${KB_DIR}/Sales/deal.md#terms`, to: `/${KB_DIR}/Sales/2026/deal.md#terms` },
+          ],
+          notRewritten: [{ path: KB('Locked/refs.md'), reason: 'no write access', links: ['../Sales/deal.md'] }],
+          unsearched: 'Links in files you cannot read were not searched, and may still point at the old path.',
+        });
+        // Nothing about the unreadable page leaks.
+        expect(JSON.stringify(dry.body)).not.toContain('Secret');
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(200);
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toEqual(dry.body.links);
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toBe(
+          '---\nnodeType: "[Deal](../../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../../HR/policy.md).\n',
+        );
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toBe(
+          `[d](2026/deal.md "Deal") [r](/${KB_DIR}/Sales/2026/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`,
+        );
+        // The read-only page, the unreadable page and the transcript keep the old path.
+        expect(await fs.readFile(KB('Locked/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Secret/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Sales/transcripts/01.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('`rewriteLinks: false` moves exactly as before: no link touched, no `links` block', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true, rewriteLinks: false });
+        expect(dry.body.links).toBeUndefined();
+        const run = await call(base, 'move_file', { ...args, rewriteLinks: false });
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toBeUndefined();
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toContain('../NodeTypes/Deal.md');
+      });
+
+      it('only the files whose links are edited reach the read and write hooks', async () => {
+        const base = await linked();
+        const reads: string[] = [];
+        const writes: string[] = [];
+        hooks.onAgentRead(async (op) => {
+          reads.push(op.wsPath ?? '');
+        });
+        hooks.onPreWrite(async (op) => {
+          writes.push(op.wsPath ?? '');
+        });
+        expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+        expect(reads.sort()).toEqual([KB('Sales/deal.md'), KB('Sales/index.md')]);
+        expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+      });
+
+      it('a move that would edit more than 200 files is refused, and nothing changes', async () => {
+        const base = await seeded();
+        for (let i = 0; i < 201; i++) await fs.writeFile(KB(`Sales/pages/p${i}.md`), '[d](../deal.md)\n');
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.body).toMatchObject({ allowed: false });
+        expect(dry.body.reason).toMatch(/201 files.*rewriteLinks: false/s);
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(400);
+        expect(JSON.stringify(run.body)).toContain('rewriteLinks: false');
+        expect(await exists(args.src)).toBe(true);
+        expect(await fs.readFile(KB('Sales/pages/p0.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('the description states the default, the opt-out, and that prose and code are not changed', async () => {
+        await start();
+        const def = (await toolRegistry.listInternal()).find((t) => t.name === 'move_file');
+        const description = typeof def?.description === 'string' ? def.description : '';
+        expect(description).toMatch(/rewritten by default/);
+        expect(description).toContain('`rewriteLinks: false`');
+        expect(description).toMatch(/plain prose or code are never changed/);
+      });
+    });
+
     it('a same-access move: the dry run changes nothing, the real call runs without confirm', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };

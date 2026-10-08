@@ -71,6 +71,23 @@ class CheckRefusal {
 }
 
 /**
+ * `moveWithEdits` could not take a lock: another writer held `path` past the
+ * retries. Nothing was moved or written.
+ */
+export class MoveLockedError extends Error {
+  constructor(
+    readonly path: string,
+    readonly holderName: string | null,
+  ) {
+    super(
+      `"${path}" is being edited by ${holderName ?? 'another user'}, so nothing was moved and no link was changed. ` +
+        'Try the move again later.',
+    );
+    this.name = 'MoveLockedError';
+  }
+}
+
+/**
  * A pre-disk write validator: called with the (workspace-relative path, full
  * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
  * names the paths it guards — only a validator that declares it is also run
@@ -387,6 +404,187 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         super.moveFile(src, dest, { ...options, overwrite: false }),
       );
     }
+  }
+
+  /**
+   * A move and the link edits it brings, as ONE change: `move_file` with link
+   * rewriting on. Where `moveFile` lands a move as two queued single-path
+   * commits (a delete, a create), this takes every lock first — both ends of
+   * the move, every file a moved folder holds at its old and its new path, and
+   * every file it edits — in deterministic order, renames,
+   * writes the edits, and commits the whole set synchronously in one commit,
+   * so git sees the move as a rename beside the edits.
+   *
+   * `edits[].path` is where each file sits AFTER the move (a moved file's
+   * edit lands at its new path); `edits[].lockAt` is where it sits now, and is
+   * the path locked. `check` runs once every lock is held and before anything
+   * changes — the caller confirms there that the bytes its edits were computed
+   * from are still the bytes on disk.
+   *
+   * Fail-closed: a lock still held by another writer after the retries throws
+   * {@link MoveLockedError} naming that path, with nothing moved and nothing
+   * written; a failure after the rename puts every edited file's bytes back and
+   * the move undone before the error leaves. Only edited text passes through
+   * memory: a folder's other files, binaries among them, are renamed on disk.
+   */
+  async moveWithEdits(
+    src: string,
+    dest: string,
+    edits: { path: string; lockAt: string; content: string }[],
+    summary: string,
+    check?: () => Promise<void>,
+  ): Promise<Change | null> {
+    const { workflow, workspaceId, branch, user } = this.lockContext;
+    await this.assertNotGitInternals(src);
+    await this.assertNotGitInternals(dest);
+    this.assertInsideRepo(dest);
+    for (const e of edits) {
+      await this.assertNotGitInternals(e.path);
+      this.assertInsideRepo(e.path);
+    }
+    await this.validateResultingWrite(dest, () => this.readFile(src));
+    if (this.lockContext.validateWrite) {
+      for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
+    }
+    // A folder's files are locked one by one at both ends: a save to one of
+    // them mid-move would otherwise recreate the old path, or ride this
+    // move's commit, whose scope names every one of them.
+    const movedNow = src === dest ? [] : await this.filesBelow(src);
+    const paths = [
+      ...new Set([
+        src,
+        dest,
+        ...movedNow.flatMap((f) => [f, dest + f.slice(src.length)]),
+        ...edits.map((e) => e.lockAt),
+      ]),
+    ].sort();
+    const acquired: string[] = [];
+    // Locked paths left holding bytes this move wrote and could not put back:
+    // released with the discard (reset to HEAD), so those bytes cannot ride
+    // the next save's commit as if they were this move's result.
+    const dirtyLeft = new Set<string>();
+    const release = async (mode: 'untouched' | 'enqueue'): Promise<void> => {
+      for (const p of acquired) {
+        try {
+          if (mode === 'enqueue') await workflow.releaseLock(workspaceId, branch, p, user);
+          else if (dirtyLeft.has(p)) await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
+          else await workflow.releaseLockUntouched(workspaceId, branch, p, user);
+        } catch (releaseErr) {
+          log.warn(`lock release failed for "${p}" during moveWithEdits:`, { err: releaseErr });
+        }
+      }
+    };
+    for (const p of paths) {
+      let holderName: string | null = null;
+      let ok = false;
+      try {
+        for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
+          const result = await workflow.acquireLock(workspaceId, branch, p, user);
+          if (result.acquired) {
+            ok = true;
+            break;
+          }
+          holderName = result.lock.holderName;
+          if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
+        }
+      } catch (err) {
+        // The lock store failing is no reason to keep the locks already held
+        // until their TTL runs out.
+        await release('untouched');
+        throw err;
+      }
+      if (!ok) {
+        await release('untouched');
+        throw new MoveLockedError(p, holderName);
+      }
+      acquired.push(p);
+    }
+    // Judged again under the locks, on the bytes that land: a validator that
+    // reads the current file must see the state each edit replaces.
+    try {
+      await this.validateResultingWrite(dest, () => this.readFile(src));
+      if (this.lockContext.validateWrite) {
+        for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
+      }
+      await check?.();
+    } catch (err) {
+      await release('untouched');
+      throw err;
+    }
+
+    // Done in this order, and undone in the reverse one.
+    let moved = false;
+    const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
+    let scope: string[] = [];
+    try {
+      await this.moveNoReplace(src, dest);
+      moved = true;
+      for (const e of edits) {
+        const before = await this.readIfExists(e.path);
+        written.push({ path: e.path, lockAt: e.lockAt, before });
+        await super.writeFile(e.path, e.content);
+      }
+      // The commit names every file at both ends: a folder's files one by one,
+      // because the scope matches files, not the folders holding them.
+      const movedFiles = await this.filesBelow(dest);
+      scope = [
+        ...new Set([
+          ...movedFiles.flatMap((f) => [f, src + f.slice(dest.length)]),
+          ...edits.map((e) => e.path),
+        ]),
+      ].sort();
+      const change = await workflow.commitChanges(workspaceId, user, summary, scope);
+      await release('untouched');
+      if (change) this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: scope, byUser: user });
+      return change;
+    } catch (err) {
+      if (err instanceof PushNeedsAgentResolutionError) {
+        // The commit landed; only its push needs help. Releasing with a commit
+        // arms the pending-commits worker's push retry (see `writeFiles`).
+        await release('enqueue');
+        throw err;
+      }
+      for (const w of written.reverse()) {
+        try {
+          if (w.before === null) {
+            const absolute = this.resolveAbsolutePath(w.path);
+            if (absolute) await fs.rm(absolute, { force: true });
+          } else {
+            await super.writeFile(w.path, w.before);
+          }
+        } catch (restoreErr) {
+          log.warn(`could not restore "${w.path}" after a failed move:`, { err: restoreErr });
+          dirtyLeft.add(w.path);
+          dirtyLeft.add(w.lockAt);
+        }
+      }
+      if (moved) {
+        try {
+          await this.moveNoReplace(dest, src);
+        } catch (undoErr) {
+          log.warn(`could not undo the move of "${src}" after a failure:`, { err: undoErr });
+        }
+      }
+      await release('untouched');
+      throw err;
+    }
+  }
+
+  /** Every file at or under `inputPath` (workspace-relative), the path itself when it is a file. */
+  private async filesBelow(inputPath: string): Promise<string[]> {
+    const absolute = this.resolveAbsolutePath(inputPath);
+    if (!absolute) return [inputPath];
+    const stat = await lstatOrNull(absolute);
+    if (!stat?.isDirectory()) return [inputPath];
+    const out: string[] = [];
+    const walk = async (abs: string, rel: string): Promise<void> => {
+      for (const e of await fs.readdir(abs, { withFileTypes: true })) {
+        if (e.isDirectory()) await walk(path.join(abs, e.name), `${rel}/${e.name}`);
+        else out.push(`${rel}/${e.name}`);
+      }
+    };
+    await walk(absolute, inputPath);
+    return out;
   }
 
   /**
