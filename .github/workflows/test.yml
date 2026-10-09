@@ -126,6 +126,10 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The ratchet decides whether a pull request may merge, so its own tests
+      # run first: a broken ratchet must not pass everything.
+      - run: pnpm test:scripts
+
       - run: pnpm lint:check --base "origin/${{ github.base_ref }}"
 
   # The local MCP server is the one thing in this repo that runs on OTHER
