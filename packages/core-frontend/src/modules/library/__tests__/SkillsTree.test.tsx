@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, within, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
@@ -217,6 +217,44 @@ describe('SkillsTree', () => {
  * manifests and all. One component, one set of rows; what differs is the
  * folder it is handed.
  */
+// Deleting the Library item on screen. Its canonical URL is a workspace URL
+// too, so "no tab left" used to land on Knowledge home — the other surface.
+describe('SkillsTree: deleting the item on screen', () => {
+  const ITEM = `${KB}/Skills/Sales/discovery-call/checklist.md`;
+
+  async function deleteRow(name: string) {
+    fireEvent.contextMenu(row(name));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+  }
+
+  it('lands on Skills & Tools, not Knowledge home, when no tab is left', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: null }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
+
+    await deleteRow('checklist.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(ITEM);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  it('lands on the tab that is left when there is one', async () => {
+    const left = `${KB}/KnowledgeBase/Handbook.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: left }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
+
+    await deleteRow('checklist.md');
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/${DEFAULT_BRANCH}/${left}`),
+    );
+  });
+});
+
 describe('PluginsTree', () => {
   const PLUGINS: FileTreeEntry = dir('.', [
     dir(KB, [
