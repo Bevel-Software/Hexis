@@ -281,7 +281,7 @@ export function mergeCommandActions(
     // without Shift. Anything else would be drawn and never fire.
     if (!isOneLetter(action.shortcut)) {
       console.error(
-        `[commands] the shortcut ${JSON.stringify(action.shortcut.key)} of ${action.id} is not one letter; it is not bound`,
+        `[commands] the shortcut ${JSON.stringify(action.shortcut)} of ${action.id} is not one letter; it is not bound`,
       );
       merged.push({ ...action, shortcut: undefined });
       continue;

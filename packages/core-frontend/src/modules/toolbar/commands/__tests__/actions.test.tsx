@@ -206,6 +206,8 @@ describe('mergeCommandActions / visibleActions', () => {
       command('digit', { key: '1' }),
       command('symbol', { key: '⇧' }),
       command('empty', { key: '' }),
+      // The old shape, a list of keys: the message shows what was given.
+      command('old-shape', ['G', 'K'] as unknown as CommandAction['shortcut']),
       // One letter each, free: kept. ⇧C is free, since C is bound without Shift.
       command('fine', { key: 'O' }),
       command('fine-shift', { key: 'o', shift: true }),
@@ -216,19 +218,20 @@ describe('mergeCommandActions / visibleActions', () => {
     const merged = mergeCommandActions(withKeys, extra);
     const shortcutOf = (id: string) => merged.find((a) => a.id === id)?.shortcut;
     expect(merged.map((a) => a.id).slice(-extra.length)).toEqual(extra.map((a) => a.id));
-    for (const id of ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'second']) {
+    for (const id of ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'old-shape', 'second']) {
       expect(shortcutOf(id)).toBeUndefined();
     }
     expect(shortcutOf('fine')).toEqual({ key: 'O' });
     expect(shortcutOf('fine-shift')).toEqual({ key: 'o', shift: true });
     expect(shortcutOf('shift-c')).toEqual({ key: 'c', shift: true });
-    expect(error).toHaveBeenCalledTimes(7);
+    expect(error).toHaveBeenCalledTimes(8);
     // Each message names the command it is about.
     expect(error.mock.calls.map(([message]) => String(message))).toEqual(
-      ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'second'].map((id) =>
+      ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'old-shape', 'second'].map((id) =>
         expect.stringContaining(` of ${id} `),
       ),
     );
+    expect(String(error.mock.calls[6][0])).toContain('["G","K"]');
     error.mockRestore();
   });
 

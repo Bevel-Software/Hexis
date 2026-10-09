@@ -441,7 +441,6 @@ function SearchPanel({
               id={optionId(r.key)}
               role="option"
               aria-selected={selected}
-              aria-keyshortcuts={hint?.aria}
               // Keep focus in the input: the row is chosen by click, not focused.
               onMouseDown={(e) => e.preventDefault()}
               onMouseMove={() => {

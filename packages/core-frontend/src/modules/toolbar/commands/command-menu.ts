@@ -28,14 +28,16 @@ export function isCommandMenuShortcut(e: KeyboardEvent): boolean {
   return APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
 
-/** A command's shortcut as the menu draws it, says it and declares it. */
+/** A command's shortcut as the menu draws it and says it. */
 export interface ShortcutHint {
   /** The one keycap: `C`; `⇧K` on Apple platforms, `Shift K` elsewhere. */
   label: string;
-  /** What a screen reader hears after the row: `C`, `Shift K`. */
+  /**
+   * What a screen reader hears after the row: `C`, `Shift K`. Spoken, not
+   * declared with `aria-keyshortcuts`: the row is read while the menu is
+   * open, where the key types into the search rather than running it.
+   */
   spoken: string;
-  /** As `aria-keyshortcuts` spells it: `C`, `Shift+K`. */
-  aria: string;
 }
 
 /**
@@ -45,8 +47,8 @@ export interface ShortcutHint {
  */
 export function shortcutHint(shortcut: { key: string; shift?: boolean }, apple: boolean = APPLE): ShortcutHint {
   const key = shortcut.key.toUpperCase();
-  if (!shortcut.shift) return { label: key, spoken: key, aria: key };
-  return { label: apple ? `⇧${key}` : `Shift ${key}`, spoken: `Shift ${key}`, aria: `Shift+${key}` };
+  if (!shortcut.shift) return { label: key, spoken: key };
+  return { label: apple ? `⇧${key}` : `Shift ${key}`, spoken: `Shift ${key}` };
 }
 
 /**

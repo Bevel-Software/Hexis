@@ -22,8 +22,8 @@ describe('shortcutHint', () => {
   it('draws a Shift key as ⇧ and the capital on Apple devices', async () => {
     const { shortcutHint, shortcutKeycapWidth, COMMAND_MENU_SHORTCUT_LABEL } = await loadOn(MAC);
     expect(COMMAND_MENU_SHORTCUT_LABEL).toBe('⌘K');
-    expect(shortcutHint({ key: 'c' })).toEqual({ label: 'C', spoken: 'C', aria: 'C' });
-    expect(shortcutHint({ key: 'i', shift: true })).toEqual({ label: '⇧I', spoken: 'Shift I', aria: 'Shift+I' });
+    expect(shortcutHint({ key: 'c' })).toEqual({ label: 'C', spoken: 'C' });
+    expect(shortcutHint({ key: 'i', shift: true })).toEqual({ label: '⇧I', spoken: 'Shift I' });
     expect(shortcutHint({ key: 'k', shift: true }).label).toBe('⇧K');
     expect(shortcutHint({ key: 's', shift: true }).label).toBe('⇧S');
     expect(shortcutKeycapWidth()).toBe('w-7');
@@ -32,8 +32,8 @@ describe('shortcutHint', () => {
   it('draws it as "Shift" and the letter elsewhere', async () => {
     const { shortcutHint, shortcutKeycapWidth, COMMAND_MENU_SHORTCUT_LABEL } = await loadOn(WINDOWS);
     expect(COMMAND_MENU_SHORTCUT_LABEL).toBe('Ctrl K');
-    expect(shortcutHint({ key: 'c' })).toEqual({ label: 'C', spoken: 'C', aria: 'C' });
-    expect(shortcutHint({ key: 'i', shift: true })).toEqual({ label: 'Shift I', spoken: 'Shift I', aria: 'Shift+I' });
+    expect(shortcutHint({ key: 'c' })).toEqual({ label: 'C', spoken: 'C' });
+    expect(shortcutHint({ key: 'i', shift: true })).toEqual({ label: 'Shift I', spoken: 'Shift I' });
     expect(shortcutHint({ key: 'k', shift: true }).label).toBe('Shift K');
     expect(shortcutHint({ key: 's', shift: true }).label).toBe('Shift S');
     expect(shortcutKeycapWidth()).toBe('w-14');

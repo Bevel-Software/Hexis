@@ -740,9 +740,8 @@ describe('SearchPalette: shortcuts', () => {
     const keycap = (name: string) => row(name).querySelector('kbd')!;
 
     // Not an Apple device under jsdom: "Shift K", not "⇧K".
-    expect(row('Create new page (shortcut C)')).toHaveAttribute('aria-keyshortcuts', 'C');
-    expect(row('Invite people (shortcut Shift I)')).toHaveAttribute('aria-keyshortcuts', 'Shift+I');
-    expect(row('Go to Skills & Tools (shortcut Shift S)')).toHaveAttribute('aria-keyshortcuts', 'Shift+S');
+    // Said, not declared: in the open menu the key types into the search.
+    for (const option of screen.getAllByRole('option')) expect(option).not.toHaveAttribute('aria-keyshortcuts');
     expect(keycap('Create new page (shortcut C)').textContent).toBe('C');
     expect(keycap('Invite people (shortcut Shift I)').textContent).toBe('Shift I');
     expect(keycap('Go to Skills & Tools (shortcut Shift S)').textContent).toBe('Shift S');
