@@ -64,6 +64,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import {
   isUntouchedStarterPage,
   knowledgeFolderIsNew,
@@ -128,6 +129,8 @@ export interface StarterPackServiceDeps {
    * folder old for them (see `knowledgeIsNew`).
    */
   accessControl: Pick<IAccessControl, 'invalidate' | 'canReadBatch'>;
+  /** The one tree walk (see `shared/fs.contract.ts`), for the look at the knowledge folder `knowledgeIsNew` takes. */
+  disk: ITreeWalker;
   /** Plugin discovery over the checkout: what "a plugin by that name is already there" means, at any depth. */
   pluginSource: Pick<PluginSource, 'discover'>;
   /** The plugin creation's identity lock, held over the name check and the commit of the pack's plugins. */
@@ -283,7 +286,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
    * it, so it must); the status question never clones, and answers "no".
    */
   private async knowledgeIsNew(clone: boolean, userEmail: string): Promise<boolean> {
-    const { kb, workspaceService, accessControl } = this.deps;
+    const { kb, workspaceService, accessControl, disk } = this.deps;
     if (!kb.isBranchModelConfigured()) return false;
     const workspaceId = kb.defaultWorkspaceId();
     if (!clone && !(await workspaceService.hasBootstrappedWorkspace(workspaceId))) return false;
@@ -300,7 +303,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       const verdicts = await accessControl.canReadBatch(ws.id, userEmail, rels.map((rel) => `${knowledgeDir}/${rel}`));
       return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));
     };
-    return knowledgeFolderIsNew(path.join(root, kb.kbDirName, knowledgeDir), undefined, mayRead);
+    return knowledgeFolderIsNew(disk, path.join(root, kb.kbDirName), knowledgeDir, undefined, mayRead);
   }
 
   /** The pack's pages: its text files under the knowledge folder. */

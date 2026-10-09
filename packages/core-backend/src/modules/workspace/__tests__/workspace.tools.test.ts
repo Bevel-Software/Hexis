@@ -2321,6 +2321,7 @@ describe('start_session', () => {
       undefined,
       undefined /* downloads */,
       starterPacks,
+      new NodeFs(),
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {

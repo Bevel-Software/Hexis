@@ -1110,6 +1110,7 @@ export async function createCoreServices(
     adminAccess,
     settings,
     accessControl,
+    disk,
     pluginSource,
     pluginLocks: pluginProvisionService,
     events: eventBus,

@@ -14,13 +14,12 @@
  *
  * The question is asked AS THE CALLER, gated like a read. The note goes only
  * to someone who may read the knowledge folder, and it judges the folder as
- * they may see it: a page or a folder they may not read is passed over as if
- * it were not there (`mayRead` in {@link knowledgeFolderIsNew}), so a note
- * that does or does not come tells them nothing about pages beyond them. The
- * answer names no file but the starter guide, which every knowledge base is
- * seeded with, and a chosen starter pack's pages — and when one of those is
- * beyond the caller, no note at all, since a list with a gap would say where
- * the gap is.
+ * they may see it: a page they may not read is passed over as if it were not
+ * there (`mayRead` in {@link knowledgeFolderIsNew}), so a note that does or
+ * does not come tells them nothing about pages beyond them. The answer names
+ * no file but the starter guide, which every knowledge base is seeded with,
+ * and a chosen starter pack's pages — and when one of those is beyond the
+ * caller, no note at all, since a list with a gap would say where the gap is.
  *
  * A STARTER PACK does not end it. The pages a pack adds are tasks with a
  * heading and a line or two — "ask your agent to draft this" — so while one
@@ -31,7 +30,9 @@
 
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { NEW_KNOWLEDGE_BASE_SECTION_ID } from '../agent-guide/agent-guide.js';
+import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
 
 /**
  * The starter guide the template seeds at the top of the knowledge folder
@@ -66,21 +67,18 @@ export interface FirstRunStarterSource {
 
 /**
  * Files that are configuration, not content, wherever they sit: a folder's
- * access rules. Dot-files (the folder placeholder `.gitkeep`, `.bevelignore`,
- * an OS's `.DS_Store`) are passed over by name.
+ * access rules. Dot-entries (the folder placeholder `.gitkeep`, `.bevelignore`,
+ * an OS's `.DS_Store`) the knowledge-base walk never shows at all.
  */
 const NOT_CONTENT = new Set(['access.md']);
 
 /**
- * How many folders the check opens, and how many entries it reads across
- * them, before it calls the knowledge base established. A knowledge base with
- * this many folders or entries and no page among them is not one an agent
- * should greet as new, and `start_session` must stay cheap whatever the tree
- * looks like: the entries are streamed, so a folder of a hundred thousand
- * costs no more than the budget.
+ * How many folders the check lists, the knowledge folder included, before it
+ * calls the knowledge base established. A knowledge base with this many
+ * folders and no page among them is not one an agent should greet as new, and
+ * `start_session` must stay cheap whatever the tree looks like.
  */
-const FOLDER_BUDGET = 200;
-export const ENTRY_BUDGET = 1000;
+export const FOLDER_BUDGET = 200;
 
 /**
  * Which of some pages (paths below the knowledge folder) the caller may
@@ -90,96 +88,96 @@ export const ENTRY_BUDGET = 1000;
 export type MayRead = (relPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
 
 /**
- * Whether the knowledge folder at `dir` (absolute) holds nothing but the
- * starter guide: no file in it or below it other than that guide at its top,
- * folder placeholders, dot-files and access rules. A folder that is not
- * there answers false: that is a knowledge base in a shape the template
- * never made, and greeting it as new would be a guess.
+ * Whether the knowledge folder `knowledgeDir` of the checkout at `repoRoot`
+ * holds nothing but the starter guide: no file in it or below it other than
+ * that guide at its top, folder placeholders, dot-files and access rules. A
+ * folder that is not there answers false: that is a knowledge base in a shape
+ * the template never made, and greeting it as new would be a guess.
  *
- * `starterPages` are a starter pack's pages (path below `dir` → the text the
- * pack wrote): one still holding exactly that text is not a page either.
+ * `starterPages` are a starter pack's pages (path below the folder → the text
+ * the pack wrote): one still holding exactly that text is not a page either.
  *
- * Only regular files are pages and only folders are entered. A link, a
- * socket, anything else is passed over by kind, the way a dot-file is by
- * name: it is not a page, and nothing is ever read through it — a link in a
- * checkout can point anywhere, and neither this walk nor the read check it
- * asks is to follow it.
+ * THE knowledge-base walk does the walking ({@link ITreeWalker.walkKb}, see
+ * `shared/fs.contract.ts`), the way the explorer's does: dot-entries never
+ * shown, a link or a socket never entered nor counted as a file, and
+ * `.bevelignore` honoured — the repository root's rules and every folder's on
+ * the way down — so what the explorer hides this check does not see either,
+ * and a knowledge folder those rules hide is not greeted. A folder that
+ * cannot be listed is the answer: not new, since it cannot say.
  *
- * With `mayRead`, the answer is the CALLER'S, and nothing they may not read
- * takes part in it: a folder they may not read is not entered — not walked,
- * not counted, not judged — and a file they may not read is not theirs to
- * know of, so it does not make the folder old for them. The files of a
- * folder are judged in chunks as they are listed (the first the caller may
- * read ends the walk: not new), and its subfolders once, after its handle
- * is closed. The budgets then count only what is entered on the caller's
- * behalf: the folders they may read. The entry budget is the other mode's:
- * without `mayRead` the first page found ends the walk, and a tree too large
- * to walk answers "not new" — which, with nobody to answer for, names
- * nothing.
+ * With `mayRead`, the answer is the CALLER'S: a file they may not read is not
+ * theirs to know of, so it does not make the folder old for them. Every
+ * folder is entered, as the agent's own listing shows every folder and
+ * filters its files — a deeper rule may open a page below a folder its
+ * parent's rules close — and a folder's pages are judged in chunks of
+ * {@link JUDGE_CHUNK}; the first the caller may read ends the walk: not new.
+ * Without `mayRead` the first page ends it. Either way {@link FOLDER_BUDGET}
+ * folders end it too: that many and no page is not a new knowledge base.
  */
 export async function knowledgeFolderIsNew(
-  dir: string,
+  disk: ITreeWalker,
+  repoRoot: string,
+  knowledgeDir: string,
   starterPages?: ReadonlyMap<string, string>,
   mayRead?: MayRead,
 ): Promise<boolean> {
-  let opened = 0;
-  let read = 0;
-  const holdsNothing = async (folder: string, rel: string): Promise<boolean> => {
-    if (++opened > FOLDER_BUDGET) return false;
-    const folders: { abs: string; rel: string }[] = [];
-    /** This folder's pages not yet judged (`mayRead` mode only). */
-    let pages: string[] = [];
-    /** Whether any of the pages waiting is one the caller may read. */
-    const anyReadable = async (): Promise<boolean> => {
-      if (pages.length === 0) return false;
-      const verdicts = await mayRead!(pages);
-      const found = pages.some((p) => verdicts.get(p) === true);
-      pages = [];
-      return found;
-    };
-    // `for await` closes the handle however the loop ends, an early return
-    // included — and it is closed before any subfolder is opened, since those
-    // are entered after the loop.
-    for await (const entry of await nodeFs.opendir(folder)) {
-      if (!mayRead && ++read > ENTRY_BUDGET) return false;
-      const name = entry.name;
-      if (name.startsWith('.') || NOT_CONTENT.has(name)) continue;
-      if (rel === '' && name === STARTER_GUIDE_FILE && entry.isFile()) continue;
-      const childRel = rel ? `${rel}/${name}` : name;
-      if (entry.isDirectory()) {
-        folders.push({ abs: join(folder, name), rel: childRel });
-        continue;
-      }
-      // Not a regular file: not a page, and never read through (see above).
-      if (!entry.isFile()) continue;
-      if (await isUntouchedStarterPage(join(folder, name), starterPages?.get(childRel))) continue;
-      // A page, with nobody to ask: something someone put there.
-      if (!mayRead) return false;
-      pages.push(childRel);
-      if (pages.length >= JUDGE_CHUNK && (await anyReadable())) return false;
-    }
-    if (await anyReadable()) return false;
-    // The subfolders, asked about a chunk at a time — a root holding a great
-    // many of them is still one bounded ask after another — and entered only
-    // as the caller may.
-    for (let at = 0; at < folders.length; at += JUDGE_CHUNK) {
-      const chunk = folders.slice(at, at + JUDGE_CHUNK);
-      const enter = mayRead ? await mayRead(chunk.map((f) => f.rel)) : null;
-      for (const child of chunk) {
-        if (enter && enter.get(child.rel) !== true) continue;
-        if (!(await holdsNothing(child.abs, child.rel))) return false;
-      }
-    }
-    return true;
+  let sawRoot = false;
+  let established = false;
+  let listed = 0;
+  /** Whether any of `pages` (paths below the knowledge folder) is one the caller may read. */
+  const anyReadable = async (pages: string[]): Promise<boolean> => {
+    const verdicts = await mayRead!(pages);
+    return pages.some((p) => verdicts.get(p) === true);
   };
   try {
-    return await holdsNothing(dir, '');
+    // The rules in force above the knowledge folder — the repository root's
+    // file — which a walk starting below it would not see on its own.
+    const above = await BevelIgnoreStack.empty().extendedWith(repoRoot);
+    const dir = join(repoRoot, knowledgeDir);
+    if (above.isIgnored(dir, true)) return false;
+    await disk.walkKb(
+      dir,
+      [
+        {
+          async onDir(rel, entries, folder) {
+            if (rel === '') sawRoot = true;
+            if (++listed > FOLDER_BUDGET) {
+              established = true;
+              return;
+            }
+            let pages: string[] = [];
+            for (const entry of entries) {
+              if (!entry.isFile() || NOT_CONTENT.has(entry.name)) continue;
+              if (rel === '' && entry.name === STARTER_GUIDE_FILE) continue;
+              const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+              if (await isUntouchedStarterPage(join(folder.abs, entry.name), starterPages?.get(childRel))) continue;
+              // A page, with nobody to ask: something someone put there.
+              if (!mayRead) {
+                established = true;
+                return;
+              }
+              pages.push(childRel);
+              if (pages.length >= JUDGE_CHUNK) {
+                if (await anyReadable(pages)) {
+                  established = true;
+                  return;
+                }
+                pages = [];
+              }
+            }
+            if (pages.length > 0 && (await anyReadable(pages))) established = true;
+          },
+        },
+      ],
+      { ignore: above, until: () => established, unreadable: 'throw' },
+    );
   } catch {
     return false;
   }
+  return sawRoot && !established;
 }
 
-/** How many of a folder's pages, or subfolders, are judged in one ask of `mayRead`. */
+/** How many of a folder's pages are judged in one ask of `mayRead`. */
 const JUDGE_CHUNK = 200;
 
 /**

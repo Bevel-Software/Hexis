@@ -33,7 +33,7 @@ import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
-import { isAbsence } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
 import { accessRoster, resolveAccessView } from '../access/access-view.js';
 import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/access-mutation.service.js';
@@ -928,6 +928,12 @@ export function registerWorkspaceTools(
    * note reads the knowledge folder alone.
    */
   starterPacks?: FirstRunStarterSource,
+  /**
+   * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
+   * note's look at the knowledge folder. Optional for the harnesses about the
+   * file primitives; without it `start_session` answers the id alone.
+   */
+  disk?: ITreeWalker,
 ): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
@@ -1755,7 +1761,7 @@ export function registerWorkspaceTools(
    */
   const firstRunFor = async (ctx: ToolContext): Promise<string | null> => {
     try {
-      if (!kb.isBranchModelConfigured()) return null;
+      if (!disk || !kb.isBranchModelConfigured()) return null;
       const workspaceId = kb.defaultWorkspaceId();
       if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceId))) return null;
       const knowledgeDir = kb.layout.knowledgeBaseDir;
@@ -1780,7 +1786,7 @@ export function registerWorkspaceTools(
       const starter = (await starterPacks?.firstRunStarter()) ?? null;
       const pages = starter ? await readableStarterPages(ctx, workspaceId, knowledgeDir, starter.pages) : undefined;
       if (starter && pages && pages.size < starter.pages.size) return null;
-      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir), pages, mayRead))) return null;
+      if (!(await knowledgeFolderIsNew(disk, join(root, kbDirName), knowledgeDir, pages, mayRead))) return null;
       return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
     } catch (err) {
       log.debug('start_session: could not tell whether the knowledge base is new', {

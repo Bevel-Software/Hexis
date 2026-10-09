@@ -78,17 +78,21 @@ function harness({
     commitChanges: vi.fn(async () => ({ sha: 'abc' })),
   };
   const events = { emit: vi.fn() };
-  /** Who may read what: everything, unless a test narrows it by repo-relative path. */
+  /**
+   * Who may read what: everything, unless a test narrows it by repo-relative
+   * path — a folder's name closes what is below it, as the folder chain does
+   * in the real verdict.
+   */
   const unreadable = new Set<string>();
+  const denied = (p: string) => [...unreadable].some((u) => p === u || p.startsWith(`${u}/`));
   const accessControl = {
     invalidate: vi.fn(),
-    canReadBatch: vi.fn(async (_ws: string, _email: string, paths: string[]) =>
-      new Map(paths.map((p) => [p, !unreadable.has(p)])),
-    ),
+    canReadBatch: vi.fn(async (_ws: string, _email: string, paths: string[]) => new Map(paths.map((p) => [p, !denied(p)]))),
   };
   const svc = new StarterPackService({
     packsDir,
     kb,
+    disk: new NodeFs(),
     pluginSource: new KbPluginSource(new NodeFs(), kb),
     pluginLocks,
     workspaceService: {
