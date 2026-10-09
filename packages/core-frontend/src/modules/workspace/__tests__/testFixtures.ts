@@ -51,6 +51,7 @@ export function makeWorkspaceFixture(
     moveEntry: async () => {},
     saveFile: async () => {},
     reloadTabFromDisk: async () => {},
+    clearChangedOnBranch: () => {},
     setPendingContent: () => {},
     acceptPendingContent: async () => {},
     rejectPendingContent: async () => {},

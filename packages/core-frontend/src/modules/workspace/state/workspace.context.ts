@@ -98,6 +98,41 @@ export interface OpenTab {
   savedContent: string | null;
   isDirty: boolean;
   pendingFileContent: string | null;
+  /**
+   * Set when this tab's file was deleted by someone else — a teammate, an
+   * agent, a merged change request, a pull from the git host. The tab stays
+   * open with its `content` and `isDirty` intact, so unsaved edits survive,
+   * and the file page shows "This file was deleted" in place of the file.
+   * `name` is who deleted it, when the change event named a person; null when
+   * the deletion was learned another way (a tree refresh, a re-read). Only
+   * Close clears it, or the file coming back. Absent on every other tab.
+   */
+  deletedBy?: { name: string | null } | null;
+  /**
+   * Set when a change pulled from the git host reached this tab while it had
+   * unsaved edits: `merged` when the edits were merged onto the new content
+   * (and are still unsaved), `discarded` when they could not be and the tab
+   * took the new content. Drives the banner above the editor; cleared by the
+   * next save, by dismissing the banner, or by closing the tab.
+   */
+  changedOnBranch?: 'merged' | 'discarded' | null;
+  /**
+   * Counts the times content from outside replaced this tab's unsaved buffer
+   * (a merge, or a discard). The editor keys on it, so it reloads its buffer
+   * from `content` instead of keeping the text the change was merged into.
+   */
+  remoteRevision?: number;
+}
+
+/**
+ * What a delete did to the tab strip. `closedActive` is true when the tab on
+ * screen was among the ones it closed; `newActivePath` is then the tab that
+ * is active now, or null when no tab is left — the caller moves the address
+ * there, as closing a tab does.
+ */
+export interface DeleteEntryResult {
+  closedActive: boolean;
+  newActivePath: string | null;
 }
 
 /** What a `hydrateTabs` call read, and whether its result reached the strip. */
@@ -330,9 +365,14 @@ export interface WorkspaceContextValue {
   clearUploadError: (target: UploadTarget) => void;
   /**
    * Delete this branch's copy of a file or folder. Resolves `false` when
-   * nothing was deleted because the user kept their unsaved tabs.
+   * nothing was deleted because the user kept their unsaved tabs, and throws
+   * when the server refused or failed it; in both cases no tab closes. On
+   * success it says whether the active tab was closed and which tab is
+   * active now, so the caller can move the address (see
+   * {@link DeleteEntryResult}). Resolves nothing when the workspace moved to
+   * another branch meanwhile.
    */
-  deleteEntry: (relativePath: string) => Promise<void | false>;
+  deleteEntry: (relativePath: string) => Promise<DeleteEntryResult | false | void>;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
   saveFile: (relativePath: string, content: string) => Promise<void>;
   /**
@@ -344,6 +384,8 @@ export interface WorkspaceContextValue {
    * tab isn't open or the workspace isn't ready.
    */
   reloadTabFromDisk: (relativePath: string) => Promise<void>;
+  /** Dismiss the changed-on-branch banner of the tab at `relativePath`. */
+  clearChangedOnBranch: (relativePath: string) => void;
   /**
    * Called by the chat hook when the agent has written a new version of the
    * currently-active file. Routes to `activeTab.pendingFileContent`. The chat

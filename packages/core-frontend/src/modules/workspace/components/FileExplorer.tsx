@@ -63,8 +63,8 @@ import {
 } from '../../change-requests/services/change-requests.api';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
-import { useSearchParams } from 'react-router-dom';
-import { CR_FILE_PARAM, CR_PARAM, useFileNav } from '../routing/kb-routes';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { CR_FILE_PARAM, CR_PARAM, branchFromPathname, kbFileUrl, useFileNav } from '../routing/kb-routes';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
@@ -476,6 +476,11 @@ function ContextMenu({
     workspaceBranch,
   } = useWorkspace();
   const suggestions = useSuggestions();
+  // Read off the router alone, not `useFileNav`: the Library's trees draw
+  // this menu with no git context, and only a Knowledge page — one whose
+  // address names a branch — has a file on screen to land away from.
+  const navigate = useNavigate();
+  const location = useLocation();
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
   const confirm = useTreeConfirm();
@@ -627,6 +632,7 @@ function ContextMenu({
     entry.type === 'directory' && kbDirName && entry.relativePath.startsWith(`${kbDirName}/`)
       ? entry.relativePath.slice(kbDirName.length + 1)
       : null;
+  const branchOnScreen = branchFromPathname(location.pathname);
   const handleDelete = () => {
     onClose();
     const deleteOnBranch = async (): Promise<boolean> => {
@@ -635,7 +641,17 @@ function ContextMenu({
       // commit for a path that does not exist.
       if (fileTree && !pathExistsInTree(fileTree, entry.relativePath)) return true;
       try {
-        return (await deleteEntry(entry.relativePath)) !== false;
+        const result = await deleteEntry(entry.relativePath);
+        if (result === false) return false;
+        // The file on screen went with it: land where closing its tab would,
+        // on the tab that is left or on Knowledge home, replacing the entry
+        // so Back never returns to a file that is gone. The file page trusts
+        // only the address, so without this it waited on the deleted file
+        // for good. Only on a Knowledge page — elsewhere nothing is on screen.
+        if (result?.closedActive && branchOnScreen !== null) {
+          navigate(kbFileUrl(branchOnScreen, result.newActivePath ?? undefined), { replace: true });
+        }
+        return true;
       } catch (err) {
         console.error('Failed to delete entry:', err);
         const msg = err instanceof Error ? err.message : String(err);

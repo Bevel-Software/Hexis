@@ -149,6 +149,14 @@ import { OpenChangeRequestsContext } from '../../state/open-change-requests.cont
 import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
+/**
+ * What the workspace state does when a change pulled from the git host meets
+ * the tab's unsaved edits: new buffer and baseline, the outcome, and one more
+ * `remoteRevision`. Needs `captureTyped` so the baseline is its own.
+ */
+let injectRemoteChangeFromTest:
+  | ((change: { content: string; savedContent: string; outcome: 'merged' | 'discarded' }) => void)
+  | null = null;
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return {
@@ -264,6 +272,19 @@ function ViewerHarness({
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
   const [pendingFileContent, setPendingFileContent] = useState<string | null>(null);
+  const [changedOnBranch, setChangedOnBranch] = useState<'merged' | 'discarded' | null>(null);
+  const [remoteRevision, setRemoteRevision] = useState(0);
+  useEffect(() => {
+    injectRemoteChangeFromTest = ({ content, savedContent: saved, outcome }) => {
+      setOpenFileContent(content);
+      setSavedContent(saved);
+      setChangedOnBranch(outcome);
+      setRemoteRevision((n) => n + 1);
+    };
+    return () => {
+      injectRemoteChangeFromTest = null;
+    };
+  }, []);
 
   useEffect(() => {
     injectPendingFromTest = (value?: string) => {
@@ -282,6 +303,8 @@ function ViewerHarness({
         savedContent: effectiveSaved,
         isDirty: false,
         pendingFileContent,
+        changedOnBranch,
+        remoteRevision,
       }
     : null;
   const workspace: WorkspaceContextValue = {
@@ -329,6 +352,7 @@ function ViewerHarness({
       setSavedContent(content);
     },
     reloadTabFromDisk: async () => {},
+    clearChangedOnBranch: () => setChangedOnBranch(null),
     setPendingContent: (content: string) => {
       setPendingFileContent(content);
     },
@@ -1875,5 +1899,75 @@ describe('FileViewer: opening straight into the editor', () => {
     expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+});
+
+// A commit pulled from the git host changed the open file while it had
+// unsaved edits. The workspace state merged them (or could not); the viewer
+// says which, and the editor shows the buffer that came out of it.
+describe('FileViewer: the file changed on the branch while you were editing', () => {
+  it('shows the merged text in the editor, still unsaved, under the merged banner', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.type(screen.getByRole('textbox'), ' Mine.');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({
+        content: 'Upstream first line. Mine.',
+        savedContent: 'Upstream first line.',
+        outcome: 'merged',
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'This file changed on the branch while you were editing. Your edits were merged in; save to keep them.',
+      ),
+    ).toBeInTheDocument();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Upstream first line. Mine.');
+  });
+
+  it('says the edits were discarded when they could not be merged, and shows the new content', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.type(screen.getByRole('textbox'), ' Mine.');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({
+        content: 'Theirs instead.',
+        savedContent: 'Theirs instead.',
+        outcome: 'discarded',
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'This file changed on the branch while you were editing, and your edits could not be merged. They were discarded.',
+      ),
+    ).toBeInTheDocument();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Theirs instead.');
+  });
+
+  it('Dismiss takes the banner away', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'New.', savedContent: 'New.', outcome: 'discarded' });
+    });
+    const banner = await screen.findByText(/your edits could not be merged/);
+
+    await user.click(within(banner.closest('[role="status"]') as HTMLElement).getByRole('button', { name: 'Dismiss' }));
+
+    expect(screen.queryByText(/your edits could not be merged/)).not.toBeInTheDocument();
+  });
+
+  it('shows no banner when nothing came from the branch', async () => {
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+    await screen.findByRole('button', { name: 'Edit' });
+    expect(screen.queryByText(/changed on the branch while you were editing/)).not.toBeInTheDocument();
   });
 });

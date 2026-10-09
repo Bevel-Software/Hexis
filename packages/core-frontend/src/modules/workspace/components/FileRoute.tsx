@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { useWorkspace } from '../state/workspace.context';
+import { useWorkspace, type OpenTab } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
 import { useGit } from '../../git/state/git.context';
 import { readPersistedTabs } from '../utils/tab-persistence';
@@ -15,6 +15,7 @@ import {
 } from '../routing/kb-routes';
 import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
+import { copyToClipboard } from '../../../lib/clipboard';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -524,8 +525,20 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
    */
   const resolvingId = segmentIsId && pathFromUrl === '';
 
+  /**
+   * The file on screen was deleted by someone else (`deletedBy` is set only
+   * for a delete this session did not make — its own close the tab and move
+   * the address). Shown in place of the file, whatever the tab still holds:
+   * a background tab whose bytes were dropped has nothing to load either.
+   */
+  const deletedTab =
+    !error && workspace.activeTab?.deletedBy && workspace.activeTab.path === pathFromUrl
+      ? workspace.activeTab
+      : null;
+
   const loadingFile =
     !error &&
+    !deletedTab &&
     !goneBranch &&
     !unknownBranch &&
     !bootstrapFailure &&
@@ -542,6 +555,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           : bootstrapFailure ? 'bootstrap-failed'
             : statusUnknown ? 'git-status-failed'
               : error ? error.kind
+                : deletedTab ? 'file-deleted'
                 : loadingFile ? 'loading'
                   : 'viewer';
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -646,6 +660,24 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     );
   }
 
+  if (deletedTab) {
+    return (
+      <DeletedFileNotice
+        tab={deletedTab}
+        branch={branchFromUrl}
+        onClose={async () => {
+          // Close lands as the person's own delete does: on the tab that is
+          // left, or Knowledge home, replacing the entry for the gone file.
+          // The notice already said the edits exist only here and offered to
+          // copy them, so it does not ask again.
+          const { closed, newActivePath } = await workspace.closeTab(deletedTab, { skipConfirm: true });
+          if (!closed) return;
+          navigate(kbFileUrl(branchFromUrl, newActivePath ?? undefined), { replace: true });
+        }}
+      />
+    );
+  }
+
   if (error?.kind === 'file-missing') {
     return (
       <ErrorScreen title="File not found">
@@ -725,6 +757,59 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
 function basename(path: string): string {
   const i = path.lastIndexOf('/');
   return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/**
+ * "This file was deleted": the file on screen was deleted by someone else.
+ * The same frame as "File not found". With unsaved edits, the edited text
+ * stays on screen with Copy edits beside Close — the tab is the only place
+ * those edits exist.
+ */
+function DeletedFileNotice({
+  tab,
+  branch,
+  onClose,
+}: {
+  tab: OpenTab;
+  branch: string;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState<boolean | null>(null);
+  const name = tab.deletedBy?.name ?? null;
+  const edits = tab.isDirty ? tab.content ?? '' : null;
+  return (
+    <ErrorScreen title="This file was deleted">
+      <p className="text-ui text-ink-muted">
+        <span className="font-mono text-ink">{basename(tab.path)}</span> was deleted from{' '}
+        <span className="font-mono text-ink">{branch}</span>
+        {name ? ` by ${name} a moment ago.` : '.'}
+      </p>
+      {edits !== null && (
+        <div className="space-y-2 text-left">
+          <p className="text-ui text-ink">Your unsaved edits exist only here. Copy them before you close.</p>
+          <pre
+            aria-label="Your unsaved edits"
+            className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-sunken p-3 text-detail text-ink"
+          >
+            {edits}
+          </pre>
+        </div>
+      )}
+      <div className="flex justify-center gap-2">
+        {edits !== null && (
+          <Button variant="outline" onClick={async () => setCopied(await copyToClipboard(edits))}>
+            Copy edits
+          </Button>
+        )}
+        <Button variant="primary" onClick={onClose}>Close</Button>
+      </div>
+      {copied !== null && (
+        <p role="status" className="text-meta text-ink-faint">
+          {copied ? 'Edits copied.' : "Couldn't copy: select the text above instead."}
+        </p>
+      )}
+    </ErrorScreen>
+  );
 }
 
 /** The status and message of a failed read, for the `?trace=files` log. */
