@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { defaultKbTemplateDir } from '../../../assets.js';
-import { agentGuideSections } from '../../agent-guide/agent-guide.js';
+import { agentGuideSections } from '../../agent-guide/index.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import {
   FIRST_RUN_SECTION_ID,

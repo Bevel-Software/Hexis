@@ -31,7 +31,7 @@
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
-import { NEW_KNOWLEDGE_BASE_SECTION_ID } from '../agent-guide/agent-guide.js';
+import { NEW_KNOWLEDGE_BASE_SECTION_ID } from '../agent-guide/index.js';
 import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
 
 /**
