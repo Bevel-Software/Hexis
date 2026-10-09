@@ -164,9 +164,13 @@ export interface IEmbedService {
   loadFile(token: string): Promise<EmbedFileView>;
 
   /**
-   * The raw bytes of the embedded file, or of one `path` beside it (an image
-   * a markdown page references), for the app renderers that read bytes rather
-   * than the text buffer. Gated on the token identity's read access, per file.
+   * The raw bytes of the embedded file, or of one asset `path` beside it (an
+   * image a markdown page shows — a file no reader edits as text, or an SVG,
+   * the one text format a page draws as a picture), for the app renderers
+   * that read bytes rather than the text buffer. Gated on the token
+   * identity's read access, per file. Any other text page than the embedded
+   * one is refused: the token scopes the view to ONE page, and another page
+   * opens in the app, never through this view's token.
    */
   readBytes(token: string, path?: string): Promise<{ bytes: Buffer; path: string }>;
 

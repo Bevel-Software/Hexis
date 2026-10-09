@@ -260,6 +260,11 @@ export class EmbedService implements IEmbedService {
    * that would show it answers a refusal, not the content, and a save would
    * replace a binary with the viewer's draft.
    */
+  /** A file a page draws rather than a page: bytes no reader edits as text, or an SVG. */
+  private isAsset(repoRelative: string): boolean {
+    return !this.readers.readerFor(repoRelative).textEditable || /\.svg$/i.test(repoRelative);
+  }
+
   private async assertTextEditable(repoRelative: string): Promise<void> {
     const reader = this.readers.readerFor(repoRelative);
     if (!reader.textEditable) throw new EmbedAccessError('This file is not editable as text');
@@ -277,6 +282,13 @@ export class EmbedService implements IEmbedService {
     // page, never to one page's read permissions.
     const target = path ? resolveBeside(claims.repoRelative, path) : claims.repoRelative;
     if (target === null) throw new EmbedAccessError('That path is not inside this knowledge base');
+    // ONE page, as the token promises: beside the page only an ASSET it draws
+    // is served — a file no reader edits as text, or an SVG, the one text
+    // format a page shows as a picture. Another page's text never comes
+    // through this token; that page opens in the app, under its own view.
+    if (target !== claims.repoRelative && !this.isAsset(target)) {
+      throw new EmbedAccessError('This view shows one page; another page opens in the app');
+    }
     const workspaceId = this.defaultWorkspaceId();
     if (!(await this.accessControl.canRead(workspaceId, user.email, target))) {
       throw new EmbedAccessError(`You don't have permission to read "${target}".`);
