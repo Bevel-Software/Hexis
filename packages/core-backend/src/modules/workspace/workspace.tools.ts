@@ -3824,8 +3824,8 @@ export function registerWorkspaceTools(
         `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
         'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
         '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
-        'Refused: `not found` (missing or unreadable), `download permission required`; no link when nothing is ' +
-        'included. At most 500 MB per request.',
+        'Refused: `not found` (missing or named-but-unreadable; folders omit unreadable files), ' +
+        '`download permission required`; no link when nothing is included. At most 500 MB per request.',
       inputs: {
         type: 'object',
         properties: {

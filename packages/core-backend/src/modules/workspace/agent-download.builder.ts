@@ -116,9 +116,12 @@ function zipsTooLarge(total: number, maxBytes: number): ToolError {
  * folder is not enough — a file's own frontmatter or a nested `access.md` can
  * withhold it, and the app's folder zip once packed such files.
  *
- * A file the caller may not read is `not found`, the same answer as a path
- * with nothing at it; a readable one they may not download is `download
- * permission required`. Every included file then goes to the deployment's read
+ * A file the caller NAMED and may not read is `not found`, the same answer as
+ * a path with nothing at it; one met inside a requested folder that they may
+ * not read is left out without a word — its name is what the read model
+ * hides, and the explorer leaves it out the same way. A readable one they may
+ * not download is `download permission required`, named either way: the
+ * explorer shows it. Every included file then goes to the deployment's read
  * hook once, as a `read_file` of it would, and one the hook refuses is listed
  * with the hook's own words. One refused path never stops the others.
  *
@@ -181,10 +184,15 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
   const readable = all.length > 0 ? await deps.canReadBatch(all) : new Map<string, boolean>();
   const visible = all.filter((p) => readable.get(p) === true);
   const downloadable = visible.length > 0 ? await deps.canDownloadBatch(visible) : new Map<string, boolean>();
+  const named = new Set(requested);
   const allowed: string[] = [];
   for (const rel of all) {
-    if (readable.get(rel) !== true) refuse(toWs(rel), NOT_FOUND);
-    else if (downloadable.get(rel) !== true) refuse(toWs(rel), DOWNLOAD_PERMISSION_REQUIRED);
+    if (readable.get(rel) !== true) {
+      // Named by the caller: answered as nothing there. Found inside a folder:
+      // not answered at all — listing it as refused would hand the caller the
+      // name of a file the read model hides from them.
+      if (named.has(toWs(rel))) refuse(toWs(rel), NOT_FOUND);
+    } else if (downloadable.get(rel) !== true) refuse(toWs(rel), DOWNLOAD_PERMISSION_REQUIRED);
     else allowed.push(rel);
   }
 

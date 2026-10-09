@@ -264,15 +264,19 @@ describe('request_file_download: every file judged on its own', () => {
 
     expect(status).toBe(200);
     expect(body.files.map((f) => f.path).sort()).toEqual([`${KB}/Shared/Open.md`, `${KB}/Shared/access.md`]);
-    expect([...body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
-      { path: `${KB}/Shared/Inner/Plan.md`, reason: NOT_FOUND },
-      { path: `${KB}/Shared/Inner/access.md`, reason: NOT_FOUND },
-      { path: `${KB}/Shared/Node-Deny-Download.md`, reason: DOWNLOAD_PERMISSION_REQUIRED },
+    // A readable file the caller may not download is named: the explorer
+    // shows it. The files they may not read are not — their names are what
+    // the read model hides, and a folder answer must not list them.
+    expect(body.refused).toEqual([{ path: `${KB}/Shared/Node-Deny-Download.md`, reason: DOWNLOAD_PERMISSION_REQUIRED }]);
+    for (const hidden of ['Inner/Plan.md', 'Inner/access.md', 'Node-Deny-Read.md']) {
+      expect(JSON.stringify(body)).not.toContain(hidden);
+    }
+    // A hidden file the caller NAMES is answered exactly as a missing one.
+    const missing = await request(h.base, [`${KB}/Shared/Nope.md`, `${KB}/Shared/Node-Deny-Read.md`]);
+    expect([...missing.body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
       { path: `${KB}/Shared/Node-Deny-Read.md`, reason: NOT_FOUND },
+      { path: `${KB}/Shared/Nope.md`, reason: NOT_FOUND },
     ]);
-    // A hidden file is answered exactly as a missing one.
-    const missing = await request(h.base, [`${KB}/Shared/Nope.md`]);
-    expect(missing.body.refused).toEqual([{ path: `${KB}/Shared/Nope.md`, reason: NOT_FOUND }]);
 
     // One zip for the folder, its entries at their full repository paths.
     expect(body.folders).toHaveLength(1);
