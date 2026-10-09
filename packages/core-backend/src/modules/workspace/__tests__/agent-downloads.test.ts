@@ -504,6 +504,20 @@ describe('a download link answers once', () => {
     h.store.stopSweeping();
   });
 
+  it('a request issued after the store was stopped does not start the sweeper again', async () => {
+    const h = await start({ ttlMs: 50 });
+    await request(h.base, [`${KB}/Shared`]);
+    await new Promise((r) => setTimeout(r, 80));
+    // Stopped for good, as shutdown stops it. A request that still lands
+    // afterwards used to re-arm the sweeper, whose first sweep runs at once
+    // and would have deleted the expired request's bytes here.
+    h.store.stopSweeping();
+    await h.store.drainSweep();
+    await request(h.base, [`${KB}/Shared`]);
+    await h.store.drainSweep();
+    expect((await readdir(h.downloadsRoot)).length).toBe(2);
+  });
+
   it('deletes the bytes of a request once every link of it has been fetched', async () => {
     const h = await start();
     const { body } = await request(h.base, [`${KB}/Shared`]);

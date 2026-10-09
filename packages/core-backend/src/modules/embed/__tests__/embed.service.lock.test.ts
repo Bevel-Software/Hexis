@@ -3,6 +3,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { FileLockService } from '../../workflow/file-lock.service.js';
 import { makeFakeLockDb, type FakeLockDb } from '../../workflow/__tests__/fake-file-lock-db.js';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
+import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService } from '../embed.service.js';
@@ -34,6 +35,15 @@ const BOB: AuthUser = { id: '22222222-2222-4222-8222-222222222222', email: 'bob@
 
 let fake: FakeLockDb;
 let locks: FileLockService;
+
+/** The extraction service the reader registry takes, typed against its contract; no document is read here. */
+function noDocExtract(): DocExtractService {
+  const extract = async (): Promise<DocExtractOutcome> => ({
+    ok: false,
+    message: 'this suite reads no document-format file',
+  });
+  return { extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService;
+}
 
 function build() {
   const workspaceService = {
@@ -68,7 +78,7 @@ function build() {
     workflowService as never,
     { createBranch: async () => ({}) } as never,
     { getUserId: async () => null } as never,
-    createFileReaderRegistry({ extract: async () => ({ kind: 'text', text: '' }) } as never),
+    createFileReaderRegistry(noDocExtract()),
     makeRolesYamlWriteValidator(KB),
   );
   return { service, workspaceService, workflowService };

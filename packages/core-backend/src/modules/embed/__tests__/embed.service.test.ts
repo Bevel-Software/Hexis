@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
+import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/roles-yaml-guard.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
@@ -48,6 +49,19 @@ interface Opts {
   remoteBranchExists?: boolean;
   config?: Partial<EmbedConfig>;
   resolveNodeId?: ((id: string) => Promise<string | null>) | null;
+}
+
+/**
+ * The extraction service the reader registry takes, typed against its
+ * contract: no test here reads a document-format file, and one that did
+ * would get this typed refusal, not a silent empty text.
+ */
+function noDocExtract(): DocExtractService {
+  const extract = async (): Promise<DocExtractOutcome> => ({
+    ok: false,
+    message: 'this suite reads no document-format file',
+  });
+  return { extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService;
 }
 
 function build(opts: Opts = {}) {
@@ -109,7 +123,7 @@ function build(opts: Opts = {}) {
     workflowService as never,
     gitService as never,
     accountLinks as never,
-    createFileReaderRegistry({ extract: async () => ({ kind: 'text', text: '' }) } as never),
+    createFileReaderRegistry(noDocExtract()),
     // The real gate: the property under test is that an embed write cannot
     // put on disk what the app's editor would refuse.
     makeRolesYamlWriteValidator(KB),

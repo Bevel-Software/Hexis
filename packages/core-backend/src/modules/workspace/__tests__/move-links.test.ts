@@ -240,6 +240,10 @@ describe('planMoveLinks', () => {
     const gone = await planMoveLinks(inputOf(files, { readText: failWith('ENOENT') }));
     expect(gone.edits.map((e) => e.path)).toEqual([`${KB}/Index.md`]);
     expect(gone.report.unsearched).toBeUndefined();
+    // Its folder became a file: gone all the same.
+    const folderGone = await planMoveLinks(inputOf(files, { readText: failWith('ENOTDIR') }));
+    expect(folderGone.edits.map((e) => e.path)).toEqual([`${KB}/Index.md`]);
+    expect(folderGone.report.unsearched).toBeUndefined();
     const denied = await planMoveLinks(inputOf(files, { readText: failWith('EACCES') }));
     expect(denied.edits.map((e) => e.path)).toEqual([`${KB}/Index.md`]);
     expect(denied.report.unsearched).toBe(UNSEARCHED_SENTENCE);
