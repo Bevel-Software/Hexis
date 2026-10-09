@@ -3,17 +3,18 @@ import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-share
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { suggestedBranch } from '../utils/suggested-branch';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
 import { forgetDraft, keepDraft, keptDraft } from '../utils/kept-draft';
 import { useAppRegistry } from '../../../core/registry';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
+import { ConnectionProbeFailed, useConnectionProbe } from '../hooks/useConnectionProbe';
 import {
   saveSettings,
   syncNow,
   syncOutcomeError,
-  testConnection,
   KbInitFailed,
   testOidc,
   RepositoryChangeNeedsConfirmation,
@@ -62,13 +63,13 @@ function CopyValue({ value, label }: { value: string; label: string }) {
 
 /** "main updated, ali/x up to date" — the per-branch outcomes as one phrase. */
 function describeOutcomes(results: LastSync['results']): string {
-  if (results.length === 0) return 'nothing to sync yet';
+  if (results.length === 0) return 'nothing to update yet';
   const word = (r: LastSync['results'][number]): string => {
     switch (r.outcome) {
       case 'up-to-date':
         return 'up to date';
       case 'not-cloned':
-        return 'not cloned';
+        return 'not set up on this server yet';
       case 'remote-gone':
         return 'deleted on the host';
       default:
@@ -117,8 +118,8 @@ const FIELDS: Record<
     advanced: true,
   },
   kbSyncSecret: {
-    label: 'Sync secret',
-    help: 'Lets your git host tell this deployment when the repository changes, so pushes and merged pull requests show up right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can trigger a sync. Stored encrypted, and never shown again.',
+    label: 'Hook secret',
+    help: 'Lets your git host tell this deployment when the repository changes, so changes made there show up here right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can bring in updates. Stored encrypted, and never shown again.',
     placeholder: 'A long random string',
     advanced: true,
   },
@@ -208,7 +209,7 @@ const BRANCH_MODEL_KEYS = ['defaultBranch', 'protectedBranches'];
 
 /** What each way of having a repository is called on its tab. */
 const GIT_MODE_LABEL: Record<GitMode, string> = {
-  managed: 'Managed for you',
+  managed: 'Hexis takes care of it',
   'github-app': 'GitHub',
   token: 'Address and token',
 };
@@ -497,12 +498,10 @@ export function SetupScreen({
   const [repositoryChanged, setRepositoryChanged] = useState<RepositoryChangeResult | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
+  /** What the last "Update now" from THIS page came back with (a failure to ask is `error`). */
   const [syncResult, setSyncResult] = useState<SyncNowResult | null>(null);
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
-  const [test, setTest] = useState<ConnectionTest | null>(null);
-  const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [restartRequired, setRestartRequired] = useState(false);
   /** Required answers still missing after a save that otherwise succeeded. */
@@ -511,16 +510,16 @@ export function SetupScreen({
   const [needsRestart, setNeedsRestart] = useState(false);
   const noticeRef = useRef<HTMLDivElement>(null);
   /**
-   * Which set of connection answers the screen is showing, bumped on every
-   * edit to one of them. A test result describes the answers as they were when
-   * the request left; if they changed while it was in flight, the result that
-   * comes back is evidence about values no longer on screen and must not be
-   * shown as if it were about the new ones.
+   * The connection test: what the host last said about the answers on screen,
+   * cleared by an edit to one of them, with an answer that lands after such
+   * an edit held stale rather than shown. The probe is the one mechanism for
+   * it, shared with the first-run storage screen.
    */
-  const connectionEpoch = useRef(0);
+  const probe = useConnectionProbe();
+  const { result: test, testing } = probe;
   const [oidcTest, setOidcTest] = useState<OidcTest | null>(null);
   const [oidcTesting, setOidcTesting] = useState(false);
-  /** The same staleness guard as {@link connectionEpoch}, for the sign-in answers. */
+  /** The probe's staleness guard, for the sign-in answers: a result describes the answers as they were when the request left. */
   const oidcEpoch = useRef(0);
   /**
    * A verification state newer than the one the host last passed in — what a
@@ -766,34 +765,9 @@ export function SetupScreen({
       // A test's "Verified" was about the values before this edit.
       setLatest(null);
     }
-    if (CONNECTION_KEYS.includes(key)) {
-      // Any in-flight test is now asking about values that are gone; the epoch
-      // bump makes its answer land as stale rather than as evidence.
-      connectionEpoch.current++;
-      setTest(null);
-    }
-  }
-
-  /**
-   * Which branch the repository just named, or the best conventional stand-in.
-   *
-   * Prefer what the remote calls its trunk. Not every host advertises it —
-   * older servers answer `ls-remote` without the symref line — so fall back to
-   * the conventional names before the first branch it did list. Leaving these
-   * blank is the one way a save can succeed and still not finish setup, which
-   * is worth a guess the reader can see and correct.
-   */
-  function suggestedBranch(result: ConnectionTest): string | null {
-    return (
-      result.defaultBranch ||
-      ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
-      result.branches?.[0] ||
-      // An EMPTY repository has no branch to report, but it will be seeded
-      // with whatever is configured here, so the conventional name is the
-      // right suggestion. Suggesting nothing was the one way "Connected"
-      // could still end, silently, in a save that did not finish setup.
-      (result.empty ? 'main' : null)
-    );
+    // Any in-flight test is now asking about values that are gone; its answer
+    // lands as stale rather than as evidence.
+    if (CONNECTION_KEYS.includes(key)) probe.invalidate();
   }
 
   /**
@@ -813,21 +787,13 @@ export function SetupScreen({
     result: ConnectionTest;
     derived: Record<string, string>;
   }> {
-    const epoch = connectionEpoch.current;
-    const result = await testConnection(draft);
-    // Read the answer BEFORE storing it, so a response that is not one at all
-    // throws to the caller (which treats that as "could not ask") instead of
-    // parking a value in state that every reader downstream has to defend
-    // against.
+    // The result describes the connection values as they were when the
+    // request left. Edited while it was out, it is stale: the probe never
+    // shows it, and it comes back to the caller, whose payload is the same
+    // snapshot. `derived` is likewise computed against that snapshot, because
+    // it travels with the payload.
+    const { result, stale } = await probe.ask(draft);
     const suggested = result.ok ? suggestedBranch(result) : null;
-    // The result describes the connection values captured above. If they were
-    // edited while the request was in flight, showing it would let the OLD
-    // values' success (or failure) stand in for the new ones — so it is
-    // returned to the caller, whose payload is the same snapshot, but never
-    // shown. `derived` is likewise computed against that snapshot, because it
-    // travels with the payload.
-    const stale = epoch !== connectionEpoch.current;
-    if (!stale) setTest(result);
     const derived: Record<string, string> = {};
     if (suggested) {
       if (!resolved('defaultBranch')) derived.defaultBranch = suggested;
@@ -848,9 +814,7 @@ export function SetupScreen({
   }
 
   async function runTest() {
-    setTesting(true);
     setError(null);
-    const epoch = connectionEpoch.current;
     try {
       await probeConnection();
     } catch (err) {
@@ -858,11 +822,9 @@ export function SetupScreen({
       // was edited while this request was out, the error describes values no
       // longer on screen, and showing it would complain about something the
       // reader already changed.
-      if (epoch === connectionEpoch.current) {
+      if (!(err instanceof ConnectionProbeFailed) || !err.stale) {
         setError(err instanceof Error ? err.message : 'Could not test the connection.');
       }
-    } finally {
-      setTesting(false);
     }
   }
 
@@ -965,7 +927,7 @@ export function SetupScreen({
       setSyncResult({
         ok: false,
         results: [],
-        error: err instanceof Error ? err.message : 'Could not sync.',
+        error: err instanceof Error ? err.message : 'Couldn’t get the latest changes.',
       });
     } finally {
       setSyncing(false);
@@ -984,7 +946,7 @@ export function SetupScreen({
       <Surface tone="surface" radius="md" className="mt-3 space-y-3 border border-line p-3">
         <div className="space-y-1.5">
           <span className="text-meta font-medium text-ink">Address for the hook</span>
-          <CopyValue value={`${sync.url}/<branch>`} label="Copy the sync address" />
+          <CopyValue value={`${sync.url}/<branch>`} label="Copy the hook address" />
           <p className="text-meta text-ink-faint">
             Replace <code className="font-mono">&lt;branch&gt;</code> with the branch that changed;
             send the secret as a bearer token.
@@ -994,8 +956,8 @@ export function SetupScreen({
           <div className="space-y-2">
             <p role="status" className="text-meta text-ink-muted">
               {last
-                ? `Last sync ${new Date(last.at).toLocaleString()} by ${last.by}: ${describeOutcomes(last.results)}.`
-                : 'No sync since this server started.'}
+                ? `Last update ${new Date(last.at).toLocaleString()} by ${last.by}: ${describeOutcomes(last.results)}.`
+                : 'No updates since this server started.'}
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Button
@@ -1005,11 +967,10 @@ export function SetupScreen({
                 onClick={() => void runSync()}
                 disabled={syncing}
               >
-                {syncing ? 'Syncing…' : 'Sync now'}
+                {syncing ? 'Updating…' : 'Update now'}
               </Button>
               <span className="text-meta text-ink-faint">
-                Pulls every branch from the repository with your own session — the same thing the
-                hook does.
+                Gets the latest changes from your git host now, the same as the hook does.
               </span>
             </div>
             {syncResult && (
@@ -1022,12 +983,12 @@ export function SetupScreen({
                 {syncResult.error
                   ? syncResult.error
                   : syncResult.ok
-                    ? `Synced: ${describeOutcomes(syncResult.results)}.`
+                    ? `Updated: ${describeOutcomes(syncResult.results)}.`
                     : (syncResult.results
                         .map(syncOutcomeError)
                         .filter((e): e is string => !!e)
                         .join('\n') ||
-                      `Not fully synced: ${describeOutcomes(syncResult.results)}.`)}
+                      `Not fully updated: ${describeOutcomes(syncResult.results)}.`)}
               </p>
             )}
           </div>
@@ -1101,7 +1062,7 @@ export function SetupScreen({
       /** What the host said this time, or null when it could not be asked. */
       let proven: ConnectionTest | null = test;
       let probed = false;
-      const probe = async () => {
+      const prove = async () => {
         probed = true;
         try {
           const { result, derived } = await probeConnection();
@@ -1122,9 +1083,7 @@ export function SetupScreen({
         // host rejects finishes setup just as well as one it accepts, and the
         // gate opens onto an app whose every call fails against a repository
         // it cannot clone. This is the one moment that can tell the two apart.
-        setTesting(true);
-        await probe();
-        setTesting(false);
+        await prove();
         // Includes a probe the server REFUSED (a 4xx comes back as a
         // rejection, not a throw) — that is an answer about these values.
         if (proven && !proven.ok) {
@@ -1157,7 +1116,7 @@ export function SetupScreen({
         !!resolvedIn(payload, 'kbRepoUrl') &&
         (!resolvedIn(payload, 'defaultBranch') || !resolvedIn(payload, 'protectedBranches'))
       ) {
-        await probe();
+        await prove();
       }
       // An ordinary save is sent exactly as it always was — one argument, and
       // no `confirmRepositoryChange` in the body. Only the save that answers
@@ -1780,7 +1739,7 @@ export function SetupScreen({
                 {/* The sync panel normally hangs off the secret's field. When
                     the secret comes from the environment that field is in the
                     locked list below, not here — but the address, the last
-                    sync and Sync now are about the deployment, not the secret,
+                    update and Update now are about the deployment, not the secret,
                     and an admin with an env-set secret needs them just as much. */}
                 {section.id === 'knowledge-base' &&
                   sync &&
@@ -1800,10 +1759,10 @@ export function SetupScreen({
               gets its own place here in that case. */}
           {sync && editable.every((s) => s.section !== 'knowledge-base') && (
             <Surface as="section" tone="surface" radius="lg" elevation="card" className="p-6">
-              <h2 className="text-title font-semibold text-ink">Repository sync</h2>
+              <h2 className="text-title font-semibold text-ink">Updates from your git host</h2>
               <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">
-                The knowledge-base connection is set by the environment. The sync hook is still
-                yours to wire up and check on here.
+                The knowledge-base connection is set by the environment. The hook that brings in
+                updates from your git host is still yours to wire up and check on here.
               </p>
               {renderSyncPanel()}
             </Surface>
@@ -1858,8 +1817,8 @@ export function SetupScreen({
             <p className="mt-1">
               The move happens as soon as you confirm, with no restart. Unless the new repository holds the
               same history, every working copy on this server stops being used and is cloned fresh from the
-              new repository. Anything committed here and not
-              yet pushed from this server goes out of the app with it. Nothing is deleted, but it is only
+              new repository. Anything saved here that hasn’t reached your git host yet goes out of
+              the app with it. Nothing is deleted, but it is only
               recoverable from the
               <code className="mx-1">replaced-working-copies</code>
               folder on the server, by hand.

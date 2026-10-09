@@ -47,8 +47,8 @@ export {
   type LeasedWorker,
 } from './core/lifecycle.js';
 
-// Packaged assets (migrations/, kb-template/, agent-guide/) + the migration runners.
-export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
+// Packaged assets (migrations/, kb-template/, agent-guide/, starter-packs/) + the migration runners.
+export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
 export {
   runCoreMigrations,
   runEnterpriseMigrations,

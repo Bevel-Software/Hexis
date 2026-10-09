@@ -728,7 +728,7 @@ export function ExternalAgentAccessPage() {
                     <ol className="text-meta text-ink-muted mb-1 leading-snug list-decimal pl-4 space-y-0.5">
                       <li>In Langdock, open your workspace settings and go to MCP servers → Add server.</li>
                       <li>Choose <span className="font-medium">HTTP</span> (Streamable HTTP) as the transport.</li>
-                      <li>Give it a name (e.g. <span className="font-medium">Bevel</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
+                      <li>Give it a name (e.g. <span className="font-medium">Hexis</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
                       <li>Save, then enable the server in any assistant you want it available in.</li>
                     </ol>
                     <textarea

@@ -3162,6 +3162,8 @@ describe('FileExplorer: platform files stay put', () => {
   });
 
   const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore'];
+  /** What a platform file's row says: access.md reads as "Who has access". */
+  const shown = (name: string) => (name === 'access.md' ? 'Who has access' : name);
 
   let alertSpy: ReturnType<typeof vi.spyOn>;
 
@@ -3180,7 +3182,7 @@ describe('FileExplorer: platform files stay put', () => {
 
   it.each(PLATFORM)('%s cannot be dragged: the row refuses to start one', (name) => {
     renderExplorer({ fileTree: TREE });
-    expect(row(name)).toHaveAttribute('draggable', 'false');
+    expect(row(shown(name))).toHaveAttribute('draggable', 'false');
   });
 
   it.each(PLATFORM)('a drop carrying %s is refused with the sentence, and nothing is sent', async (name) => {
@@ -3200,7 +3202,7 @@ describe('FileExplorer: platform files stay put', () => {
 
   it.each(PLATFORM)('the Rename action on %s says the sentence and opens nothing', async (name) => {
     const { moveEntry } = renderExplorer({ fileTree: TREE });
-    fireEvent.contextMenu(row(name));
+    fireEvent.contextMenu(row(shown(name)));
     const rename = screen.getByRole('menuitem', { name: /Rename/i });
     expect(rename).toHaveAttribute('aria-disabled', 'true');
     expect(rename).toHaveAttribute('title', sentence(name));
@@ -3208,7 +3210,7 @@ describe('FileExplorer: platform files stay put', () => {
       fireEvent.click(rename);
     });
     // No rename box: the row still shows its name, and nothing was sent.
-    expect(screen.getAllByText(name)[0]).toBeInTheDocument();
+    expect(screen.getAllByText(shown(name))[0]).toBeInTheDocument();
     expect(moveEntry).not.toHaveBeenCalled();
   });
 
@@ -3311,7 +3313,7 @@ describe('FileExplorer: platform files stay put', () => {
 
     it("the root's own copy still cannot be dragged, admin or not", () => {
       renderExplorer({ fileTree: MISPLACED, isAdmin: true });
-      expect(row('access.md')).toHaveAttribute('draggable', 'false');
+      expect(row('Who has access')).toHaveAttribute('draggable', 'false');
     });
 
     it('a non-admin gets no exception: the misplaced row is refused like any other', async () => {
@@ -3363,6 +3365,16 @@ describe('FileExplorer: platform files stay put', () => {
     const rename = screen.getByRole('menuitem', { name: /Rename/i });
     expect(rename).toHaveAttribute('aria-disabled', 'true');
     expect(rename).toHaveAttribute('title', sentence('access.md'));
+  });
+
+  it('an access.md row reads Who has access, with the file name on hover', () => {
+    renderExplorer({ fileTree: TREE });
+    const access = row('Who has access');
+    expect(access).toHaveAttribute('data-tree-path', `${KB}/access.md`);
+    expect(access).toHaveAttribute('title', 'access.md');
+    expect(screen.queryByText('access.md')).not.toBeInTheDocument();
+    // Other platform files are not renamed for display.
+    expect(row('roles.yaml')).not.toHaveAttribute('title');
   });
 
   it('an AGENTS.md is content, not a platform file, at the root and nested: it drags like any other row', () => {
@@ -4107,11 +4119,16 @@ describe('FileExplorer: deleting platform files', () => {
     mockAuthFetch.mockReset();
   });
 
-  it.each(['access.md', 'roles.yaml'])('the root %s shows Delete disabled with the sentence, for an admin too', async (name) => {
+  // The rows show the file's plain name (`access.md` reads "Who has access");
+  // the sentence keeps the file's own.
+  it.each([
+    ['access.md', 'Who has access'],
+    ['roles.yaml', 'roles.yaml'],
+  ])('the root %s shows Delete disabled with the sentence, for an admin too', async (name, label) => {
     const deleteEntry = vi.fn(async () => {});
     renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
     // The root's copy is the first row of that name.
-    fireEvent.contextMenu(screen.getAllByText(name)[0].closest('button')!);
+    fireEvent.contextMenu(screen.getAllByText(label)[0].closest('button')!);
     const del = screen.getByRole('menuitem', { name: /Delete/i });
     expect(del).toHaveAttribute('aria-disabled', 'true');
     expect(del).toHaveAttribute('title', sentence(name));
@@ -4125,7 +4142,7 @@ describe('FileExplorer: deleting platform files', () => {
   it('a nested access.md offers Delete, and deletes once confirmed', async () => {
     const deleteEntry = vi.fn(async () => {});
     renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
-    const rows = screen.getAllByText('access.md');
+    const rows = screen.getAllByText('Who has access');
     expect(rows).toHaveLength(2);
     fireEvent.contextMenu(rows[1].closest('button')!);
     const del = screen.getByRole('menuitem', { name: /Delete/i });

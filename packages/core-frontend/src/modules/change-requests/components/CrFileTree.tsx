@@ -13,6 +13,7 @@ import {
 import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { hasOwnApproval } from '../utils/approval';
+import { displayFileName } from '../../workspace/utils/display-file-name';
 
 /**
  * The change request's files as a TREE — the Knowledge sidebar's visual
@@ -205,7 +206,7 @@ function Level({
         );
       })}
       {folder.files.map((file) => {
-        const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+        const name = displayFileName(file.path);
         const on = selected === file.path;
         const eligible = file.changed && file.approval?.viewerCanApprove === true;
         // The viewer's own state wins the slot when there is one: approved

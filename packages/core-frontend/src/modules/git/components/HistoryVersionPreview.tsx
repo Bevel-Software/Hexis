@@ -23,6 +23,7 @@ import {
   type RendererFileRef,
 } from '../../workspace/components/renderers';
 import { useWorkspace } from '../../workspace/state/workspace.context';
+import { displayFileName, fileNameTooltip } from '../../workspace/utils/display-file-name';
 
 /**
  * One past save of a file, shown the way the FILE PAGE shows that file.
@@ -165,7 +166,7 @@ export interface HistoryVersionPreviewProps {
 
 export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPreviewProps) {
   const { fetchFileDiff, fetchFileAtChange, status } = useGit();
-  const { workspaceId } = useWorkspace();
+  const { workspaceId, kbDirName } = useWorkspace();
   const ext = extensionOf(filePath);
 
   /**
@@ -257,7 +258,6 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   const who = commit.authorName || commit.authorEmail || 'unknown';
-  const fileName = filePath.slice(filePath.lastIndexOf('/') + 1);
   const kind = loaded === null ? null : previewKind(filePath, loaded.patch);
   const canToggleSource = kind === 'viewer' && SOURCE_TOGGLE_EXTENSIONS.has(ext);
   /**
@@ -369,7 +369,9 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
         // div is what stays mounted around it for focus to land on. See
         // `RetryReadButton`.
         <div {...READ_PANE} className="flex-1 overflow-auto p-3">
-          <FilePaneCard file={fileName}>{viewer}</FilePaneCard>
+          <FilePaneCard file={displayFileName(filePath, kbDirName)} fileTitle={fileNameTooltip(filePath, kbDirName)}>
+            {viewer}
+          </FilePaneCard>
         </div>
       ) : (
         // A viewport (pdf, image, workbook, sandboxed page): it owns its own

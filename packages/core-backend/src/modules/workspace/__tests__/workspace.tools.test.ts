@@ -19,6 +19,7 @@ import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
+import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
@@ -2265,6 +2266,15 @@ describe('start_session', () => {
     // `UuidSessionSink`, because "did fifty first calls collide?" is a question
     // only the real minting can answer.
     sink?: ISessionSink,
+    // The default branch's workspace directory, for the tests about the
+    // `firstRun` note. Without one the workspace service is a bare stand-in
+    // the note's check cannot use, which is what every other test here wants:
+    // the call answers with the id alone.
+    defaultWorkspaceDir?: string,
+    // The starter pack the knowledge base was filled from, for the note.
+    starterPacks?: FirstRunStarterSource,
+    // Who may read what: everything, unless a test about the note's gate says otherwise.
+    access: IAccessControl = allowAll,
   ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
@@ -2273,7 +2283,12 @@ describe('start_session', () => {
       scope: auth.scope,
       source: auth.source,
       abortSignal: signal,
-      workspaceService: {} as never,
+      workspaceService: (defaultWorkspaceDir
+        ? {
+            hasBootstrappedWorkspace: async () => true,
+            getWorkspacePath: async () => defaultWorkspaceDir,
+          }
+        : {}) as never,
       workflowService: {} as never,
       events: {} as never,
       getFilesystem: async () => ({}) as never,
@@ -2296,10 +2311,17 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), access, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined /* downloads */,
+      starterPacks,
+      new NodeFs(),
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -2436,6 +2458,141 @@ describe('start_session', () => {
     expect(description).toMatch(/retry/i);
     expect(description).toMatch(/created nothing/i);
     expect(description).toMatch(/harmless/i);
+    // And that the answer may carry a note to act on, so an agent reading
+    // only the catalog knows the field is not noise.
+    expect(description).toContain('`firstRun`');
+  });
+
+  /**
+   * "The agent is the onboarding guide": on a knowledge base nobody has
+   * written in yet, the first call of a conversation says so, and the note
+   * stops on its own once a page exists.
+   */
+  describe('the firstRun note', () => {
+    let wsDir = '';
+    const knowledge = () => join(wsDir, KB_DIR, 'KnowledgeBase');
+
+    beforeEach(async () => {
+      wsDir = await mkdtemp(join(tmpdir(), 'bevel-first-run-'));
+      await mkdir(knowledge(), { recursive: true });
+      await writeFile(join(knowledge(), STARTER_GUIDE_FILE), '# How to get started\n');
+    });
+
+    afterEach(async () => {
+      await rm(wsDir, { recursive: true, force: true });
+    });
+
+    const startSession = async () => {
+      const base = await startSessionApp('external', undefined, wsDir);
+      // `postRaw`: the tool takes no arguments, and `post` adds a branch.
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+    };
+
+    it('is there while the knowledge folder holds only the starter guide', async () => {
+      // Folder placeholders and access rules are not pages either.
+      await mkdir(join(knowledge(), 'Empty'), { recursive: true });
+      await writeFile(join(knowledge(), 'Empty', '.gitkeep'), '');
+      await writeFile(join(knowledge(), 'access.md'), '# Access\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
+    });
+
+    it('is gone once another page exists beside the starter guide', async () => {
+      await writeFile(join(knowledge(), 'Glossary.md'), '# Glossary\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it('is gone once another page exists in a folder', async () => {
+      await mkdir(join(knowledge(), 'Company'), { recursive: true });
+      await writeFile(join(knowledge(), 'Company', 'About.md'), '# About us\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it("after a starter pack, stays while the pack's pages are untouched and names its suggestions", async () => {
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n');
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers', 'Pricing'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const base = await startSessionApp('external', undefined, wsDir, starter);
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(first.firstRun).toBe(
+        firstRunNote(`${KB_DIR}/KnowledgeBase`, { name: 'Sales', suggestedPages: ['Customers', 'Pricing'] }),
+      );
+
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n\nAcme.\n');
+      const second = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(second).not.toHaveProperty('firstRun');
+    });
+
+    /**
+     * The note is a read: it says what the knowledge folder holds. A caller
+     * who may not read the folder gets the id alone, and a pack page the
+     * caller may not read is judged as anybody's page, so the note never
+     * tells them it is still a placeholder.
+     */
+    it('is withheld from a caller who may not read the knowledge folder', async () => {
+      const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
+
+    it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
+      await mkdir(join(knowledge(), 'Leadership'), { recursive: true });
+      await writeFile(join(knowledge(), 'Leadership', 'Plan.md'), '# Plan\n');
+      const planClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Plan.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, planClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+    });
+
+    it('says nothing of a pack whose page the caller may not read, in the checkout or gone from it', async () => {
+      // Absent from the checkout, so the folder reads as new — and the note
+      // would still name the pack and its suggestions.
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const pageClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Customers.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
+
+    it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {
+      await rm(wsDir, { recursive: true, force: true });
+
+      const res = await startSession();
+
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
   });
 });
 

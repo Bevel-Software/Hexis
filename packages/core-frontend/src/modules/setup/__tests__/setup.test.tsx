@@ -1008,13 +1008,13 @@ describe('SetupScreen — remote sync panel', () => {
     },
   };
 
-  it('shows the address a hook calls on first run, without a Sync now button', () => {
+  it('shows the address a hook calls on first run, without an Update now button', () => {
     render(<SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} />);
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Copy the sync address' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Copy the hook address' })).toBeTruthy();
     // The 'setup' variant never offers the button or the history, whatever the
     // record says: on first run the repository behind them is not connected yet.
-    expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
   });
 
   it('shows the address on the Deployment page too', () => {
@@ -1022,7 +1022,7 @@ describe('SetupScreen — remote sync panel', () => {
       <SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} variant="settings" />,
     );
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update now' })).toBeTruthy();
   });
 
   it('keeps the panel when the secret is set by the environment', () => {
@@ -1032,12 +1032,12 @@ describe('SetupScreen — remote sync panel', () => {
     );
     // The secret itself is locked, listed under the environment…
     expect(screen.getByText('KB_SYNC_SECRET')).toBeTruthy();
-    // …but the address, the history and Sync now are still there.
+    // …but the address, the history and Update now are still there.
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update now' })).toBeTruthy();
   });
 
-  it('on the Deployment page: says what the last sync did, and Sync now reports the result', async () => {
+  it('on the Deployment page: says what the last sync did, and Update now reports the result', async () => {
     api.syncNow.mockResolvedValue({
       ok: true,
       status: 'synced',
@@ -1055,10 +1055,10 @@ describe('SetupScreen — remote sync panel', () => {
         variant="settings"
       />,
     );
-    expect(screen.getByText(/Last sync .* by github-signature: main updated\./)).toBeTruthy();
+    expect(screen.getByText(/Last update .* by github-signature: main updated\./)).toBeTruthy();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Sync now' }));
-    await waitFor(() => expect(screen.getByText('Synced: main updated, ali/x up to date.')).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: 'Update now' }));
+    await waitFor(() => expect(screen.getByText('Updated: main updated, ali/x up to date.')).toBeTruthy());
     expect(api.syncNow).toHaveBeenCalledTimes(1);
     // The status carries the last-sync record, so the page refetches it.
     expect(onSaved).toHaveBeenCalled();
@@ -1080,8 +1080,8 @@ describe('SetupScreen — remote sync panel', () => {
         variant="settings"
       />,
     );
-    expect(screen.getByText('No sync since this server started.')).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+    expect(screen.getByText('No updates since this server started.')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Update now' }));
     await waitFor(() =>
       expect(screen.getByText(/main is not in sync yet: a\.md changed both/)).toBeTruthy(),
     );
@@ -1294,7 +1294,7 @@ describe('SetupScreen — a failed knowledge-base initialization', () => {
 });
 
 describe('SetupScreen — sync panel when the whole knowledge base is env-set', () => {
-  it('still renders the address and Sync now, in a section of its own', () => {
+  it('still renders the address and Update now, in a section of its own', () => {
     const KB_FROM_ENV: SettingStatus[] = SETTINGS.map((s) =>
       s.section === 'knowledge-base' ? { ...s, source: 'env', configured: true } : s,
     );
@@ -1310,8 +1310,8 @@ describe('SetupScreen — sync panel when the whole knowledge base is env-set', 
       />,
     );
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Repository sync' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update now' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Updates from your git host' })).toBeTruthy();
   });
 });
 

@@ -286,7 +286,13 @@ export interface WorkspaceContextValue {
     activePath: string | null,
   ) => Promise<HydrateResult>;
 
-  createFile: (relativePath: string, content?: string) => Promise<void>;
+  /**
+   * Write a new file and refresh the tree. Unconditional by default, as the
+   * explorer's New file has always been; `ifAbsent` makes it an exclusive
+   * create, refused with a 409 `WorkspaceApiError` when the path already
+   * exists, for a caller that picked the name from a tree that may be stale.
+   */
+  createFile: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
   createDirectory: (relativePath: string) => Promise<void>;
   /**
    * Extract a `.zip` file already in the workspace. Defaults to "unzip here":

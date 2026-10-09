@@ -251,6 +251,7 @@ function PageHeader() {
   return (
     <KbPageHeader
       path="Knowledge/Onboarding.md"
+      kbDirName={null}
       canWrite
       editMode={false}
       entering={false}

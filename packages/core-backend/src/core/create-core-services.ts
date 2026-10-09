@@ -118,6 +118,7 @@ import { ReviewWorkflowService } from '../modules/workflow/review-workflow/revie
 import { FileLockService } from '../modules/workflow/file-lock.service.js';
 import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
+import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
@@ -275,6 +276,11 @@ export interface CoreServices {
   toolDeleteService: ToolDeleteService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
+  /**
+   * "What does your team do?" — the starter pack a new knowledge base's admin
+   * may fill it from, and the record of what was chosen. See modules/onboarding.
+   */
+  starterPackService: StarterPackService;
   joinRequestsService: JoinRequestsService;
   /**
    * Records a join request and finishes it in the background. Its `sweep()`
@@ -1104,6 +1110,24 @@ export async function createCoreServices(
     [config.adminEmail],
   );
 
+  // The starter-pack question: one commit on the default branch through the
+  // same batch write the roles admin uses, the choice kept as a deployment
+  // setting. Read by its routes and by `start_session`'s first-run note.
+  const starterPackService = new StarterPackService({
+    packsDir: config.starterPacksDir,
+    kb,
+    workspaceService,
+    workflow: workflowService,
+    adminAccess,
+    settings,
+    accessControl,
+    disk,
+    pluginSource,
+    pluginLocks: pluginProvisionService,
+    events: eventBus,
+    fileChanges: fileChangeNotifier,
+  });
+
   // In-app update check: lazily compares the running release version against
   // the newest published GitHub release, only when an admin's browser asks —
   // no timers, so a deployment nobody looks at makes zero calls. The flag
@@ -1203,9 +1227,13 @@ export async function createCoreServices(
   // Connection keys also come as GitHub-shaped links (`gho_…`, kind
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
-    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC,
-  });
+  const externalApiKeyService = new ExternalApiKeyService(
+    db,
+    config.externalApiKeyPrefix,
+    { [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC },
+    // A key's first use tells its owner's open tabs that the agent arrived.
+    eventBus,
+  );
 
   // The facade that lets products which sync marketplaces only from a GitHub
   // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
@@ -1329,6 +1357,8 @@ export async function createCoreServices(
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
     tokenPrefix: config.mcpOAuthTokenPrefix,
+    // An agent connection's first use tells its owner's open tabs the agent arrived.
+    events: eventBus,
   });
   // RFC 9728 pointer carried on every MCP 401 challenge so OAuth-capable
   // clients discover the AS. Single source of truth for the resource id.
@@ -1564,6 +1594,7 @@ export async function createCoreServices(
     agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
+    starterPackService,
     joinRequestsService,
     pluginJoinRequestJobs,
     pluginLinkIndex,

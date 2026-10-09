@@ -38,7 +38,7 @@ const ENTRY: FileTreeEntry = {
 const BRANCH = 'suggestions/me/knowledge';
 const BRANCH_WS = encodeURIComponent(BRANCH);
 const PROPOSAL = { number: 12, branch: BRANCH };
-const NOTICE = /editing access on change request #12\. It takes effect when the request merges/i;
+const NOTICE = /editing access on change request #12\. It takes effect when the request is published/i;
 const A = { name: 'Alice', email: 'alice@x.com' };
 
 /** Alice, granted `write` directly on the file. */

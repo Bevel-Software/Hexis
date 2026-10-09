@@ -1,5 +1,6 @@
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
+import { notePluginCreated } from '../state/plugins-revision';
 
 /**
  * Plugin enumeration + join requests — the browser half of the backend's
@@ -141,7 +142,9 @@ export async function createPlugin(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Couldn't create that plugin.");
   }
-  return (await res.json()) as { folder: string; name: string; displayName: string };
+  const created = (await res.json()) as { folder: string; name: string; displayName: string };
+  notePluginCreated();
+  return created;
 }
 
 /**

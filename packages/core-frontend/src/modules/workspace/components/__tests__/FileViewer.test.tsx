@@ -126,10 +126,21 @@ vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
   };
 });
 
+// The starter-pack question the empty state asks a new knowledge base's
+// admin. Not offered unless a test says so.
+const starterPacksMock = vi.hoisted(() => ({
+  fetchStarterPacks: vi.fn(async () => ({ offered: false, chosen: null, packs: [], chosenPack: null }) as unknown),
+  chooseStarterPack: vi.fn(async () => ({}) as unknown),
+}));
+vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../onboarding/services/starter-packs.api')>()),
+  ...starterPacksMock,
+}));
+
 import { FileViewer } from '../FileViewer';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
-import { acquireLock as acquireLockMock, LockApiError } from '../../../workflow/services/lock.api';
+import { acquireLock as acquireLockMock, getLock as getLockMock, LockApiError } from '../../../workflow/services/lock.api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
@@ -187,7 +198,12 @@ function makeGit(
  */
 function LocationEcho() {
   const location = useLocation();
-  return <div data-testid="location">{location.pathname}</div>;
+  return (
+    <>
+      <div data-testid="location">{location.pathname}</div>
+      <div data-testid="location-state">{JSON.stringify(location.state ?? null)}</div>
+    </>
+  );
 }
 
 function ViewerHarness({
@@ -203,6 +219,9 @@ function ViewerHarness({
   authUser = null,
   captureTyped = false,
   gitAvailability = 'ready',
+  routeState,
+  routePath,
+  workspaceBranch = 'main',
 }: {
   initialContent?: string;
   /** What git reports about itself; the history views need `'ready'`. */
@@ -231,6 +250,16 @@ function ViewerHarness({
    * tests keep the historical no-op.
    */
   captureTyped?: boolean;
+  /**
+   * Router state on the entry the viewer opens under. Given (or with
+   * `routePath`), the URL names the file the way `openWorkspacePath` builds
+   * it — `/workspace/<branch>/<path>` — instead of the bare branch.
+   */
+  routeState?: unknown;
+  /** The file the URL names, when it is not the open one. */
+  routePath?: string;
+  /** The branch the workspace is on, as the workspace state reports it. */
+  workspaceBranch?: string | null;
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
@@ -260,7 +289,7 @@ function ViewerHarness({
     kbDirName,
     fileTree,
     bootstrapError: null,
-    workspaceBranch: 'main',
+    workspaceBranch,
     retryBootstrap: () => {},
     openTabs: tab ? [tab] : [],
     activeTab: tab,
@@ -373,7 +402,19 @@ function ViewerHarness({
       </AuthContext.Provider>
   );
   return (
-    <MemoryRouter initialEntries={[`/workspace/${encodeURIComponent(urlBranch)}`]}>
+    <MemoryRouter
+      initialEntries={[
+        routeState !== undefined || routePath !== undefined
+          ? {
+              pathname: `/workspace/${encodeURIComponent(urlBranch)}/${(routePath ?? filePath ?? '')
+                .split('/')
+                .map(encodeURIComponent)
+                .join('/')}`,
+              state: routeState ?? null,
+            }
+          : `/workspace/${encodeURIComponent(urlBranch)}`,
+      ]}
+    >
       <Routes>
         <Route path="/workspace/:branch/*" element={tree} />
       </Routes>
@@ -656,8 +697,8 @@ describe('FileViewer', () => {
   // fix that 403 was swallowed (console.warn only) and the click just flickered
   // "Loading…" then reverted to "Edit" with no explanation. Now the refusal is
   // surfaced in the save-error banner so the user understands the file is
-  // read-only to them. (Distinct from lock contention, which the "Locked by X"
-  // banner already covers.)
+  // read-only to them. (Distinct from someone else editing, which the "X is
+  // editing this page" banner already covers.)
   it('surfaces an access-denied 403 on enter-edit instead of silently reverting', async () => {
     // Force the access lookup to fail → useFileAccess default-allows →
     // canWrite=true → the Edit button renders on a protected branch.
@@ -686,6 +727,26 @@ describe('FileViewer', () => {
     expect(screen.getByText(/Eligible: Admin/i)).toBeInTheDocument();
     // And we did NOT flip into edit mode — no editable textbox appeared.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  // Someone else has the page open for editing: the reader is told who, in
+  // plain words, and Edit says the same on hover.
+  it('says who is editing a page someone else has open', async () => {
+    vi.mocked(getLockMock).mockResolvedValueOnce({
+      branch: 'alice/draft',
+      path: 'knowledge-base/Knowledge/Foo.md',
+      holderUserId: 'u2',
+      holderName: 'Dana Lee',
+      acquiredAt: new Date().toISOString(),
+      lastHeartbeatAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const banner = await screen.findByText(/is editing this page\. You can edit it when they finish\./);
+    expect(banner).toHaveTextContent('Dana Lee is editing this page. You can edit it when they finish.');
+    expect(screen.queryByText(/Locked/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveAttribute('title', 'Dana Lee is editing this page');
   });
 
   // WP1 regression. The document column moved: the viewer pane used to be
@@ -943,6 +1004,37 @@ describe('FileViewer', () => {
     // folder's own row in the tree, beside the children it governs.
     await user.click(screen.getByRole('button', { name: 'More sharing options' }));
     expect(screen.queryByRole('menuitem', { name: /whole folder/i })).not.toBeInTheDocument();
+  });
+
+  it("calls a folder's access.md Who has access, says what it governs, and opens the folder's Manage access", async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="read: everyone"
+        filePath="knowledge-base/KnowledgeBase/Legal/access.md"
+      />,
+    );
+
+    const h1 = await screen.findByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Who has access');
+    expect(h1).toHaveAttribute('title', 'access.md');
+    expect(screen.getByRole('note')).toHaveTextContent(
+      'This file controls who can see and change Legal. Change it with Manage access.',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Manage access' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access: directory knowledge-base/KnowledgeBase/Legal',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing about access on an ordinary page', async () => {
+    render(<ViewerHarness initialContent="plain" />);
+    await screen.findByRole('heading', { level: 1 });
+    expect(screen.queryByText(/This file controls who can see and change/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manage access' })).not.toBeInTheDocument();
   });
 
   // ── WP5: the rail ──
@@ -1551,5 +1643,237 @@ describe('FileViewer: nothing open', () => {
       />,
     );
     expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
+  });
+});
+
+/**
+ * "What does your team do?" stands where the empty state would, for exactly
+ * as long as the server offers it, and hands back to the empty state with a
+ * line saying what was added.
+ */
+describe('FileViewer: the starter-pack question', () => {
+  // A fresh sign-in per test: the starter answer is kept per signed-in user.
+  const admin = () => ({ id: 'u-admin', email: 'ada@example.com', name: 'Ada' });
+  const PACKS = [
+    { id: 'engineering', name: 'Engineering', description: 'How you build.', order: 1 },
+    { id: 'sales', name: 'Sales', description: 'What you sell.', order: 2 },
+  ];
+  // The pack lands on the default branch, so the question is asked there —
+  // the branch the test setup pins as the default.
+  const DEFAULT = 'target-company-state';
+
+  afterEach(() => {
+    starterPacksMock.fetchStarterPacks.mockReset().mockResolvedValue({
+      offered: false,
+      chosen: null,
+      packs: [],
+      chosenPack: null,
+    });
+  });
+
+  it('replaces the empty state while it is offered', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+    expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Engineering' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+  });
+
+  it('is not there when it is not offered — a member, or a question already answered', async () => {
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+  });
+
+  it('is not asked on another branch, where the pack would not land, even while it is offered', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch="alice/draft" />);
+    expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Engineering' })).toBeNull();
+  });
+
+  it('waits for the branch to be known rather than asking on a guess, showing neither state meanwhile', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={null} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+  });
+
+  it('shows no reading empty state before the server has answered: the question must not flash in after it', async () => {
+    let answer!: (a: unknown) => void;
+    starterPacksMock.fetchStarterPacks.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    answer({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
+  });
+
+  it('after a choice, says what was added above the ordinary empty state', async () => {
+    starterPacksMock.fetchStarterPacks
+      .mockResolvedValueOnce({ offered: true, chosen: null, packs: PACKS, chosenPack: null })
+      .mockResolvedValue({ offered: false, chosen: 'sales', packs: PACKS, chosenPack: null });
+    starterPacksMock.chooseStarterPack.mockResolvedValue({
+      id: 'sales',
+      name: 'Sales',
+      pages: 6,
+      skills: 37,
+      summary: 'Added 6 pages and 37 skills for Sales.',
+    });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Sales' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Added 6 pages and 37 skills for Sales.');
+    expect(screen.getByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+  });
+});
+
+/**
+ * Opening a page straight into the editor, asked for by the navigation
+ * (`openWorkspacePath(path, { edit: true })` → router state `startEditing`).
+ * It goes through the same lock-then-reload as the Edit button, happens once,
+ * and the request is taken off the history entry so a refresh or a Back
+ * opens the page for reading.
+ */
+describe('FileViewer: opening straight into the editor', () => {
+  const NEW_PAGE = 'knowledge-base/KnowledgeBase/Untitled.md';
+
+  afterEach(() => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    vi.mocked(acquireLockMock).mockClear();
+  });
+
+  it('enters edit mode once, caret under the title, and clears the request', async () => {
+    const user = userEvent.setup();
+    vi.mocked(acquireLockMock).mockClear();
+    render(
+      <ViewerHarness
+        initialContent={'# Untitled\n\n'}
+        filePath={NEW_PAGE}
+        // Another key on the same entry survives the clean-up.
+        routeState={{ startEditing: true, rawFile: true }}
+      />,
+    );
+
+    const textarea = (await screen.findByRole('textbox')) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('# Untitled\n\n');
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe(textarea.value.length);
+    expect(screen.getByTestId('location-state')).toHaveTextContent('{"rawFile":true}');
+    expect(screen.getByTestId('location')).toHaveTextContent('/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/Untitled.md');
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+
+    // Done is Done: with the request gone, nothing puts the editor back.
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument());
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still opens the editor once the path URL has been swapped for the node-id URL', async () => {
+    // `FileRoute` canonicalises a node's path URL to its id URL, sometimes
+    // before the bytes land: the URL then names the id, and the request
+    // carries the path it was made for.
+    render(
+      <ViewerHarness
+        initialContent={'# Untitled\n\n'}
+        filePath={NEW_PAGE}
+        routePath="untitled_page"
+        routeState={{ startEditing: true, startEditingPath: NEW_PAGE }}
+      />,
+    );
+    expect(await screen.findByRole('textbox')).toBeInTheDocument();
+    expect(screen.getByTestId('location-state')).toHaveTextContent('null');
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the caret alone on a later Edit by hand when the request was turned away', async () => {
+    const user = userEvent.setup();
+    // The request's enter-edit is refused by the lock …
+    vi.mocked(acquireLockMock).mockRejectedValueOnce(
+      new LockApiError(403, 'You don\'t have permission to write to this page.', {
+        access: { path: NEW_PAGE, eligibleRoles: ['Admin'], eligibleUsers: [] },
+      }),
+    );
+    render(
+      <ViewerHarness
+        initialContent={'# Long page\n\nA long body.'}
+        filePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('location-state')).toHaveTextContent('null'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+
+    // … so the Edit the reader then clicks is theirs, not the request's: the
+    // caret is not sent to the end of the page, scrolling them away.
+    const setSelectionRange = vi.spyOn(HTMLTextAreaElement.prototype, 'setSelectionRange');
+    try {
+      await user.click(screen.getByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox');
+      await act(async () => {});
+      expect(setSelectionRange).not.toHaveBeenCalled();
+    } finally {
+      setSelectionRange.mockRestore();
+    }
+  });
+
+  it('opens for reading when the navigation asked for nothing', async () => {
+    render(<ViewerHarness initialContent="# Notes" filePath={NEW_PAGE} routePath={NEW_PAGE} />);
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeEnabled();
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves another file alone: the request is for the file the URL names', async () => {
+    render(
+      <ViewerHarness
+        initialContent="# Foo"
+        filePath="knowledge-base/KnowledgeBase/Foo.md"
+        routePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await screen.findByRole('button', { name: 'Edit' });
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+    // Still pending, for when that file opens.
+    expect(screen.getByTestId('location-state')).toHaveTextContent('{"startEditing":true}');
+  });
+
+  it('consumes the request without editing a file the reader cannot write', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        filePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('location-state')).toHaveTextContent('null'));
+    expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
   });
 });
