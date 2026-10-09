@@ -98,7 +98,7 @@ export class RepositorySource {
     this.credentials = {
       username: () => this.username(),
       token: () => this.token(),
-      prepare: () => this.prepare(),
+      prepare: (opts) => this.prepare(opts),
     };
   }
 
@@ -185,8 +185,8 @@ export class RepositorySource {
     }
   }
 
-  private async prepare(): Promise<void> {
-    if (this.inEffect === 'github-app') await this.opts.githubApp?.prepare();
+  private async prepare(opts?: { asked?: boolean }): Promise<void> {
+    if (this.inEffect === 'github-app') await this.opts.githubApp?.prepare(opts);
   }
 
   private tokenIn(read: SettingReader): string {

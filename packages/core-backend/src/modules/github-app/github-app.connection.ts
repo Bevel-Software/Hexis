@@ -59,6 +59,13 @@ export class GitHubAppConnection implements GitHubAppRepository {
   private renewing: Promise<void> | null = null;
   /** The last renewal failed: how many in a row have, and until when GitHub is not asked again. */
   private failed: { times: number; until: number } | null = null;
+  /**
+   * The settings that were empty the last time no token could be asked for,
+   * so the log says so ONCE per state and not before every git call. A
+   * deployment in this state used to run for hours with every push failing
+   * and nothing in the log naming the cause.
+   */
+  private saidUnaskable: string | null = null;
 
   constructor(private readonly opts: GitHubAppConnectionOptions) {
     this.client = opts.client ?? new GitHubAppClient();
@@ -142,7 +149,21 @@ export class GitHubAppConnection implements GitHubAppRepository {
   async prepare(opts: { asked?: boolean } = {}): Promise<void> {
     const credentials = this.credentials();
     const installationId = this.installationId();
-    if (!credentials || !installationId) return;
+    if (!credentials || !installationId) {
+      // Said once per state: every git call lands here while it lasts.
+      const empty = ['githubAppId', 'githubAppSlug', 'githubAppPrivateKey', 'githubAppClientId', 'githubAppClientSecret', 'githubInstallationId']
+        .filter((key) => !this.opts.read(key))
+        .join(', ');
+      if (this.saidUnaskable !== empty) {
+        this.saidUnaskable = empty;
+        this.log().error(
+          `no installation token can be asked for while these settings are empty: ${empty}. ` +
+            'Every git call to the repository host runs without a credential until they are set.',
+        );
+      }
+      return;
+    }
+    this.saidUnaskable = null;
     const held = this.held?.for === this.holder() ? this.held : null;
     const good = held !== null && held.expiresAt > this.now();
     if (good && held.expiresAt - this.now() > RENEW_AHEAD_MS) return;

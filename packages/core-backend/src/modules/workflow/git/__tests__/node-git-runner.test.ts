@@ -1,9 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { NodeGitRunner } from '../node-git-runner.js';
-import { GitRunError, gitCredentials, isGitTimeout } from '../../../../shared/git.contract.js';
+import {
+  GitRunError,
+  gitCredentials,
+  isGitTimeout,
+  type GitCredentials,
+} from '../../../../shared/git.contract.js';
 
 /**
  * These run REAL git, like the rest of this module's suites: the behaviours
@@ -148,5 +155,147 @@ describe('NodeGitRunner', () => {
       if (previous === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = previous;
     }
+  });
+});
+
+/**
+ * A git host that wants a credential, as a real `ls-remote` over HTTP meets
+ * it: a bare repository behind Basic auth, served the dumb way (`info/refs`
+ * as a file), which git falls back to when no smart service answers. Every
+ * refusal below is git's own — "could not read Username" when it had nothing
+ * to offer, "Authentication failed" when what it offered was thrown out.
+ */
+describe('NodeGitRunner: a call the host refuses a credential', () => {
+  let root: string;
+  let clone: string;
+  let server: http.Server;
+  let remote: string;
+  /** The one token the host accepts. */
+  let accepted: string;
+  /** How many times the host was asked, and refused, in order. */
+  let answers: number[];
+  /** No helper from the machine this runs on: the clone's config and the call's `-c` are the whole story. */
+  let env: NodeJS.ProcessEnv;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'git-runner-auth-'));
+    const empty = path.join(root, 'empty-gitconfig');
+    await fs.writeFile(empty, '');
+    env = { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1' };
+    const plain = new NodeGitRunner();
+    const seed = path.join(root, 'seed');
+    await fs.mkdir(seed);
+    await plain.run(seed, ['init', '--initial-branch=main'], { env });
+    await plain.run(seed, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '--allow-empty', '-m', 'init'], { env });
+    const upstream = path.join(root, 'upstream.git');
+    await plain.run(root, ['clone', '--bare', seed, upstream], { env });
+    await plain.run(upstream, ['update-server-info'], { env });
+    clone = path.join(root, 'clone');
+    await fs.mkdir(clone);
+    await plain.run(clone, ['init', '--initial-branch=main'], { env });
+
+    accepted = 'ghp_good';
+    answers = [];
+    server = http.createServer(async (req, res) => {
+      const expected = `Basic ${Buffer.from(`x-access-token:${accepted}`).toString('base64')}`;
+      if (req.headers.authorization !== expected) {
+        answers.push(401);
+        res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="upstream"' });
+        res.end();
+        return;
+      }
+      answers.push(200);
+      const file = path.join(upstream, new URL(req.url ?? '/', 'http://x').pathname.replace(/^\/upstream\.git\/?/, ''));
+      try {
+        const bytes = await fs.readFile(file);
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(bytes);
+      } catch {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    remote = `http://127.0.0.1:${(server.address() as AddressInfo).port}/upstream.git`;
+    await plain.run(clone, ['remote', 'add', 'origin', remote], { env });
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  /** Credentials whose token a test moves, with a `prepare` that records how it was asked. */
+  function moving(initial: string | null, onAsked: (set: (token: string | null) => void) => void = () => undefined) {
+    let token = initial;
+    const prepare = vi.fn(async (opts?: { asked?: boolean }) => {
+      if (opts?.asked) onAsked((next) => { token = next; });
+    });
+    const credentials: GitCredentials = {
+      username: () => 'x-access-token',
+      token: () => token,
+      prepare,
+    };
+    return { credentials, prepare };
+  }
+
+  it('authenticates a clone whose config carries no helper: the helper rides the call', async () => {
+    const runner = new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_good'));
+    const { stdout } = await runner.run(clone, ['ls-remote', 'origin'], { env });
+    expect(stdout).toContain('refs/heads/main');
+    // Refused once, with nothing offered; then every request carried the token.
+    expect(answers.filter((a) => a === 401)).toHaveLength(1);
+    expect(answers).toContain(200);
+  });
+
+  it('with nothing to offer, insists on a token and runs the command once more', async () => {
+    const { credentials, prepare } = moving(null, (set) => set('ghp_good'));
+    const runner = new NodeGitRunner(undefined, credentials);
+    const { stdout } = await runner.run(clone, ['ls-remote', 'origin'], { env });
+    expect(stdout).toContain('refs/heads/main');
+    // The ordinary renewal before the call, then the insistent one after the refusal.
+    expect(prepare.mock.calls.map((c) => c[0]?.asked ?? false)).toEqual([false, true]);
+    // The first attempt never got to offer anything (one refusal, and git
+    // gave up); the second was refused once more before it offered the token.
+    expect(answers.filter((a) => a === 401)).toHaveLength(2);
+    expect(answers).toContain(200);
+  });
+
+  it('with a token the host throws out, renews it and runs the command once more', async () => {
+    const { credentials, prepare } = moving('ghp_stale', (set) => set('ghp_good'));
+    const runner = new NodeGitRunner(undefined, credentials);
+    const { stdout } = await runner.run(clone, ['ls-remote', 'origin'], { env });
+    expect(stdout).toContain('refs/heads/main');
+    expect(prepare.mock.calls.map((c) => c[0]?.asked ?? false)).toEqual([false, true]);
+  });
+
+  it('runs the command again ONCE: a refusal with a token just issued is the answer', async () => {
+    const { credentials, prepare } = moving('ghp_stale', (set) => set('ghp_still_stale'));
+    const runner = new NodeGitRunner(undefined, credentials);
+    const err = await runner.run(clone, ['ls-remote', 'origin'], { env }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitRunError);
+    expect(`${(err as GitRunError).stderr}`).toMatch(/Authentication failed/);
+    expect(prepare.mock.calls.filter((c) => c[0]?.asked).length).toBe(1);
+    // Two attempts, each refused once with a credential offered.
+    expect(answers.filter((a) => a === 401).length).toBeGreaterThanOrEqual(2);
+    expect(answers).not.toContain(200);
+  });
+
+  it('does not run the command again when no token can be had, and keeps the refusal', async () => {
+    const { credentials, prepare } = moving(null, (set) => set(null));
+    const runner = new NodeGitRunner(undefined, credentials);
+    const err = await runner.run(clone, ['ls-remote', 'origin'], { env }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitRunError);
+    expect(`${(err as GitRunError).stderr}`).toMatch(/could not read Username/);
+    expect(prepare.mock.calls.filter((c) => c[0]?.asked).length).toBe(1);
+    // One attempt: with nothing to offer, running it again would only repeat the refusal.
+    expect(answers).toEqual([401]);
+  });
+
+  it('leaves every other failure alone', async () => {
+    const { credentials, prepare } = moving('ghp_good');
+    const runner = new NodeGitRunner(undefined, credentials);
+    await expect(runner.run(clone, ['checkout', 'no-such-branch'], { env })).rejects.toBeInstanceOf(GitRunError);
+    expect(prepare.mock.calls.filter((c) => c[0]?.asked).length).toBe(0);
   });
 });
