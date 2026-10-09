@@ -9,9 +9,9 @@ import { forgetDraft } from '../utils/kept-draft';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { suggestedBranch } from '../utils/suggested-branch';
 import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { ConnectionProbeFailed, useConnectionProbe } from '../hooks/useConnectionProbe';
 import {
   saveSettings,
-  testConnection,
   KbInitFailed,
   SettingsProblems,
   type ConnectionTest,
@@ -157,24 +157,20 @@ export function FirstRunStorage({ repository, onSaved }: Props) {
   const [token, setToken] = useState('');
   /** Only asked for when the host is not one whose token username is known. */
   const [username, setUsername] = useState('');
-  /** The last test of exactly what is typed; any edit clears it. */
-  const [test, setTest] = useState<ConnectionTest | null>(null);
-  const [testing, setTesting] = useState(false);
   /**
-   * Which set of answers is typed, bumped on every edit. A test result
-   * describes the answers as they were when the request left; one that comes
-   * back after an edit is about values no longer on screen, so it is neither
-   * shown nor saved with. The full form keeps the same guard
-   * (`connectionEpoch`).
+   * The last test of exactly what is typed. Any edit clears it, and an answer
+   * that lands after an edit is about values no longer on screen, so it is
+   * neither shown nor saved with — the one mechanism the full form keeps too
+   * (`useConnectionProbe`).
    */
-  const answersEpoch = useRef(0);
+  const probe = useConnectionProbe();
+  const { result: test, testing } = probe;
   const knownHost = tokenUsernameForHost(repoUrl);
   const askUsername = repoUrl.trim() !== '' && !knownHost;
 
   function edit(set: (value: string) => void, value: string) {
     set(value);
-    answersEpoch.current++;
-    setTest(null);
+    probe.invalidate();
     setError(null);
   }
 
@@ -191,28 +187,22 @@ export function FirstRunStorage({ repository, onSaved }: Props) {
   /**
    * Ask the host. A refusal is an answer and is shown. Never throws: null
    * when there is no answer about what is typed now — the request failed
-   * (said in the banner), or the answers were edited while it was out (see
-   * {@link answersEpoch}) — and then a Save waiting on it stops, and the next
-   * press tests what is on screen.
+   * (said in the banner), or the answers were edited while it was out — and
+   * then a Save waiting on it stops, and the next press tests what is on
+   * screen.
    */
   async function runTest(): Promise<ConnectionTest | null> {
-    setTesting(true);
     setError(null);
-    const epoch = answersEpoch.current;
     try {
-      const result = await testConnection(connection());
-      if (epoch !== answersEpoch.current) return null;
-      setTest(result);
-      return result;
+      const { result, stale } = await probe.ask(connection());
+      return stale ? null : result;
     } catch (err) {
       // A failure goes stale the same way: it would complain about values
       // the admin has already changed.
-      if (epoch === answersEpoch.current) {
+      if (!(err instanceof ConnectionProbeFailed) || !err.stale) {
         setError(err instanceof Error ? err.message : 'Could not test the connection.');
       }
       return null;
-    } finally {
-      setTesting(false);
     }
   }
 

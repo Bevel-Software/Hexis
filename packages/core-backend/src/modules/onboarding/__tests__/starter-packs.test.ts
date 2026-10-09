@@ -4,7 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { defaultStarterPacksDir } from '../../../assets.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { loadStarterPacks, packProblem, readStarterPack, starterPackFiles } from '../starter-packs.js';
+
+const disk = new NodeFs();
 
 /**
  * Reading the packs: what makes a folder a pack, that one bad folder never
@@ -50,7 +53,7 @@ describe('loadStarterPacks', () => {
     await write('general/pack.yaml', manifest('general', { name: 'Something else', order: '99' }));
     await write('README.md', '# not a pack\n');
 
-    const packs = await loadStarterPacks(root);
+    const packs = await loadStarterPacks(disk,root);
 
     expect(packs.map((p) => p.id)).toEqual(['engineering', 'sales', 'general']);
     expect(packs[2]).toMatchObject({
@@ -70,23 +73,23 @@ describe('loadStarterPacks', () => {
     await write('wrong-id/pack.yaml', manifest('something-else'));
     await write('no-order/pack.yaml', manifest('no-order', { order: 'soon' }));
 
-    expect((await loadStarterPacks(root)).map((p) => p.id)).toEqual(['good']);
+    expect((await loadStarterPacks(disk,root)).map((p) => p.id)).toEqual(['good']);
   });
 
   it('offers nothing when the folder is not there', async () => {
-    expect(await loadStarterPacks(path.join(root, 'missing'))).toEqual([]);
+    expect(await loadStarterPacks(disk,path.join(root, 'missing'))).toEqual([]);
   });
 
   it('the packaged packs all read as packs', async () => {
     const dirs = (await fs.readdir(defaultStarterPacksDir(), { withFileTypes: true })).filter((e) => e.isDirectory());
-    const packs = await loadStarterPacks(defaultStarterPacksDir());
+    const packs = await loadStarterPacks(disk,defaultStarterPacksDir());
     expect(packs.map((p) => p.id).sort()).toEqual(dirs.map((d) => d.name).sort());
   });
 
   it("the packaged skills are named, described, unique across packs, and free of their upstream's install", async () => {
     const names = new Map<string, string>();
-    for (const pack of await loadStarterPacks(defaultStarterPacksDir())) {
-      for (const file of await starterPackFiles(pack, DEFAULT_KB_LAYOUT)) {
+    for (const pack of await loadStarterPacks(disk,defaultStarterPacksDir())) {
+      for (const file of await starterPackFiles(disk, pack,DEFAULT_KB_LAYOUT)) {
         if (path.posix.basename(file.repoPath) !== 'SKILL.md') continue;
         const text = file.content as string;
         const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '';
@@ -133,9 +136,9 @@ describe('starterPackFiles', () => {
     await write('eng/Plugins/eng-starter/skills/review/SKILL.md', '---\nname: review\n---\n');
     await write('eng/Plugins/eng-starter/logo.png', Buffer.from([0x89, 0x50, 0x00, 0x01]));
     await write('eng/Skills/Shared/tidy/SKILL.md', '---\nname: tidy\n---\n');
-    const pack = (await readStarterPack(path.join(root, 'eng')))!;
+    const pack = (await readStarterPack(disk, path.join(root, 'eng')))!;
 
-    const files = await starterPackFiles(pack, {
+    const files = await starterPackFiles(disk, pack,{
       ...DEFAULT_KB_LAYOUT,
       knowledgeBaseDir: 'Wiki',
       pluginsDir: 'Teams',
@@ -157,9 +160,9 @@ describe('starterPackFiles', () => {
     await write('eng/pack.yaml', manifest('eng'));
     await write('eng/KnowledgeBase/About us.md', '# About us\n');
     await write('eng/Plugins', 'not a folder\n');
-    const pack = (await readStarterPack(path.join(root, 'eng')))!;
+    const pack = (await readStarterPack(disk, path.join(root, 'eng')))!;
 
-    const files = await starterPackFiles(pack, DEFAULT_KB_LAYOUT);
+    const files = await starterPackFiles(disk, pack,DEFAULT_KB_LAYOUT);
 
     expect(files.map((f) => f.repoPath)).toEqual(['KnowledgeBase/About us.md']);
   });

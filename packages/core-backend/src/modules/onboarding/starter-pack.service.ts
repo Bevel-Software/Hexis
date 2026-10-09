@@ -46,7 +46,6 @@
  * the same name cannot slip between them.
  */
 
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   PERSONAL_PLUGIN_PREFIX,
@@ -64,7 +63,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import type { ITreeWalker } from '../../shared/fs.contract.js';
+import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
 import {
   isUntouchedStarterPage,
   knowledgeFolderIsNew,
@@ -129,8 +128,13 @@ export interface StarterPackServiceDeps {
    * folder old for them (see `knowledgeIsNew`).
    */
   accessControl: Pick<IAccessControl, 'invalidate' | 'canReadBatch'>;
-  /** The one tree walk (see `shared/fs.contract.ts`), for the look at the knowledge folder `knowledgeIsNew` takes. */
-  disk: ITreeWalker;
+  /**
+   * The one tree walk and the one probe (see `shared/fs.contract.ts`): the
+   * packs folder and a pack's files are listed through them, and so are the
+   * knowledge folder `knowledgeIsNew` looks at and the checkout `apply`
+   * judges its writes against.
+   */
+  disk: ITreeWalker & IFsProbe;
   /** Plugin discovery over the checkout: what "a plugin by that name is already there" means, at any depth. */
   pluginSource: Pick<PluginSource, 'discover'>;
   /** The plugin creation's identity lock, held over the name check and the commit of the pack's plugins. */
@@ -156,7 +160,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
     const [chosen, isAdmin, packs] = await Promise.all([
       this.recordedChoice(),
       this.deps.adminAccess.isAdmin(user.email),
-      loadStarterPacks(this.deps.packsDir),
+      loadStarterPacks(this.deps.disk, this.deps.packsDir),
     ]);
     const offered = isAdmin && chosen === null && packs.length > 0 && (await this.knowledgeIsNew(false, user.email));
     const pack = chosen && chosen !== NO_STARTER_PACK ? packs.find((p) => p.id === chosen) : undefined;
@@ -197,7 +201,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
         if (!(await this.knowledgeIsNew(true, user.email))) {
           throw new StarterPackError('This knowledge base already has pages, so starter pages are no longer offered.', 409);
         }
-        pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.packsDir)).find((p) => p.id === id) ?? null);
+        pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.disk, this.deps.packsDir)).find((p) => p.id === id) ?? null);
         if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
         if (pack) added = await this.apply(user, pack);
         else await this.deps.settings.record({ [STARTER_PACK_SETTING]: id }, user.id);
@@ -228,7 +232,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
   async firstRunStarter(): Promise<FirstRunStarter | null> {
     const chosen = await this.recordedChoice();
     if (!chosen || chosen === NO_STARTER_PACK) return null;
-    const pack = (await loadStarterPacks(this.deps.packsDir)).find((p) => p.id === chosen);
+    const pack = (await loadStarterPacks(this.deps.disk, this.deps.packsDir)).find((p) => p.id === chosen);
     if (!pack) return null;
     const knowledgeDir = this.deps.kb.layout.knowledgeBaseDir;
     const pages = new Map<string, string>();
@@ -308,7 +312,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
 
   /** The pack's pages: its text files under the knowledge folder. */
   private async pagesOf(pack: StarterPack): Promise<StarterPackFile[]> {
-    const files = await starterPackFiles(pack, this.deps.kb.layout);
+    const files = await starterPackFiles(this.deps.disk, pack, this.deps.kb.layout);
     return files.filter((f) => f.root === 'KnowledgeBase' && typeof f.content === 'string' && this.isPage(f.repoPath));
   }
 
@@ -357,11 +361,11 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
 
   /** Write the pack's absent files to the default branch as one commit; resolve to the paths written. */
   private async apply(user: AuthUser, pack: StarterPack): Promise<string[]> {
-    const { kb, workspaceService, workflow } = this.deps;
+    const { kb, workspaceService, workflow, disk } = this.deps;
     const branch = kb.defaultBranch;
     const ws = await workspaceService.getOrCreateForBranch(branch);
     const basePath = await workspaceService.getWorkspacePath(ws.id);
-    const files = await starterPackFiles(pack, kb.layout);
+    const files = await starterPackFiles(disk, pack, kb.layout);
     // Held from the name check to the commit: the names the pack's plugins
     // would take, on the lock a creation or a deletion of one of them takes.
     return this.deps.pluginLocks.withIdentities(packPluginFolders(files, kb.layout.pluginsDir), async () => {
@@ -377,7 +381,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
           // a page someone made a moment ago is never replaced.
           const absent: (typeof candidates)[number][] = [];
           for (const w of candidates) {
-            if (!(await exists(path.join(basePath, ...w.path.split('/'))))) absent.push(w);
+            if (!(await disk.exists(path.join(basePath, ...w.path.split('/'))))) absent.push(w);
           }
           written = absent.map((w) => w.path);
           return absent;
@@ -415,7 +419,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
   ): Promise<{ path: string; content: string | Buffer }[]> {
     const { kbDirName, layout } = this.deps.kb;
     const [existingFolders, discovered] = await Promise.all([
-      childNames(path.join(repoDir, layout.pluginsDir)),
+      folderNames(this.deps.disk, path.join(repoDir, layout.pluginsDir)),
       this.deps.pluginSource.discover(repoDir),
     ]);
     if (discovered.unreadable.length > 0) {
@@ -499,20 +503,7 @@ export function summaryOf(pack: Pick<StarterPack, 'id' | 'name'>, pages: number,
   return `Added ${parts.join(' and ')}${pack.id === CATCH_ALL_PACK ? '' : ` for ${pack.name}`}.`;
 }
 
-async function exists(abs: string): Promise<boolean> {
-  try {
-    await fs.lstat(abs);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** The names in `dir`, or none when it is not there. */
-async function childNames(dir: string): Promise<string[]> {
-  try {
-    return (await fs.readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
-  } catch {
-    return [];
-  }
+/** The folders in `dir`, by name; none when it is not there. A folder that cannot be listed is the error: a name cannot be proved free over a hole. */
+async function folderNames(disk: IFsProbe, dir: string): Promise<string[]> {
+  return ((await disk.listDir(dir)) ?? []).filter((e) => e.isDirectory()).map((e) => e.name);
 }

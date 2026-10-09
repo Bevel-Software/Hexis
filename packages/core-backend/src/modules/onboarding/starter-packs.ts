@@ -19,12 +19,17 @@
  * A pack that does not read as one — no `pack.yaml`, a field missing or of
  * the wrong kind, an id that is not its folder's name — is passed over with
  * a warning: one broken folder must not take the choice away from everyone.
+ *
+ * The disk is read through the one walk and the one probe
+ * (`shared/fs.contract.ts`), handed in by the caller; only a file's bytes are
+ * read here, which neither contract covers.
  */
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { renderKbLayoutPlaceholders, type KbLayout } from '@bevel-software/platform-shared';
+import type { IFsProbe, ITreeWalker, WalkedEntry } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
 import { utf8Text } from '../../shared/utf8-text.js';
 
@@ -78,31 +83,30 @@ export interface StarterPackFile {
  * is not there offers no packs; it is not an error, since a distribution may
  * ship none.
  */
-export async function loadStarterPacks(root: string): Promise<StarterPack[]> {
-  let entries: import('node:fs').Dirent[];
+export async function loadStarterPacks(disk: IFsProbe, root: string): Promise<StarterPack[]> {
+  let entries: WalkedEntry[] | null;
   try {
-    entries = await fs.readdir(root, { withFileTypes: true });
+    entries = await disk.listDir(root);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      log.warn(`could not read the starter packs folder "${root}" — no packs offered:`, { err });
-    }
+    log.warn(`could not read the starter packs folder "${root}" — no packs offered:`, { err });
     return [];
   }
+  if (entries === null) return [];
   const packs: StarterPack[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-    const pack = await readStarterPack(path.join(root, entry.name));
+    const pack = await readStarterPack(disk, path.join(root, entry.name));
     if (pack) packs.push(pack);
   }
   return packs.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
 }
 
 /** The pack in `dir`, or null (with a warning saying why) when it does not read as one. */
-export async function readStarterPack(dir: string): Promise<StarterPack | null> {
+export async function readStarterPack(disk: IFsProbe, dir: string): Promise<StarterPack | null> {
   const folder = path.basename(dir);
   let raw: string;
   try {
-    raw = await fs.readFile(path.join(dir, PACK_MANIFEST), 'utf8');
+    raw = await disk.readTextFile(path.join(dir, PACK_MANIFEST));
   } catch {
     log.warn(`starter pack "${folder}" has no readable ${PACK_MANIFEST} — skipped.`);
     return null;
@@ -153,15 +157,18 @@ export function packProblem(manifest: unknown, folder: string): string | null {
 }
 
 /**
- * Every file the pack would add, at its path under `layout`, in a stable
- * order. Dot-files are left behind (an editor's or an OS's droppings, never
- * content), and so is anything that is not a regular file: a pack is files.
+ * Every file the pack would add, at its path under `layout`, in walk order.
+ * The knowledge-base walk lists them: dot-entries are left behind (an
+ * editor's or an OS's droppings, never content), and so is anything that is
+ * not a regular file — a pack is files. A pack folder that is not there, or
+ * is a file where a folder was expected, holds nothing; a folder in one that
+ * cannot be listed is the error, since a pack with a hole is not the pack.
  */
-export async function starterPackFiles(pack: StarterPack, layout: Required<KbLayout>): Promise<StarterPackFile[]> {
+export async function starterPackFiles(disk: ITreeWalker, pack: StarterPack, layout: Required<KbLayout>): Promise<StarterPackFile[]> {
   const out: StarterPackFile[] = [];
   for (const [root, layoutKey] of PACK_ROOTS) {
     const base = path.join(pack.dir, root);
-    for (const rel of await filesUnder(base)) {
+    for (const rel of await disk.walkFiles(base, () => true, { strict: true })) {
       const bytes = await fs.readFile(path.join(base, ...rel.split('/')));
       const text = utf8Text(bytes);
       out.push({
@@ -173,36 +180,3 @@ export async function starterPackFiles(pack: StarterPack, layout: Required<KbLay
   }
   return out;
 }
-
-/**
- * The files below `dir` as POSIX paths relative to it, sorted; none when it
- * is not there — or is a file where a folder was expected, which is said in
- * the log and treated as empty: one odd entry in a pack must not take the
- * whole choice down.
- */
-async function filesUnder(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (abs: string, rel: string): Promise<void> => {
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(abs, { withFileTypes: true });
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (rel === '' && code === 'ENOENT') return;
-      if (rel === '' && code === 'ENOTDIR') {
-        log.warn(`starter pack: "${dir}" is a file, not a folder — nothing taken from it.`);
-        return;
-      }
-      throw err;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) await walk(path.join(abs, entry.name), childRel);
-      else if (entry.isFile()) out.push(childRel);
-    }
-  };
-  await walk(dir, '');
-  return out.sort();
-}
-
