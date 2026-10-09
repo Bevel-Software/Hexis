@@ -43,6 +43,8 @@ interface Opts {
   emailDomainAllowed?: boolean;
   openChangeRequest?: ReturnType<typeof vi.fn>;
   createBranch?: ReturnType<typeof vi.fn>;
+  /** Whether origin already carries the viewer's suggestions branch. */
+  remoteBranchExists?: boolean;
   config?: Partial<EmbedConfig>;
   resolveNodeId?: ((id: string) => Promise<string | null>) | null;
 }
@@ -86,7 +88,11 @@ function build(opts: Opts = {}) {
     commitChanges: vi.fn(async () => ({ sha: 'deadbee' })),
     openChangeRequest: opts.openChangeRequest ?? vi.fn(async () => ({ number: 42 })),
   };
-  const gitService = { createBranch: opts.createBranch ?? vi.fn(async () => ({})) };
+  const gitService = {
+    createBranch: opts.createBranch ?? vi.fn(async () => ({})),
+    // Origin has no suggestions branch yet unless a test says otherwise.
+    remoteBranchExists: vi.fn(async () => opts.remoteBranchExists ?? false),
+  };
   const accountLinks = {
     getUserId: vi.fn(async () => (opts.linkedUserId === undefined ? USER.id : opts.linkedUserId)),
     link: vi.fn(async () => undefined),
@@ -554,6 +560,20 @@ describe('EmbedService: proposing as a non-writer', () => {
     const { service, workflowService } = build({ canWrite: false, createBranch });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, 'x')).resolves.toMatchObject({ number: 42 });
+    expect(workflowService.openChangeRequest).toHaveBeenCalled();
+  });
+
+  it('a second proposal finds the branch on origin and does not try to create it again', async () => {
+    // Created and pushed by the first proposal, the branch is on origin; a
+    // second `createBranch` would fail as a non-fast-forward push, not as
+    // "already exists" — so origin is asked first.
+    const createBranch = vi.fn(async () => {
+      throw new Error('git push failed: ! [rejected] suggestions/alice-u-1/knowledge (non-fast-forward)');
+    });
+    const { service, workflowService } = build({ canWrite: false, createBranch, remoteBranchExists: true });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.propose(token, 'again')).resolves.toMatchObject({ number: 42 });
+    expect(createBranch).not.toHaveBeenCalled();
     expect(workflowService.openChangeRequest).toHaveBeenCalled();
   });
 

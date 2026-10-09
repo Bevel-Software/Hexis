@@ -143,13 +143,17 @@ export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedI
       throw new EmbedRefParseError(`Not a valid URL: ${ref}`);
     }
     fragment = safeDecode(url.hash.replace(/^#/, ''));
-    refuseEncodedSeparators(url.pathname);
-    const segments = url.pathname.split('/').filter(Boolean).map((s) => safeDecode(s));
-    if ((segments[0] === 'workspace' || segments[0] === 'embed') && segments.length >= 3) {
-      pathPart = segments.slice(2).join('/');
-    } else {
-      pathPart = segments.join('/');
-    }
+    // The app's route (`workspace` or `embed`) is found wherever it sits: a
+    // deployment served under a path prefix carries it after the prefix,
+    // which is then not part of the file's path. The branch segment that
+    // follows it is ignored — and may carry an encoded separator, since a
+    // default branch named `team/main` is written `team%2Fmain` there; only
+    // the FILE path after it is held to the plain-separator rule.
+    const rawSegments = url.pathname.split('/').filter(Boolean);
+    const route = rawSegments.findIndex((s) => s === 'workspace' || s === 'embed');
+    const rest = route >= 0 && rawSegments.length >= route + 3 ? rawSegments.slice(route + 2) : rawSegments;
+    refuseEncodedSeparators(rest.join('/'));
+    pathPart = rest.map((s) => safeDecode(s)).join('/');
   } else {
     const hashIndex = ref.indexOf('#');
     fragment = hashIndex >= 0 ? safeDecode(ref.slice(hashIndex + 1)) : '';

@@ -34,6 +34,16 @@ describe('parseEmbedRef', () => {
       `https://hexis.example/embed/some-draft/${KB}/Data/Thing.md`,
       { repoRelative: 'Data/Thing.md' },
     ],
+    [
+      'an app URL of a deployment served under a path prefix',
+      `https://hexis.example/hexis/workspace/main/${KB}/Data/Thing.md#goal`,
+      { repoRelative: 'Data/Thing.md', slug: 'goal' },
+    ],
+    [
+      'an app URL whose default branch carries a slash, encoded in its segment',
+      `https://hexis.example/workspace/team%2Fmain/${KB}/Data/Thing.md`,
+      { repoRelative: 'Data/Thing.md' },
+    ],
     ['a content: marker in angle brackets', '<content: Data/Thing.md>', { repoRelative: 'Data/Thing.md' }],
     ['a percent-encoded space', 'Data/Some%20Thing.md', { repoRelative: 'Data/Some Thing.md' }],
   ])('reads %s', (_label, raw, expected) => {

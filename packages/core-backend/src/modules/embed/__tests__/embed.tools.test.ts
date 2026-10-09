@@ -243,12 +243,13 @@ describe('toRepoRelative', () => {
     ['a leading slash', `/${KB}/Data/Thing.md`, 'Data/Thing.md'],
     ['a dot-slash', './Data/Thing.md', 'Data/Thing.md'],
     ['a trailing slash', 'Data/Thing.md/', 'Data/Thing.md'],
-    ['backslashes', 'Data\\Thing.md', 'Data/Thing.md'],
   ])('reads %s', (_label, input, expected) => {
     expect(toRepoRelative(input, KB)).toBe(expected);
   });
 
-  it.each([['empty', ''], ['the folder itself', KB], ['traversal', 'Data/../../x'], ['a newline', 'a\nb']])(
+  // A backslash is refused, as `read_file` refuses it: read as a separator it
+  // would name a file other than the one the caller wrote, in a signed token.
+  it.each([['empty', ''], ['the folder itself', KB], ['traversal', 'Data/../../x'], ['a newline', 'a\nb'], ['DEL', 'a\x7fb'], ['a backslash', 'Data\\Thing.md']])(
     'refuses %s',
     (_label, input) => {
       expect(toRepoRelative(input, KB)).toBeNull();

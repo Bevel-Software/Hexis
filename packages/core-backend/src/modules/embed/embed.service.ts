@@ -397,25 +397,35 @@ export class EmbedService implements IEmbedService {
     if (!canRead) throw new EmbedAccessError(`You don't have permission to read "${claims.repoRelative}".`);
     const branch = `${suggestionsBranchPrefixFor({ email: user.email, id: user.id })}knowledge`;
     // Create the branch when it is not there yet; an existing one is reused,
-    // which is what bundles a person's proposals into one request.
-    await this.gitService
-      .createBranch(this.defaultWorkspaceId(), branch, this.kb.defaultBranch)
-      .catch((err: unknown) => {
-        if (err instanceof Error && /already exists/i.test(err.message)) return;
-        throw err;
-      });
+    // which is what bundles a person's proposals into one request. Asked of
+    // ORIGIN first: a second proposal finds the branch already pushed, and
+    // creating it again would fail as a non-fast-forward push, not as
+    // "already exists" — the race between the two is still caught below.
+    if (!(await this.gitService.remoteBranchExists(this.defaultWorkspaceId(), branch))) {
+      await this.gitService
+        .createBranch(this.defaultWorkspaceId(), branch, this.kb.defaultBranch)
+        .catch((err: unknown) => {
+          if (err instanceof Error && /already exists|non-fast-forward|fetch first/i.test(err.message)) return;
+          throw err;
+        });
+    }
     const workspace = await this.workspaceService.getOrCreateForBranch(branch);
     const wsPath = this.wsPathFor(claims.repoRelative);
-    await this.workspaceService.writeFile(workspace.id, wsPath, content);
-    // Scoped to the one path this proposal is about: the suggestions branch
-    // is shared by everything this person has proposed, and a bare commit
-    // would sweep in another in-flight write of theirs under this message.
-    await this.workflowService.commitChanges(
-      workspace.id,
-      user,
-      `Propose changes to ${claims.repoRelative}`,
-      [wsPath],
-    );
+    // One proposal at a time per file on this branch: two from the same
+    // person landing together would otherwise write over each other before
+    // either commit staged the file, and one would commit the other's text.
+    await this.proposing(`${branch}\u0000${wsPath}`, async () => {
+      await this.workspaceService.writeFile(workspace.id, wsPath, content);
+      // Scoped to the one path this proposal is about: the suggestions branch
+      // is shared by everything this person has proposed, and a bare commit
+      // would sweep in another in-flight write of theirs under this message.
+      await this.workflowService.commitChanges(
+        workspace.id,
+        user,
+        `Propose changes to ${claims.repoRelative}`,
+        [wsPath],
+      );
+    });
     try {
       const created = await this.workflowService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,
@@ -543,6 +553,21 @@ export class EmbedService implements IEmbedService {
     }
   }
 
+  /** In-flight proposal write-and-commit sequences, by branch and path — see `propose`. */
+  private readonly proposals = new Map<string, Promise<unknown>>();
+
+  /** Run `work` after every proposal already running for the same `key`. */
+  private async proposing<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const before = this.proposals.get(key) ?? Promise.resolve();
+    const mine = before.catch(() => undefined).then(work);
+    this.proposals.set(key, mine);
+    try {
+      return await mine;
+    } finally {
+      if (this.proposals.get(key) === mine) this.proposals.delete(key);
+    }
+  }
+
   /** The typed 404 of {@link readFileBytes}, for a reference, without reading a byte. */
   private async assertExists(repoRelative: string): Promise<void> {
     const workspaceId = this.defaultWorkspaceId();
@@ -613,13 +638,16 @@ function nodeNameFor(repoRelative: string): string {
  */
 export function resolveBeside(from: string, path: string): string | null {
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(path)) return null;
+  if (/[\x00-\x1f\x7f]/.test(path)) return null;
   let decoded = path;
   try {
     decoded = decodeURIComponent(path);
   } catch {
     return null;
   }
+  // Judged again decoded: `%0a` is a newline once the escape is undone.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(decoded)) return null;
   const absolute = decoded.startsWith('/');
   const base = absolute ? [] : from.split('/').slice(0, -1);
   const parts = [...base];
@@ -647,7 +675,10 @@ function duplicateRequestNumber(err: unknown): number | null {
   const candidate = detail?.details?.existingNumber ?? detail?.existingNumber;
   if (typeof candidate === 'number') return candidate;
   if (err instanceof Error) {
-    const match = /already\D+(\d+)/i.exec(err.message);
+    // The refusal's own sentence ("An open change request already exists
+    // from … to … (#12)"), and only that shape: a count or a numeric token
+    // after some other "already" is not a request.
+    const match = /change request already exists[^#]*#(\d+)/i.exec(err.message);
     if (match) return Number(match[1]);
   }
   return null;
