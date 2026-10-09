@@ -12,7 +12,16 @@ import { atlassianAccountLinks } from '../database/schema.js';
  * An embed minted for a Hexis user (the MCP `open_page` path) consults none of
  * this: its token names the user id directly, so there is nothing to link.
  */
-export class AccountLinkService {
+/** The account links as the embed service consumes them — the port a deployment may substitute. */
+export interface IAccountLinkService {
+  /** Resolve an account id to its linked Hexis user id, or null. */
+  getUserId(accountId: string): Promise<string | null>;
+  link(accountId: string, userId: string): Promise<void>;
+  listForUser(userId: string): Promise<Array<{ atlassianAccountId: string; createdAt: Date }>>;
+  unlink(userId: string, accountId: string): Promise<boolean>;
+}
+
+export class AccountLinkService implements IAccountLinkService {
   constructor(private readonly db: Database) {}
 
   /** Resolve an account id to its linked Hexis user id, or null. */

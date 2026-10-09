@@ -1,22 +1,21 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+import { timingSafeStringEqual } from '../auth/password-hash.js';
 import jwt from 'jsonwebtoken';
-import type { AuthUser } from '@bevel-software/platform-shared';
+import type { AuthUser, IGitService, IWorkflowService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { WorkflowService } from '../workflow/workflow.service.js';
-import type { GitService } from '../workflow/git/git.service.js';
 import { changeRequestLink, changeRequestLinkBase } from '../workflow/git/change-request-link.js';
 import type { FileReaderRegistry } from '../workspace/file-readers/file-reader.js';
 import type {
+  EmbedAuthPort,
   EmbedFileView,
   EmbedLinkedAccount,
   EmbedLockResult,
   EmbedNodeIdResolver,
+  EmbedWorkspacePort,
   EmbedProposalResult,
   EmbedSubject,
   EmbedTokenResult,
@@ -29,7 +28,7 @@ import {
   EmbedTokenError,
 } from './embed.errors.js';
 import { parseEmbedRef, EmbedRefParseError, isSafeRepoRelativeEmbedPath } from './embed-link.js';
-import type { AccountLinkService } from './account-link.service.js';
+import type { IAccountLinkService } from './account-link.service.js';
 
 const log = logger('embed');
 
@@ -93,12 +92,12 @@ export class EmbedService implements IEmbedService {
   constructor(
     private readonly config: EmbedConfig,
     private readonly kb: KbContext,
-    private readonly workspaceService: WorkspaceService,
+    private readonly workspaceService: EmbedWorkspacePort,
     private readonly accessControl: IAccessControl,
-    private readonly authService: AuthService,
-    private readonly workflowService: WorkflowService,
-    private readonly gitService: GitService,
-    private readonly accountLinks: AccountLinkService,
+    private readonly authService: EmbedAuthPort,
+    private readonly workflowService: IWorkflowService,
+    private readonly gitService: IGitService,
+    private readonly accountLinks: IAccountLinkService,
     private readonly readers: FileReaderRegistry,
     /** See {@link EmbedNodeIdResolver} — core has none, so core refuses an id reference. */
     private readonly resolveNodeId: EmbedNodeIdResolver | null = null,
@@ -117,14 +116,8 @@ export class EmbedService implements IEmbedService {
   verifySharedSecret(secret: string | undefined): boolean {
     const expected = this.config.embedSharedSecret;
     if (!expected || !secret) return false;
-    const a = Buffer.from(secret, 'utf8');
-    const b = Buffer.from(expected, 'utf8');
-    const len = Math.max(a.length, b.length);
-    const aPadded = Buffer.alloc(len);
-    const bPadded = Buffer.alloc(len);
-    a.copy(aPadded);
-    b.copy(bPadded);
-    return timingSafeEqual(aPadded, bPadded) && a.length === b.length;
+    // The one constant-time comparison the platform has (the password hash's).
+    return timingSafeStringEqual(secret, expected);
   }
 
   async mintForUser(input: { userId: string; reference: string }): Promise<EmbedTokenResult> {
