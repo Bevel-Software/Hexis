@@ -452,16 +452,22 @@ describe('the renderer', () => {
    */
   it('copies a heading link from the page address without the heading the view opened at', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
+    // A stub `vi.restoreAllMocks` does not know about: removed by hand, so
+    // no later test in this file meets a clipboard this one left behind.
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    api.loadEmbed.mockResolvedValue(
-      view({
-        appUrl: 'https://hexis.example/workspace/main/knowledge-base/Data/Thing.md#what-it-is',
-        heading: 'what-it-is',
-      }),
-    );
-    mount();
-    const btn = await screen.findByRole('button', { name: /copy link to this heading/i });
-    fireEvent.click(btn);
-    expect(writeText).toHaveBeenCalledWith('https://hexis.example/workspace/main/knowledge-base/Data/Thing.md#thing');
+    try {
+      api.loadEmbed.mockResolvedValue(
+        view({
+          appUrl: 'https://hexis.example/workspace/main/knowledge-base/Data/Thing.md#what-it-is',
+          heading: 'what-it-is',
+        }),
+      );
+      mount();
+      const btn = await screen.findByRole('button', { name: /copy link to this heading/i });
+      fireEvent.click(btn);
+      expect(writeText).toHaveBeenCalledWith('https://hexis.example/workspace/main/knowledge-base/Data/Thing.md#thing');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
   });
 });
