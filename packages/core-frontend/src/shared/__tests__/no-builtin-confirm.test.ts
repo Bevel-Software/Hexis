@@ -22,11 +22,19 @@ const REPO_ROOT = resolve(SRC, '..', '..', '..');
 const WEB_SRC = join(REPO_ROOT, 'apps', 'web', 'src');
 const RULES = new Set(['no-restricted-globals', 'no-restricted-properties']);
 
+/**
+ * ONE instance for the whole suite. Building one loads the repo's flat config
+ * and the typescript parser — seconds on a slow machine — and the first case
+ * below lints four fixtures, which built four of them and ran past the
+ * default timeout on Windows. The config does not change between cases.
+ */
+let instance: ESLint | null = null;
 function eslint(): ESLint {
-  return new ESLint({
+  instance ??= new ESLint({
     cwd: REPO_ROOT,
     ruleFilter: ({ ruleId }) => RULES.has(ruleId),
   });
+  return instance;
 }
 
 /** Lint `code` as if it were a file in this package, with the repo's config. */
@@ -61,7 +69,8 @@ describe('lint: no built-in confirm', () => {
     expect(await lintFixture("export const d = confirm('Delete?');\n", WEB_SRC)).toEqual([
       'no-restricted-globals:1',
     ]);
-  });
+    // The first lint of the suite pays for loading the config and the parser.
+  }, 60_000);
 
   it("allows a local function called confirm (useConfirm()'s result, the file tree's)", async () => {
     const code = [
