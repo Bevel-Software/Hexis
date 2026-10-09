@@ -67,6 +67,8 @@ const FILES: Record<string, string | Buffer> = {
   'Readable/Top.md': '# top\n',
   // A folder whose rules deny Ana `download`, holding a file whose own
   // frontmatter grants it: the file alone may go out, the folder's zip not.
+  // A folder Ana may read (no rule of its own) whose one file she may not: for her it holds no files.
+  'Veiled/Secret.md': '---\nread:\n  - deny Ana <ana@x.io>\n---\n# secret\n',
   'Gated/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\ndownload:\n  - deny Ana <ana@x.io>\n',
   'Gated/Open.md': '---\ndownload:\n  - Ana <ana@x.io>\n---\n# open inside a gated folder\n',
   'Pictures/access.md': '---\n---\ndownload:\n  - Ana <ana@x.io>\n',
@@ -271,12 +273,24 @@ describe('request_file_download: every file judged on its own', () => {
     for (const hidden of ['Inner/Plan.md', 'Inner/access.md', 'Node-Deny-Read.md']) {
       expect(JSON.stringify(body)).not.toContain(hidden);
     }
-    // A hidden file the caller NAMES is answered exactly as a missing one.
-    const missing = await request(h.base, [`${KB}/Shared/Nope.md`, `${KB}/Shared/Node-Deny-Read.md`]);
+    // A hidden file or FOLDER the caller NAMES is answered exactly as a missing one.
+    const missing = await request(h.base, [`${KB}/Shared/Nope.md`, `${KB}/Shared/Node-Deny-Read.md`, `${KB}/Shared/Inner`, `${KB}/Shared/Nowhere`]);
     expect([...missing.body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: `${KB}/Shared/Inner`, reason: NOT_FOUND },
       { path: `${KB}/Shared/Node-Deny-Read.md`, reason: NOT_FOUND },
       { path: `${KB}/Shared/Nope.md`, reason: NOT_FOUND },
+      { path: `${KB}/Shared/Nowhere`, reason: NOT_FOUND },
     ]);
+    expect(JSON.stringify(missing.body)).not.toContain('Plan');
+    // A folder holding nothing the caller may read is one the explorer hides
+    // outright, so it is `not found`; a folder with nothing in it at all,
+    // which the explorer shows, "holds no files".
+    const veiled = await request(h.base, [`${KB}/Veiled`, `${KB}/Pictures/sub`]);
+    expect([...veiled.body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: `${KB}/Pictures/sub`, reason: 'the folder holds no files' },
+      { path: `${KB}/Veiled`, reason: NOT_FOUND },
+    ]);
+    expect(JSON.stringify(veiled.body)).not.toContain('Secret');
 
     // One zip for the folder, its entries at their full repository paths.
     expect(body.folders).toHaveLength(1);
@@ -616,14 +630,20 @@ describe('limits', () => {
     expect(one.folders).toHaveLength(1);
   });
 
-  it('refuses a request holding more files than one request may carry, before judging any', async () => {
-    const deps = fakeDeps({ [`${KB}/a`]: [{ path: 'a/1.md', bytes: 0 }, { path: 'a/2.md', bytes: 0 }] }, 10, 1);
-    const canRead = vi.spyOn(deps, 'canReadBatch');
+  it('refuses a request holding more readable files than one request may carry, before reading any', async () => {
+    const two = [{ path: 'a/1.md', bytes: 0 }, { path: 'a/2.md', bytes: 0 }];
+    const deps = fakeDeps({ [`${KB}/a`]: two }, 10, 1);
     await expect(buildDownload([`${KB}/a`], deps)).rejects.toMatchObject({
       status: 413,
       details: { kind: 'download-too-many-files', maxFiles: 1 },
     });
-    expect(canRead).not.toHaveBeenCalled();
+    expect(deps.readFile).not.toHaveBeenCalled();
+    // Only what the caller may read counts: the refusal must not tell them
+    // how many files they cannot see.
+    const oneHidden = { ...fakeDeps({ [`${KB}/a`]: two }, 10, 1), canReadBatch: async (ps: string[]) => new Map(ps.map((p) => [p, p === 'a/1.md'])) };
+    const built = await buildDownload([`${KB}/a`], oneHidden);
+    expect(built.files.map((f) => f.path)).toEqual([`${KB}/a/1.md`]);
+    expect(built.refused).toEqual([]);
   });
 
   it('counts calls still building against the cap, so parallel calls cannot all pass it', async () => {

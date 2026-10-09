@@ -462,8 +462,8 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     // One log line per close, naming the request, its branches and why.
     const closeLines = lines.filter((l) => l.includes('closed change request #'));
     expect(closeLines).toEqual([
-      '[cr] closed change request #21 ("ali/sync" into "target-company-state") by ana@example.com: it proposes nothing (empty when "ali/sync" was deleted)',
-      '[cr] closed change request #22 ("ali/feature" into "ali/sync") by ana@example.com: it proposes nothing (empty when "ali/sync" was deleted)',
+      '[cr] closed change request #21 ("ali/sync" into "target-company-state") by u-ana: it proposes nothing (empty when "ali/sync" was deleted)',
+      '[cr] closed change request #22 ("ali/feature" into "ali/sync") by u-ana: it proposes nothing (empty when "ali/sync" was deleted)',
     ]);
   });
 
@@ -813,8 +813,8 @@ describe('retireLeftoverMergedBranches — the server removes what merged change
     const deletions = lines.filter((l) => l.includes('branch deleted by'));
     expect(deletions).toEqual([
       '[workflow] branch deleted by system: "ali/sync-0709" at t3',
-      '[workflow] branch deleted by ana@example.com: "ali/old-draft" at a1',
-      '[workflow] branch deleted by ana@example.com: "ana/mine" at n1',
+      '[workflow] branch deleted by u-ana: "ali/old-draft" at a1',
+      '[workflow] branch deleted by u-ana: "ana/mine" at n1',
     ]);
   });
 
