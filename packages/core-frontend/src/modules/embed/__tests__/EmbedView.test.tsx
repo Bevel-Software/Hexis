@@ -444,4 +444,24 @@ describe('the renderer', () => {
     expect(img.getAttribute('src')).toBe('/api/embed/raw?token=tok&path=/Data/shot.png');
     expect(api.embedRawUrl).toHaveBeenCalledWith('tok', '/Data/shot.png', expect.anything());
   });
+
+  /**
+   * A heading's copy-link is the page's canonical address plus the heading.
+   * A view opened AT a heading carries that heading in its app address; the
+   * canonical address drops it, or every copied link would carry two.
+   */
+  it('copies a heading link from the page address without the heading the view opened at', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    api.loadEmbed.mockResolvedValue(
+      view({
+        appUrl: 'https://hexis.example/workspace/main/knowledge-base/Data/Thing.md#what-it-is',
+        heading: 'what-it-is',
+      }),
+    );
+    mount();
+    const btn = await screen.findByRole('button', { name: /copy link to this heading/i });
+    fireEvent.click(btn);
+    expect(writeText).toHaveBeenCalledWith('https://hexis.example/workspace/main/knowledge-base/Data/Thing.md#thing');
+  });
 });

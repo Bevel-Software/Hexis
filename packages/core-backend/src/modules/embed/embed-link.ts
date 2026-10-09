@@ -150,7 +150,12 @@ export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedI
     // default branch named `team/main` is written `team%2Fmain` there; only
     // the FILE path after it is held to the plain-separator rule.
     const rawSegments = url.pathname.split('/').filter(Boolean);
-    const route = rawSegments.findIndex((s) => s === 'workspace' || s === 'embed');
+    // Matched DECODED (a route name may arrive percent-encoded), while the
+    // separator rule below reads the raw spelling.
+    const route = rawSegments.findIndex((s) => {
+      const decoded = safeDecode(s);
+      return decoded === 'workspace' || decoded === 'embed';
+    });
     const rest = route >= 0 && rawSegments.length >= route + 3 ? rawSegments.slice(route + 2) : rawSegments;
     refuseEncodedSeparators(rest.join('/'));
     pathPart = rest.map((s) => safeDecode(s)).join('/');

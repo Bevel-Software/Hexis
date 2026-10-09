@@ -40,6 +40,11 @@ describe('parseEmbedRef', () => {
       { repoRelative: 'Data/Thing.md', slug: 'goal' },
     ],
     [
+      'an app URL whose route name arrives percent-encoded',
+      `https://hexis.example/%77orkspace/main/${KB}/Data/Thing.md`,
+      { repoRelative: 'Data/Thing.md' },
+    ],
+    [
       'an app URL whose default branch carries a slash, encoded in its segment',
       `https://hexis.example/workspace/team%2Fmain/${KB}/Data/Thing.md`,
       { repoRelative: 'Data/Thing.md' },

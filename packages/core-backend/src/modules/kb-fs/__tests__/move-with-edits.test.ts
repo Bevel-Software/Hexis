@@ -204,9 +204,15 @@ describe('LockingFilesystem.moveWithEdits', () => {
       await commit(...args);
       throw new PushNeedsAgentResolutionError('feature-test', `${KB}/Index.md`, 'refused', '(not attempted)', 'refused');
     });
+    const commitsBefore = await git(repo, ['rev-list', '--count', 'HEAD']);
     await expect(
       fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
     ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    // The commit stands — the tree is as committed, nothing rolled back —
+    // and only its push is owed.
+    expect(Number(await git(repo, ['rev-list', '--count', 'HEAD']))).toBe(Number(commitsBefore) + 1);
+    expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
+    expect(await read('Topics/Deep/A/One.md')).toContain('../../../NodeTypes/Task.md');
     const enqueued = released(workflow.releaseLock);
     const untouched = released(workflow.releaseLockUntouched);
     // Every file the commit named is enqueued…
