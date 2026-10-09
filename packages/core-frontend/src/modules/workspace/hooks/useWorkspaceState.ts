@@ -268,6 +268,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * optimistic state stays stable until the delete finishes.
    */
   const pendingDeletePathsRef = useRef<Set<string>>(new Set());
+  /**
+   * Open tabs whose file someone else deleted (`OpenTab.deletedBy`), as a
+   * ref so `saveFile` can refuse a write-back synchronously — the state that
+   * marks the tab lands a render after the editor's unmount cleanup reads it.
+   * A path leaves the set when its tab closes or the file is read again.
+   */
+  const deletedPathsRef = useRef<Set<string>>(new Set());
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
@@ -283,7 +290,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // Paths whose close is waiting on that question: a second close of the same
   // tab while it is asked must not queue the same question twice.
   const askingClosePathsRef = useRef(new Set<string>());
-  useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+    // A closed tab's file is nobody's to guard any more.
+    for (const path of deletedPathsRef.current) {
+      if (!openTabs.some((t) => t.path === path)) deletedPathsRef.current.delete(path);
+    }
+  }, [openTabs]);
   useEffect(() => { activeTabPathRef.current = activeTabPath; }, [activeTabPath]);
   useEffect(() => { fileTreeRef.current = fileTree; }, [fileTree]);
   useEffect(() => { persistenceBranchRef.current = persistenceBranch; }, [persistenceBranch]);
@@ -400,16 +413,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * Someone else deleted the file of the open tab at `path`. The tab stays,
    * with its content and unsaved edits, and the file page shows the deleted
-   * notice for it. A name already learned is kept when a later signal (a
-   * tree refresh, a re-read) arrives without one.
+   * notice for it. A name already learned is kept: later signals (a tree
+   * refresh, a re-read, another event) never replace it.
    */
   const markTabDeleted = useCallback((path: string, name: string | null) => {
     if (isPendingDelete(path)) return;
+    // Synchronously, before the state that unmounts the editor: its lock
+    // cleanup writes the buffer back, and that write must find the file
+    // already known to be gone (see `saveFile`).
+    if (openTabsRef.current.some((t) => t.path === path)) deletedPathsRef.current.add(path);
     setOpenTabs((prev) => {
       const idx = prev.findIndex((t) => t.path === path);
       if (idx < 0) return prev;
       const tab = prev[idx];
-      const nextName = name ?? tab.deletedBy?.name ?? null;
+      // The first event to name someone is the delete; later ones (an echo of a
+      // lock release, a re-read) do not rename who did it.
+      const nextName = tab.deletedBy?.name ?? name;
       if (tab.deletedBy && tab.deletedBy.name === nextName) return prev;
       const next = prev.slice();
       next[idx] = { ...tab, deletedBy: { name: nextName }, pendingFileContent: null };
@@ -1428,6 +1447,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;
+    // Someone else deleted this file. The editor that held its unsaved edits
+    // unmounts when the notice replaces it, and its lock cleanup (and the
+    // autosave / idle-release timers) persist the buffer through here —
+    // which re-created the deleted file and wiped the notice. The edits stay
+    // on the tab, offered to copy; nothing writes them back unasked.
+    if (deletedPathsRef.current.has(relativePath)) {
+      throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
+    }
     await writeFile(workspaceId, relativePath, content);
     // Update the matching tab — both the cached current value and the on-disk
     // baseline now equal `content`; clear dirty.
@@ -1699,6 +1726,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   useEffect(() => {
     pendingUploadsRef.current = new Map();
     pendingDeletePathsRef.current = new Set();
+    deletedPathsRef.current = new Set();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingUploads(new Map());
     // The banners go with them. An upload still routing when the user
@@ -1742,6 +1770,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       if (matchingTab.pendingFileContent !== null) return;
       readFile(subscribedWorkspaceId, event.path)
         .then((content) => {
+          if (workspaceIdRef.current === subscribedWorkspaceId) {
+            // The file is there: writing it is no longer re-creating it.
+            deletedPathsRef.current.delete(event.path);
+          }
           if (workspaceIdRef.current !== subscribedWorkspaceId) {
             // Workspace switched while the refetch was in flight. The
             // tab list we'd be mutating is for a different branch now

@@ -355,6 +355,74 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.');
   });
 
+  // The editor holding the edits unmounts when the notice replaces it, and
+  // its file-lock cleanup (like the autosave and idle-release timers) writes
+  // the buffer back through `saveFile`. That write re-created the deleted
+  // file and took the notice away (Local Testing, mock screen 08).
+  it('refuses to write a deleted file back, so the edits stay on the notice and the file stays deleted', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nA page to delete.\n\nA paragraph I added.');
+    apiMocks.writeFile.mockClear();
+
+    disk.delete('KB/Draft.md');
+    let writeBack: Promise<void> | undefined;
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await act(async () => {
+      writeBack = result.current.saveFile('KB/Draft.md', '# Draft\n\nA page to delete.\n\nA paragraph I added.');
+      await expect(writeBack).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+    // An echo after the refused write finds nothing on disk either.
+    act(() => bus.emit(fileChanged('KB/Draft.md', { id: 'u-me', name: 'Me' })));
+    await settle();
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' });
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.\n\nA paragraph I added.');
+  });
+
+  it('refuses the write the moment the delete is learned, before the marked tab renders', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    // The read's 404 marks the tab; a write issued in that same turn — as
+    // the editor's unmount cleanup is — must already be refused.
+    let refused: unknown = null;
+    apiMocks.readFile.mockImplementationOnce(async () => {
+      throw new WorkspaceApiError(404, 'Not found');
+    });
+    await act(async () => {
+      bus.emit(fileChanged('KB/Draft.md'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await result.current.saveFile('KB/Draft.md', 'edited').catch((err: unknown) => { refused = err; });
+    });
+
+    expect(refused).toBeInstanceOf(Error);
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('writes again once the file is back on the branch', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toBeTruthy());
+
+    disk.set('KB/Draft.md', 'restored');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy ?? null).toBeNull());
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'restored, edited'); });
+
+    expect(disk.get('KB/Draft.md')).toBe('restored, edited');
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
