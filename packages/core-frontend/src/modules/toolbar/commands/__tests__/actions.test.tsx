@@ -21,11 +21,14 @@ const APPS: AppDef[] = [
   { id: 'knowledge', label: 'Knowledge', path: '/workspace', order: 10, element: <></> },
 ];
 
+const USER = { id: 'u1', email: 'ada@example.com', name: 'Ada' };
+
 const row = (over: Partial<AdminMenuItem> & { id: string }): AdminMenuItem => ({ label: over.id, ...over });
 
 function ctx(over: Partial<CommandContext> = {}): CommandContext {
   return {
     navigate: vi.fn(),
+    user: USER,
     isAdmin: false,
     activeAppId: 'knowledge',
     openFilePath: null,
@@ -99,6 +102,21 @@ describe('coreCommandActions', () => {
     void action.run(c);
     expect(c.navigate).toHaveBeenCalledWith('/chosen');
     expect(c.navigate).not.toHaveBeenCalledWith('/declared');
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ user: USER }));
+  });
+
+  it('offers a settings row only while its isShown holds for the signed-in person, as the profile menu does', () => {
+    const isShown = vi.fn((user: { email: string }) => user.email === 'ada@example.com');
+    const actions = coreCommandActions({
+      apps: [],
+      settings: { defaultItems: [row({ id: 'undo', label: 'Ask again', onSelect: vi.fn(), isShown })], adminItems: [] },
+    });
+    expect(labels(visibleActions(actions, ctx()))).toContain('Settings: Ask again');
+    expect(labels(visibleActions(actions, ctx({ user: { ...USER, email: 'bob@example.com' } })))).not.toContain(
+      'Settings: Ask again',
+    );
+    // Signed out there is nobody to show the profile menu's rows to.
+    expect(labels(visibleActions(actions, ctx({ user: null })))).not.toContain('Settings: Ask again');
   });
 });
 

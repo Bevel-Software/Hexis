@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useActiveAppId, useAppRegistry } from '../../../core/registry';
 import { useAdmin } from '../../admin/state/admin.context';
+import { useAuth } from '../../auth/state/auth.context';
 import { useMenuSections } from '../../settings/settings-nav-items';
 import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
 import { useOnboarding } from '../../onboarding/state/onboarding';
@@ -20,6 +21,7 @@ import {
 /** The one {@link CommandContext}, read off the app's own hooks. */
 export function useCommandContext(): CommandContext {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { isAdmin } = useAdmin();
   const activeAppId = useActiveAppId();
   const { openFilePath } = useWorkspace();
@@ -31,6 +33,7 @@ export function useCommandContext(): CommandContext {
   return useMemo(
     () => ({
       navigate: (to: string) => navigate(to),
+      user,
       isAdmin,
       activeAppId,
       openFilePath,
@@ -40,7 +43,7 @@ export function useCommandContext(): CommandContext {
       createPage: knowledgeRoot ? createPage : null,
       onboardingPending: showPill,
     }),
-    [navigate, isAdmin, activeAppId, openFilePath, editablePage, openWorkspacePath, invite, knowledgeRoot, createPage, showPill],
+    [navigate, user, isAdmin, activeAppId, openFilePath, editablePage, openWorkspacePath, invite, knowledgeRoot, createPage, showPill],
   );
 }
 

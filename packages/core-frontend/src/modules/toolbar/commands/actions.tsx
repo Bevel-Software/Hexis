@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { ArrowRight, FilePlus, Pencil, Plug, Settings, UserPlus } from 'lucide-react';
 import type { AdminMenuItem, AppDef } from '../../../core/registry';
 import type { MenuSections } from '../../settings/settings-nav-items';
@@ -22,6 +23,8 @@ import { WELCOME_PATH } from '../../onboarding/paths';
 export interface CommandContext {
   /** react-router navigation. */
   navigate(to: string): void;
+  /** The signed-in person, or null signed out. */
+  user: AuthUser | null;
   isAdmin: boolean;
   /** The app on screen (see `useActiveAppId`); undefined on a settings page. */
   activeAppId: string | undefined;
@@ -188,11 +191,15 @@ function settingsActions(settings: MenuSections): CommandAction[] {
       label: `Settings: ${label}`,
       keywords: [label, 'preferences'],
       icon: <Settings size={ICON_SIZE} />,
-      visible: (ctx) => !adminOnly || ctx.isAdmin,
+      // The profile menu's gates: a person to show it to, admin rows for
+      // admins, and the row's own `isShown` for this person right now.
+      visible: (ctx) =>
+        ctx.user !== null && (!adminOnly || ctx.isAdmin) && (item.isShown?.(ctx.user) ?? true),
       run: (ctx) => {
+        if (!ctx.user) return;
         // The profile menu's precedence, minus the dialog: code first, then
         // the declared destination.
-        if (item.onSelect) item.onSelect({ closeMenu: () => {}, navigate: ctx.navigate });
+        if (item.onSelect) item.onSelect({ closeMenu: () => {}, navigate: ctx.navigate, user: ctx.user });
         else if (item.path) ctx.navigate(item.path);
       },
     };
