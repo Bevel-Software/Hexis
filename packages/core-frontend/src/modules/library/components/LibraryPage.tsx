@@ -10,7 +10,7 @@ import { pluginEntriesFor } from '../utils/plugin-entries';
 import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAdmin } from '../../admin/state/admin.context';
@@ -163,7 +163,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           carrying — a height no other page could match. They read below it
           now, where they always looked like they were. */}
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
-        <h1 className="min-w-0 truncate text-display font-semibold" title={headingFor(filter)}>
+        <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={headingFor(filter)}>
           {headingFor(filter)}
         </h1>
         <TextField
