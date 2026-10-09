@@ -12,11 +12,15 @@
  * {@link FIRST_RUN_SECTION_ID} section says how. Once a page of anyone's
  * exists, the note stops on its own: there is no flag to clear.
  *
- * The question is about the knowledge base, not about the caller: it is asked
- * of the disk, under no access gate, and the answer names no file but the
- * starter guide, which every knowledge base is seeded with. A knowledge base
- * holding pages the caller may not read is not new, and the caller learns no
- * more from the missing note than that.
+ * The question is asked AS THE CALLER, gated like a read. The note goes only
+ * to someone who may read the knowledge folder, and it judges the folder as
+ * they may see it: a page or a folder they may not read is passed over as if
+ * it were not there (`mayRead` in {@link knowledgeFolderIsNew}), so a note
+ * that does or does not come tells them nothing about pages beyond them. The
+ * answer names no file but the starter guide, which every knowledge base is
+ * seeded with, and a chosen starter pack's pages — and when one of those is
+ * beyond the caller, no note at all, since a list with a gap would say where
+ * the gap is.
  *
  * A STARTER PACK does not end it. The pages a pack adds are tasks with a
  * heading and a line or two — "ask your agent to draft this" — so while one

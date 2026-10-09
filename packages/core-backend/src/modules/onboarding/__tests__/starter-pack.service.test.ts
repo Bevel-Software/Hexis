@@ -6,7 +6,7 @@ import { DEFAULT_KB_LAYOUT, type AuthUser, type IWorkflowService, type KbLayout 
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+import { KbPluginSource } from '../../plugins/index.js';
 import { CLAIM_TTL_MS, StarterPackError, StarterPackService, commitSubjectOf, summaryOf } from '../starter-pack.service.js';
 
 /**

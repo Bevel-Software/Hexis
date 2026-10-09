@@ -71,8 +71,7 @@ import {
   type FirstRunStarterSource,
   type MayRead,
 } from '../workspace/first-run.js';
-import { pluginAccessMd, withCreatorGrants } from '../plugins/plugin-provision.service.js';
-import type { PluginSource } from '../plugins/discovery/plugin-source.js';
+import { pluginAccessMd, withCreatorGrants, type PluginSource } from '../plugins/index.js';
 import {
   NO_STARTER_PACK,
   loadStarterPacks,
