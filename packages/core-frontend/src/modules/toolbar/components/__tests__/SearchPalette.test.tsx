@@ -549,6 +549,34 @@ describe('SearchPalette: commands', () => {
     expect(screen.getByTestId('location')).toHaveTextContent('/roles-and-members');
   });
 
+  it('asks a settings row’s isShown again on each open, so a row its own command switched off is gone', async () => {
+    // The shape of git's "Ask before deleting branches": shown while a stored
+    // preference is off, and its command turns the preference back on.
+    let skipped = true;
+    const adminMenuItems: AdminMenuItem[] = [
+      {
+        id: 'ask-again',
+        label: 'Ask again',
+        isShown: () => skipped,
+        onSelect: ({ closeMenu }) => {
+          skipped = false;
+          closeMenu();
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    renderPalette({ adminMenuItems });
+    await user.click(trigger());
+    await user.type(input(), 'ask again');
+    expect(groupRows('Actions')).toEqual(['Settings: Ask again']);
+    await user.keyboard('{Enter}');
+    expect(skipped).toBe(false);
+
+    await user.click(trigger());
+    await user.type(input(), 'ask again');
+    expect(group('Actions')).toBeNull();
+  });
+
   it('offers Edit this page only while the page on screen can be opened for editing', async () => {
     const page = 'knowledge-base/KnowledgeBase/Onboarding.md';
     const user = userEvent.setup();

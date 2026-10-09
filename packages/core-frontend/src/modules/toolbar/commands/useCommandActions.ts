@@ -59,6 +59,11 @@ export function useCommandActions(): { actions: CommandAction[]; ctx: CommandCon
     () => mergeCommandActions(coreCommandActions({ apps: registry.apps, settings }), registry.commandActions ?? []),
     [registry, settings],
   );
-  const actions = useMemo(() => visibleActions(all, ctx), [all, ctx]);
+  // Asked on every render rather than memoized on `ctx`: a settings row's
+  // `isShown` can follow state the menu does not own (a preference in
+  // storage), and the profile menu asks it each time its panel renders.
+  // Opening the palette is a render, so a row a command just switched off is
+  // gone by the next open.
+  const actions = visibleActions(all, ctx);
   return { actions, ctx };
 }

@@ -117,6 +117,9 @@ describe('coreCommandActions', () => {
     );
     // Signed out there is nobody to show the profile menu's rows to.
     expect(labels(visibleActions(actions, ctx({ user: null })))).not.toContain('Settings: Ask again');
+    // Never asked about nobody: `visibleActions` hides a row whose check
+    // throws, so the label alone would pass without the signed-in gate.
+    expect(isShown).toHaveBeenCalledTimes(2);
   });
 });
 
