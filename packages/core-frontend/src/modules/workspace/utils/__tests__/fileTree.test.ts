@@ -63,11 +63,6 @@ describe('subtreeHasVisibleEntries', () => {
   });
 });
 
-/**
- * What was kept out of ONE root is that root's own count, set by the server
- * per folder: a Skills tree emptied by the read rules says "nothing shared",
- * a Skills tree that is simply empty beside a withheld Knowledge does not.
- */
 /** The one exact-path lookup the workspace and the Get set up column share. */
 describe('findEntryByPath', () => {
   const page: FileTreeEntry = { name: 'note.md', relativePath: 'knowledge-base/KnowledgeBase/note.md', type: 'file' };
@@ -94,8 +89,33 @@ describe('findEntryByPath', () => {
     expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase/other.md')).toBeNull();
     expect(findEntryByPath(null, 'knowledge-base')).toBeNull();
   });
+
+  it('never opens a folder off the path', () => {
+    let opened = 0;
+    const skills: FileTreeEntry = { name: 'Skills', relativePath: 'knowledge-base/Skills', type: 'directory' };
+    Object.defineProperty(skills, 'children', {
+      get: () => {
+        opened++;
+        return [{ name: 'a.md', relativePath: 'knowledge-base/Skills/a.md', type: 'file' }];
+      },
+    });
+    const wide: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name: 'knowledge-base', relativePath: 'knowledge-base', type: 'directory', children: [skills, folder] }],
+    };
+    expect(findEntryByPath(wide, 'knowledge-base/KnowledgeBase/note.md')).toBe(page);
+    expect(findEntryByPath(wide, 'knowledge-base/Missing.md')).toBeNull();
+    expect(opened).toBe(0);
+  });
 });
 
+/**
+ * What was kept out of ONE root is that root's own count, set by the server
+ * per folder: a Skills tree emptied by the read rules says "nothing shared",
+ * a Skills tree that is simply empty beside a withheld Knowledge does not.
+ */
 describe('subtreeWithheld', () => {
   const kb: FileTreeEntry = {
     name: '.',

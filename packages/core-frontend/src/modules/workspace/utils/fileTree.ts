@@ -185,12 +185,17 @@ function walkKnowledge(
   return pages.slice(0, limit);
 }
 
-/** The entry at exactly `relativePath` (a file or a folder), or null when the tree has none. */
+/**
+ * The entry at exactly `relativePath` (a file or a folder), or null when the
+ * tree has none. It descends only into the folder on the path: an entry's
+ * path is its folder's plus its own name, so no other subtree can hold it,
+ * and a caller asking on every render does not walk the whole checkout.
+ */
 export function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
   if (!tree) return null;
   if (tree.relativePath === relativePath) return tree;
-  if (tree.children) {
-    for (const child of tree.children) {
+  for (const child of tree.children ?? []) {
+    if (relativePath === child.relativePath || relativePath.startsWith(`${child.relativePath}/`)) {
       const found = findEntryByPath(child, relativePath);
       if (found) return found;
     }
