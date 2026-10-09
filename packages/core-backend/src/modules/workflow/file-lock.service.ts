@@ -23,6 +23,13 @@
  * never be keyed on a path no file verb would accept. See
  * `canonicalFileIdentity`.
  *
+ * Workspace identity works the same way. The lock routes pass the `:id`
+ * path param, which Express URL-decodes, so a slashed branch's workspace
+ * arrives as `alice/feature`; the deletion gate and the git status probe ask
+ * with the encoded `alice%2Ffeature`. Every method keys rows on
+ * `canonicalWorkspaceId`, so both spellings are one workspace and a held file
+ * is seen whichever spelling asks.
+ *
  * There is no transition handling for rows written under a raw spelling
  * before this landed: such a row is now unreachable by name and expires on
  * its own TTL. For one deploy an in-flight edit's lock can linger up to the
@@ -41,6 +48,7 @@ import { fileLocks } from '../database/schema.js';
 import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/platform-shared';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
+import { canonicalWorkspaceId } from './pending-commits.service.js';
 
 /**
  * Lock lifetime without a heartbeat. The client is expected to heartbeat
@@ -125,13 +133,14 @@ export class FileLockService {
    * (or vice versa).
    */
   async acquire(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
     user: AuthUser,
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     if (this.closing.has(branch)) {
       throw new WorkflowValidationError(`"${branch}" is being deleted, so "${targetPath}" cannot be held for editing.`, {
         kind: 'branch-being-deleted',
@@ -255,12 +264,13 @@ export class FileLockService {
    * current holder.
    */
   async heartbeat(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
     user: AuthUser,
   ): Promise<FileLock> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
     // The expiry guard (`expiresAt > now`) matters because an expired
@@ -302,12 +312,13 @@ export class FileLockService {
    * over by someone else — that's not an error from the caller's POV).
    */
   async release(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
     user: AuthUser,
   ): Promise<void> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     await this.db
       .delete(fileLocks)
       .where(
@@ -326,11 +337,12 @@ export class FileLockService {
    * are purged here lazily.
    */
   async get(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
   ): Promise<FileLock | null> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     const rows = await this.db
       .select()
       .from(fileLocks)
@@ -406,7 +418,8 @@ export class FileLockService {
    * the "missed lock-release commit" the loud warning is for. Expired rows
    * don't count (their holder is gone; they explain nothing).
    */
-  async hasAnyActive(workspaceId: string): Promise<boolean> {
+  async hasAnyActive(rawWorkspaceId: string): Promise<boolean> {
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     const rows = await this.db
       .select({ path: fileLocks.path })
       .from(fileLocks)

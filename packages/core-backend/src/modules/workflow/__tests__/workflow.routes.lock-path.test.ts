@@ -18,6 +18,7 @@ import { WorkflowService } from '../workflow.service.js';
 import { createWorkflowRoutes } from '../workflow.routes.js';
 import { makeFakeLockDb, type FakeLockDb } from './fake-file-lock-db.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 
 /**
  * The lock routes over the real service and a real lock store: acquire,
@@ -223,6 +224,17 @@ describe('lock routes coordinate on one file identity', () => {
     expect(await read.json()).toMatchObject({
       lock: { holderUserId: ALICE.id, path: CANONICAL },
     });
+  });
+
+  it('stores a lock taken through the route under the encoded workspace id the deletion gate asks with', async () => {
+    // Express hands the route the decoded `:id`; the deletion paths ask
+    // `hasAnyActive` with `workspaceIdForBranch(branch)`, the encoded one.
+    await acquire(CANONICAL);
+
+    expect(h.fake.rows().map((r) => r.workspaceId)).toEqual([WS]);
+    await expect(new FileLockService(h.fake.db).hasAnyActive(workspaceIdForBranch(BRANCH))).resolves.toBe(true);
+    expect((await release(CANONICAL)).status).toBe(200);
+    expect(h.fake.rows()).toEqual([]);
   });
 
   it('reads the status of a raw spelling after a canonical acquire', async () => {
