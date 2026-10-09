@@ -80,7 +80,16 @@ function build(opts: Opts = {}) {
     // The mint's existence check: a stat, never a read.
     isFile: vi.fn(async (_id: string, wsPath: string) => files[wsPath] !== undefined),
     writeFile: vi.fn(async () => undefined),
+    // The service's per-path turn, as the real one runs `op`: one at a time
+    // per path, callers in order. `turns` records what ran inside which turn.
+    withPathTurn: vi.fn(async (_id: string, wsPath: string, op: () => Promise<unknown>) => {
+      const before = turns.get(wsPath) ?? Promise.resolve();
+      const mine = before.catch(() => undefined).then(op);
+      turns.set(wsPath, mine);
+      return mine;
+    }),
   };
+  const turns = new Map<string, Promise<unknown>>();
   const accessControl = {
     canRead: vi.fn(async () => opts.canRead ?? true),
     canWrite: vi.fn(async () => opts.canWrite ?? true),
@@ -530,6 +539,13 @@ describe('EmbedService: proposing as a non-writer', () => {
     const branch = 'suggestions/alice-u-1/knowledge';
     expect(gitService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
     expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(branch), WS, 'proposed text');
+    // The write and its commit run inside the workspace service's own
+    // per-path turn — the queue every other write surface takes — so two
+    // proposals for one file from one person cannot interleave.
+    expect(workspaceService.withPathTurn).toHaveBeenCalledWith(encodeURIComponent(branch), WS, expect.any(Function));
+    const turn = workspaceService.withPathTurn.mock.invocationCallOrder[0]!;
+    expect(workspaceService.writeFile.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
+    expect(workflowService.commitChanges.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
     /**
      * COMMITTED, and committed BEFORE the request is opened.
      *

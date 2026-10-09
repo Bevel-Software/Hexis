@@ -139,6 +139,30 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(feedback.send).not.toHaveBeenCalled();
   });
 
+  /**
+   * The author's synthetic id reaches log lines (`user=<id>` when a push or
+   * its recovery fails), and log lines carry no email addresses: the id is
+   * opaque, and the same person gets the same one however their address was
+   * typed.
+   */
+  it("the commit author's id carries no address, and is the same for one person", async () => {
+    const seen: string[] = [];
+    workflow.runPendingCommit.mockImplementation(async (_ws: string, _b: string, _p: string, user: AuthUser) => {
+      seen.push(user.id);
+    });
+    for (const authorEmail of ['alice@example.com', 'Alice@Example.com ', 'bob@example.com']) {
+      (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeRow({ authorEmail }));
+      await worker.drainOnce();
+    }
+    expect(seen).toHaveLength(3);
+    for (const id of seen) {
+      expect(id).not.toContain('@');
+      expect(id).not.toMatch(/alice|bob|example/i);
+    }
+    expect(seen[0]).toBe(seen[1]);
+    expect(seen[0]).not.toBe(seen[2]);
+  });
+
   it('skips work entirely when claimNext returns null (idle queue)', async () => {
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
 
@@ -225,7 +249,11 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(call.message).toContain('ws-1');
     expect(call.message).toContain('Foo.md');
     expect(call.message).toContain('unrecoverable');
-    expect(call.message).toContain('alice@example.com');
+    // The author is on the queue row the notice names — never in the body,
+    // which a core-only deployment writes to its log.
+    expect(call.message).toContain('Queue row: row-1');
+    expect(call.message).not.toContain('@');
+    expect(call.message).not.toContain('Alice');
   });
 
   it('a path-outside-repo refusal escalates at once: no retry, no recovery agent, the notice names the corrected path', async () => {
@@ -258,7 +286,8 @@ describe('PendingCommitsWorker.drainOnce', () => {
     // The correction survives the truncation: it rides on the error payload,
     // not on the message.
     expect(call.message).toContain('Use instead: knowledge-base/KnowledgeBase/Reviews/PR-12.html');
-    expect(call.message).toContain('alice@example.com');
+    expect(call.message).toContain('Queue row: row-1');
+    expect(call.message).not.toContain('@');
   });
 
   it('a feedback-sink failure does not throw — the row stays needs_attention regardless', async () => {

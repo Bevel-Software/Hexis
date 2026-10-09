@@ -51,6 +51,7 @@ function build() {
     readFileBinary: vi.fn(async () => Buffer.from('# Thing\n', 'utf8')),
     isFile: vi.fn(async () => true),
     writeFile: vi.fn(async () => undefined),
+    withPathTurn: vi.fn(async (_id: string, _wsPath: string, op: () => Promise<unknown>) => op()),
   };
   // The lock verbs go straight to the real service; release drops the row as
   // the real `releaseLock` does once it has enqueued the commit.

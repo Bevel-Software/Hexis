@@ -113,6 +113,8 @@ export interface EmbedWorkspacePort {
   isFile(workspaceId: string, wsPath: string): Promise<boolean>;
   readFileBinary(workspaceId: string, wsPath: string): Promise<Buffer>;
   writeFile(workspaceId: string, wsPath: string, content: string): Promise<void>;
+  /** One mutation at a time per resolved path, in this process: `op` runs after every turn already taken for `wsPath`. */
+  withPathTurn<T>(workspaceId: string, wsPath: string, op: () => Promise<T>): Promise<T>;
 }
 
 /** What the embed service needs of authentication: a user by id, and the email-domain rule. */
