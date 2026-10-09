@@ -8,7 +8,7 @@ import { WELCOME_PATH } from '../../onboarding/paths';
 
 /**
  * The commands the toolbar's menu can run, beside the pages and items it
- * finds: "New page", "Invite people", "Settings: Secrets".
+ * finds: "Create new page", "Invite people", "Settings: Secrets".
  *
  * A command is DATA plus two functions of a {@link CommandContext}, never a
  * hook or a component of its own: whether it is offered right now
@@ -50,6 +50,14 @@ export interface CommandContext {
   onboardingPending: boolean;
 }
 
+/** One letter, with or without Shift (see {@link CommandAction.shortcut}). */
+export interface CommandShortcut {
+  /** The letter, `a` to `z`; matched without regard to case. */
+  key: string;
+  /** Held: ⇧K. Not held: K on its own. */
+  shift?: boolean;
+}
+
 export interface CommandAction {
   /** Stable and unique among all commands — it keys the row and the suggestions. */
   id: string;
@@ -60,16 +68,16 @@ export interface CommandAction {
   /** Faint text after the label, naming where the command belongs (a distribution's area, say). */
   group?: string;
   /**
-   * The keys that run it outside the menu: `['C']`, or `['G', 'K']` for a
-   * sequence of two. Shown on the row as its hint AND bound by
-   * `useCommandShortcuts`, under the same guards as core's, so a hint is
-   * never a key that does nothing. Core's are filled in from
-   * {@link COMMAND_SHORTCUTS}. A registry command's shortcut is dropped at
-   * merge time, hint and all, and said so in the console, when it is longer
-   * than two keys or would collide with keys already bound — the same keys,
-   * or a sequence one of them begins: give it other keys.
+   * The key that runs it outside the menu: one letter, `a` to `z`, with or
+   * without Shift — `{ key: 'c' }`, or `{ key: 'k', shift: true }` for ⇧K.
+   * Shown on the row as its hint AND bound by `useCommandShortcuts`, under
+   * the same guards as core's, so a hint is never a key that does nothing.
+   * Core's are filled in from {@link COMMAND_SHORTCUTS}. A registry
+   * command's shortcut is dropped at merge time, hint and all, and said so in
+   * the console, when its key is not one letter or is already bound: give it
+   * another.
    */
-  shortcut?: string[];
+  shortcut?: CommandShortcut;
   /** The row's icon; a generic arrow when absent. */
   icon?: ReactNode;
   /** Whether to offer it now. Called on every render of the menu, so keep it cheap. */
@@ -85,8 +93,8 @@ const ICON_SIZE = 15;
 
 const NEW_PAGE: CommandAction = {
   id: 'new-page',
-  label: 'New page',
-  keywords: ['create page', 'add page', 'write', 'document', 'note', 'untitled'],
+  label: 'Create new page',
+  keywords: ['new page', 'create page', 'add page', 'write', 'document', 'note', 'untitled'],
   icon: <FilePlus size={ICON_SIZE} />,
   visible: (ctx) => ctx.createPage !== null,
   run: async (ctx) => {
@@ -137,22 +145,24 @@ export function goToAppActionId(appId: string): string {
 }
 
 /**
- * The single-key shortcuts, keyed by the command they run: `C` for New page,
- * `G` then `K` for Knowledge, `G` then `S` for Skills & Tools. ONE table,
- * read both by `useCommandShortcuts` (which binds the keys) and by the list
- * below (which shows them as hints), so a row never advertises a key that
- * does nothing. Lower-case is what is matched; the hints upper-case it.
+ * The shortcuts, keyed by the command they run: `C` for Create new page, ⇧I
+ * for Invite people, ⇧K for Knowledge and ⇧S for Skills & Tools — the two
+ * apps of the top bar's toggle. No other command has one. ONE table, read
+ * both by `useCommandShortcuts` (which binds the keys) and by the list below
+ * (which shows them as hints), so a row never advertises a key that does
+ * nothing.
  */
-export const COMMAND_SHORTCUTS: Readonly<Record<string, readonly string[]>> = {
-  'new-page': ['c'],
-  [goToAppActionId('knowledge')]: ['g', 'k'],
-  [goToAppActionId('skills-tools')]: ['g', 's'],
+export const COMMAND_SHORTCUTS: Readonly<Record<string, CommandShortcut>> = {
+  'new-page': { key: 'c' },
+  invite: { key: 'i', shift: true },
+  [goToAppActionId('knowledge')]: { key: 'k', shift: true },
+  [goToAppActionId('skills-tools')]: { key: 's', shift: true },
 };
 
 /** A core command with its hint from {@link COMMAND_SHORTCUTS}, if it has one. */
 function withShortcutHint(action: CommandAction): CommandAction {
-  const keys = COMMAND_SHORTCUTS[action.id];
-  return keys ? { ...action, shortcut: keys.map((k) => k.toUpperCase()) } : action;
+  const shortcut = COMMAND_SHORTCUTS[action.id];
+  return shortcut ? { ...action, shortcut } : action;
 }
 
 /**
@@ -227,21 +237,18 @@ export function coreCommandActions({
   );
 }
 
-/** A command's keys as `useCommandShortcuts` matches them: lower-cased, space-joined (`g k`); null without a shortcut. */
-export function shortcutSequence(action: Pick<CommandAction, 'shortcut'>): string | null {
-  return action.shortcut && action.shortcut.length > 0 ? action.shortcut.map((k) => k.toLowerCase()).join(' ') : null;
+/**
+ * A shortcut as `useCommandShortcuts` matches it: the letter lower-cased,
+ * after `shift+` when Shift is held (`c`, `shift+k`). Null without one.
+ */
+export function shortcutId(shortcut: CommandShortcut | undefined): string | null {
+  if (!shortcut) return null;
+  return `${shortcut.shift ? 'shift+' : ''}${shortcut.key.toLowerCase()}`;
 }
 
-/**
- * Whether `seq` could not be bound beside `bound`: the same keys, or a
- * sequence one of them begins (a bare `g` would swallow `g k`, and `c x`
- * would never be reached past `c`).
- */
-function shortcutCollides(seq: string, bound: Iterable<string>): boolean {
-  for (const b of bound) {
-    if (b === seq || b.startsWith(`${seq} `) || seq.startsWith(`${b} `)) return true;
-  }
-  return false;
+/** Whether a shortcut is one a person can press as drawn: one letter, `a` to `z`. */
+function isOneLetter(shortcut: CommandShortcut): boolean {
+  return typeof shortcut.key === 'string' && /^[a-z]$/i.test(shortcut.key);
 }
 
 /**
@@ -249,16 +256,16 @@ function shortcutCollides(seq: string, bound: Iterable<string>): boolean {
  * rather than reordering it. A registry command reusing an id core already
  * has is dropped (and said so in the console): two rows with one id would
  * share a DOM id, and the suggestions could not tell them apart. A registry
- * command whose keys collide with ones already bound keeps its row and loses
- * its shortcut, hint included, so the menu never shows a key that does
- * nothing.
+ * command whose shortcut is not one letter, or takes a key already bound,
+ * keeps its row and loses its shortcut, hint included, so the menu never
+ * shows a key that does nothing.
  */
 export function mergeCommandActions(
   core: readonly CommandAction[],
   extra: readonly CommandAction[],
 ): CommandAction[] {
   const ids = new Set(core.map((a) => a.id));
-  const bound = new Set(core.map(shortcutSequence).filter((s): s is string => s !== null));
+  const bound = new Set(core.map((a) => shortcutId(a.shortcut)).filter((s): s is string => s !== null));
   const merged = [...core];
   for (const action of extra) {
     if (ids.has(action.id)) {
@@ -266,21 +273,26 @@ export function mergeCommandActions(
       continue;
     }
     ids.add(action.id);
-    const seq = shortcutSequence(action);
-    // Only what `useCommandShortcuts` can bind is kept: one key, or two in
-    // sequence. A longer one would be drawn as "x then y then z" and never
-    // fire.
-    if (seq !== null && seq.split(' ').length > 2) {
-      console.error(`[commands] the shortcut "${seq}" of ${action.id} is longer than two keys; it is not bound`);
+    if (!action.shortcut) {
+      merged.push(action);
+      continue;
+    }
+    // Only what `useCommandShortcuts` can bind is kept: one letter, with or
+    // without Shift. Anything else would be drawn and never fire.
+    if (!isOneLetter(action.shortcut)) {
+      console.error(
+        `[commands] the shortcut ${JSON.stringify(action.shortcut.key)} of ${action.id} is not one letter; it is not bound`,
+      );
       merged.push({ ...action, shortcut: undefined });
       continue;
     }
-    if (seq !== null && shortcutCollides(seq, bound)) {
-      console.error(`[commands] the shortcut "${seq}" of ${action.id} collides with keys already bound; it is not bound`);
+    const id = shortcutId(action.shortcut)!;
+    if (bound.has(id)) {
+      console.error(`[commands] the shortcut "${id}" of ${action.id} is already bound; it is not bound`);
       merged.push({ ...action, shortcut: undefined });
       continue;
     }
-    if (seq !== null) bound.add(seq);
+    bound.add(id);
     merged.push(action);
   }
   return merged;
@@ -304,7 +316,7 @@ export function visibleActions(actions: readonly CommandAction[], ctx: CommandCo
 
 /**
  * What an empty menu offers before anything is typed: a handful of the
- * commonest verbs, not the whole list — New page, Invite people (for an
+ * commonest verbs, not the whole list — Create new page, Invite people (for an
  * admin), Connect your agent while that onboarding is open, and a way to the
  * other app. Drawn from `visible`, so nothing is suggested that is not
  * offered.
