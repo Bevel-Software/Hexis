@@ -3,6 +3,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { FileLockService } from '../../workflow/file-lock.service.js';
 import { makeFakeLockDb, type FakeLockDb } from '../../workflow/__tests__/fake-file-lock-db.js';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
+import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService } from '../embed.service.js';
 import { EmbedLockedError } from '../embed.errors.js';
@@ -68,6 +69,7 @@ function build() {
     { createBranch: async () => ({}) } as never,
     { getUserId: async () => null } as never,
     createFileReaderRegistry({ extract: async () => ({ kind: 'text', text: '' }) } as never),
+    makeRolesYamlWriteValidator(KB),
   );
   return { service, workspaceService, workflowService };
 }

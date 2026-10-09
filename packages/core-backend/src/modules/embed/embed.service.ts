@@ -9,6 +9,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { changeRequestLink, changeRequestLinkBase } from '../workflow/git/change-request-link.js';
 import type { FileReaderRegistry } from '../workspace/file-readers/file-reader.js';
+import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
 import type {
   EmbedAuthPort,
   EmbedFileView,
@@ -99,6 +100,13 @@ export class EmbedService implements IEmbedService {
     private readonly gitService: IGitService,
     private readonly accountLinks: IAccountLinkService,
     private readonly readers: FileReaderRegistry,
+    /**
+     * The pre-disk write gate every other write surface runs — the file
+     * editor's and the agent tools' `roles.yaml` validity check. An embed
+     * save or proposal writes through `workspaceService.writeFile`, which
+     * puts bytes on disk without one, so the gate is asked here first.
+     */
+    private readonly validateWrite: WriteValidator,
     /** See {@link EmbedNodeIdResolver} — core has none, so core refuses an id reference. */
     private readonly resolveNodeId: EmbedNodeIdResolver | null = null,
   ) {
@@ -326,6 +334,9 @@ export class EmbedService implements IEmbedService {
   async save(token: string, content: string): Promise<void> {
     const { claims, user, wsPath } = await this.requireEditor(token);
     await this.assertTextEditable(claims.repoRelative);
+    // The write gate before the lock: a text the gate refuses (a `roles.yaml`
+    // that would not parse) never takes a lock it has nothing to write under.
+    await this.validateWrite(wsPath, content);
     const workspaceId = this.defaultWorkspaceId();
     // Bytes reach the disk ONLY under a lock this viewer holds. ASK who holds
     // it rather than acquiring again: `acquire` is strict and refuses a live
@@ -388,6 +399,11 @@ export class EmbedService implements IEmbedService {
     // file's new text beside its old, so proposing on a file you may not read
     // would publish what you were not allowed to see.
     if (!canRead) throw new EmbedAccessError(`You don't have permission to read "${claims.repoRelative}".`);
+    const wsPath = this.wsPathFor(claims.repoRelative);
+    // The same write gate as a save, before a branch is made for the text: a
+    // proposal is a commit, and a commit of an unparseable `roles.yaml` is
+    // exactly what the gate exists to keep out of the repository.
+    await this.validateWrite(wsPath, content);
     const branch = `${suggestionsBranchPrefixFor({ email: user.email, id: user.id })}knowledge`;
     // Create the branch when it is not there yet; an existing one is reused,
     // which is what bundles a person's proposals into one request. Asked of
@@ -403,7 +419,6 @@ export class EmbedService implements IEmbedService {
         });
     }
     const workspace = await this.workspaceService.getOrCreateForBranch(branch);
-    const wsPath = this.wsPathFor(claims.repoRelative);
     // One proposal at a time per file on this branch: two from the same
     // person landing together would otherwise write over each other before
     // either commit staged the file, and one would commit the other's text.

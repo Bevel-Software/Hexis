@@ -8,7 +8,8 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { ReadForTool } from '../workspace/workspace.tools.js';
 import type { IEmbedService } from './embed.interface.js';
 import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
-import { SESSION_ID_INPUT } from '../workspace/agent-access.gate.js';
+import { SESSION_ID_INPUT, type ToolDescriptionNotes } from '../workspace/agent-access.gate.js';
+import { sessionIdInputOf } from '../workspace/workspace.tools.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
 export const OPEN_PAGE_TOOL = 'open_page';
@@ -32,6 +33,8 @@ export interface EmbedToolsDeps {
   canBeReached: () => boolean;
   /** The file's address in the app, for the answer and for the view's fallback link. */
   appUrlFor: (repoRelative: string, slug?: string) => string;
+  /** The notes a deployment registers for the gated tools — `read_file`'s, and so this tool's. */
+  notes: ToolDescriptionNotes;
 }
 
 /**
@@ -60,17 +63,18 @@ export function registerEmbedTools(
   deps: EmbedToolsDeps,
 ): void {
   const { kbDirName } = deps.kb;
+  const DESCRIPTION =
+    'Show a knowledge-base page to the person you are talking to, rendered inside this chat. ' +
+    'Returns the same `{ path, content }` `read_file` returns — the page as text, for you to read — ' +
+    'plus `embedUrl` (the view the chat renders), `appUrl` (the page in the app), and `branch` ' +
+    "(always the default branch). The rendered view uses the app's own renderer for the file's type, " +
+    'and offers the reader Edit when they may write the page and Propose changes when they may not, ' +
+    'as that same person — not as you. Use it when somebody wants to SEE or FIX a page; use `read_file` ' +
+    'when you only need to read one yourself. A chat host that cannot render a view shows the text, ' +
+    'so calling this is never worse than reading.';
   const def = toolDef({
     name: OPEN_PAGE_TOOL,
-    description:
-      'Show a knowledge-base page to the person you are talking to, rendered inside this chat. ' +
-      'Returns the same `{ path, content }` `read_file` returns — the page as text, for you to read — ' +
-      'plus `embedUrl` (the view the chat renders), `appUrl` (the page in the app), and `branch` ' +
-      "(always the default branch). The rendered view uses the app's own renderer for the file's type, " +
-      'and offers the reader Edit when they may write the page and Propose changes when they may not, ' +
-      'as that same person — not as you. Use it when somebody wants to SEE or FIX a page; use `read_file` ' +
-      'when you only need to read one yourself. A chat host that cannot render a view shows the text, ' +
-      'so calling this is never worse than reading.',
+    description: DESCRIPTION + deps.notes.gatedToolNote(),
     path: `/api/agent/tools/${OPEN_PAGE_TOOL}`,
     inputs: {
       type: 'object',
@@ -123,6 +127,17 @@ export function registerEmbedTools(
   // click away — handing it an iframe of the page it is standing on would be
   // a tool that cannot help.
   registry.registerExternalTool(def);
+  // The read is `read_file`'s own, so what the agent reads about it is too:
+  // the note a deployment registers for the gated tools, and the `sessionId`
+  // description with its note — applied now and on every later registration,
+  // exactly as the file tools apply them (`sessionIdInputOf` is theirs).
+  const redescribe = (): void => {
+    def.description = DESCRIPTION + deps.notes.gatedToolNote();
+    const sessionId = sessionIdInputOf(def);
+    if (sessionId) sessionId.description = deps.notes.sessionIdDescription();
+  };
+  redescribe();
+  deps.notes.onChange(redescribe);
 
   router.post(
     `/agent/tools/${OPEN_PAGE_TOOL}`,

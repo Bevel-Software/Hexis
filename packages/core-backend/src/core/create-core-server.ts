@@ -486,6 +486,9 @@ export async function createCoreServer(
     // the tool answers the text and the app address and says so.
     canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
     appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+    // The read is `read_file`'s, so the notes a deployment registers for the
+    // gated tools reach this one as well.
+    notes: agentAccessGate.notes,
   });
   // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
   // a host to this deployment over HTTP and has no other way to learn which

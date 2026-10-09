@@ -103,6 +103,7 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         readForTool: nothing,
         canBeReached: () => true,
         appUrlFor: (repoRelative) => `https://example.test/workspace/main/knowledge-base/${repoRelative}`,
+        notes: new ToolDescriptionNotes(),
       }),
   },
   {
