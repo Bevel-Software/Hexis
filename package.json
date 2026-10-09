@@ -8,6 +8,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r --reporter-hide-prefix run test",
     "lint": "eslint .",
+    "lint:check": "node scripts/lint-ratchet.mjs",
     "release": "pnpm build && pnpm changeset publish",
     "notices": "node scripts/generate-license-notices.mjs",
     "notices:check": "node scripts/generate-license-notices.mjs --check",

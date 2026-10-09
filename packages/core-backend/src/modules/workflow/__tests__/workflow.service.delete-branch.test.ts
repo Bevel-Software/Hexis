@@ -113,7 +113,6 @@ interface Harness {
   };
   fetch: ReturnType<typeof vi.fn>;
   deleted: string[];
-  fileLocks: FileLockService;
   /** What the service announced to connected tabs. */
   emitted: { kind: string; number?: number }[];
   hasAnyActive: MockInstance<FileLockService['hasAnyActive']>;
@@ -214,7 +213,7 @@ function harness(opts: {
     openChangeGate(),
     { emit: (e: { kind: string; number?: number }) => void emitted.push(e) } as unknown as WorkflowEventBus,
   );
-  return { svc, git, fetch, deleted, fileLocks, emitted, hasAnyActive };
+  return { svc, git, fetch, deleted, emitted, hasAnyActive };
 }
 
 const merged = (number: number, source: string, sha: string | null): CrRow => ({
@@ -357,7 +356,7 @@ describe('deleteBranchChecked — an agent deletes a branch', () => {
     h.hasAnyActive.mockResolvedValue(false);
     let during: unknown = null;
     h.git.deleteBranch.mockImplementationOnce(async () => {
-      during = await h.fileLocks.acquire(workspaceIdForBranch('ali/draft'), 'ali/draft', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
+      during = await h.svc.acquireLock(workspaceIdForBranch('ali/draft'), 'ali/draft', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
       return { lastCommit: 'a1' };
     });
     await h.svc.deleteBranchChecked(ADMIN, 'ali/draft');
@@ -661,7 +660,7 @@ describe('closeEmptyOpenChangeRequests — the background close', () => {
     const h = harness({ rows, branches: { 'ali/empty': clean('e1') }, changes: { 'ali/empty': [] } });
     let during: unknown = null;
     h.git.deleteBranch.mockImplementationOnce(async () => {
-      during = await h.fileLocks.acquire(workspaceIdForBranch('ali/empty'), 'ali/empty', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
+      during = await h.svc.acquireLock(workspaceIdForBranch('ali/empty'), 'ali/empty', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
       return { lastCommit: 'e1' };
     });
     await h.svc.closeEmptyOpenChangeRequests();
@@ -915,7 +914,7 @@ const git = async (cwd: string, args: string[]) =>
  */
 describe('a file held through the app on a slashed branch', () => {
   const holdAsTheRouteDoes = (h: Harness, branch: string) =>
-    h.fileLocks.acquire(branch, branch, 'KnowledgeBase/f.md', BOB);
+    h.svc.acquireLock(branch, branch, 'KnowledgeBase/f.md', BOB);
 
   it('refuses the agent delete, with or without discardUnmerged', async () => {
     const h = harness({ realLocks: true, branches: { 'ali/draft': { exists: true, lastCommit: 'a3', unmergedCommits: 1 } } });
