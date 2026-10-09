@@ -54,6 +54,8 @@ interface Harness {
   fake: FakeLockDb;
   enqueue: ReturnType<typeof vi.fn>;
   commitFile: ReturnType<typeof vi.fn>;
+  /** The service behind the routes, for the in-process callers (an agent's edits) that use it directly. */
+  workflow: IWorkflowService;
   /** Whose credentials the next request carries. */
   actAs: (user: AuthUser) => void;
 }
@@ -118,6 +120,7 @@ async function makeHarness(): Promise<Harness> {
     fake,
     enqueue,
     commitFile,
+    workflow: workflow as unknown as IWorkflowService,
     actAs: (user) => {
       current = user;
     },
@@ -227,12 +230,11 @@ describe('lock routes coordinate on one file identity', () => {
   });
 
   it('stores a lock taken through the route under the encoded workspace id the deletion gate asks with', async () => {
-    // Express hands the route the decoded `:id`; the deletion paths ask
-    // `hasAnyActive` with `workspaceIdForBranch(branch)`, the encoded one.
+    // Express hands the route the decoded `:id`; the deletion paths and an
+    // agent's edits ask with `workspaceIdForBranch(branch)`, the encoded one.
     await acquire(CANONICAL);
 
     expect(h.fake.rows().map((r) => r.workspaceId)).toEqual([WS]);
-    await expect(new FileLockService(h.fake.db).hasAnyActive(workspaceIdForBranch(BRANCH))).resolves.toBe(true);
     expect((await release(CANONICAL)).status).toBe(200);
     expect(h.fake.rows()).toEqual([]);
   });
@@ -313,6 +315,117 @@ describe('lock routes coordinate on one file identity', () => {
       expect(h.fake.rows()).toEqual([]);
       expect(h.enqueue).not.toHaveBeenCalled();
       expect(h.commitFile).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * A slashed branch's workspace has two spellings: the lock routes get the
+ * `:id` Express decoded (`feat/x`), while an agent's edits and the deletion
+ * gate use the encoded id (`feat%2Fx`). They are one workspace — one clone,
+ * one branch — so they are one lock: a file a person holds in the app is held
+ * against an agent's edit too, and the other way round.
+ */
+describe('lock routes coordinate on one workspace identity', () => {
+  let h: Harness;
+
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await close(h.server);
+  });
+
+  const url = (suffix: string) => `${h.baseUrl}/api/workspace/${WS}/workflow/locks${suffix}`;
+  const send = (method: string, suffix: string, body: unknown) =>
+    fetch(url(suffix), {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const acquire = () => send('POST', '', { branch: BRANCH, path: CANONICAL });
+  const release = () => send('DELETE', '', { branch: BRANCH, path: CANONICAL });
+  const heartbeat = () => send('POST', '/heartbeat', { branch: BRANCH, path: CANONICAL });
+  const status = () =>
+    fetch(`${url('')}?branch=${encodeURIComponent(BRANCH)}&path=${encodeURIComponent(CANONICAL)}`);
+
+  it("holds a file taken in the app against an agent's edit, and frees it on release", async () => {
+    expect(await (await acquire()).json()).toMatchObject({ acquired: true });
+
+    await expect(h.workflow.acquireLock(workspaceIdForBranch(BRANCH), BRANCH, CANONICAL, BOB)).resolves.toMatchObject({
+      acquired: false,
+      lock: { holderUserId: ALICE.id },
+    });
+
+    expect((await release()).status).toBe(200);
+    await expect(h.workflow.acquireLock(workspaceIdForBranch(BRANCH), BRANCH, CANONICAL, BOB)).resolves.toMatchObject({
+      acquired: true,
+    });
+  });
+
+  it("holds a file an agent took against the app, which reads its status", async () => {
+    await h.workflow.acquireLock(workspaceIdForBranch(BRANCH), BRANCH, CANONICAL, ALICE);
+
+    expect(await (await status()).json()).toMatchObject({ lock: { holderUserId: ALICE.id } });
+    h.actAs(BOB);
+    expect(await (await acquire()).json()).toMatchObject({ acquired: false, lock: { holderUserId: ALICE.id } });
+    expect(h.fake.rows()).toHaveLength(1);
+  });
+
+  it('leaves an unslashed workspace id as it is', async () => {
+    const res = await fetch(`${h.baseUrl}/api/workspace/main/workflow/locks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ branch: 'main', path: CANONICAL }),
+    });
+    expect(res.status).toBe(200);
+    expect(h.fake.rows().map((r) => r.workspaceId)).toEqual(['main']);
+  });
+
+  describe('a lock the previous version left under the decoded id', () => {
+    /** A row as the previous version wrote it through these routes. */
+    const seedLegacy = (expiresInMs: number) => {
+      const now = Date.now();
+      h.fake.seed({
+        workspaceId: BRANCH,
+        branch: BRANCH,
+        path: CANONICAL,
+        holderUserId: ALICE.id,
+        holderName: ALICE.name,
+        mode: 'edit',
+        acquiredAt: new Date(now - 1_000),
+        lastHeartbeatAt: new Date(now - 1_000),
+        expiresAt: new Date(now + expiresInMs),
+      });
+    };
+
+    it("while live: the app reads it, another editor and an agent's edit are refused, its holder heartbeats and releases it", async () => {
+      seedLegacy(30_000);
+
+      expect(await (await status()).json()).toMatchObject({ lock: { holderUserId: ALICE.id } });
+      h.actAs(BOB);
+      expect(await (await acquire()).json()).toMatchObject({ acquired: false, lock: { holderUserId: ALICE.id } });
+      await expect(h.workflow.acquireLock(workspaceIdForBranch(BRANCH), BRANCH, CANONICAL, BOB)).resolves.toMatchObject({
+        acquired: false,
+      });
+      // No second row was written beside it.
+      expect(h.fake.rows().map((r) => r.workspaceId)).toEqual([BRANCH]);
+
+      h.actAs(ALICE);
+      const beat = await heartbeat();
+      expect(beat.status).toBe(200);
+      expect(new Date((await beat.json()).expiresAt).getTime()).toBeGreaterThan(Date.now() + 30_000);
+      expect(await (await release()).json()).toEqual({ queued: true });
+      expect(h.fake.rows()).toEqual([]);
+    });
+
+    it('once expired: it holds nothing, and the file is taken under the encoded id', async () => {
+      seedLegacy(-1_000);
+
+      expect(await (await status()).json()).toMatchObject({ lock: null });
+      h.actAs(BOB);
+      expect(await (await acquire()).json()).toMatchObject({ acquired: true, lock: { holderUserId: BOB.id } });
+      expect(h.fake.rows().map((r) => r.workspaceId)).toEqual([WS]);
     });
   });
 });
