@@ -53,7 +53,8 @@ export function createAccountRoutes(
   // single sign-on: the person finds it waiting when they first sign in.
   // With `keepExistingPassword: true` (an invite's starting password) the
   // password goes only to a new account or a switched-on one with none; the
-  // reply's `passwordSet` says whether it did.
+  // reply's `passwordSet` says whether it did, and `deactivated` whether a
+  // refusal was because the account is switched off.
   router.post('/admin/accounts', requireAdmin, async (req, res) => {
     const { email, name, password, keepExistingPassword } = req.body as {
       email?: string;
@@ -70,14 +71,19 @@ export function createAccountRoutes(
       res.status(400).json({ error: 'password must be a string' });
       return;
     }
+    // Fail closed: anything but a boolean is a mistake, never "overwrite".
+    if (keepExistingPassword !== undefined && typeof keepExistingPassword !== 'boolean') {
+      res.status(400).json({ error: 'keepExistingPassword must be a boolean' });
+      return;
+    }
     if (keepExistingPassword === true && typeof password !== 'string') {
       res.status(400).json({ error: 'keepExistingPassword needs a password' });
       return;
     }
     try {
       if (keepExistingPassword === true && typeof password === 'string') {
-        const { user, passwordSet } = await authService.createAccountWithStartingPassword(email, password);
-        res.status(201).json({ ...user, passwordSet });
+        const { user, passwordSet, deactivated } = await authService.createAccountWithStartingPassword(email, password);
+        res.status(201).json({ ...user, passwordSet, deactivated });
         return;
       }
       const user = await authService.createAccount(email, name, password);

@@ -71,7 +71,8 @@ export async function listAccounts(): Promise<AccountSummary[]> {
  *
  * With `keepExistingPassword` (an invite's starting password) the password
  * goes only to a new account or a switched-on one that has none; the reply's
- * `passwordSet` says whether it did.
+ * `passwordSet` says whether it did, and `deactivated` whether it did not
+ * because the account is switched off.
  *
  * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
  * the deployment's admission rules had no place for the account.
@@ -81,7 +82,7 @@ export async function createAccount(
   name: string,
   password?: string,
   options: { keepExistingPassword?: boolean } = {},
-): Promise<{ passwordSet?: boolean }> {
+): Promise<{ passwordSet?: boolean; deactivated?: boolean }> {
   const res = await authFetch('/api/admin/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -97,8 +98,11 @@ export async function createAccount(
     const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
     throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
   }
-  const body = (await res.json().catch(() => ({}))) as { passwordSet?: unknown };
-  return typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {};
+  const body = (await res.json().catch(() => ({}))) as { passwordSet?: unknown; deactivated?: unknown };
+  return {
+    ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
+    ...(body.deactivated === true ? { deactivated: true } : {}),
+  };
 }
 
 /**

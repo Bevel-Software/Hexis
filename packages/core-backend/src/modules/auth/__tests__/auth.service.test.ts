@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, type IAccountAdmission } from '../account-admission.js';
 import { hashPassword, verifyPassword } from '../password-hash.js';
+import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/directory-sync-bot.js';
 
 /**
  * Minimal drizzle chain stub (same idiom as the secrets-vault tests): each
@@ -304,23 +308,48 @@ describe('AuthService.createAccountWithStartingPassword — an invite never repl
     expect(result.user.email).toBe('alice@example.com');
     const conflict = captured.conflict[0] as { set: { passwordHash: string; name?: string }; setWhere: unknown };
     expect(conflict.set.passwordHash.startsWith('scrypt:')).toBe(true);
-    // The test and the write are one statement: the guard rides on the upsert.
-    expect(conflict.setWhere).toBeDefined();
+    // The test and the write are one statement: the guard rides on the upsert,
+    // and writes only where there is no password AND the account is on.
+    const guard = new PgDialect().sqlToQuery(conflict.setWhere as SQL);
+    expect(guard.sql).toBe('("users"."password_hash" is null and "users"."deactivated_at" is null)');
+    expect(guard.params).toEqual([]);
     expect(conflict.set.name).toBeUndefined();
     expect(db.select).not.toHaveBeenCalled();
   });
 
   it('leaves an account the guard refused as it was, and says so', async () => {
     // The upsert's guard refused the row (it has a password now): nothing returned, the row is read back.
-    const { db, captured } = makeFakeDb([[], [{ ...ROW, passwordHash: 'scrypt:own' }]]);
+    const { db, captured } = makeFakeDb([[], [{ ...ROW, passwordHash: 'scrypt:own', deactivatedAt: null }]]);
     const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
       'alice@example.com',
       'starting-pass-1',
     );
     expect(result.passwordSet).toBe(false);
+    expect(result.deactivated).toBe(false);
     expect(result.user.email).toBe('alice@example.com');
     expect(captured.set).toEqual([]);
   });
+
+  it('tells a switched-off account apart from one with its own password', async () => {
+    const { db } = makeFakeDb([[], [{ ...ROW, passwordHash: null, deactivatedAt: new Date('2026-09-01T00:00:00Z') }]]);
+    const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
+      'alice@example.com',
+      'starting-pass-1',
+    );
+    expect(result).toMatchObject({ passwordSet: false, deactivated: true });
+  });
+
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'refuses the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([]);
+      await expect(
+        new AuthService(db, makeConfig()).createAccountWithStartingPassword(email, 'starting-pass-1'),
+      ).rejects.toThrow('System accounts cannot be given a password');
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(db.select).not.toHaveBeenCalled();
+    },
+  );
 
   it('leaves the deployment admin to the environment password, writing nothing', async () => {
     const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);

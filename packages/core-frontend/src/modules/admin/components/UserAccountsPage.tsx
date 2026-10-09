@@ -162,11 +162,14 @@ export function UserAccountsPage() {
   const [pendingDeactivate, setPendingDeactivate] = useState<AccountSummary | null>(null);
 
   // Only the latest read lands: an older one answering late would otherwise
-  // put back a list without the people a send just invited.
+  // put back a list without the people a send just invited. And a caller
+  // waiting on a read that was overtaken waits on to the latest one, so
+  // "busy until the list shows the new state" still holds.
   const accountsRequest = useRef(0);
-  const refresh = useCallback(() => {
+  const latestRead = useRef<Promise<void>>(Promise.resolve());
+  const refresh = useCallback(async () => {
     const requestId = ++accountsRequest.current;
-    return listAccounts()
+    const read = listAccounts()
       .then((rows) => {
         if (accountsRequest.current !== requestId) return;
         setAccounts(rows);
@@ -180,6 +183,13 @@ export function UserAccountsPage() {
         // storing `[]` would render "No user accounts." — an admin reading
         // that would take a deployment they cannot reach for one nobody is on.
       });
+    latestRead.current = read;
+    let awaited = read;
+    await awaited;
+    while (latestRead.current !== awaited) {
+      awaited = latestRead.current;
+      await awaited;
+    }
   }, []);
 
   // Again after every send from the Invite dialog, so the people just invited appear.

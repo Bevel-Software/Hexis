@@ -24,7 +24,7 @@ function makeApi(accounts: { email: string; hasPassword?: boolean; isEnvAdmin?: 
         name: string,
         password?: string,
         options?: { keepExistingPassword?: boolean },
-      ) => Promise<{ passwordSet?: boolean } | void>
+      ) => Promise<{ passwordSet?: boolean; deactivated?: boolean } | void>
     >(async () => ({ passwordSet: true })),
     addMember: vi.fn(async () => []),
     fetchRoles: vi.fn(async () => [{ canonical: 'admin', members: ['boss@acme.com'] }]),
@@ -113,6 +113,20 @@ describe('sendInvites with a starting password', () => {
         { email: 'new@acme.com', status: 'existing', hasOwnPassword: true },
       ],
     });
+  });
+
+  it('reports an account switched off after the list was read as switched off, not invited', async () => {
+    api.createAccount.mockResolvedValue({ passwordSet: false, deactivated: true });
+    const result = await sendInvites(['nopw@acme.com', 'new@acme.com'], 'member', api, { password: PW });
+    expect(result).toEqual({
+      status: 'sent',
+      outcomes: [
+        { email: 'nopw@acme.com', status: 'existing', deactivated: true },
+        { email: 'new@acme.com', status: 'existing', deactivated: true },
+      ],
+    });
+    if (result.status !== 'sent') throw new Error('not sent');
+    expect(result.outcomes.filter((o) => isInvited(o, true))).toEqual([]);
   });
 
   it('carries the password in no outcome', async () => {

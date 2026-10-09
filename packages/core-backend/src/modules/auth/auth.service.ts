@@ -367,19 +367,29 @@ export class AuthService {
    * invite is never overwritten; `passwordSet` says which happened.
    *
    * The deployment admin has its own password (the environment's): it is
-   * left as it is, as {@link createAccount} would refuse to store one.
+   * left as it is, as {@link createAccount} would refuse to store one. The
+   * accounts the platform runs its own work as are refused outright: a
+   * password would make them able to sign in.
+   *
+   * When nothing was written, `deactivated` tells a switched-off account
+   * apart from one that has a password of its own.
    */
   async createAccountWithStartingPassword(
     email: string,
     password: string,
-  ): Promise<{ user: AuthUser; passwordSet: boolean }> {
+  ): Promise<{ user: AuthUser; passwordSet: boolean; deactivated: boolean }> {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
+    if (SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail)) {
+      throw new Error('System accounts cannot be given a password');
+    }
     if (this.isEnvAdminEmail(normalizedEmail)) {
       const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
-      if (existing) return { user: this.toClientUser(existing), passwordSet: false };
+      if (existing) {
+        return { user: this.toClientUser(existing), passwordSet: false, deactivated: existing.deactivatedAt != null };
+      }
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
@@ -395,11 +405,11 @@ export class AuthService {
         setWhere: and(isNull(users.passwordHash), isNull(users.deactivatedAt)),
       })
       .returning();
-    if (row) return { user: this.toClientUser(row), passwordSet: true };
+    if (row) return { user: this.toClientUser(row), passwordSet: true, deactivated: false };
     // The conflicting account has a password or is switched off: untouched.
     const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
     if (!existing) throw new Error('Could not set the password');
-    return { user: this.toClientUser(existing), passwordSet: false };
+    return { user: this.toClientUser(existing), passwordSet: false, deactivated: existing.deactivatedAt != null };
   }
 
   /**

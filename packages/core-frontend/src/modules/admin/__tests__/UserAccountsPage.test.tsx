@@ -16,6 +16,7 @@ import {
   listAccounts,
   reactivateAccount,
   type AccountReferences,
+  type AccountSummary,
 } from '../../auth/services/account.api';
 
 vi.mock('../../auth/services/account.api', () => ({
@@ -739,5 +740,51 @@ describe('UserAccountsPage — inviting new users', () => {
     answerFirst([withLena[0]!, ALICE]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getByText('lena')).toBeInTheDocument();
+  });
+
+  it('keeps a switch busy until the latest read lands, even when a send’s refresh overtook its own', async () => {
+    const user = userEvent.setup();
+    const off = { ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' };
+    let answerSwitch: (rows: AccountSummary[]) => void = () => {};
+    let answerSend: (rows: AccountSummary[]) => void = () => {};
+    vi.mocked(listAccounts)
+      .mockReset()
+      .mockResolvedValueOnce([ALICE])
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSwitch = resolve)))
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSend = resolve)));
+    const page = (revision: number) => (
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(revision)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>
+    );
+    const view = render(page(0));
+    await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Switch off' }));
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
+    // A send from the Invite dialog reads the list again before the switch's read answers.
+    view.rerender(page(1));
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(3));
+    answerSwitch([off]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Its own read was overtaken: still busy, so the stale row offers no second click.
+    expect(screen.getByRole('button', { name: 'Switching off…' })).toBeDisabled();
+    answerSend([off]);
+    expect(await screen.findByText('(switched off)')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

@@ -167,7 +167,7 @@ export async function sendInvites(
       name: string,
       password?: string,
       options?: { keepExistingPassword?: boolean },
-    ): Promise<{ passwordSet?: boolean } | void>;
+    ): Promise<{ passwordSet?: boolean; deactivated?: boolean } | void>;
     addMember(canonical: string, email: string): Promise<unknown>;
     fetchRoles(): Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>;
   },
@@ -196,7 +196,7 @@ export async function sendInvites(
   for (const email of emails) {
     const account = existing?.get(email.toLowerCase());
     if (account) {
-      const off = account.deactivatedAt ? { deactivated: true } : {};
+      let off: { deactivated?: true } = account.deactivatedAt ? { deactivated: true } : {};
       const ownPassword = Boolean(account.hasPassword || account.isEnvAdmin);
       let passwordFlags: { passwordSet?: boolean; hasOwnPassword?: boolean } = {};
       if (password && !account.deactivatedAt) {
@@ -205,8 +205,10 @@ export async function sendInvites(
         } else {
           try {
             const reply = await api.createAccount(email, '', password, { keepExistingPassword: true });
-            // Not set: it got a password of its own since the list was read.
-            passwordFlags = reply?.passwordSet === false ? { hasOwnPassword: true } : { passwordSet: true };
+            // Not set: since the list was read it was switched off, or got a password of its own.
+            if (reply?.passwordSet !== false) passwordFlags = { passwordSet: true };
+            else if (reply.deactivated) off = { deactivated: true };
+            else passwordFlags = { hasOwnPassword: true };
           } catch (err) {
             const passwordError = err instanceof Error ? err.message : 'Could not set the password';
             outcomes.push({ email, status: 'existing', passwordError });
@@ -233,12 +235,15 @@ export async function sendInvites(
       continue;
     }
     let created: { passwordSet?: boolean } = {};
-    /** Not on the list, but there by the time of the write, with its own password (left as it was). */
-    let appeared = false;
+    /**
+     * Not on the list, but there by the time of the write — with its own
+     * password, or switched off — and left as it was.
+     */
+    let appeared: { hasOwnPassword: true } | { deactivated: true } | null = null;
     try {
       if (password) {
         const reply = await api.createAccount(email, '', password, { keepExistingPassword: true });
-        if (reply?.passwordSet === false) appeared = true;
+        if (reply?.passwordSet === false) appeared = reply.deactivated ? { deactivated: true } : { hasOwnPassword: true };
         else created = { passwordSet: true };
       } else {
         await api.createAccount(email, '');
@@ -253,7 +258,7 @@ export async function sendInvites(
     }
     if (role !== 'admin') {
       outcomes.push(
-        appeared ? { email, status: 'existing', hasOwnPassword: true } : { email, status: 'created', role, ...created },
+        appeared ? { email, status: 'existing', ...appeared } : { email, status: 'created', role, ...created },
       );
       continue;
     }
@@ -261,14 +266,14 @@ export async function sendInvites(
       await api.addMember(ADMIN_ROLE, email);
       outcomes.push(
         appeared
-          ? { email, status: 'existing', hasOwnPassword: true, promoted: true }
+          ? { email, status: 'existing', ...appeared, promoted: true }
           : { email, status: 'created', role: 'admin', ...created },
       );
     } catch (err) {
       const roleError = err instanceof Error ? err.message : 'Could not make them an admin';
       outcomes.push(
         appeared
-          ? { email, status: 'existing', hasOwnPassword: true, roleError }
+          ? { email, status: 'existing', ...appeared, roleError }
           : { email, status: 'created', role: 'member', roleError, ...created },
       );
     }
