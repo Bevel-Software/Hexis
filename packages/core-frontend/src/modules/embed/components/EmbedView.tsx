@@ -269,7 +269,9 @@ export function EmbedView() {
       // the app resolves it with the reader's session, which is the only
       // place that resolution can be done.
       openNodeId: (idOrLink) => open(`/workspace/${encodeURIComponent(view.branch)}/${idOrLink}`, ''),
-      canonicalUrlFor: () => absolute(view.appUrl),
+      // The page's address without the heading the view opened at: a heading
+      // link appends its own fragment, and two fragments is no address.
+      canonicalUrlFor: () => absolute(view.appUrl).split('#', 1)[0],
       rawUrl: (path, options) => embedRawUrl(token, embedRawPath(path, view), options),
       rawFetch: (path, options) =>
         fetch(embedRawUrl(token, embedRawPath(path, view), options), {
