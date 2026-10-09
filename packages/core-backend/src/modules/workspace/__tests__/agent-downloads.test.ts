@@ -258,7 +258,7 @@ describe('request_file_download: every file judged on its own', () => {
     expect(sha(got)).toBe(body.files[0]!.sha256);
   });
 
-  it('includes only the plain file from the folder-zip leak cases, and says why for each of the rest', async () => {
+  it('includes the readable, downloadable files from the folder-zip leak cases, names the one it may not download, and leaves the unreadable ones out unnamed', async () => {
     const h = await start();
     const { status, body } = await request(h.base, [`${KB}/Shared`]);
 

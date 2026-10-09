@@ -1,4 +1,4 @@
-import { isUtf8 } from 'node:buffer';
+import { isTextBytes } from '../../../shared/utf8-text.js';
 import { fileExtension } from './doc-extract.types.js';
 import { displayPath, type FileKind, type FileReader, type ReadResult } from './file-reader.js';
 
@@ -64,14 +64,11 @@ export function extensionMime(path: string): string | undefined {
 
 /**
  * Text is what the fallback reader may hand to the text tools: no NUL byte
- * AND valid UTF-8. A NUL-free file that does not decode as UTF-8 is still
- * binary here — the decode would be lossy, so text written back could never
- * round-trip the original bytes. Checked on the raw bytes, so a large binary
- * is refused without allocating its full decoded string first.
+ * AND valid UTF-8 — the one policy in `shared/utf8-text.ts`, which the
+ * seeder and the starter packs read as well. Re-exported here for the
+ * readers' callers.
  */
-export function isTextBytes(bytes: Buffer): boolean {
-  return !bytes.includes(0) && isUtf8(bytes);
-}
+export { isTextBytes };
 
 /**
  * The DEFAULT reader — the registry's fallback for every extension no other
