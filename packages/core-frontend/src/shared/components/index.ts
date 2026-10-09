@@ -41,6 +41,9 @@ export type { MenuPanelProps, MenuItemProps } from './Menu';
 /* Pre-existing components that are part of the same surface. */
 export { Dialog } from './Dialog';
 export type { DialogSize } from './Dialog';
+export { ConfirmProvider } from './ConfirmProvider';
+export { useConfirm } from './confirm-context';
+export type { ConfirmAnswer, ConfirmFn, ConfirmRequest } from './confirm-context';
 export { PageShell } from './PageShell';
 export type { PageShellWidth } from './PageShell';
 export { useModalLayer } from './useModalLayer';

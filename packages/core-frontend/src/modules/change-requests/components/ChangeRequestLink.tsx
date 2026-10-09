@@ -124,12 +124,20 @@ function NoSuchRequest({ raw }: { raw: string }) {
   );
 }
 
-/** The page under the dialog: a sentence and a way out, nothing to be read as content. */
+/**
+ * The page under the dialog: a sentence and a way out, nothing to be read as
+ * content. A landmark with a heading all the same, and the sentence in a
+ * live region: somebody arriving by the address, or by keyboard, is told what
+ * page this is and hears the state change from "opening" to the request.
+ */
 function Quiet({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 bg-white text-sm text-ink-muted">
-      {children}
-    </div>
+    <main className="flex h-full flex-col items-center justify-center gap-2 bg-white text-sm text-ink-muted">
+      <h1 className="text-base font-semibold text-ink">Change request</h1>
+      <div aria-live="polite" className="contents">
+        {children}
+      </div>
+    </main>
   );
 }
 

@@ -9,6 +9,7 @@ import { MAX_EMAIL_BYTES, attachmentLine, type EmailMessageView } from './emailM
 import { buildEmailBody, type EmailLink } from './emailBody';
 import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
+import { useConfirm } from '../../../../shared/components';
 
 /**
  * The honest email view for `.eml` and `.msg`: labelled header fields, the
@@ -279,6 +280,7 @@ function CopyLinkButton({ url }: { url: string }): React.ReactElement {
  * navigates at all.
  */
 function EmailLinks({ links }: { links: readonly EmailLink[] }): React.ReactElement {
+  const confirm = useConfirm();
   return (
     <div className="mt-4 border-t border-line pt-3">
       <div className="mb-1 flex items-center gap-1.5 text-meta font-medium uppercase tracking-wide text-ink-faint">
@@ -298,13 +300,19 @@ function EmailLinks({ links }: { links: readonly EmailLink[] }): React.ReactElem
               type="button"
               className="shrink-0 text-ink-faint hover:text-ink"
               title="Open in a new tab"
-              onClick={() => {
+              onClick={async () => {
                 // Asked before anything opens, with the address in the prompt:
                 // the reader decides against the REAL destination, not against
-                // whatever text the sender chose to show.
-                if (window.confirm(`Open this link?
+                // whatever text the sender chose to show. The Open click is
+                // itself the gesture the new tab rides on.
+                const { confirmed } = await confirm({
+                  title: 'Open link',
+                  message: `Open this link?
 
-${link.url}`)) {
+${link.url}`,
+                  confirmLabel: 'Open',
+                });
+                if (confirmed) {
                   window.open(link.url, '_blank', 'noopener,noreferrer');
                 }
               }}

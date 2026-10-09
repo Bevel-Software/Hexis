@@ -127,6 +127,7 @@ describe('describeSyncFailure', () => {
     ],
     ["fatal: unable to access 'https://github.com/acme/kb.git/': timed out", 'The repository host could not be reached.'],
     ['connect ETIMEDOUT 140.82.121.3:443', 'The repository host could not be reached.'],
+    ['HTTP 401 Unauthorized', "The repository host did not accept this server's credentials."],
     // A host's "token" wording is a rejected credential, as its "password" wording is.
     ["remote: Invalid username or token. Password authentication is not supported", "The repository host did not accept this server's credentials."],
     // "repository … not found" with git's quoted URL between the words.

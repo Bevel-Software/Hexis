@@ -81,7 +81,17 @@ export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   // itself.
   router.get('/embed', (_req, res, next) => {
     res.removeHeader('X-Frame-Options');
-    res.removeHeader('Content-Security-Policy');
+    // Only the framing directive goes: a policy's other directives (scripts,
+    // objects, connections) protect the page whoever frames it, and stay.
+    const csp = res.getHeader('Content-Security-Policy');
+    if (typeof csp === 'string') {
+      const kept = csp
+        .split(';')
+        .map((d) => d.trim())
+        .filter((d) => d !== '' && !/^frame-ancestors\b/i.test(d));
+      if (kept.length > 0) res.setHeader('Content-Security-Policy', kept.join('; '));
+      else res.removeHeader('Content-Security-Policy');
+    }
     next();
   });
   // The account-link page is the opposite: it acts under the viewer's own

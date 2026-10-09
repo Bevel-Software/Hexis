@@ -497,10 +497,16 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // released with the discard (reset to HEAD), so those bytes cannot ride
     // the next save's commit as if they were this move's result.
     const dirtyLeft = new Set<string>();
+    // The paths the commit names (set once it is built): the only ones a
+    // release with a commit may enqueue. The folder locks at either end
+    // coordinate and name nothing committed, so they go back untouched —
+    // enqueued, a later write under those folders would be this move's.
+    let scope: string[] = [];
     const release = async (mode: 'untouched' | 'enqueue'): Promise<void> => {
       for (const p of acquired) {
         try {
-          if (mode === 'enqueue') await workflow.releaseLock(workspaceId, branch, p, user);
+          if (mode === 'enqueue' && scope.includes(p)) await workflow.releaseLock(workspaceId, branch, p, user);
+          else if (mode === 'enqueue') await workflow.releaseLockUntouched(workspaceId, branch, p, user);
           else if (dirtyLeft.has(p)) await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
           else await workflow.releaseLockUntouched(workspaceId, branch, p, user);
         } catch (releaseErr) {
@@ -548,9 +554,11 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // Placement, re-judged where the rename happens: a link introduced on
       // the way to either end since the caller's preflight would carry the
       // rename outside the repository.
+      // The entries themselves included: an edit destination replaced by a
+      // link since planning would have the write follow it.
       await this.assertNoLinkBelowBase(src);
-      await this.assertNoLinkBelowBase(path.posix.dirname(dest));
-      for (const e of edits) await this.assertNoLinkBelowBase(path.posix.dirname(e.path));
+      await this.assertNoLinkBelowBase(dest);
+      for (const e of edits) await this.assertNoLinkBelowBase(e.path);
       await this.validateResultingWrite(dest, () => this.readFile(src));
       if (this.lockContext.validateWrite) {
         for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
@@ -564,7 +572,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Done in this order, and undone in the reverse one.
     let moved = false;
     const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
-    let scope: string[] = [];
     try {
       await this.moveNoReplace(src, dest);
       moved = true;
@@ -574,8 +581,11 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await super.writeFile(e.path, e.content);
       }
       // The commit names every file at both ends: a folder's files one by one,
-      // because the scope matches files, not the folders holding them.
-      const movedFiles = await this.filesBelow(dest);
+      // because the scope matches files, not the folders holding them. From
+      // the files LOCKED, not the destination as it is now: a file saved into
+      // the new place since the rename is somebody else's, under no lock of
+      // this move, and stays out of its commit.
+      const movedFiles = src === dest ? [] : movedNow.map((f) => dest + f.slice(src.length));
       scope = [
         ...new Set([
           ...movedFiles.flatMap((f) => [f, src + f.slice(dest.length)]),

@@ -263,12 +263,16 @@ describe('md-links — scanning', () => {
       // inside a raw tag is not an escape, so the value keeps it.
       '<a title="a > b" href="quoted.md">q</a> <a href="Plan\\_v2.md">e</a>\n';
     const live = ['live.md', 'pic.png', 'bare.md', 'quoted.md', 'Plan\\_v2.md'];
-    expect(scanMarkdownHtmlLinks(page)).toEqual(live);
+    expect(scanMarkdownHtmlLinks(page).map((t) => t.destination)).toEqual(live);
+    // Which attribute each came from travels with it: a `src` is a picture.
+    expect(scanMarkdownHtmlLinks(page).map((t) => t.image)).toEqual([false, true, false, false, false]);
     // Escaped backticks are literal text, not a code span around the tag;
     // `data-href` is not a link; `href=` inside another attribute's value is a value.
-    expect(scanMarkdownHtmlLinks('a \\` b <a href="between.md">x</a> c \\` d\n')).toEqual(['between.md']);
-    expect(scanMarkdownHtmlLinks('<div data-href="not.md" title="href=nor.md"><a href="yes.md">x</a></div>\n'))
-      .toEqual(['yes.md']);
+    const found = (text: string) => scanMarkdownHtmlLinks(text).map((t) => t.destination);
+    expect(found('a \\` b <a href="between.md">x</a> c \\` d\n')).toEqual(['between.md']);
+    expect(found('<div data-href="not.md" title="href=nor.md"><a href="yes.md">x</a></div>\n')).toEqual(['yes.md']);
+    // A tag inside an HTML comment is not rendered, so it is not a link.
+    expect(found('<!-- <a href="hidden.md">x</a> -->\n<a href="shown.md">y</a>\n')).toEqual(['shown.md']);
     expect(htmlLinksAffectedByMove(page, { oldPath: OUTSIDE, newPath: `${KB}/Moved/Index.md`, mapPath: () => null, kbDirName: KB, branch: 'main' }, scanMarkdownHtmlLinks(page)))
       .toEqual(live);
   });

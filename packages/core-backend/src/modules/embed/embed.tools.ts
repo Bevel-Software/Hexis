@@ -170,7 +170,10 @@ export function registerEmbedTools(
  * or without a leading slash, which is what `read_file` documents.
  */
 export function toRepoRelative(path: string, kbDirName: string): string | null {
-  const norm = path.replace(/\\/g, '/').replace(/^\.?\/+/, '').replace(/\/+$/, '');
+  // A backslash is refused, not read as a separator — `read_file`'s contract,
+  // and a token must never name a file other than the one the caller wrote.
+  if (path.includes('\\')) return null;
+  const norm = path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
   if (!norm) return null;
   const rel = norm === kbDirName ? '' : norm.startsWith(`${kbDirName}/`) ? norm.slice(kbDirName.length + 1) : norm;
   if (!rel) return null;

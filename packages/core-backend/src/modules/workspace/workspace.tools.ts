@@ -3838,8 +3838,9 @@ export function registerWorkspaceTools(
     for (const p of raw as string[]) {
       try {
         // As written: a name may begin or end with a space, and trimming it
-        // would ask for another file.
-        requested.push(normalizeWorkspacePath(p, kbDirName));
+        // would ask for another file. A trailing slash is the one spelling
+        // folded, so `Shared/` and `Shared` are one request, not two zips.
+        requested.push(normalizeWorkspacePath(p, kbDirName).replace(/\/+$/, ''));
       } catch (err) {
         if (!hasHttpStatus(err)) throw err;
         refusedSpelling.push({ path: p, reason: err.message });
@@ -3855,6 +3856,9 @@ export function registerWorkspaceTools(
         candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
         canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
         canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
+        // The folder-level gate the app's zip route applies, before the files.
+        canDownloadFolder: (p) =>
+          accessControl.canDownload(workspaceId, ctx.user.email, toKbRelative(p, kbDirName) ?? p),
         notifyRead: (p) => notifyAgentRead(agentAccessGate, ctx, branch, p),
         readFile: (p) => ctx.workspaceService.readFileBinary(workspaceId, p),
         contentTypeOf: downloadContentType,

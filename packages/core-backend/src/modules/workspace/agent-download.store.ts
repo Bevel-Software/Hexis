@@ -217,8 +217,11 @@ export class AgentDownloadStore {
     }
     this.assertCanIssue(user);
     this.reserved.set(user.id, (this.reserved.get(user.id) ?? 0) + 1);
+    // Once the request is recorded, the record is what counts as open and the
+    // reservation is given back by `write` — not here as well, which would
+    // count the request twice while `work` finishes.
+    let issued = false;
     try {
-      let issued = false;
       const issue = (items: DownloadArtifact[]): Promise<IssuedDownload> => {
         if (issued) return Promise.reject(new Error('A download request slot issues once.'));
         issued = true;
@@ -234,10 +237,15 @@ export class AgentDownloadStore {
         if (this.building.get(user.id) === mine) this.building.delete(user.id);
       }
     } finally {
-      const left = (this.reserved.get(user.id) ?? 1) - 1;
-      if (left > 0) this.reserved.set(user.id, left);
-      else this.reserved.delete(user.id);
+      if (!issued) this.releaseReservation(user.id);
     }
+  }
+
+  /** Give back one of `userId`'s reserved slots. */
+  private releaseReservation(userId: string): void {
+    const left = (this.reserved.get(userId) ?? 1) - 1;
+    if (left > 0) this.reserved.set(userId, left);
+    else this.reserved.delete(userId);
   }
 
   /**
@@ -279,6 +287,9 @@ export class AgentDownloadStore {
         await this.removeDir(requestId);
       } finally {
         this.writing.delete(requestId);
+        // Nothing issued: the slot goes back here, since `withRequestSlot`
+        // treats an `issue` that was called as one that filled its slot.
+        this.releaseReservation(user.id);
       }
       throw err;
     }
@@ -292,6 +303,9 @@ export class AgentDownloadStore {
     }
     this.requests.set(requestId, request);
     this.writing.delete(requestId);
+    // The record counts as open from here; the reservation that held the
+    // place until now is given back, so the request is counted once.
+    this.releaseReservation(user.id);
     // AFTER the records exist: the first sweep runs at once and would
     // otherwise take this request's directory for an orphan.
     this.startSweeping();
@@ -411,6 +425,9 @@ export class AgentDownloadStore {
   }
 
   private sweep(): void {
+    // One sweep at a time: a second starting while the first still deletes
+    // would make `drainSweep` wait for the newer and miss the older.
+    if (this.sweeping) return;
     const running = this.sweepNow()
       .catch((err: unknown) => {
         log.warn('could not sweep expired downloads:', { err });
