@@ -59,7 +59,7 @@ function parseDomainList(raw: string): string[] {
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
-import { AgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
@@ -73,6 +73,7 @@ import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -238,7 +239,7 @@ export interface CoreServices {
   /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
-  agentDownloadStore: AgentDownloadStore;
+  agentDownloadStore: IAgentDownloadStore;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
    * session cookie — none when it carries none that verifies — so the
@@ -1262,6 +1263,10 @@ export async function createCoreServices(
     // embed answer to "is this text, or bytes a renderer fetches?" cannot
     // disagree with what a read of the file returns.
     createFileReaderRegistry(docExtractService),
+    // The SAME pre-disk gate the file editor and the agent tools run: a
+    // `roles.yaml` that would not parse is refused before it is written, from
+    // a chat exactly as from the app.
+    makeRolesYamlWriteValidator(kbDirName),
   );
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.

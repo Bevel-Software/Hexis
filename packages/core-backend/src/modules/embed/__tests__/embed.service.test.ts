@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
+import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/roles-yaml-guard.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
 import {
@@ -109,6 +110,9 @@ function build(opts: Opts = {}) {
     gitService as never,
     accountLinks as never,
     createFileReaderRegistry({ extract: async () => ({ kind: 'text', text: '' }) } as never),
+    // The real gate: the property under test is that an embed write cannot
+    // put on disk what the app's editor would refuse.
+    makeRolesYamlWriteValidator(KB),
     opts.resolveNodeId ?? null,
   );
   return { service, workspaceService, accessControl, authService, workflowService, gitService, accountLinks };
@@ -604,6 +608,49 @@ describe('EmbedService: proposing as a non-writer', () => {
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, 'x')).rejects.toThrow(EmbedAccessError);
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The embed writes through `workspaceService.writeFile`, which puts bytes on
+ * disk with no gate of its own — the app's editor and the agent tools write
+ * through a filesystem that refuses a `roles.yaml` that would not parse. The
+ * embed asks that same gate first, so a chat cannot commit what the app
+ * would refuse.
+ */
+describe('EmbedService: the roles.yaml write gate', () => {
+  const ROLES = `${KB}/roles.yaml`;
+  const VALID = 'roles:\n  Admin:\n    - a@x.eu\n';
+
+  it('refuses to save a roles.yaml that would not parse, writing nothing and taking no lock', async () => {
+    const { service, workspaceService, workflowService } = build({ files: { [ROLES]: VALID } });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
+    await expect(service.save(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.acquireLock).not.toHaveBeenCalled();
+    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('refuses to propose a roles.yaml that would not parse, before any branch is made', async () => {
+    const { service, workspaceService, workflowService, gitService } = build({
+      canWrite: false,
+      files: { [ROLES]: VALID },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
+    await expect(service.propose(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
+    expect(gitService.createBranch).not.toHaveBeenCalled();
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+  });
+
+  it('saves a roles.yaml that parses, and any other file untouched by the gate', async () => {
+    const { service, workspaceService } = build({ files: { [ROLES]: VALID, [WS]: PAGE } });
+    const roles = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
+    await service.save(roles.token, `${VALID}  Editor:\n    - e@x.eu\n`);
+    expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(BRANCH), ROLES, expect.any(String));
+    const page = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await service.save(page.token, 'roles: [oops');
+    expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(BRANCH), WS, 'roles: [oops');
   });
 });
 

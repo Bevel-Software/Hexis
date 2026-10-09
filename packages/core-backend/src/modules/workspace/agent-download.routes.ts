@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import express from 'express';
 import { logger } from '../../shared/logging.js';
-import { AgentDownloadStore, DownloadTokenError } from './agent-download.store.js';
+import { DownloadTokenError, type IAgentDownloadStore } from './agent-download.store.js';
 
 const log = logger('agent-downloads');
 
@@ -17,7 +17,7 @@ export const AGENT_DOWNLOAD_ROUTE = '/agent/downloads/:token';
 export const AGENT_DOWNLOAD_HEADER_ROUTE = '/agent/downloads';
 
 export interface AgentDownloadRouteDeps {
-  downloads: AgentDownloadStore;
+  downloads: IAgentDownloadStore;
   /**
    * Every user a fetch identifies itself as, by the credentials this server
    * recognises — none when it carries none (or none that verifies). The link

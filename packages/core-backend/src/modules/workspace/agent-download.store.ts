@@ -132,7 +132,38 @@ export interface AgentDownloadStoreOptions {
  * fetched has its bytes deleted once the response ends, however it ends; a
  * link nobody fetched is deleted when it expires.
  */
-export class AgentDownloadStore {
+/**
+ * The download store as its consumers see it — the port the tool, the
+ * download routes and the lifecycle depend on, so a deployment may substitute
+ * its own keeper of one-time links.
+ */
+export interface IAgentDownloadStore {
+  /** The absolute address a token's link is fetched at. */
+  downloadUrlFor(token: string): string;
+  /** Refuse, with the cap's sentence, when `user` holds the most requests allowed. */
+  assertCanIssue(user: { id: string }): void;
+  /** Take one of `user`'s request slots and run `work` in their turn — see the class. */
+  withRequestSlot<T>(
+    user: { id: string },
+    work: (issue: (items: DownloadArtifact[]) => Promise<IssuedDownload>) => Promise<T>,
+  ): Promise<T>;
+  /** Take `token`'s link for ONE fetch and answer what to send. */
+  claim(token: string, fetcherIds?: readonly string[]): ClaimedDownload;
+  /** A fetch is over: the link's bytes are gone. Idempotent. */
+  finish(token: string): Promise<void>;
+  /** How many requests `userId` holds open. */
+  openRequestsOf(userId: string): number;
+  /** Delete every expired request and every orphaned directory, once. */
+  sweepNow(): Promise<void>;
+  /** Sweep now, and keep sweeping. */
+  startSweeping(intervalMs?: number): void;
+  /** Stop the sweeps. */
+  stopSweeping(): void;
+  /** Wait for a sweep in flight, so a root can be torn down after it. */
+  drainSweep(): Promise<void>;
+}
+
+export class AgentDownloadStore implements IAgentDownloadStore {
   /** Token hash → the one artifact that link serves. */
   private readonly artifacts = new Map<string, ArtifactRecord>();
   /** Request id → the request its links belong to. */

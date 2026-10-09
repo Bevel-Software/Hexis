@@ -78,7 +78,7 @@ import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
-import type { AgentDownloadStore } from './agent-download.store.js';
+import type { IAgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
 import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
 import {
@@ -828,7 +828,7 @@ const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
  * the tools were built has to be written here rather than onto the shared
  * `SESSION_ID_INPUT` constant.
  */
-function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
+export function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
   const inputs = def.inputs as
     | { properties?: { body?: { properties?: Record<string, { description?: string }> } } }
     | undefined;
@@ -919,7 +919,7 @@ export function registerWorkspaceTools(
    * for the harnesses about the file primitives; without it the tool is not
    * mounted.
    */
-  downloads?: AgentDownloadStore,
+  downloads?: IAgentDownloadStore,
 ): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
@@ -3824,7 +3824,7 @@ export function registerWorkspaceTools(
   async function requestFileDownload(
     a: Record<string, unknown>,
     ctx: ToolContext,
-    store: AgentDownloadStore,
+    store: IAgentDownloadStore,
   ): Promise<unknown> {
     const branch = a.branch as string;
     const raw = a.paths;
