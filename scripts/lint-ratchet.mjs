@@ -9,9 +9,11 @@
  * ESLint problems (errors plus warnings) than it went in with.
  *
  * Each changed file is linted as it is now, and as it was at the merge base
- * with `--base` (its old content, under today's config). A file the change
- * adds counts from zero, so a new file must lint clean. Files ESLint ignores,
- * or that no config covers, are skipped; deleted files have nothing to count.
+ * with `--base` (its old content, under today's config). A renamed or moved
+ * file is compared with its content under the old path, so a move alone
+ * never fails. A file the change adds counts from zero, so a new file must
+ * lint clean. Files ESLint ignores, or that no config covers, are skipped;
+ * deleted files have nothing to count.
  *
  * Usage:
  *   node scripts/lint-ratchet.mjs                    # against origin/dev
@@ -38,13 +40,17 @@ if (!baseRef) {
 }
 const base = git('merge-base', baseRef, 'HEAD').trim();
 
-/** Changed files that still exist, with whether they existed at the base. */
-const changed = git('diff', '--name-status', '--no-renames', '--diff-filter=AM', `${base}...HEAD`)
+/**
+ * Changed files that still exist, each with the path its content had at the
+ * base (`null` for an added file). A rename's line is `R<score>\told\tnew`.
+ */
+const changed = git('diff', '--name-status', '-M', '--diff-filter=AMR', `${base}...HEAD`)
   .split('\n')
   .filter(Boolean)
   .map((line) => {
-    const [status, file] = line.split('\t');
-    return { file, added: status === 'A' };
+    const [status, first, second] = line.split('\t');
+    if (status.startsWith('R')) return { file: second, was: first };
+    return { file: first, was: status === 'A' ? null : first };
   })
   .filter(({ file }) => LINTED.test(file));
 
@@ -52,16 +58,18 @@ const eslint = new ESLint({ cwd: ROOT });
 const problems = (results) => results.reduce((n, r) => n + r.errorCount + r.warningCount, 0);
 
 const rows = [];
-for (const { file, added } of changed) {
+for (const { file, was } of changed) {
   const abs = join(ROOT, file);
   if (await eslint.isPathIgnored(abs)) continue;
   if (!(await eslint.calculateConfigForFile(abs))) continue;
   const nowResults = await eslint.lintFiles([abs]);
   const now = problems(nowResults);
-  const before = added
+  // The old content is linted under the NEW path, so the same config judges
+  // both sides of a move.
+  const before = was === null
     ? 0
-    : problems(await eslint.lintText(git('show', `${base}:${file}`), { filePath: abs }));
-  rows.push({ file, before, now, results: nowResults });
+    : problems(await eslint.lintText(git('show', `${base}:${was}`), { filePath: abs }));
+  rows.push({ file: was && was !== file ? `${was} -> ${file}` : file, before, now, results: nowResults });
 }
 
 const worse = rows.filter((r) => r.now > r.before);
