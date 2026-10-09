@@ -23,7 +23,15 @@ import { splitEmails } from '../invite-emails';
 const { listAccountsMock, createAccountMock, addMemberMock, fetchRolesMock, copyMock, providersMock } = vi.hoisted(
   () => ({
     listAccountsMock: vi.fn<() => Promise<AccountSummary[]>>(),
-    createAccountMock: vi.fn<(email: string, name: string, password?: string) => Promise<void>>(),
+    createAccountMock:
+      vi.fn<
+        (
+          email: string,
+          name: string,
+          password?: string,
+          options?: { keepExistingPassword?: boolean },
+        ) => Promise<{ passwordSet?: boolean }>
+      >(),
     addMemberMock: vi.fn<(canonical: string, email: string) => Promise<unknown>>(),
     fetchRolesMock: vi.fn<() => Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>>(),
     copyMock: vi.fn<(text: string) => Promise<boolean>>(),
@@ -57,6 +65,8 @@ const SSO_AND_PASSWORD: LoginProviders = { password: true, sso: [DUENDE] };
 const SSO_ONLY: LoginProviders = { password: false, sso: [DUENDE] };
 
 const SECRET = 'welcome-to-acme';
+/** How a starting password is sent: the server never writes it over one of the account's own. */
+const KEEP = { keepExistingPassword: true };
 
 function account(email: string, over: Partial<AccountSummary> = {}): AccountSummary {
   return {
@@ -110,7 +120,7 @@ function rowOf(email: string): HTMLElement {
 
 beforeEach(() => {
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software', { hasPassword: true })]);
-  createAccountMock.mockReset().mockResolvedValue(undefined);
+  createAccountMock.mockReset().mockResolvedValue({});
   addMemberMock.mockReset().mockResolvedValue([]);
   fetchRolesMock.mockReset().mockResolvedValue([{ canonical: 'admin', members: ['juan@bevel.software'] }]);
   copyMock.mockReset().mockResolvedValue(true);
@@ -341,6 +351,16 @@ describe('InviteDialog: how people sign in here', () => {
     expect(createAccountMock).toHaveBeenCalledWith('ana@bevel.software', '');
   });
 
+  it('with password sign-in off and no single sign-on either, sends nothing and says why', async () => {
+    providersMock.mockResolvedValue({ password: false, sso: [] });
+    await mountDialog({ initialEmails: ['ana@bevel.software'], settle: false });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Nobody could sign in: password sign-in is off here and no single sign-on is set up.',
+    );
+    expect(screen.getByRole('button', { name: 'Invite 1 person' })).toBeDisabled();
+    expect(screen.queryByLabelText('Starting password')).not.toBeInTheDocument();
+  });
+
   it('when the check fails, keeps Invite disabled with Retry, and a successful Retry enables the form', async () => {
     providersMock.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(PASSWORD_ONLY);
     await mountDialog({ initialEmails: ['ana@bevel.software'] });
@@ -415,6 +435,7 @@ describe('InviteDialog: sending', () => {
   it('says "no seat left" on the row the deployment refused for want of a place', async () => {
     createAccountMock.mockImplementation(async (email) => {
       if (email === 'bo@bevel.software') throw new AccountRequestError('No seat left on this plan', 403, 'admission');
+      return {};
     });
     const { input, onInvited } = await mountDialog();
     await userEvent.type(input, 'ana@bevel.software{Enter}bo@bevel.software{Enter}');
@@ -527,9 +548,9 @@ describe('InviteDialog: a starting password', () => {
   it('is given to every new account and to an existing one with none; never to one with its own or one switched off', async () => {
     const { onInvited } = await sendFive();
     expect(createAccountMock.mock.calls).toEqual([
-      ['lena@acme.com', '', SECRET],
-      ['tom@acme.com', '', SECRET],
-      ['priya@acme.com', '', SECRET],
+      ['lena@acme.com', '', SECRET, KEEP],
+      ['tom@acme.com', '', SECRET, KEEP],
+      ['priya@acme.com', '', SECRET, KEEP],
     ]);
     expect(onInvited).toHaveBeenCalledTimes(1);
 
@@ -619,7 +640,7 @@ describe('InviteDialog: a starting password', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
     await screen.findByRole('dialog', { name: '1 person is invited' });
 
-    expect(createAccountMock).toHaveBeenCalledWith('lena@acme.com', '', SECRET);
+    expect(createAccountMock).toHaveBeenCalledWith('lena@acme.com', '', SECRET, KEEP);
     expect(within(rowOf('lena@acme.com')).getByText('Member · signs in with Duende Demo or password')).toBeInTheDocument();
     expect(screen.getByText('Send them the password you set, separately.')).toBeInTheDocument();
     expect(screen.getByText(/^I’ve added you to/)).toHaveTextContent(
@@ -643,6 +664,7 @@ describe('InviteDialog: a starting password', () => {
     listAccountsMock.mockResolvedValue([account('priya@acme.com')]);
     createAccountMock.mockImplementation(async (email) => {
       if (email === 'priya@acme.com') throw new AccountRequestError('Password too common', 400);
+      return {};
     });
     const { input } = await mountDialog();
     await userEvent.type(input, 'lena@acme.com{Enter}priya@acme.com{Enter}');
@@ -656,6 +678,34 @@ describe('InviteDialog: a starting password', () => {
     expect(within(priya).getByText('Couldn’t set the password: Password too common')).toBeInTheDocument();
     // Left as it was: not made an admin either.
     expect(addMemberMock.mock.calls).toEqual([['admin', 'lena@acme.com']]);
+  });
+
+  it('when setting it fails on an account that has single sign-on, still counts it as invited and says how it signs in', async () => {
+    listAccountsMock.mockResolvedValue([account('priya@acme.com')]);
+    createAccountMock.mockRejectedValue(new AccountRequestError('Password too common', 400));
+    const { input } = await mountDialog();
+    await userEvent.type(input, 'priya@acme.com{Enter}');
+    await userEvent.click(screen.getByLabelText('Also give them a password'));
+    await userEvent.type(passwordField(), SECRET);
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(
+      within(rowOf('priya@acme.com')).getByText('Couldn’t set the password: Password too common · signs in with Duende Demo'),
+    ).toBeInTheDocument();
+  });
+
+  it('reports an account that got its own password after the list was read as keeping it', async () => {
+    providersMock.mockResolvedValue(PASSWORD_ONLY);
+    listAccountsMock.mockResolvedValue([account('priya@acme.com')]);
+    createAccountMock.mockResolvedValue({ passwordSet: false });
+    const { input } = await mountDialog();
+    await userEvent.type(input, 'priya@acme.com{Enter}');
+    await userEvent.type(passwordField(), SECRET);
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(createAccountMock).toHaveBeenCalledWith('priya@acme.com', '', SECRET, KEEP);
+    expect(within(rowOf('priya@acme.com')).getByText('Signs in with their own password (unchanged)')).toBeInTheDocument();
+    expect(screen.queryByText('Send them the password you set, separately.')).not.toBeInTheDocument();
   });
 
   it('when the account list cannot be read, sends nothing and offers Retry, keeping what was typed', async () => {
@@ -677,7 +727,7 @@ describe('InviteDialog: a starting password', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByRole('dialog', { name: '1 person is invited' });
-    expect(createAccountMock).toHaveBeenCalledWith('lena@acme.com', '', SECRET);
+    expect(createAccountMock).toHaveBeenCalledWith('lena@acme.com', '', SECRET, KEEP);
   });
 });
 

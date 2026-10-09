@@ -161,13 +161,19 @@ export function UserAccountsPage() {
   // The account awaiting confirmation before it is switched off; non-null drives that Dialog.
   const [pendingDeactivate, setPendingDeactivate] = useState<AccountSummary | null>(null);
 
+  // Only the latest read lands: an older one answering late would otherwise
+  // put back a list without the people a send just invited.
+  const accountsRequest = useRef(0);
   const refresh = useCallback(() => {
+    const requestId = ++accountsRequest.current;
     return listAccounts()
       .then((rows) => {
+        if (accountsRequest.current !== requestId) return;
         setAccounts(rows);
         setError(null);
       })
       .catch((err) => {
+        if (accountsRequest.current !== requestId) return;
         setError(err instanceof Error ? err.message : "Couldn't load accounts.");
         // `accounts` is deliberately left alone. A RELOAD that fails keeps the
         // rows it already had; a FIRST load that fails stays `null`, because

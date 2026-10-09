@@ -102,16 +102,22 @@ export async function fetchLoginProviders(): Promise<LoginProviders> {
  * The same probe, strictly: rejects on a failed request or a non-OK answer
  * instead of answering "password only". The login screen wants the fallback;
  * the Invite dialog and Manage access must tell "no single sign-on" from
- * "couldn't check", because they say different things to the admin.
+ * "couldn't check", because they say different things to the admin. A body
+ * that does not carry both answers is "couldn't check" too, not a guess.
  */
 export async function fetchLoginProvidersStrict(): Promise<LoginProviders> {
   const res = await fetch('/api/auth/providers');
   if (!res.ok) throw new Error(`Couldn't read the sign-in methods (${res.status})`);
-  const body = (await res.json()) as Partial<LoginProviders>;
-  return {
-    password: body.password !== false,
-    sso: Array.isArray(body.sso) ? body.sso : [],
-  };
+  const body = (await res.json()) as { password?: unknown; sso?: unknown } | null;
+  const sso = body?.sso;
+  if (
+    typeof body?.password !== 'boolean' ||
+    !Array.isArray(sso) ||
+    !sso.every((p: Partial<SsoProvider> | null) => typeof p?.key === 'string' && typeof p.label === 'string')
+  ) {
+    throw new Error("Couldn't read the sign-in methods");
+  }
+  return { password: body.password, sso: sso as SsoProvider[] };
 }
 
 /**

@@ -359,6 +359,50 @@ export class AuthService {
   }
 
   /**
+   * An invite's starting password: create the account with it, or give it to
+   * an existing account that is switched on and has no password yet — never
+   * to one that has a password of its own or is switched off. The test and
+   * the write are ONE statement (the upsert's `setWhere`), so a password the
+   * person sets between the admin reading the account list and sending the
+   * invite is never overwritten; `passwordSet` says which happened.
+   *
+   * The deployment admin has its own password (the environment's): it is
+   * left as it is, as {@link createAccount} would refuse to store one.
+   */
+  async createAccountWithStartingPassword(
+    email: string,
+    password: string,
+  ): Promise<{ user: AuthUser; passwordSet: boolean }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
+      if (existing) return { user: this.toClientUser(existing), passwordSet: false };
+      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+    }
+    this.assertPasswordPolicy(password);
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
+    const passwordHash = await hashPassword(password);
+    const displayName = normalizedEmail.split('@')[0] || normalizedEmail;
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
+      .onConflictDoUpdate({
+        target: users.emailBidx,
+        set: { passwordHash, updatedAt: new Date() },
+        setWhere: and(isNull(users.passwordHash), isNull(users.deactivatedAt)),
+      })
+      .returning();
+    if (row) return { user: this.toClientUser(row), passwordSet: true };
+    // The conflicting account has a password or is switched off: untouched.
+    const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
+    if (!existing) throw new Error('Could not set the password');
+    return { user: this.toClientUser(existing), passwordSet: false };
+  }
+
+  /**
    * Is `email` the deployment admin — the account whose password is set in
    * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
    * rather than stored on its row? The single definition behind

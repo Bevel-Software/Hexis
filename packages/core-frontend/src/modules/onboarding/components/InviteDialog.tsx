@@ -41,13 +41,15 @@ function either(labels: string[]): string {
  *   is required, or nobody invited could sign in;
  * - `sso`: single sign-on and password sign-in — a password is an option;
  * - `sso-only`: password sign-in is off — no password at all;
+ * - `none`: password sign-in is off and no single sign-on is on either —
+ *   nobody invited could sign in, so nothing can be sent;
  * - `unknown`: not known yet, or the check failed — nothing can be sent.
  */
-type FormMode = 'password' | 'sso' | 'sso-only' | 'unknown';
+type FormMode = 'password' | 'sso' | 'sso-only' | 'none' | 'unknown';
 
 function formMode(methods: LoginProviders | null): FormMode {
   if (!methods) return 'unknown';
-  if (!methods.password) return 'sso-only';
+  if (!methods.password) return methods.sso.length > 0 ? 'sso-only' : 'none';
   return methods.sso.length > 0 ? 'sso' : 'password';
 }
 
@@ -97,6 +99,8 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
   // A send with a password stopped before any write: the account list could not be read.
   const [accountsUnreadable, setAccountsUnreadable] = useState(false);
   const [outcomes, setOutcomes] = useState<InviteOutcome[] | null>(null);
+  // Whether the send that produced `outcomes` carried a starting password (never the password itself).
+  const [sentWithPassword, setSentWithPassword] = useState(false);
   const emailsId = useId();
   const doneRef = useRef<HTMLButtonElement>(null);
 
@@ -123,7 +127,7 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
   const valid = pending.filter(isValidEmail);
   const wantsPassword = mode === 'password' || (mode === 'sso' && alsoPassword);
   const passwordOk = !wantsPassword || password.length >= MIN_PASSWORD_LENGTH;
-  const canSend = mode !== 'unknown' && valid.length > 0 && passwordOk && !sending;
+  const canSend = mode !== 'unknown' && mode !== 'none' && valid.length > 0 && passwordOk && !sending;
 
   async function send() {
     if (!canSend) return;
@@ -144,6 +148,7 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
       setEmails([]);
       setDraft('');
       setPassword('');
+      setSentWithPassword(wantsPassword);
       setOutcomes(result.outcomes);
       if (result.outcomes.some((o) => o.status === 'created' || gotPassword(o) || (o.status === 'existing' && o.promoted))) {
         onInvited?.();
@@ -159,11 +164,13 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
     setRole('member');
     setPassword('');
     setAlsoPassword(false);
+    setSentWithPassword(false);
     setOutcomes(null);
   }
 
   if (outcomes) {
-    const invited = outcomes.filter(isInvited).length;
+    const sso = (methods?.sso.length ?? 0) > 0;
+    const invited = outcomes.filter((o) => isInvited(o, sso)).length;
     return (
       <Dialog
         open={open}
@@ -185,7 +192,7 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
           </>
         }
       >
-        <InvitedBody outcomes={outcomes} invited={invited} methods={methods} />
+        <InvitedBody outcomes={outcomes} invited={invited} methods={methods} passwordGiven={sentWithPassword} />
       </Dialog>
     );
   }
@@ -218,6 +225,10 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
         alert={
           signIn.status === 'failed' ? (
             <RetryAlert text="Couldn’t check how people sign in here." onRetry={signIn.retry} />
+          ) : mode === 'none' ? (
+            <Banner tone="danger" role="alert">
+              Nobody could sign in: password sign-in is off here and no single sign-on is set up.
+            </Banner>
           ) : accountsUnreadable ? (
             <RetryAlert
               text="Nothing was sent: couldn’t check who already has an account."
@@ -511,7 +522,10 @@ function outcomeDetail(outcome: InviteOutcome, idp: string, passwordGiven: boole
       return how ? `${as} · ${how}` : as;
     }
     case 'existing': {
-      if (outcome.passwordError) return `Couldn’t set the password: ${outcome.passwordError}`;
+      if (outcome.passwordError) {
+        const failed = `Couldn’t set the password: ${outcome.passwordError}`;
+        return idp ? `${failed} · signs in with ${idp}` : failed;
+      }
       const access = outcome.deactivated
         ? 'Can’t sign in until it’s switched on in User accounts'
         : outcome.passwordSet
@@ -561,18 +575,19 @@ function InvitedBody({
   outcomes,
   invited,
   methods,
+  passwordGiven,
 }: {
   outcomes: InviteOutcome[];
   invited: number;
   methods: LoginProviders | null;
+  /** The send carried a starting password, whoever ended up with it. */
+  passwordGiven: boolean;
 }) {
   const { user } = useAuth();
   const origin = window.location.origin;
   const idp = either(methods?.sso.map((p) => p.label) ?? []);
   // Some account was given the starting password in this send.
   const passwordSet = outcomes.some(gotPassword);
-  // The send carried a password, whoever ended up with it.
-  const passwordGiven = passwordSet || outcomes.some((o) => o.status === 'existing' && o.passwordError);
   const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
 
   return (

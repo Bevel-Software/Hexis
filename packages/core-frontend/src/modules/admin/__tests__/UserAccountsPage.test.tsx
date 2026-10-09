@@ -119,7 +119,7 @@ beforeEach(() => {
     ]);
   vi.mocked(deleteAccount).mockReset().mockResolvedValue(null);
   vi.mocked(getAccountReferences).mockReset().mockResolvedValue(REFS);
-  vi.mocked(createAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(createAccount).mockReset().mockResolvedValue({});
   vi.mocked(deactivateAccount).mockReset().mockResolvedValue(undefined);
   vi.mocked(reactivateAccount).mockReset().mockResolvedValue(undefined);
 });
@@ -699,5 +699,45 @@ describe('UserAccountsPage — inviting new users', () => {
     );
     expect(await screen.findByText('lena')).toBeInTheDocument();
     expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the refreshed list when an older read answers after it', async () => {
+    const withLena = [
+      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
+      ALICE,
+      { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
+    ];
+    let answerFirst: (rows: typeof withLena) => void = () => {};
+    vi.mocked(listAccounts)
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
+      .mockResolvedValue(withLena);
+    const page = (revision: number) => (
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(revision)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>
+    );
+    const view = render(page(0));
+    view.rerender(page(1));
+    expect(await screen.findByText('lena')).toBeInTheDocument();
+    // The first read, from before the send, answers last: it must not land.
+    answerFirst([withLena[0]!, ALICE]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('lena')).toBeInTheDocument();
   });
 });

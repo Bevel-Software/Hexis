@@ -26,7 +26,7 @@ import './auth.middleware.js'; // Express Request augmentation
  * bootstrap admin (always-admin, see AdminAccessService).
  */
 export function createAccountRoutes(
-  authService: Pick<AuthService, 'listAccounts' | 'createAccount' | 'getUserById' | 'deactivate' | 'reactivate'>,
+  authService: Pick<AuthService, 'listAccounts' | 'createAccount' | 'createAccountWithStartingPassword' | 'getUserById' | 'deactivate' | 'reactivate'>,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
   accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
@@ -51,11 +51,15 @@ export function createAccountRoutes(
   // (or reset the password of an existing one; upsert-by-email is deliberate,
   // see AuthService.createAccount). Without a password the account is for
   // single sign-on: the person finds it waiting when they first sign in.
+  // With `keepExistingPassword: true` (an invite's starting password) the
+  // password goes only to a new account or a switched-on one with none; the
+  // reply's `passwordSet` says whether it did.
   router.post('/admin/accounts', requireAdmin, async (req, res) => {
-    const { email, name, password } = req.body as {
+    const { email, name, password, keepExistingPassword } = req.body as {
       email?: string;
       name?: string;
       password?: unknown;
+      keepExistingPassword?: unknown;
     };
     if (!email) {
       res.status(400).json({ error: 'email is required' });
@@ -66,7 +70,16 @@ export function createAccountRoutes(
       res.status(400).json({ error: 'password must be a string' });
       return;
     }
+    if (keepExistingPassword === true && typeof password !== 'string') {
+      res.status(400).json({ error: 'keepExistingPassword needs a password' });
+      return;
+    }
     try {
+      if (keepExistingPassword === true && typeof password === 'string') {
+        const { user, passwordSet } = await authService.createAccountWithStartingPassword(email, password);
+        res.status(201).json({ ...user, passwordSet });
+        return;
+      }
       const user = await authService.createAccount(email, name, password);
       res.status(201).json(user);
     } catch (error) {

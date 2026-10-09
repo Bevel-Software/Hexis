@@ -1233,6 +1233,9 @@ export function createAccessRoutes(
   // roster above (every role, its members, groups and references) stays
   // admin-only. Names come from the accounts table; an admin with no account
   // yet (a deployment admin before first sign-in, say) is named by address.
+  // A role member whose account is switched off cannot sign in to invite
+  // anyone, so is left out; a deployment admin is not (it signs in with the
+  // environment's password regardless).
   router.get('/access/admins', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
@@ -1242,11 +1245,13 @@ export function createAccessRoutes(
         emails.length === 0
           ? []
           : await db
-              .select({ email: users.email, name: users.name })
+              .select({ email: users.email, name: users.name, deactivatedAt: users.deactivatedAt })
               .from(users)
               .where(inArray(users.emailBidx, emails));
       const names = new Map(rows.map((r) => [r.email.trim().toLowerCase(), r.name?.trim() ?? '']));
+      const off = new Set(rows.filter((r) => r.deactivatedAt).map((r) => r.email.trim().toLowerCase()));
       const admins = emails
+        .filter((email) => !off.has(email) || rolesAdmin.isFixedAdmin(email))
         .map((email) => ({ name: names.get(email) || email, email }))
         .sort((a, b) => a.name.localeCompare(b.name) || a.email.localeCompare(b.email));
       res.json({ admins });

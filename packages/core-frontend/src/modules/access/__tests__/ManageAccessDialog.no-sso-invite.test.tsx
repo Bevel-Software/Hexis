@@ -110,14 +110,17 @@ function chipFor(label: string): HTMLElement {
   return screen.getByRole('button', { name: `Remove ${label}` }).parentElement!;
 }
 
-/** Type an unknown address into the picker, chip it and Share. */
-async function grantToUnknown() {
+/**
+ * Type an unknown address into the picker, chip it, check the chip's help
+ * (`title`) while it is still on screen — Share removes it — and Share.
+ */
+async function grantToUnknown(title: string) {
   const user = userEvent.setup();
   const input = await screen.findByPlaceholderText('Add people, groups, roles or plugins…');
   await user.type(input, UNKNOWN.email);
   await waitFor(() => expect(api.suggestPrincipals).toHaveBeenCalled());
   await user.keyboard('{Enter}');
-  const chip = chipFor(UNKNOWN.name);
+  expect(within(chipFor(UNKNOWN.name)).getByText(TODAY_NOTE)).toHaveAttribute('title', title);
   await user.click(screen.getByRole('button', { name: /^share$/i }));
   await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
   expect(api.grantAccess).toHaveBeenCalledWith(
@@ -126,7 +129,6 @@ async function grantToUnknown() {
       principal: { kind: 'user', email: UNKNOWN.email, displayName: UNKNOWN.name },
     }),
   );
-  return chip;
 }
 
 beforeEach(() => {
@@ -173,15 +175,13 @@ describe('ManageAccessDialog, no single sign-on', () => {
   it('the grant saves as today, and the new chip carries the same help — for an admin', async () => {
     mount(true);
     await screen.findByText(ADMIN_HELP);
-    const chip = await grantToUnknown();
-    expect(within(chip).getByText(TODAY_NOTE)).toHaveAttribute('title', ADMIN_HELP);
+    await grantToUnknown(ADMIN_HELP);
   });
 
   it('the grant saves as today, and the new chip carries the same help — for anyone else', async () => {
     mount(false);
     await screen.findByText(MEMBER_HELP);
-    const chip = await grantToUnknown();
-    expect(within(chip).getByText(TODAY_NOTE)).toHaveAttribute('title', MEMBER_HELP);
+    await grantToUnknown(MEMBER_HELP);
   });
 });
 
@@ -197,8 +197,7 @@ describe('ManageAccessDialog keeps today’s note', () => {
     await waitFor(() => expect(within(row).getByText(TODAY_NOTE)).toHaveAttribute('title', TODAY_HELP));
     expect(within(row).queryByText(ADMIN_HELP)).toBeNull();
     expect(within(row).queryByRole('button', { name: /^Invite/ })).toBeNull();
-    const chip = await grantToUnknown();
-    expect(within(chip).getByText(TODAY_NOTE)).toHaveAttribute('title', TODAY_HELP);
+    await grantToUnknown(TODAY_HELP);
   });
 
   it('when the sign-in methods could not be read', async () => {

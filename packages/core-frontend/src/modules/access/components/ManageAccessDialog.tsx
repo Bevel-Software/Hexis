@@ -1744,8 +1744,12 @@ export function ManageAccessDialog({
           </div>
           {noSso && p.kind === 'user' && p.hasAccount === false ? (
             // Without single sign-on the reason takes the second line, readable
-            // without hovering: it is why this person is not in yet.
-            <div className="text-detail italic text-ink-faint">{noAccountHelp}</div>
+            // without hovering: it is why this person is not in yet. The address
+            // a display name hides stays visible, so Invite's target is plain.
+            <>
+              <div className="text-detail italic text-ink-faint">{noAccountHelp}</div>
+              {p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>}
+            </>
           ) : (
             p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>
           )}

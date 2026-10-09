@@ -85,11 +85,15 @@ export type InviteResult =
   | { status: 'sent'; outcomes: InviteOutcome[] }
   | { status: 'accounts-unreadable' };
 
-/** The address now has an account it can sign in to — new, or already there and switched on. */
-export function isInvited(outcome: InviteOutcome): boolean {
+/**
+ * The address now has an account it can sign in to — new, or already there
+ * and switched on. One whose starting password could not be set still can
+ * when the deployment has single sign-on (`sso`).
+ */
+export function isInvited(outcome: InviteOutcome, sso = false): boolean {
   return (
     outcome.status === 'created' ||
-    (outcome.status === 'existing' && !outcome.deactivated && !outcome.passwordError)
+    (outcome.status === 'existing' && !outcome.deactivated && (!outcome.passwordError || sso))
   );
 }
 
@@ -126,12 +130,14 @@ interface ListedAccount {
  * switched-off accounts too, and those are reported as such rather than as
  * able to sign in, and never written.
  *
- * The upsert also REPLACES a stored password. So with a starting password,
- * the list is what keeps someone's own password safe: an existing, switched-on
- * account is given the starting password only when it has none (and is not
- * the deployment admin, who signs in with the environment's). For the same
- * reason a list that cannot be read stops a send with a password before any
- * write — every address would otherwise be treated as new, and written over.
+ * A starting password is sent with `keepExistingPassword`: the server gives
+ * it only to a new account or a switched-on one with no password, testing
+ * and writing in one statement, and says whether it did. So someone's own
+ * password is never replaced, even one set after the list was read. The list
+ * still decides what each row says, and an account it shows with a password
+ * (or the deployment admin, who signs in with the environment's) is not
+ * written at all. A list that cannot be read stops a send with a password
+ * before any write: the rows could not say who already had an account.
  * Without a password an unreadable list just means every address is treated
  * as new, as before.
  *
@@ -156,7 +162,12 @@ export async function sendInvites(
   role: InviteRole,
   api: {
     listAccounts(): Promise<ListedAccount[]>;
-    createAccount(email: string, name: string, password?: string): Promise<void>;
+    createAccount(
+      email: string,
+      name: string,
+      password?: string,
+      options?: { keepExistingPassword?: boolean },
+    ): Promise<{ passwordSet?: boolean } | void>;
     addMember(canonical: string, email: string): Promise<unknown>;
     fetchRoles(): Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>;
   },
@@ -193,8 +204,9 @@ export async function sendInvites(
           passwordFlags = { hasOwnPassword: true };
         } else {
           try {
-            await api.createAccount(email, '', password);
-            passwordFlags = { passwordSet: true };
+            const reply = await api.createAccount(email, '', password, { keepExistingPassword: true });
+            // Not set: it got a password of its own since the list was read.
+            passwordFlags = reply?.passwordSet === false ? { hasOwnPassword: true } : { passwordSet: true };
           } catch (err) {
             const passwordError = err instanceof Error ? err.message : 'Could not set the password';
             outcomes.push({ email, status: 'existing', passwordError });
@@ -220,9 +232,17 @@ export async function sendInvites(
       }
       continue;
     }
+    let created: { passwordSet?: boolean } = {};
+    /** Not on the list, but there by the time of the write, with its own password (left as it was). */
+    let appeared = false;
     try {
-      if (password) await api.createAccount(email, '', password);
-      else await api.createAccount(email, '');
+      if (password) {
+        const reply = await api.createAccount(email, '', password, { keepExistingPassword: true });
+        if (reply?.passwordSet === false) appeared = true;
+        else created = { passwordSet: true };
+      } else {
+        await api.createAccount(email, '');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not create account';
       const kind = (err as { kind?: unknown } | null)?.kind;
@@ -231,17 +251,26 @@ export async function sendInvites(
       );
       continue;
     }
-    const created = password ? { passwordSet: true } : {};
     if (role !== 'admin') {
-      outcomes.push({ email, status: 'created', role, ...created });
+      outcomes.push(
+        appeared ? { email, status: 'existing', hasOwnPassword: true } : { email, status: 'created', role, ...created },
+      );
       continue;
     }
     try {
       await api.addMember(ADMIN_ROLE, email);
-      outcomes.push({ email, status: 'created', role: 'admin', ...created });
+      outcomes.push(
+        appeared
+          ? { email, status: 'existing', hasOwnPassword: true, promoted: true }
+          : { email, status: 'created', role: 'admin', ...created },
+      );
     } catch (err) {
       const roleError = err instanceof Error ? err.message : 'Could not make them an admin';
-      outcomes.push({ email, status: 'created', role: 'member', roleError, ...created });
+      outcomes.push(
+        appeared
+          ? { email, status: 'existing', hasOwnPassword: true, roleError }
+          : { email, status: 'created', role: 'member', roleError, ...created },
+      );
     }
   }
   return { status: 'sent', outcomes };

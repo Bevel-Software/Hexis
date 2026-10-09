@@ -14,6 +14,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { parseRolesYaml } from '../../access-model/access-grammar.js';
 
 /**
  * `GET /api/access/admins`: who the admins are, for anyone signed in. It
@@ -44,7 +45,12 @@ const GROUPS = `groups:
 const tmpDirs: string[] = [];
 
 async function makeHarness(
-  opts: { roles?: string; signedIn?: boolean; deploymentAdmins?: string[] } = {},
+  opts: {
+    roles?: string;
+    signedIn?: boolean;
+    deploymentAdmins?: string[];
+    accounts?: { email: string; name?: string; deactivatedAt?: Date | null }[];
+  } = {},
 ): Promise<{ server: Server; baseUrl: string }> {
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-admins-route-'));
   tmpDirs.push(workspaceDir);
@@ -63,15 +69,22 @@ async function makeHarness(
     canWrite: vi.fn(async () => false),
     eligibleWriters: vi.fn(async () => ({ roles: ['Admin'], users: [] })),
     invalidate: vi.fn(),
+    // The resolver's own parser, as the real service runs it.
+    validateRolesYaml: vi.fn((text: string) => {
+      const parsed = parseRolesYaml(text);
+      return parsed.ok ? { ok: true } : { ok: false, errors: parsed.errors };
+    }),
   } as unknown as IAccessControl;
   const authService = { getUserById: vi.fn(async () => MEMBER) } as unknown as AuthService;
-  const db = usersDbDouble([
-    { email: 'dana@acme.com', name: 'Dana Admin' },
-    { email: 'sam.ortiz@acme.com', name: 'Sam Ortiz' },
-    { email: 'felix@acme.com', name: 'Felix Sales' },
-    { email: 'priya@acme.com', name: 'Priya Product' },
-    MEMBER,
-  ]);
+  const db = usersDbDouble(
+    opts.accounts ?? [
+      { email: 'dana@acme.com', name: 'Dana Admin' },
+      { email: 'sam.ortiz@acme.com', name: 'Sam Ortiz' },
+      { email: 'felix@acme.com', name: 'Felix Sales' },
+      { email: 'priya@acme.com', name: 'Priya Product' },
+      MEMBER,
+    ],
+  );
 
   const app = express();
   app.use(express.json());
@@ -142,6 +155,35 @@ describe('GET /api/access/admins', () => {
     server = h.server;
     const body = (await (await fetch(`${h.baseUrl}/api/access/admins`)).json()) as { admins: unknown[] };
     expect(body.admins).toEqual([{ name: 'owner@acme.com', email: 'owner@acme.com' }]);
+  });
+
+  it('answers only the deployment admins when the resolver rejects roles.yaml the editing model would read', async () => {
+    // A role named with the reserved plugin prefix: the resolver refuses the
+    // whole file, so nobody in it is an Admin — and nobody is listed as one.
+    const h = await makeHarness({
+      roles: 'roles:\n  Admin:\n    - sam.ortiz@acme.com\n    - group:Ops\n  plugin/x:\n    - felix@acme.com\n',
+    });
+    server = h.server;
+    const body = (await (await fetch(`${h.baseUrl}/api/access/admins`)).json()) as { admins: unknown[] };
+    expect(body.admins).toEqual([{ name: 'owner@acme.com', email: 'owner@acme.com' }]);
+  });
+
+  it('leaves out a role member whose account is switched off, but not a switched-off deployment admin', async () => {
+    const off = new Date('2026-01-01T00:00:00Z');
+    const h = await makeHarness({
+      accounts: [
+        { email: 'dana@acme.com', name: 'Dana Admin', deactivatedAt: off },
+        { email: 'sam.ortiz@acme.com', name: 'Sam Ortiz' },
+        { email: 'owner@acme.com', name: 'Olive Owner', deactivatedAt: off },
+        MEMBER,
+      ],
+    });
+    server = h.server;
+    const body = (await (await fetch(`${h.baseUrl}/api/access/admins`)).json()) as { admins: unknown[] };
+    expect(body.admins).toEqual([
+      { name: 'Olive Owner', email: 'owner@acme.com' },
+      { name: 'Sam Ortiz', email: 'sam.ortiz@acme.com' },
+    ]);
   });
 
   it('refuses a caller who is not signed in', async () => {

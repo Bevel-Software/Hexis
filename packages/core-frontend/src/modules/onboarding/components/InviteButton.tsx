@@ -35,7 +35,7 @@ function inviteRequestMailto(admin: AdminContact, origin: string): string {
  * tests and by hosts, and a button with nothing to open is a dead control.
  */
 export function InviteButton({ compact = false }: { compact?: boolean }) {
-  const { isAdmin } = useAdmin();
+  const { isAdmin, isAdminLoading = false } = useAdmin();
   const invite = useInviteDialog();
   const [asking, setAsking] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -46,8 +46,10 @@ export function InviteButton({ compact = false }: { compact?: boolean }) {
   });
   if (!invite) return null;
 
-  const onClick = isAdmin ? () => invite.open() : () => setAsking((a) => !a);
-  const expanded = isAdmin ? undefined : asking;
+  // While the admin check is still out, a click does nothing rather than
+  // show an admin the ask-an-admin popover.
+  const onClick = isAdmin ? () => invite.open() : isAdminLoading ? () => {} : () => setAsking((a) => !a);
+  const expanded = isAdmin || isAdminLoading ? undefined : asking;
   const trigger = compact ? (
     <IconButton ref={triggerRef} aria-label="Invite" title="Invite" aria-expanded={expanded} onClick={onClick}>
       <Users size={16} aria-hidden />

@@ -227,9 +227,10 @@ export class RolesAdminService {
   /**
    * Is `email` a deployment admin — an address the server configuration makes
    * an Admin, ahead of `roles.yaml`? Drives both the fixed member rows and
-   * the add/remove refusals on the Admin role.
+   * the add/remove refusals on the Admin role, and keeps a switched-off
+   * deployment admin among the admins people are told to ask.
    */
-  private isFixedAdmin(email: string): boolean {
+  isFixedAdmin(email: string): boolean {
     return this.fixedAdminEmails.includes(canonicalEmail(email));
   }
 
@@ -351,17 +352,21 @@ export class RolesAdminService {
    * signed-in person may make (who to ask for an invite), unlike the roster.
    *
    * A roles.yaml that does not parse makes nobody an Admin in the resolver
-   * except the deployment admins, so that is all this answers then.
+   * except the deployment admins, so that is all this answers then — "parse"
+   * judged by the resolver's own parser (`validateRolesYaml`), which is
+   * stricter than the editing model's: a file the resolver rejects must not
+   * name anyone here.
    */
   async getAdminEmails(): Promise<string[]> {
     const workspaceId = await this.ensureWorkspace();
     const emails = new Set(this.fixedAdminEmails);
     let members: string[] = [];
     try {
-      const role = parseRolesModel(await this.readRolesYaml(workspaceId)).find(
-        (r) => canonicalRoleName(r.displayName) === ADMIN_CANONICAL,
-      );
-      members = role?.members ?? [];
+      const rolesText = await this.readRolesYaml(workspaceId);
+      if (this.accessControl.validateRolesYaml(rolesText).ok) {
+        const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === ADMIN_CANONICAL);
+        members = role?.members ?? [];
+      }
     } catch (err) {
       if (!(err instanceof RolesEditError)) throw err;
     }

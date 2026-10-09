@@ -13,6 +13,10 @@ const authService = {
     { id: 'u1', email: 'a@example.com', name: 'A', hasPassword: true, createdAt: new Date() },
   ]),
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
+  createAccountWithStartingPassword: vi.fn(async (email: string) => ({
+    user: { id: 'u2', email, name: 'B' },
+    passwordSet: false,
+  })),
   deactivate: vi.fn(async (userId: string) => userId !== 'missing'),
   reactivate: vi.fn(async (userId: string) => userId !== 'missing'),
 } as unknown as AuthService;
@@ -86,6 +90,26 @@ describe('account routes — admin gate', () => {
     });
     expect(create.status).toBe(201);
     expect(authService.createAccount).toHaveBeenCalledWith('b@example.com', 'B', 'long-enough-pw');
+  });
+
+  it('gives an invite\'s starting password through the keep-existing path, and says whether it was set', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    const create = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'b@example.com', password: 'long-enough-pw', keepExistingPassword: true }),
+    });
+    expect(create.status).toBe(201);
+    expect(await create.json()).toEqual({ id: 'u2', email: 'b@example.com', name: 'B', passwordSet: false });
+    expect(authService.createAccountWithStartingPassword).toHaveBeenCalledWith('b@example.com', 'long-enough-pw');
+    expect(authService.createAccount).not.toHaveBeenCalled();
+
+    const without = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'b@example.com', keepExistingPassword: true }),
+    });
+    expect(without.status).toBe(400);
   });
 
   it('list reports hasPassword + isEnvAdmin and never carries a hash or password', async () => {

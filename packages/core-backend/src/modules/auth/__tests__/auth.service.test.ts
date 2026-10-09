@@ -293,6 +293,53 @@ describe('AuthService.createAccount / changePassword', () => {
   });
 });
 
+describe('AuthService.createAccountWithStartingPassword — an invite never replaces a password', () => {
+  it('sets it in ONE upsert that writes only over an account with no password that is switched on', async () => {
+    const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: 'scrypt:x' }]]);
+    const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
+      'Alice@Example.com',
+      'starting-pass-1',
+    );
+    expect(result.passwordSet).toBe(true);
+    expect(result.user.email).toBe('alice@example.com');
+    const conflict = captured.conflict[0] as { set: { passwordHash: string; name?: string }; setWhere: unknown };
+    expect(conflict.set.passwordHash.startsWith('scrypt:')).toBe(true);
+    // The test and the write are one statement: the guard rides on the upsert.
+    expect(conflict.setWhere).toBeDefined();
+    expect(conflict.set.name).toBeUndefined();
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
+  it('leaves an account the guard refused as it was, and says so', async () => {
+    // The upsert's guard refused the row (it has a password now): nothing returned, the row is read back.
+    const { db, captured } = makeFakeDb([[], [{ ...ROW, passwordHash: 'scrypt:own' }]]);
+    const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
+      'alice@example.com',
+      'starting-pass-1',
+    );
+    expect(result.passwordSet).toBe(false);
+    expect(result.user.email).toBe('alice@example.com');
+    expect(captured.set).toEqual([]);
+  });
+
+  it('leaves the deployment admin to the environment password, writing nothing', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+    const result = await new AuthService(
+      db,
+      makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }),
+    ).createAccountWithStartingPassword('root@example.com', 'starting-pass-1');
+    expect(result.passwordSet).toBe(false);
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it('enforces the password policy', async () => {
+    const { db } = makeFakeDb([]);
+    await expect(
+      new AuthService(db, makeConfig()).createAccountWithStartingPassword('alice@example.com', 'short'),
+    ).rejects.toThrow(/at least/);
+  });
+});
+
 /**
  * The three kinds of account that reach the Account page's password change,
  * and what separates them.

@@ -34,10 +34,10 @@ const ADMINS: AdminContact[] = [
   { name: 'Sam Ortiz', email: 'sam.ortiz@acme.com' },
 ];
 
-function adminValue(isAdmin: boolean): AdminContextValue {
+function adminValue(isAdmin: boolean, isAdminLoading = false): AdminContextValue {
   return {
     isAdmin,
-    isAdminLoading: false,
+    isAdminLoading,
     unreadCount: 0,
     lastSeen: null,
     markSeen: () => {},
@@ -49,11 +49,11 @@ function adminValue(isAdmin: boolean): AdminContextValue {
 }
 
 /** With a stub controller, so a test can tell whether the dialog was asked for. */
-function mountWithController(isAdmin: boolean, compact = false) {
+function mountWithController(isAdmin: boolean, compact = false, isAdminLoading = false) {
   const invite: InviteDialogController = { open: vi.fn(), invitedRevision: 0 };
   render(
     <AuthContext.Provider value={authValue()}>
-      <AdminContext.Provider value={adminValue(isAdmin)}>
+      <AdminContext.Provider value={adminValue(isAdmin, isAdminLoading)}>
         <InviteDialogContext.Provider value={invite}>
           <div>
             <p>Elsewhere on the page</p>
@@ -72,6 +72,16 @@ function popover() {
 
 beforeEach(() => {
   fetchAdminsMock.mockReset().mockResolvedValue(ADMINS);
+});
+
+describe('InviteButton while the admin check is still out', () => {
+  it('does nothing on a click: no ask-an-admin popover for someone who may be an admin', async () => {
+    const invite = mountWithController(false, false, true);
+    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
+    expect(popover()).toBeNull();
+    expect(fetchAdminsMock).not.toHaveBeenCalled();
+    expect(invite.open).not.toHaveBeenCalled();
+  });
 });
 
 describe('InviteButton for an admin', () => {
