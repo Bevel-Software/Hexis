@@ -34,7 +34,7 @@ export interface GitHubAppRepository {
    * Make sure {@link token} answers with one that is still good. `asked`
    * is for a caller waiting on the answer itself, who is told a failure.
    */
-  prepare(opts?: { asked?: boolean }): Promise<void>;
+  prepare(opts?: { asked?: boolean; refused?: boolean }): Promise<void>;
   /** Whether the deployment may be pointed at this repository (`owner/name`). */
   permits(repository: string, read: SettingReader): boolean;
   /** Whether the app, its installation and a repository are all there. */
@@ -98,7 +98,7 @@ export class RepositorySource {
     this.credentials = {
       username: () => this.username(),
       token: () => this.token(),
-      prepare: () => this.prepare(),
+      prepare: (opts) => this.prepare(opts),
     };
   }
 
@@ -185,8 +185,8 @@ export class RepositorySource {
     }
   }
 
-  private async prepare(): Promise<void> {
-    if (this.inEffect === 'github-app') await this.opts.githubApp?.prepare();
+  private async prepare(opts?: { refused?: boolean }): Promise<void> {
+    if (this.inEffect === 'github-app') await this.opts.githubApp?.prepare(opts);
   }
 
   private tokenIn(read: SettingReader): string {

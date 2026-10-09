@@ -697,8 +697,10 @@ describe('EmbedService: a switched-off account', () => {
       () => service.save(token, 'x'),
       () => service.propose(token, 'x'),
     ]) {
-      await expect(call()).rejects.toThrow(EmbedAccessError);
-      await expect(call()).rejects.toThrow(ACCOUNT_DEACTIVATED_MESSAGE);
+      // One invocation, both checks on its one rejection.
+      const err: unknown = await call().then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(EmbedAccessError);
+      expect((err as Error).message).toBe(ACCOUNT_DEACTIVATED_MESSAGE);
     }
     expect(workspaceService.readFileBinary).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
