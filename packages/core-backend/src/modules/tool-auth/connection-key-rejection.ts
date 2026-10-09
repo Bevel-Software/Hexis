@@ -1,4 +1,5 @@
 import type { Response } from 'express';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
 
 /**
  * How every key-authenticated endpoint answers a bearer that LOOKS like a
@@ -19,7 +20,16 @@ export const INVALID_CONNECTION_KEY_CHALLENGE =
 export const INVALID_CONNECTION_KEY_MESSAGE =
   'Invalid or revoked connection key. Mint a new one in External agent access.';
 
-export function rejectConnectionKey(res: Response): void {
-  res.setHeader('WWW-Authenticate', INVALID_CONNECTION_KEY_CHALLENGE);
-  res.status(401).json({ error: INVALID_CONNECTION_KEY_MESSAGE });
+/**
+ * A live key whose account an admin switched off: still a plain
+ * `invalid_token` (no sign-in invitation, see above), but told the real
+ * reason — telling them to mint a new key would send them to something
+ * they cannot do.
+ */
+export const SWITCHED_OFF_CONNECTION_KEY_CHALLENGE =
+  'Bearer error="invalid_token", error_description="The account of this connection key is switched off"';
+
+export function rejectConnectionKey(res: Response, opts: { switchedOff?: boolean } = {}): void {
+  res.setHeader('WWW-Authenticate', opts.switchedOff ? SWITCHED_OFF_CONNECTION_KEY_CHALLENGE : INVALID_CONNECTION_KEY_CHALLENGE);
+  res.status(401).json({ error: opts.switchedOff ? ACCOUNT_DEACTIVATED_MESSAGE : INVALID_CONNECTION_KEY_MESSAGE });
 }

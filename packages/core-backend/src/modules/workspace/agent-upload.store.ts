@@ -260,8 +260,10 @@ export class AgentUploadStore {
     });
     // AFTER the record exists, not before. The first sweep runs the moment the
     // timer starts, and started from an empty map it would be a sweep that
-    // believes nothing is live — this token's own id included.
-    this.startSweeping();
+    // believes nothing is live — this token's own id included. And never once
+    // the store is stopped: a token issued after shutdown's `stopSweeping`
+    // must not re-arm the sweeper that was stopped for good.
+    if (!this.stopped) this.startSweeping();
     return {
       uploadUrl: this.uploadUrlFor(token),
       token,

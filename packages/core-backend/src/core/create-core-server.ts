@@ -27,7 +27,7 @@ import {
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
-import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+import { changeRequestScope, registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
 import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
@@ -469,7 +469,8 @@ export async function createCoreServer(
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
+  // `delete_branch` sees change requests as `get_change_request` does.
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee);
   // The five read tools over change requests. Separate from the workflow tools
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
@@ -487,6 +488,9 @@ export async function createCoreServer(
     // the tool answers the text and the app address and says so.
     canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
     appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+    // The read is `read_file`'s, so the notes a deployment registers for the
+    // gated tools reach this one as well.
+    notes: agentAccessGate.notes,
   });
   // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
   // a host to this deployment over HTTP and has no other way to learn which
@@ -561,6 +565,9 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: core.mcpAppService,
   }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the

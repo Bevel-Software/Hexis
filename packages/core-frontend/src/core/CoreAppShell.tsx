@@ -76,9 +76,11 @@ import {
   type CrCreationPort,
   type PaneDef,
 } from './registry';
+import { withCoreModuleContributions } from './core-contributions';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
 import { EmbedView } from '../modules/embed/components/EmbedView';
 import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
+import { ConfirmProvider } from '../shared/components';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
@@ -611,12 +613,13 @@ function AppShell() {
  */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // Core contributions merge ahead of registry-contributed ones: the core
-  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
-  // The review file-viewer panel is no longer registered here — see the note
-  // on `chrome` above.
+  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read,
+  // and core modules' own rows (see `withCoreModuleContributions`). The
+  // review file-viewer panel is no longer registered here — see the note on
+  // `chrome` above.
   const mergedRegistry = useMemo<AppRegistry>(
     () => ({
-      ...registry,
+      ...withCoreModuleContributions(registry),
       apps: [...CORE_APPS, ...registry.apps],
     }),
     [registry],
@@ -634,26 +637,32 @@ export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   return (
     <AppRegistryContext.Provider value={mergedRegistry}>
       <BrowserRouter>
-        {/* Sits above every route (including /embed) — backend downtime during
-            a redeploy affects them all equally. */}
-        <MaintenanceOverlay />
-        <Routes>
-          {/* The embed surface, OUTSIDE `AppShell` and its auth gate — like
-              the registry routes below, it owns its own auth story. `/embed`
-              authenticates by the embed token in its query and by nothing
-              else (there is no session inside a host's frame);
-              `/embed/link` is the one page that DOES act under a session,
-              which is why the server refuses to let any site frame it.
-              Core's first, so a deployment adds to the app rather than
-              having to re-register these. */}
-          {CORE_TOP_LEVEL_ROUTES.map((r) => (
-            <Route key={r.path} path={r.path} element={r.element} />
-          ))}
-          {registry.topLevelRoutes.map((r) => (
-            <Route key={r.path} path={r.path} element={r.element} />
-          ))}
-          <Route path="*" element={<AppShell />} />
-        </Routes>
+        {/* The app's own confirmation dialog, for every route: whatever asks
+            before acting asks through `useConfirm()`, never `window.confirm`,
+            which the browser can silence. Above the state hooks
+            (`useWorkspaceState` asks before closing an unsaved tab). */}
+        <ConfirmProvider>
+          {/* Sits above every route (including /embed) — backend downtime during
+              a redeploy affects them all equally. */}
+          <MaintenanceOverlay />
+          <Routes>
+            {/* The embed surface, OUTSIDE `AppShell` and its auth gate — like
+                the registry routes below, it owns its own auth story. `/embed`
+                authenticates by the embed token in its query and by nothing
+                else (there is no session inside a host's frame);
+                `/embed/link` is the one page that DOES act under a session,
+                which is why the server refuses to let any site frame it.
+                Core's first, so a deployment adds to the app rather than
+                having to re-register these. */}
+            {CORE_TOP_LEVEL_ROUTES.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
+            {registry.topLevelRoutes.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
+            <Route path="*" element={<AppShell />} />
+          </Routes>
+        </ConfirmProvider>
       </BrowserRouter>
     </AppRegistryContext.Provider>
   );

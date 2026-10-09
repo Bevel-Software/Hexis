@@ -263,7 +263,16 @@ describe('md-links — scanning', () => {
       // inside a raw tag is not an escape, so the value keeps it.
       '<a title="a > b" href="quoted.md">q</a> <a href="Plan\\_v2.md">e</a>\n';
     const live = ['live.md', 'pic.png', 'bare.md', 'quoted.md', 'Plan\\_v2.md'];
-    expect(scanMarkdownHtmlLinks(page)).toEqual(live);
+    expect(scanMarkdownHtmlLinks(page).map((t) => t.destination)).toEqual(live);
+    // Which attribute each came from travels with it: a `src` is a picture.
+    expect(scanMarkdownHtmlLinks(page).map((t) => t.image)).toEqual([false, true, false, false, false]);
+    // Escaped backticks are literal text, not a code span around the tag;
+    // `data-href` is not a link; `href=` inside another attribute's value is a value.
+    const found = (text: string) => scanMarkdownHtmlLinks(text).map((t) => t.destination);
+    expect(found('a \\` b <a href="between.md">x</a> c \\` d\n')).toEqual(['between.md']);
+    expect(found('<div data-href="not.md" title="href=nor.md"><a href="yes.md">x</a></div>\n')).toEqual(['yes.md']);
+    // A tag inside an HTML comment is not rendered, so it is not a link.
+    expect(found('<!-- <a href="hidden.md">x</a> -->\n<a href="shown.md">y</a>\n')).toEqual(['shown.md']);
     expect(htmlLinksAffectedByMove(page, { oldPath: OUTSIDE, newPath: `${KB}/Moved/Index.md`, mapPath: () => null, kbDirName: KB, branch: 'main' }, scanMarkdownHtmlLinks(page)))
       .toEqual(live);
   });
@@ -291,6 +300,13 @@ describe('md-links — container and frontmatter edges', () => {
   it('a reference definition inside a blockquote is rewritten', () => {
     const input = '> [ref]: ../Old/Plan.md "t"\n> > [deep]: <../Old/Plan.md>\n';
     expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe('> [ref]: ../New/Deep/Plan.md "t"\n> > [deep]: <../New/Deep/Plan.md>\n');
+  });
+
+  it('an indented code block inside a blockquote is untouched, and the quoted prose beside it is rewritten', () => {
+    const input = '> intro\n>\n>     [p](../Old/Plan.md)\n>\n> [q](../Old/Plan.md)\n';
+    expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe(
+      '> intro\n>\n>     [p](../Old/Plan.md)\n>\n> [q](../New/Deep/Plan.md)\n',
+    );
   });
 
   it('frontmatter: only a value that is one whole link is rewritten; a link in a prose value is left', () => {

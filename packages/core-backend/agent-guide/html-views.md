@@ -60,10 +60,11 @@ or `window.bevel.navigate(href)`:
 
 - **A bare fragment scrolls the page.** `#totals` scrolls the element with
   `id="totals"` into view inside the frame; the page stays loaded and the app
-  does not move. A fragment that names no element does nothing, except `#` and
-  `#top`, which scroll to the top of the page. An element whose id is `top`
-  wins over the top of the page. Use this for a table of contents or a "back
-  to top" link. The page's own address does not change, so `hashchange` never
+  does not move. A fragment that names no element by `id`, and no `<a name>`,
+  does nothing. `#` and `#top` scroll to the top of the page only when no
+  target matches: an element with `id="top"`, or an `<a name="top">`, wins
+  over the top of the page. Use this for a table of contents or a "back to
+  top" link. The page's own address does not change, so `hashchange` never
   fires: a page that routes by hash handles its own clicks.
 - **A relative path** resolves against the folder of the page's own file and
   opens that file in the app: from `{{knowledgeBaseDir}}/Reports/Q3.html`,

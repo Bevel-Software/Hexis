@@ -84,7 +84,7 @@ describe('the html-views guide section agrees with the renderer', () => {
   it('says a bare fragment scrolls the page, and the bridge does exactly that', () => {
     expect(flat).toContain('**A bare fragment scrolls the page.**');
     expect(flat).toContain('the page stays loaded and the app does not move');
-    expect(flat).toContain('A fragment that names no element does nothing, except `#` and `#top`, which scroll to the top of the page');
+    expect(flat).toContain('A fragment that names no element by `id`, and no `<a name>`, does nothing. `#` and `#top` scroll to the top of the page only when no target matches');
     expect(flat).toContain('The same rules apply to a click on a link and to `window.bevel.openNode(href)` or `window.bevel.navigate(href)`');
 
     for (const route of ['click', 'openNode', 'navigate'] as const) {
@@ -99,11 +99,13 @@ describe('the html-views guide section agrees with the renderer', () => {
       expect(bridge.scrolledToTop(), route).toBe(2);
       expect(bridge.posted, route).toEqual([]);
     }
-    expect(flat).toContain('An element whose id is `top` wins over the top of the page');
-    const withTop = runBridge({ ids: ['top'] });
-    withTop.click('#top');
-    expect(withTop.scrolled).toEqual(['top']);
-    expect(withTop.scrolledToTop()).toBe(0);
+    expect(flat).toContain('an element with `id="top"`, or an `<a name="top">`, wins over the top of the page');
+    for (const page of [{ ids: ['top'] }, { names: ['top'] }]) {
+      const withTop = runBridge(page);
+      withTop.click('#top');
+      expect(withTop.scrolled, JSON.stringify(page)).toEqual(['top']);
+      expect(withTop.scrolledToTop(), JSON.stringify(page)).toBe(0);
+    }
   });
 
   it('says a click the page already cancelled is left to the page, and the bridge leaves it', () => {

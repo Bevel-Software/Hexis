@@ -3227,7 +3227,7 @@ describe('preflight for moves and deletes', () => {
         expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toContain('../NodeTypes/Deal.md');
       });
 
-      it('only the files whose links are edited reach the read and write hooks', async () => {
+      it('the pages the answer names reach the read hook, the edited ones the write hook, and a page merely searched neither', async () => {
         const base = await linked();
         const reads: string[] = [];
         const writes: string[] = [];
@@ -3238,7 +3238,10 @@ describe('preflight for moves and deletes', () => {
           writes.push(op.wsPath ?? '');
         });
         expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
-        expect(reads.sort()).toEqual([KB('Sales/deal.md'), KB('Sales/index.md')]);
+        // `Locked/refs.md` is named (left for want of write access, its links
+        // listed), so the read hook hears of it; the unreadable page and the
+        // transcript are never named, so it never hears of them.
+        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
         expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
       });
 

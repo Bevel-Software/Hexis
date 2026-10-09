@@ -370,3 +370,115 @@ describe('GitService.deleteBranch — authorship + remote delete', () => {
     ).rejects.toBeInstanceOf(ProtectedBranchError);
   });
 });
+
+/**
+ * The pieces an agent's `delete_branch` and the leftover cleanup decide with:
+ * where a branch stands against the default branch, whether a commit is
+ * contained in another, and a delete leased on the tip the checks saw.
+ */
+describe('GitService — branch state for a checked delete', () => {
+  let root: string;
+  const workspaceId = 'target-company-state';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  function makeService(): GitService {
+    return new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new WorkflowHooks(),
+      testKbContext(),
+    );
+  }
+
+  /** Push `n` commits onto `branch` from a separate clone, as a colleague would. */
+  async function pushCommits(upstream: string, branch: string, n: number): Promise<string> {
+    const other = path.join(root, `.other-${Math.random().toString(36).slice(2)}`);
+    await runGit(root, ['clone', '-b', branch, upstream, other]);
+    for (let i = 0; i < n; i++) await runGit(other, ['commit', '--allow-empty', '-m', `work ${i}`]);
+    await runGit(other, ['push', 'origin', branch]);
+    return gitOut(other, ['rev-parse', 'HEAD']);
+  }
+
+  it('counts the commits not on the default branch, and reads the tip', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    const tip = await pushCommits(upstream, 'bob/other-draft', 3);
+    await runGit(repo, ['fetch', 'origin']);
+    const svc = makeService();
+
+    const state = await svc.branchState(workspaceId, 'bob/other-draft', 'target-company-state');
+    expect(state).toEqual({ exists: true, lastCommit: tip, unmergedCommits: 3 });
+
+    // A branch with nothing of its own counts none.
+    const merged = await svc.branchState(workspaceId, 'alice/my-draft', 'target-company-state');
+    expect(merged.exists).toBe(true);
+    expect(merged.unmergedCommits).toBe(0);
+  });
+
+  it('a name that is not a branch does not exist', async () => {
+    await seedWorkspace(root, workspaceId);
+    const state = await makeService().branchState(workspaceId, 'alice/no-such-branch', 'target-company-state');
+    expect(state).toEqual({ exists: false, lastCommit: null, unmergedCommits: 0 });
+  });
+
+  it('isAncestor: yes for a contained commit, no for one that is not, and throws for an unknown commit', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    const base = await gitOut(repo, ['rev-parse', 'HEAD']);
+    const tip = await pushCommits(upstream, 'bob/other-draft', 1);
+    await runGit(repo, ['fetch', 'origin']);
+    const svc = makeService();
+
+    expect(await svc.isAncestor(workspaceId, base, tip)).toBe(true);
+    expect(await svc.isAncestor(workspaceId, tip, base)).toBe(false);
+    await expect(svc.isAncestor(workspaceId, 'f'.repeat(40), base)).rejects.toThrow();
+  });
+
+  it('removes the branch from the shared repository even when this clone never fetched it, and answers its tip', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    // Created from elsewhere after this clone was made: no tracking ref here.
+    const other = path.join(root, '.creator');
+    await runGit(root, ['clone', upstream, other]);
+    await runGit(other, ['checkout', '-b', 'alice/new-elsewhere']);
+    await runGit(other, ['commit', '--allow-empty', '-m', 'elsewhere']);
+    await runGit(other, ['push', 'origin', 'alice/new-elsewhere']);
+    const tip = await gitOut(other, ['rev-parse', 'HEAD']);
+    expect(await gitOut(repo, ['for-each-ref', 'refs/remotes/origin/alice/new-elsewhere'])).toBe('');
+
+    const result = await makeService().deleteBranch(workspaceId, 'alice/new-elsewhere', ALICE);
+    expect(result).toEqual({ lastCommit: tip });
+    expect(await remoteHasRef(upstream, 'alice/new-elsewhere')).toBe(false);
+  });
+
+  it('a delete leased on a tip refuses a branch that moved since, and leaves it in place', async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const seen = await gitOut(upstream, ['rev-parse', 'refs/heads/alice/my-draft']);
+    // A colleague pushes after the checks were made.
+    await pushCommits(upstream, 'alice/my-draft', 1);
+
+    const err = await makeService()
+      .deleteBranch(workspaceId, 'alice/my-draft', ALICE, { expectTip: seen })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BranchDeleteRefusedError);
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(true);
+  });
+
+  it('a delete leased on the current tip goes through', async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const seen = await gitOut(upstream, ['rev-parse', 'refs/heads/alice/my-draft']);
+    const result = await makeService().deleteBranch(workspaceId, 'alice/my-draft', ALICE, { expectTip: seen });
+    expect(result.lastCommit).toBe(seen);
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(false);
+  });
+
+  it('mayDeleteBranch: the author yes, anyone else without the Admin role no', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = makeService();
+    expect(await svc.mayDeleteBranch(workspaceId, 'alice/my-draft', ALICE)).toBe(true);
+    expect(await svc.mayDeleteBranch(workspaceId, 'bob/other-draft', ALICE)).toBe(false);
+  });
+});

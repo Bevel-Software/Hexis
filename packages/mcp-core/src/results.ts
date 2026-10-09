@@ -487,7 +487,18 @@ export function toCallToolResult(
   const text = typeof value === 'string' ? value : safeJsonText(value ?? null);
   const result: CallToolResult = { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
   if (options?.structured && value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    result.structuredContent = value as Record<string, unknown>;
+    // The JSON-safe reading of the value, the same one the text block carries:
+    // the object itself may hold a BigInt, a cycle or a `toJSON` that throws,
+    // and the response serializer would fail on it where the text did not. A
+    // value with no JSON object reading carries no structured content.
+    try {
+      const structured: unknown = JSON.parse(text);
+      if (structured !== null && typeof structured === 'object' && !Array.isArray(structured)) {
+        result.structuredContent = structured as Record<string, unknown>;
+      }
+    } catch {
+      /* text was not JSON: nothing structured to attach */
+    }
   }
   return result;
 }

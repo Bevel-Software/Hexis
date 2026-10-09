@@ -149,6 +149,44 @@ describe('callExample, for keys and arrays a bare placeholder would get wrong', 
     expect(compiled.check({ tool_names: ['...'] })).toEqual([]);
   });
 
+  it('caps the placeholders an array example holds, whatever `minItems` a connected schema declares', () => {
+    const inputs = {
+      type: 'object',
+      properties: { ids: { type: 'array', items: { type: 'integer' }, minItems: 1_000_000_000 } },
+      required: ['ids'],
+    };
+    const started = Date.now();
+    expect(callLine('NS.bulk', inputs)).toBe('Call: NS.bulk({ ids: [0, 0, 0, 0, 0, 0, 0, 0] })');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('shows a value that must be null as `null`, which the check accepts', () => {
+    const inputs = { type: 'object', properties: { nothing: { type: 'null' } }, required: ['nothing'] };
+    expect(callLine('NS.void', inputs)).toBe('Call: NS.void({ nothing: null })');
+    const compiled = compileCheck(inputs);
+    if (!compiled.checkable) throw new Error(compiled.reason);
+    expect(compiled.check({ nothing: null })).toEqual([]);
+  });
+
+  it('keeps a required `__proto__` argument as an own property, rendered as a computed key', () => {
+    const inputs = { type: 'object', properties: { __proto__: { type: 'string' } }, required: ['__proto__'] };
+    expect(callLine('NS.odd', inputs)).toBe('Call: NS.odd({ ["__proto__"]: "..." })');
+  });
+
+  it('cuts the example off where the check stops looking, so the two agree on a deep schema', () => {
+    const inputs = platformTool({
+      type: 'object',
+      properties: {
+        deep: { type: 'object', properties: { deeper: { type: 'string' } }, required: ['deeper'] },
+      },
+      required: ['deep'],
+    });
+    expect(callLine('NS.deep', inputs)).toBe('Call: NS.deep({ body: { deep: {} } })');
+    const compiled = compileCheck(inputs);
+    if (!compiled.checkable) throw new Error(compiled.reason);
+    expect(compiled.check({ body: { deep: {} } })).toEqual([]);
+  });
+
   it('shows a value the schema fixes as that value', () => {
     const inputs = {
       type: 'object',
@@ -295,6 +333,27 @@ describe('compileCheck', () => {
     expect(mismatches[0]).toBe(BODY_AT_TOP_LEVEL_LINE);
     expect(mismatches).toContain('"query" is required, and was not given.');
     expect(mismatches).toContain('"body" is not an argument of this tool.');
+  });
+
+  it('says nothing about `body` when an open schema with nothing required accepts it as any extra key', () => {
+    const open = { type: 'object', properties: { query: { type: 'string' } } };
+    expect(check(open, { body: {} })).toEqual([]);
+    expect(check({ ...open, additionalProperties: false }, { body: {} })).toEqual([
+      BODY_AT_TOP_LEVEL_LINE,
+      '"body" is not an argument of this tool.',
+    ]);
+  });
+
+  it('switches checking off for a boolean subschema rather than reading it as `{}`', () => {
+    for (const inputs of [
+      { type: 'object', properties: { never: false }, required: ['never'] },
+      { type: 'object', properties: { list: { type: 'array', items: false } } },
+      { type: 'object', properties: { body: { type: 'object', properties: { any: true } } } },
+    ]) {
+      const compiled = compileCheck(inputs);
+      expect(compiled.checkable).toBe(false);
+      if (!compiled.checkable) expect(compiled.reason).toContain('boolean subschema');
+    }
   });
 
   it('names a required argument that is missing, one level down', () => {

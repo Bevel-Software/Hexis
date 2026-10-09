@@ -82,7 +82,14 @@ function describeOutcomes(results: LastSync['results']): string {
 /** Copy for each setting: what it is, in the words of someone who has to fill it in. */
 const FIELDS: Record<
   string,
-  { label: string; help: string; placeholder?: string; advanced?: boolean }
+  {
+    label: string;
+    help: string;
+    placeholder?: string;
+    advanced?: boolean;
+    /** An on/off setting, shown as a checkbox and saved as `true` / `false`; `on` is what an unset one means. */
+    toggle?: { on: boolean };
+  }
 > = {
   kbRepoUrl: {
     label: 'Repository address',
@@ -145,6 +152,12 @@ const FIELDS: Record<
     help: 'Nobody can change these directly; edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
     advanced: true,
+  },
+  retireMergedBranches: {
+    label: 'Remove branches left over from merged change requests',
+    help: 'Removes, on its own, a draft whose change request was merged but which is still there: every commit on it is already on the main branch and no request is open from or into it. Runs at startup and whenever the server checks for deleted branches. Merging a change request removes its draft either way. Applies without a restart.',
+    advanced: true,
+    toggle: { on: true },
   },
   oidcIssuerUrl: {
     label: 'Provider address',
@@ -1249,6 +1262,31 @@ export function SetupScreen({
       : isFolderField
         ? (remoteRootFolders ?? []).filter(isRootFolderSuggestion)
         : [];
+    if (copy.toggle) {
+      const raw = draft[setting.key] ?? setting.value ?? '';
+      const checked = raw === '' ? copy.toggle.on : raw !== 'false';
+      return (
+        <div key={setting.key}>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={checked}
+              onChange={(e) => set(setting.key, e.target.checked ? 'true' : 'false')}
+              aria-invalid={problems[setting.key] ? true : undefined}
+              aria-describedby={problems[setting.key] ? `${setting.key}-problem` : undefined}
+            />
+            <span className="text-detail font-medium text-ink">{copy.label}</span>
+          </label>
+          <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+          {problems[setting.key] && (
+            <p id={`${setting.key}-problem`} role="alert" className="mt-1 text-meta text-danger">
+              {problems[setting.key]}
+            </p>
+          )}
+        </div>
+      );
+    }
     const listId = suggestions.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>

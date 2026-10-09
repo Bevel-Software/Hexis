@@ -87,7 +87,8 @@ export function createMcpAuthMiddleware(
         // `externalApiKeyId` unset and are not metered.
         const resolved = await externalApiKeyService.verifyAndLoadToken(token);
         if (!resolved) {
-          rejectConnectionKey(res);
+          const switchedOff = (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) ?? false;
+          rejectConnectionKey(res, { switchedOff });
           return;
         }
         req.userId = resolved.user.id;

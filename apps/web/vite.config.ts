@@ -24,6 +24,19 @@ export default defineConfig(({ mode }) => {
       // Per-tenant demo expiry. Unset → the demo banner never renders.
       'process.env.DEMO_EXPIRY': JSON.stringify(env.DEMO_EXPIRY ?? ''),
     },
+    experimental: {
+      // A URL a CHUNK imports (a lazily loaded renderer, a worker, a picture
+      // a module references) is written relative to the importing module,
+      // not as `/assets/…` from the document's root. The embed bundle runs
+      // inside a chat host's own document (see `build.manifest` below),
+      // where the document's root is the host's sandbox, and under a
+      // deployment served from a path prefix; `import.meta.url` is right in
+      // both. HTML-hosted references keep their absolute form, which the deep
+      // routes of the SPA need.
+      renderBuiltUrl(_filename, { hostType }) {
+        return hostType === 'js' ? { relative: true } : undefined;
+      },
+    },
     build: {
       // The MCP App view (core-backend's `mcp-app/page.html`) runs inside a
       // chat host's sandbox, where no frame to this deployment is allowed, so

@@ -59,7 +59,7 @@ const CORE_SERVER_SOURCE = new URL('../../../core/create-core-server.ts', import
 const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) => void }> = [
   {
     name: 'registerWorkflowTools',
-    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext()),
+    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext(), async () => true),
   },
   {
     name: 'registerChangeRequestReadTools',
@@ -103,6 +103,7 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         readForTool: nothing,
         canBeReached: () => true,
         appUrlFor: (repoRelative) => `https://example.test/workspace/main/knowledge-base/${repoRelative}`,
+        notes: new ToolDescriptionNotes(),
       }),
   },
   {

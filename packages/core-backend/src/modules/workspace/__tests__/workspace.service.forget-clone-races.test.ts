@@ -127,6 +127,13 @@ describe('a bootstrap in flight when the working copy is taken away', () => {
     const svc = service(runner);
     // Nothing on disk: this is a first clone, which is what takes seconds.
     const opening = svc.getOrCreateForBranch(BRANCH);
+    // Told, rather than handed a cached path to a working copy of the
+    // repository that was replaced — which every later read would ENOENT on,
+    // with nothing left to re-clone it. The expectation is attached NOW: the
+    // refusal lands somewhere inside the timer turns below, and a rejection
+    // with no handler on it across a turn is what Vitest reports as unhandled
+    // — a flake that failed the suite on CI with every test green.
+    const refused = expect(opening).rejects.toThrow(/replaced while the "main" working copy was being created/);
     await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
 
     // The replacement lands while the clone runs.
@@ -139,9 +146,6 @@ describe('a bootstrap in flight when the working copy is taken away', () => {
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    // Told, rather than handed a cached path to a working copy of the
-    // repository that was replaced — which every later read would ENOENT on,
-    // with nothing left to re-clone it.
-    await expect(opening).rejects.toThrow(/replaced while the "main" working copy was being created/);
+    await refused;
   });
 });

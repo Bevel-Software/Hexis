@@ -62,9 +62,13 @@ function safeDecode(s: string): string {
 export function isSafeRepoRelativeEmbedPath(repoRelative: string): boolean {
   if (!repoRelative) return false;
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(repoRelative)) return false;
+  if (/[\x00-\x1f\x7f]/.test(repoRelative)) return false;
   if (/%2e|%2f|%5c/i.test(repoRelative)) return false;
-  const norm = repoRelative.replace(/\\/g, '/');
+  // A backslash is refused, not read as a separator: the workspace path
+  // validator refuses it too, so normalising it here would only move a
+  // malformed reference from this 400 to a later one.
+  if (repoRelative.includes('\\')) return false;
+  const norm = repoRelative;
   if (norm.startsWith('/')) return false;
   return norm.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }
@@ -139,13 +143,22 @@ export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedI
       throw new EmbedRefParseError(`Not a valid URL: ${ref}`);
     }
     fragment = safeDecode(url.hash.replace(/^#/, ''));
-    refuseEncodedSeparators(url.pathname);
-    const segments = url.pathname.split('/').filter(Boolean).map((s) => safeDecode(s));
-    if ((segments[0] === 'workspace' || segments[0] === 'embed') && segments.length >= 3) {
-      pathPart = segments.slice(2).join('/');
-    } else {
-      pathPart = segments.join('/');
-    }
+    // The app's route (`workspace` or `embed`) is found wherever it sits: a
+    // deployment served under a path prefix carries it after the prefix,
+    // which is then not part of the file's path. The branch segment that
+    // follows it is ignored — and may carry an encoded separator, since a
+    // default branch named `team/main` is written `team%2Fmain` there; only
+    // the FILE path after it is held to the plain-separator rule.
+    const rawSegments = url.pathname.split('/').filter(Boolean);
+    // Matched DECODED (a route name may arrive percent-encoded), while the
+    // separator rule below reads the raw spelling.
+    const route = rawSegments.findIndex((s) => {
+      const decoded = safeDecode(s);
+      return decoded === 'workspace' || decoded === 'embed';
+    });
+    const rest = route >= 0 && rawSegments.length >= route + 3 ? rawSegments.slice(route + 2) : rawSegments;
+    refuseEncodedSeparators(rest.join('/'));
+    pathPart = rest.map((s) => safeDecode(s)).join('/');
   } else {
     const hashIndex = ref.indexOf('#');
     fragment = hashIndex >= 0 ? safeDecode(ref.slice(hashIndex + 1)) : '';

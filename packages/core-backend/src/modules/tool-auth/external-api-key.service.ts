@@ -103,6 +103,19 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return resolved ? resolved.user : null;
   }
 
+  async isKeyOfSwitchedOffAccount(plaintext: string): Promise<boolean> {
+    if (!this.looksLikeExternalApiKey(plaintext)) return false;
+    // The same key `verifyAndLoadToken` would accept (known, not revoked),
+    // but on an account that is off.
+    const [row] = await this.db
+      .select({ id: externalApiKeys.id })
+      .from(externalApiKeys)
+      .innerJoin(users, eq(externalApiKeys.userId, users.id))
+      .where(and(eq(externalApiKeys.tokenHash, hashToken(plaintext)), isNull(externalApiKeys.revokedAt), isNotNull(users.deactivatedAt)))
+      .limit(1);
+    return row !== undefined;
+  }
+
   async verifyAndLoadToken(
     plaintext: string,
   ): Promise<{ tokenId: string; user: AuthUser } | null> {

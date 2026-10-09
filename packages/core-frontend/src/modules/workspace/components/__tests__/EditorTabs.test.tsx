@@ -11,6 +11,7 @@ import {
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { ConfirmProvider } from '../../../../shared/components';
 
 function makeTab(path: string, overrides: Partial<OpenTab> = {}): OpenTab {
   const content = overrides.content ?? `content:${path}`;
@@ -76,6 +77,7 @@ function Wrap({
 }) {
   return (
     <MemoryRouter>
+      <ConfirmProvider>
       <WorkspaceContext.Provider value={workspace}>
         <OpenChangeRequestsContext.Provider
           value={{ paths: new Set(changeRequestPaths), forPath: () => [], minePaths: new Map(), mineNumbers: new Set() }}
@@ -83,6 +85,7 @@ function Wrap({
           {children}
         </OpenChangeRequestsContext.Provider>
       </WorkspaceContext.Provider>
+      </ConfirmProvider>
     </MemoryRouter>
   );
 }
@@ -215,8 +218,29 @@ describe('EditorTabs', () => {
     await user.click(screen.getByText('Close others'));
 
     expect(closeTab).toHaveBeenCalledTimes(2);
-    expect(closeTab.mock.calls[0]).toEqual([tabs[0], { skipConfirm: true }]);
-    expect(closeTab.mock.calls[1]).toEqual([tabs[2], { skipConfirm: true }]);
+    // Pinned to the workspace the tabs were picked in.
+    expect(closeTab.mock.calls[0]).toEqual([tabs[0], { skipConfirm: true, workspaceId: 'ws-1' }]);
+    expect(closeTab.mock.calls[1]).toEqual([tabs[2], { skipConfirm: true, workspaceId: 'ws-1' }]);
+  });
+
+  it('a bulk close leaves the URL alone when the workspace moves partway through', async () => {
+    const user = userEvent.setup();
+    mockNavigate.mockClear();
+    // The first close lands; then the workspace moves to another branch and
+    // closeTab refuses the rest.
+    const closeTab = vi
+      .fn<WorkspaceContextValue['closeTab']>()
+      .mockResolvedValueOnce({ closed: true, newActivePath: 'b.md' })
+      .mockResolvedValue({ closed: false, newActivePath: 'elsewhere.md' });
+    const tabs = [makeTab('a.md'), makeTab('b.md'), makeTab('c.md')];
+    const ws = makeWorkspace(tabs, 'c.md', { closeTab });
+    render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
+
+    fireEvent.contextMenu(screen.getAllByRole('tab')[0]); // right-click on a
+    await user.click(screen.getByText('Close all'));
+
+    await vi.waitFor(() => expect(closeTab).toHaveBeenCalledTimes(3));
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it('"Close tabs to the right" only closes tabs after the target', async () => {
@@ -234,26 +258,47 @@ describe('EditorTabs', () => {
     expect(closeTab.mock.calls[1][0]).toEqual(tabs[2]);
   });
 
-  it('bulk close shows ONE confirm when multiple tabs are dirty', async () => {
-    const user = userEvent.setup();
-    const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: null }));
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const tabs = [
-      makeTab('a.md', { isDirty: true }),
-      makeTab('b.md'),
-      makeTab('c.md', { isDirty: true }),
-    ];
-    const ws = makeWorkspace(tabs, 'b.md', { closeTab });
-    render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
+  describe("bulk close with unsaved tabs asks ONE question in the app's dialog", () => {
+    async function openCloseAll() {
+      const user = userEvent.setup();
+      const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: null }));
+      // The browser's dialogs suppressed: never the thing that answers.
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const tabs = [
+        makeTab('a.md', { isDirty: true }),
+        makeTab('b.md'),
+        makeTab('c.md', { isDirty: true }),
+      ];
+      const ws = makeWorkspace(tabs, 'b.md', { closeTab });
+      render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
 
-    fireEvent.contextMenu(screen.getAllByRole('tab')[1]); // right-click on b
-    await user.click(screen.getByText('Close all'));
+      fireEvent.contextMenu(screen.getAllByRole('tab')[1]); // right-click on b
+      await user.click(screen.getByText('Close all'));
+      const dialog = await screen.findByRole('dialog');
+      return { user, closeTab, confirmSpy, dialog };
+    }
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/a\.md/);
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/c\.md/);
-    // All three tabs requested for close, with skipConfirm.
-    expect(closeTab).toHaveBeenCalledTimes(3);
+    it('lists the unsaved files with today\'s wording, and Close anyway closes every tab', async () => {
+      const { user, closeTab, confirmSpy, dialog } = await openCloseAll();
+      expect(screen.getAllByRole('dialog')).toHaveLength(1);
+      expect(dialog.textContent).toContain('You have unsaved changes in:\n  - a.md\n  - c.md\nClose anyway?');
+      expect(within(dialog).queryByText("Don't ask again")).toBeNull();
+      await user.click(within(dialog).getByRole('button', { name: 'Close anyway' }));
+      // All three tabs requested for close, with skipConfirm.
+      await vi.waitFor(() => expect(closeTab).toHaveBeenCalledTimes(3));
+      expect(closeTab.mock.calls.every((c) => c[1]?.skipConfirm === true)).toBe(true);
+      // Pinned to the workspace the question was asked in, so a branch switch
+      // while it was up closes nothing on the new branch.
+      expect(closeTab.mock.calls.every((c) => c[1]?.workspaceId === 'ws-1')).toBe(true);
+      expect(confirmSpy).not.toHaveBeenCalled();
+    });
+
+    it('Cancel closes nothing', async () => {
+      const { user, closeTab, dialog } = await openCloseAll();
+      await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(closeTab).not.toHaveBeenCalled();
+    });
   });
 
   it('reorders via drag and drop', () => {

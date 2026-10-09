@@ -27,6 +27,13 @@ export interface DownloadBuildDeps {
   canReadBatch(paths: string[]): Promise<Map<string, boolean>>;
   /** The caller's `download` verdicts, repository-relative paths. */
   canDownloadBatch(paths: string[]): Promise<Map<string, boolean>>;
+  /**
+   * The caller's `download` verdict on a FOLDER (workspace path): the gate a
+   * folder's zip passes before its files are judged one by one, as the
+   * app's folder zip route gates it. A child's own grant does not open a
+   * folder its rules deny.
+   */
+  canDownloadFolder?(wsPath: string): Promise<boolean>;
   /** The deployment's read hook for one workspace path; throws to refuse it. */
   notifyRead(wsPath: string): Promise<void>;
   /** The bytes of one workspace path. */
@@ -152,6 +159,13 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
     }
     if (found.kind === 'missing') {
       refuse(wsPath, NOT_FOUND);
+      continue;
+    }
+    // The folder itself first: a zip of it is asked for as the app's folder
+    // download is, by `download` on the folder, before any file inside is
+    // judged — a file's own grant must not open a folder its rules deny.
+    if (found.kind === 'folder' && deps.canDownloadFolder && !(await deps.canDownloadFolder(wsPath))) {
+      refuse(wsPath, DOWNLOAD_PERMISSION_REQUIRED);
       continue;
     }
     for (const f of found.files) if (!sizes.has(f.path)) sizes.set(f.path, f.bytes);

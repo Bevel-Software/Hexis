@@ -25,7 +25,8 @@ function inputOf(
       reads.push(p);
       return files[p];
     },
-    hookRefusal: async () => null,
+    readRefused: async () => false,
+    writeRefusal: async () => null,
     reads,
     ...over,
   };
@@ -143,12 +144,13 @@ describe('planMoveLinks', () => {
   it(`more than ${MOVE_LINK_EDIT_CAP} edited files is refused, saying how to split or switch off`, async () => {
     const files: Record<string, string> = { [`${KB}/Old/One.md`]: 'x\n' };
     for (let i = 0; i <= MOVE_LINK_EDIT_CAP; i++) files[`${KB}/Pages/P${i}.md`] = '[one](../Old/One.md)\n';
-    const hookRefusal = vi.fn(async () => null);
-    const plan = await planMoveLinks(inputOf(files, { hookRefusal }));
+    const writeRefusal = vi.fn(async () => null);
+    const plan = await planMoveLinks(inputOf(files, { writeRefusal }));
     expect(plan.overCap).toMatch(/201 files.*rewriteLinks: false/s);
     expect(plan.overCap).toMatch(/subfolder/);
     expect(plan.edits).toEqual([]);
-    expect(hookRefusal).not.toHaveBeenCalled();
+    // Nothing is edited, so the write hook hears of nothing.
+    expect(writeRefusal).not.toHaveBeenCalled();
     // Exactly at the cap is allowed.
     delete files[`${KB}/Pages/P0.md`];
     expect((await planMoveLinks(inputOf(files))).overCap).toBeUndefined();
@@ -161,10 +163,13 @@ describe('planMoveLinks', () => {
       [`${KB}/B.md`]: '[one](Old/One.md)\n',
       [`${KB}/Searched.md`]: 'mentions Old but links nowhere\n',
     };
-    const hookRefusal = vi.fn(async (_lockAt: string, path: string) =>
-      path.endsWith('B.md') ? { reason: 'refused: not in this session', read: false } : null);
-    const plan = await planMoveLinks(inputOf(files, { hookRefusal }));
-    expect(hookRefusal.mock.calls.map((c) => c[0]).sort()).toEqual([`${KB}/A.md`, `${KB}/B.md`, `${KB}/Old/One.md`]);
+    const readRefused = vi.fn(async () => false);
+    const writeRefusal = vi.fn(async (_lockAt: string, path: string) =>
+      path.endsWith('B.md') ? 'refused: not in this session' : null);
+    const plan = await planMoveLinks(inputOf(files, { readRefused, writeRefusal }));
+    // The pages the answer names, and not the one merely searched.
+    expect(readRefused.mock.calls.map((c) => c[0]).sort()).toEqual([`${KB}/A.md`, `${KB}/B.md`, `${KB}/Old/One.md`]);
+    expect(writeRefusal.mock.calls.map((c) => c[0]).sort()).toEqual([`${KB}/A.md`, `${KB}/B.md`, `${KB}/Old/One.md`]);
     expect(plan.edits.map((e) => e.path)).toEqual([`${KB}/A.md`, `${KB}/New/Old/One.md`]);
     expect(plan.report.notRewritten).toEqual([{ path: `${KB}/B.md`, reason: 'refused: not in this session', links: ['Old/One.md'] }]);
   });
@@ -174,11 +179,40 @@ describe('planMoveLinks', () => {
       [`${KB}/Old/One.md`]: 'x\n',
       [`${KB}/Hidden.md`]: '[one](Old/One.md) [secret](Secret/Target.md)\n',
     };
-    const plan = await planMoveLinks(inputOf(files, { hookRefusal: async () => ({ reason: 'refused: read denied', read: true }) }));
+    const plan = await planMoveLinks(inputOf(files, { readRefused: async () => true }));
     expect(plan.edits).toEqual([]);
     expect(plan.report.notRewritten).toEqual([]);
     expect(plan.report.unsearched).toBe(UNSEARCHED_SENTENCE);
     expect(JSON.stringify(plan.report)).not.toMatch(/Hidden|Secret|read denied/);
+  });
+
+  it('a page the read hook refuses is not named for its raw HTML, nor as one the caller may not change', async () => {
+    // Every way a page gets NAMED passes the same gate: an HTML page, raw
+    // HTML in a markdown page, and a page left unedited for want of write
+    // access are all pages the answer would quote links from.
+    const files = {
+      [`${KB}/Old/One.md`]: 'x\n',
+      [`${KB}/Board.html`]: '<a href="Old/One.md">one</a>',
+      [`${KB}/Gallery.md`]: '<img src="Old/One.md">\n',
+      [`${KB}/Locked.md`]: '[one](Old/One.md)\n',
+      [`${KB}/Shown.md`]: '[one](Old/One.md)\n',
+    };
+    const readRefused = vi.fn(async (path: string) => path !== `${KB}/Shown.md`);
+    const plan = await planMoveLinks(
+      inputOf(files, { readRefused, writeBlocked: async (paths) => paths.filter((p) => p.endsWith('Locked.md')) }),
+    );
+    expect(plan.edits.map((e) => e.path)).toEqual([`${KB}/Shown.md`]);
+    expect(plan.report.notRewritten).toEqual([]);
+    expect(plan.report.unsearched).toBe(UNSEARCHED_SENTENCE);
+    expect(JSON.stringify(plan.report)).not.toMatch(/Board|Gallery|Locked/);
+    // Asked once per page named, never for one merely searched — the moved
+    // file itself links nowhere, so it is not named and not asked about.
+    expect(readRefused.mock.calls.map((c) => c[0]).sort()).toEqual([
+      `${KB}/Board.html`,
+      `${KB}/Gallery.md`,
+      `${KB}/Locked.md`,
+      `${KB}/Shown.md`,
+    ]);
   });
 
   it('a link spelling the moved name with percent-encoding or escapes is still found', async () => {
@@ -206,6 +240,10 @@ describe('planMoveLinks', () => {
     const gone = await planMoveLinks(inputOf(files, { readText: failWith('ENOENT') }));
     expect(gone.edits.map((e) => e.path)).toEqual([`${KB}/Index.md`]);
     expect(gone.report.unsearched).toBeUndefined();
+    // Its folder became a file: gone all the same.
+    const folderGone = await planMoveLinks(inputOf(files, { readText: failWith('ENOTDIR') }));
+    expect(folderGone.edits.map((e) => e.path)).toEqual([`${KB}/Index.md`]);
+    expect(folderGone.report.unsearched).toBeUndefined();
     const denied = await planMoveLinks(inputOf(files, { readText: failWith('EACCES') }));
     expect(denied.edits.map((e) => e.path)).toEqual([`${KB}/Index.md`]);
     expect(denied.report.unsearched).toBe(UNSEARCHED_SENTENCE);

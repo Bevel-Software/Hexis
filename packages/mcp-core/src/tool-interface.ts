@@ -48,6 +48,14 @@ export const ARGS_UNDER_BODY_LINE = 'This tool takes its arguments under "body",
  */
 const MAX_DEPTH = 2;
 
+/**
+ * How many placeholders an array example holds at most. `minItems` comes from
+ * a schema someone else wrote; one declaring a million would otherwise have
+ * the listing allocate a million placeholders for one line of description.
+ * An example cut short is still a call that shows the shape, which is its job.
+ */
+const EXAMPLE_ITEMS_MAX = 8;
+
 /** An argument description is cut to this, so one verbose argument can't crowd out the rest. */
 const DESCRIPTION_MAX = 160;
 
@@ -94,18 +102,33 @@ function placeholder(schema: Dict, depth: number): unknown {
     const minItems = typeof schema.minItems === 'number' ? schema.minItems : 0;
     if (minItems < 1) return [];
     const items = isDict(schema.items) ? schema.items : {};
-    return Array.from({ length: minItems }, () => placeholder(items, depth));
+    return Array.from({ length: Math.min(minItems, EXAMPLE_ITEMS_MAX) }, () => placeholder(items, depth));
   }
   if (type === 'object') {
     // An object whose own required arguments are known is shown with them, so
     // the `{ body: { branch, path } }` envelope is spelled out rather than
-    // handed over as an empty `{}` the agent has to guess the inside of.
+    // handed over as an empty `{}` the agent has to guess the inside of. The
+    // check stops at the same depth (see `compileCheck`), so an example cut
+    // off here is still one the check accepts.
     return depth < MAX_DEPTH ? exampleArguments(schema, depth + 1) : {};
   }
-  // No declared type (or `null`) is shown as a string placeholder: the
-  // overwhelming majority of such arguments are strings, and a `"..."` reads
-  // as "put a value here" in a way `null` does not.
+  // A value that must be null is shown as `null`: `"..."` would be a call the
+  // check refuses.
+  if (type === 'null') return null;
+  // A string long enough for its `minLength`: `"..."` fails a schema that
+  // wants more. (A `pattern` is not synthesised — a placeholder cannot be
+  // made to match an arbitrary expression — so the example stays `"..."`.)
+  if (type === 'string') return stringPlaceholder(schema);
+  // No declared type is shown as a string placeholder: the overwhelming
+  // majority of such arguments are strings, and a `"..."` reads as "put a
+  // value here" in a way `null` does not.
   return '...';
+}
+
+/** `"..."`, padded with dots to the schema's `minLength` (capped: a bound is a bound, not a size). */
+function stringPlaceholder(schema: Dict): string {
+  const minLength = typeof schema.minLength === 'number' && Number.isFinite(schema.minLength) ? schema.minLength : 0;
+  return '.'.repeat(Math.min(64, Math.max(3, Math.ceil(minLength))));
 }
 
 /**
@@ -152,13 +175,25 @@ export function exampleArguments(inputs: unknown, depth = 1): Dict {
   const args: Dict = {};
   for (const name of required as string[]) {
     const prop = properties[name];
-    args[name] = placeholder(isDict(prop) ? prop : {}, depth);
+    // An own property by definition: a bare `args.__proto__ = …` would set
+    // the prototype and lose the argument.
+    Object.defineProperty(args, name, {
+      value: placeholder(isDict(prop) ? prop : {}, depth),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return args;
 }
 
-/** A key as JavaScript source: bare when it is an identifier, quoted (and escaped) when it is not, e.g. `"odd-key"`. */
+/**
+ * A key as JavaScript source: bare when it is an identifier, quoted (and
+ * escaped) when it is not, e.g. `"odd-key"`. `__proto__` is computed
+ * (`["__proto__"]`): bare or quoted in an object literal it sets the prototype.
+ */
 function renderKey(key: string): string {
+  if (key === '__proto__') return '["__proto__"]';
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
 
@@ -325,10 +360,14 @@ function typeMatches(types: string[], value: unknown): boolean {
  * take tools away from every agent at once, so every rule here is one a call
  * cannot satisfy by any reading of the schema.
  */
-export function compileCheck(inputs: unknown): CompiledCheck {
+export function compileCheck(inputs: unknown, depth = 1): CompiledCheck {
   if (!isDict(inputs)) return { checkable: false, reason: 'the input schema is not an object' };
   const unsupported = unsupportedKeyword(inputs);
   if (unsupported) return { checkable: false, reason: `the input schema uses "${unsupported}"` };
+  // A boolean subschema (`false`: nothing is valid; `true`: anything is) is a
+  // rule this module does not apply — read as `{}` it would pass what the
+  // schema forbids — so it switches the check off like a combinator does.
+  if (hasBooleanSubschema(inputs)) return { checkable: false, reason: 'the input schema uses a boolean subschema' };
   const types = declaredTypes(inputs);
   if (types && !types.includes('object')) {
     return { checkable: false, reason: `the input schema declares type "${types.join(' or ')}", not an object` };
@@ -344,12 +383,15 @@ export function compileCheck(inputs: unknown): CompiledCheck {
   const hasBodyProperty = Object.prototype.hasOwnProperty.call(properties, 'body');
 
   // Sub-checks for the one level below the top: compiled here, with the rest,
-  // so a call pays nothing for them.
+  // so a call pays nothing for them. No deeper than the call example goes
+  // (`MAX_DEPTH`): an example cut off at `{}` must be a call the check accepts.
   const nested = new Map<string, CompiledCheck>();
-  for (const [name, raw] of Object.entries(properties)) {
-    if (!isDict(raw) || !declaredTypes(raw)?.includes('object') || !isDict(raw.properties)) continue;
-    const inner = compileCheck(raw);
-    if (inner.checkable) nested.set(name, inner);
+  if (depth < MAX_DEPTH) {
+    for (const [name, raw] of Object.entries(properties)) {
+      if (!isDict(raw) || !declaredTypes(raw)?.includes('object') || !isDict(raw.properties)) continue;
+      const inner = compileCheck(raw, depth + 1);
+      if (inner.checkable) nested.set(name, inner);
+    }
   }
 
   const check = (args: Dict): string[] => {
@@ -357,12 +399,24 @@ export function compileCheck(inputs: unknown): CompiledCheck {
     // The `body` wrapper first: when every argument sits under a `body` key the
     // tool does not have, THAT is what went wrong, and the lines below (a
     // missing required argument, an argument the tool lacks) are its symptoms.
+    // Only when the wrapper IS wrong: an open schema with nothing required
+    // accepts `{ body: {} }` as it accepts any extra key.
     const keys = Object.keys(args);
-    if (!hasBodyProperty && keys.length === 1 && keys[0] === 'body' && isDict(args.body)) {
+    if (
+      !hasBodyProperty &&
+      (closed || required.length > 0) &&
+      keys.length === 1 &&
+      keys[0] === 'body' &&
+      isDict(args.body)
+    ) {
       mismatches.push(BODY_AT_TOP_LEVEL_LINE);
     }
+    // Own properties only, here and below: `constructor` or `toString` read
+    // through the prototype would otherwise count as given — or be checked
+    // as a value the caller never sent.
+    const given = (name: string): boolean => Object.prototype.hasOwnProperty.call(args, name);
     for (const name of required) {
-      if (args[name] === undefined) mismatches.push(`"${name}" is required, and was not given.`);
+      if (!given(name)) mismatches.push(`"${name}" is required, and was not given.`);
     }
     if (closed) {
       for (const key of keys) {
@@ -372,6 +426,7 @@ export function compileCheck(inputs: unknown): CompiledCheck {
       }
     }
     for (const [name, raw] of Object.entries(properties)) {
+      if (!given(name)) continue;
       const value = args[name];
       if (value === undefined) continue;
       const prop = isDict(raw) ? raw : {};
@@ -447,6 +502,22 @@ function valueMismatch(name: string, schema: Dict, value: unknown): string | nul
     }
   }
   return null;
+}
+
+/**
+ * Whether a property or item schema anywhere the check would look (`MAX_DEPTH`
+ * levels, items included) is a boolean rather than an object.
+ */
+function hasBooleanSubschema(schema: Dict, depth = 1): boolean {
+  // `additionalProperties: false` is the ordinary way to close an object and
+  // is applied as such; a boolean PROPERTY or ITEM schema is the case here.
+  const subschemas: unknown[] = isDict(schema.properties) ? Object.values(schema.properties) : [];
+  if (schema.items !== undefined) subschemas.push(schema.items);
+  for (const sub of subschemas) {
+    if (typeof sub === 'boolean') return true;
+    if (isDict(sub) && depth < MAX_DEPTH && hasBooleanSubschema(sub, depth + 1)) return true;
+  }
+  return false;
 }
 
 /** The numeric bound `value` breaks, phrased for a refusal, or `null`. */
@@ -552,8 +623,11 @@ export function patternMayBacktrack(source: string): boolean {
  * rather than refused.
  */
 const patterns = new Map<string, RegExp | null>();
+/** How many compiled patterns are kept: past this the cache starts over, so a process listing ever-new schemas does not grow without bound. */
+const PATTERN_CACHE_MAX = 512;
 function compiledPattern(source: string): RegExp | null {
   if (!patterns.has(source)) {
+    if (patterns.size >= PATTERN_CACHE_MAX) patterns.clear();
     let re: RegExp | null = null;
     if (patternMayBacktrack(source)) {
       patterns.set(source, null);

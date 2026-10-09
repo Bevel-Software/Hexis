@@ -71,7 +71,7 @@ import {
 import { removeEmptyDirs } from './empty-dirs.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
-import { MoveLockedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
@@ -79,7 +79,7 @@ import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
-import type { AgentDownloadStore } from './agent-download.store.js';
+import type { IAgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
 import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
 import {
@@ -829,7 +829,7 @@ const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
  * the tools were built has to be written here rather than onto the shared
  * `SESSION_ID_INPUT` constant.
  */
-function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
+export function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
   const inputs = def.inputs as
     | { properties?: { body?: { properties?: Record<string, { description?: string }> } } }
     | undefined;
@@ -920,7 +920,7 @@ export function registerWorkspaceTools(
    * for the harnesses about the file primitives; without it the tool is not
    * mounted.
    */
-  downloads?: AgentDownloadStore,
+  downloads?: IAgentDownloadStore,
   /**
    * The starter pack the knowledge base was filled from, if any (see
    * `modules/onboarding`): its untouched pages do not end the `firstRun`
@@ -3177,22 +3177,29 @@ export function registerWorkspaceTools(
             paths,
           ),
           writeBlocked: (paths) => writeBlocked(branch, ctx, paths),
-          readText: (p) => nodeFs.readFile(join(root, p), 'utf8'),
-          // Asked only once a page is known to be edited — the hooks hear of
-          // no page merely searched — so a read refusal arrives after the
-          // read; the plan then treats the page as unreadable and never names it.
-          hookRefusal: async (lockAt, path) => {
-            const why = (err: unknown) => `refused: ${err instanceof Error ? err.message : String(err)}`;
+          // Through the guarded filesystem the tools read with, never the raw
+          // disk: a page replaced by a link since the listing is refused there
+          // instead of read through to wherever the link points.
+          readText: async (p) => String(await fs.readFile(p, { encoding: 'utf8' })),
+          // The read hook, for every page the answer would NAME — an edited
+          // one, one left with its links listed — and for no page merely
+          // searched: naming is the disclosure, and the hook's refusal makes
+          // the page one the caller cannot read, covered by the one sentence.
+          readRefused: async (path) => {
             try {
-              await notifyAgentRead(agentAccessGate, ctx, branch, lockAt);
-            } catch (err) {
-              return { reason: why(err), read: true };
+              await notifyAgentRead(agentAccessGate, ctx, branch, path);
+              return false;
+            } catch {
+              return true;
             }
+          },
+          // The write hook, for a page the move would edit, at its post-move path.
+          writeRefusal: async (_lockAt, path) => {
             try {
               await assertAgentWriteAllowed(agentAccessGate, ctx, branch, path);
               return null;
             } catch (err) {
-              return { reason: why(err), read: false };
+              return `refused: ${err instanceof Error ? err.message : String(err)}`;
             }
           },
         })
@@ -3240,7 +3247,7 @@ export function registerWorkspaceTools(
         const edits = linkPlan.edits.map((e) => ({ path: e.path, lockAt: e.lockAt, content: e.content }));
         const check = async () => {
           for (const e of linkPlan.edits) {
-            const now = await nodeFs.readFile(join(root, e.lockAt), 'utf8').catch(() => null);
+            const now = await fs.readFile(e.lockAt, { encoding: 'utf8' }).then(String, () => null);
             if (now !== e.original) {
               throw new ToolError(`"${e.lockAt}" changed while the move was being planned, so nothing was moved. Run the move again.`, 409);
             }
@@ -3259,7 +3266,7 @@ export function registerWorkspaceTools(
             for (const e of edits) await fs.writeFile(e.path, e.content);
           }
         } catch (err) {
-          if (err instanceof MoveLockedError) throw new ToolError(err.message, 409);
+          if (err instanceof MoveLockedError || err instanceof MoveRacedError) throw new ToolError(err.message, 409);
           throw err;
         }
       }
@@ -3894,7 +3901,7 @@ export function registerWorkspaceTools(
   async function requestFileDownload(
     a: Record<string, unknown>,
     ctx: ToolContext,
-    store: AgentDownloadStore,
+    store: IAgentDownloadStore,
   ): Promise<unknown> {
     const branch = a.branch as string;
     const raw = a.paths;
@@ -3912,8 +3919,9 @@ export function registerWorkspaceTools(
     for (const p of raw as string[]) {
       try {
         // As written: a name may begin or end with a space, and trimming it
-        // would ask for another file.
-        requested.push(normalizeWorkspacePath(p, kbDirName));
+        // would ask for another file. A trailing slash is the one spelling
+        // folded, so `Shared/` and `Shared` are one request, not two zips.
+        requested.push(normalizeWorkspacePath(p, kbDirName).replace(/\/+$/, ''));
       } catch (err) {
         if (!hasHttpStatus(err)) throw err;
         refusedSpelling.push({ path: p, reason: err.message });
@@ -3929,6 +3937,9 @@ export function registerWorkspaceTools(
         candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
         canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
         canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
+        // The folder-level gate the app's zip route applies, before the files.
+        canDownloadFolder: (p) =>
+          accessControl.canDownload(workspaceId, ctx.user.email, toKbRelative(p, kbDirName) ?? p),
         notifyRead: (p) => notifyAgentRead(agentAccessGate, ctx, branch, p),
         readFile: (p) => ctx.workspaceService.readFileBinary(workspaceId, p),
         contentTypeOf: downloadContentType,

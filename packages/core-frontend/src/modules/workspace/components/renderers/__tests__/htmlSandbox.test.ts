@@ -486,10 +486,13 @@ describe('buildSandboxedHtml', () => {
       bridge.click('#TOP');
       expect(bridge.scrolledToTop()).toBe(3);
       expect(bridge.posted).toEqual([]);
-      const withTop = runBridge({ ids: ['top'] });
-      withTop.click('#top');
-      expect(withTop.scrolled).toEqual(['top']);
-      expect(withTop.scrolledToTop()).toBe(0);
+      // An id and a named anchor both win over the top of the page.
+      for (const page of [{ ids: ['top'] }, { names: ['top'] }]) {
+        const withTop = runBridge(page);
+        withTop.click('#top');
+        expect(withTop.scrolled, JSON.stringify(page)).toEqual(['top']);
+        expect(withTop.scrolledToTop(), JSON.stringify(page)).toBe(0);
+      }
     });
 
     it('finds the target by a percent-encoded id and by an anchor name', () => {
@@ -500,6 +503,28 @@ describe('buildSandboxedHtml', () => {
       // A malformed escape is looked up as written, and nothing breaks.
       bridge.click('#100%');
       expect(bridge.scrolled).toEqual(['Q3 totals', 'legacy']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    // The standard's fallback is the named ANCHOR: a form control carrying
+    // the name is not a target, even when it comes first in the document.
+    it('a name on a form control is not a fragment target; only <a name> is', () => {
+      const bridge = runBridge({ names: ['legacy'], namedControls: ['legacy', 'query'] });
+      const { prevented } = bridge.click('#query');
+      expect(bridge.scrolled).toEqual([]);
+      expect(prevented).toBe(true);
+      // The control comes first in document order; the anchor is the target.
+      bridge.click('#legacy');
+      expect(bridge.scrolled).toEqual(['legacy']);
+      expect(bridge.scrolledTags).toEqual(['A']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('leaves a click that is not on a link alone — a button, a div — whatever it carries', () => {
+      const bridge = runBridge({ ids: ['goal'] });
+      const { prevented } = bridge.click('#goal', { noAnchor: true });
+      expect(prevented).toBe(false);
+      expect(bridge.scrolled).toEqual([]);
       expect(bridge.posted).toEqual([]);
     });
 

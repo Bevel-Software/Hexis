@@ -290,6 +290,19 @@ describe('DELETE /workspace/:id/file — the repository\'s own files', () => {
     expect(await exists(path.join(h.repoDir, 'Team/access.md'))).toBe(true);
   });
 
+  it('refuses a reserved top-level folder as delete_folder does, and leaves what it holds', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'KnowledgeBase/Product'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'KnowledgeBase/Product/Plan.md'), 'p', 'utf-8');
+
+    const res = await del(h.baseUrl, `${KB}/KnowledgeBase`);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'KnowledgeBase/ is a platform folder and cannot be moved or deleted.' });
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(await exists(path.join(h.repoDir, 'KnowledgeBase/Product/Plan.md'))).toBe(true);
+  });
+
   it.each([KB, `${KB}/`])('refuses the repository root as a folder (%j) and leaves its own files', async (p) => {
     h = await makeHarness();
     await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });

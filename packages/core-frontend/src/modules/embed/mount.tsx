@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { AppRegistryContext, type AppRegistry } from '../../core/registry';
 import { configureEmbed, resetEmbedConfig, type EmbedHandoff } from './embed-config';
 import { EmbedView } from './components/EmbedView';
+import { ConfirmProvider } from '../../shared/components';
 
 export interface MountEmbedOptions extends EmbedHandoff {
   /**
@@ -54,7 +55,11 @@ export function mountEmbed(root: HTMLElement, options: MountEmbedOptions): Embed
     <StrictMode>
       <AppRegistryContext.Provider value={options.registry}>
         <MemoryRouter>
-          <EmbedView />
+          {/* A link in an embedded email still asks before it opens — and a
+              host's sandbox may refuse the browser's own dialog outright. */}
+          <ConfirmProvider>
+            <EmbedView />
+          </ConfirmProvider>
         </MemoryRouter>
       </AppRegistryContext.Provider>
     </StrictMode>,

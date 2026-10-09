@@ -52,17 +52,27 @@ export function resetEmbedConfig(): void {
 }
 
 /**
+ * Where this deployment is mounted, read from the page's own address when the
+ * embed was not handed a base: the path before `/embed` (or `/embed/link`).
+ * Empty for a deployment at the origin root; `/hexis` for one served under a
+ * prefix, whose API and app links must keep it.
+ */
+function pagePrefix(): string {
+  return window.location.pathname.replace(/\/embed(?:\/link)?\/?$/, '').replace(/\/+$/, '');
+}
+
+/**
  * The prefix every embed API path gets. The deployment's address when the
- * embed runs elsewhere, and empty — a relative address, this page's own
- * origin — in the app.
+ * embed runs elsewhere; in the app, the deployment's mount prefix (usually
+ * empty), so a relative address stays on this page's own origin and path.
  */
 export function embedApiBase(): string {
-  return current.baseUrl;
+  return current.baseUrl || pagePrefix();
 }
 
 /** The deployment's address, for the absolute app links a host opens. */
 export function embedBaseUrl(): string {
-  return current.baseUrl || window.location.origin;
+  return current.baseUrl || `${window.location.origin}${pagePrefix()}`;
 }
 
 /** The token this view was minted with: handed over, or read from the page URL. */

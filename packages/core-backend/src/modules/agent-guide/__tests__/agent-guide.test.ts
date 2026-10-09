@@ -299,6 +299,18 @@ describe('what the guide tells an agent', () => {
     expect(prose).toContain('add people to existing roles, and use a GROUP for a task- or team-scoped set of people');
   });
 
+  it('describes delete_branch where it says what an agent does with branches', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### An agent proposes and syncs; a person merges');
+    const prose = text.replace(/\s+/g, ' ');
+    expect(prose).toContain('`delete_branch`');
+    expect(prose).toContain('Only its author');
+    expect(prose).toContain('`dryRun: true`');
+    expect(prose).toContain('`discardUnmerged: true`');
+    expect(prose).toContain('that proposes nothing is closed by the delete');
+    expect(prose).toContain('its author can withdraw it, or an Admin can decline it, in the app');
+    expect(prose).toContain('`lastCommit`');
+  });
+
   it('documents giving a role to a group, with an example that parses as a valid roles.yaml', async () => {
     const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### Giving a role to a group');
     const prose = text.replace(/\s+/g, ' ');
