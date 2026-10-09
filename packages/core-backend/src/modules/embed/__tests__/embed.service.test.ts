@@ -411,6 +411,24 @@ describe('EmbedService: bytes', () => {
     expect([...bytes]).toEqual([9]);
   });
 
+  it('refuses another page beside the embedded one: the token shows one page', async () => {
+    const { service, workspaceService } = build({
+      files: { [WS]: PAGE, [`${KB}/Data/Other.md`]: '# Other\n', [`${KB}/Other.md`]: '# Root\n' },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.readBytes(token, './Other.md')).rejects.toThrow(EmbedAccessError);
+    await expect(service.readBytes(token, '/Other.md')).rejects.toThrow(EmbedAccessError);
+    // The page itself, under any spelling, is what the token is for.
+    const { path } = await service.readBytes(token, `/${REPO}`);
+    expect(path).toBe(REPO);
+    // An SVG is text, and the one text format a page draws as a picture.
+    const { service: withSvg } = build({ files: { [WS]: PAGE, [`${KB}/Data/d.svg`]: '<svg/>' } });
+    const svg = await withSvg.mintForUser({ userId: USER.id, reference: REPO });
+    expect((await withSvg.readBytes(svg.token, './d.svg')).path).toBe('Data/d.svg');
+    expect(workspaceService.readFileBinary).not.toHaveBeenCalledWith(expect.anything(), `${KB}/Other.md`);
+    expect(workspaceService.readFileBinary).not.toHaveBeenCalledWith(expect.anything(), `${KB}/Data/Other.md`);
+  });
+
   it('refuses the outside-the-knowledge-base form the view sends', async () => {
     const { service } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
