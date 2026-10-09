@@ -13,6 +13,8 @@ import { cn } from '../../../lib/utils';
 import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
+import { useAdmin } from '../../admin/state/admin.context';
+import { CreatorWelcomePage } from '../../onboarding/components/CreatorWelcomePage';
 import { PluginItemSections } from './plugin-page-parts';
 import { PluginRows } from './PluginRows';
 import { ManagedPluginRequests } from './ManagedPluginRequests';
@@ -62,6 +64,7 @@ function headingFor(filter: LibraryFilter): string {
 
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
+  const { isAdmin, isAdminLoading = false } = useAdmin();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
@@ -131,6 +134,25 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       return;
     }
     if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
+  }
+
+  /**
+   * An admin's empty catalog is a beginning, not a "nothing here": the page
+   * the Library opens on offers the two smallest real starts — a plugin for a
+   * team, a skill in their own space — instead of an empty gallery. Only once
+   * both indexes have ANSWERED, and answered empty: a load still in flight,
+   * or one that failed, is not an empty library. Members keep the gallery;
+   * the shared structure is not theirs to make.
+   */
+  const catalogIsEmpty =
+    !data.loading &&
+    !data.pluginsLoading &&
+    !data.error &&
+    !data.pluginsError &&
+    data.items.length === 0 &&
+    data.pluginSummaries.length === 0;
+  if (filter.kind === 'all' && isAdmin && !isAdminLoading && catalogIsEmpty) {
+    return <CreatorWelcomePage />;
   }
 
   return (

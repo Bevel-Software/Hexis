@@ -381,7 +381,12 @@ export function PluginPage() {
           </h1>
         </div>
         <div className="flex flex-none items-center gap-1">
-          <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
+          <ManifestButton
+            kbDirName={kbDirName}
+            folder={folderBelowRoot}
+            canWrite={summary?.canWrite === true}
+            managed={summary?.linksAreManaged !== false}
+          />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             // The dialog needs both to mount (`addOpen && summary &&

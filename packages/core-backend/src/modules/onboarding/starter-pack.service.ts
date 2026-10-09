@@ -1,0 +1,580 @@
+/**
+ * "What does your team do?" — the one question a new knowledge base's admin
+ * is asked after choosing where the knowledge lives, and the pages and skills
+ * the answer adds.
+ *
+ * WHEN IT IS ASKED. Only of an admin, only until somebody has answered, and
+ * only while the knowledge folder is still new (`knowledgeFolderIsNew`, the
+ * same check the agent's first-run note makes): a knowledge base that already
+ * has pages has outgrown starter pages, whoever wrote them. The answer —
+ * a pack's id, or `none` for "I'll start from scratch" — is recorded as the
+ * deployment setting `starterPack`, and its presence retires the question for
+ * good.
+ *
+ * HOW THE PACK LANDS. As ONE commit on the default branch, authored by the
+ * admin who chose it ("Add starter pages and skills for Sales"), through the
+ * platform's own multi-file write: `LockingFilesystem.writeFiles`, the batch
+ * the roles admin and the synced-groups writer use. It takes every path's
+ * lock, writes, commits the set as one change and pushes it, and the
+ * protected branch's write gate applies to it as to any write — which an
+ * admin passes, as the root's `write: Admin` says. Nothing is overwritten: a
+ * path that already exists when the locks are held is left out of the batch.
+ *
+ * ONE commit across every replica, too. Before the write the admin takes a
+ * CLAIM — a settings row inserted only if absent, so of two admins choosing
+ * at once on two replicas the database lets one through and tells the other
+ * the pack is being added — and holds it until the answer is recorded, after
+ * the write landed. A write that fails releases the claim, so the question
+ * is asked again. A claim nobody released within `CLAIM_TTL_MS` was left by
+ * a process that died mid-write (a write takes seconds) and is taken over,
+ * so one crash never strands the question. A CLAIM IS CHECKED, NOT TRUSTED:
+ * a holder that outlived its claim — a clone that took minutes — may find it
+ * taken over and the question answered meanwhile, so right before the one
+ * effect, with every lock held and nothing written, the holder renews the
+ * claim where it still reads as its own — one statement that proves it and
+ * gives the effect a whole `CLAIM_TTL_MS` of its own — and checks that
+ * nothing is answered (`fence`); the answer is recorded only where none is. The answer itself (`starterPack`)
+ * is recorded once the pack is there; should that last step fail, the pack
+ * is added all the same — said in the log, answered as the success it is —
+ * and the pages close the question from then on.
+ *
+ * The pack's plugin is RUN BY the admin who applied it, the way a plugin made
+ * with "Create a plugin" is run by its creator: its `access.md` names them
+ * under read, write and owner (added to the rules the pack ships, which open
+ * the plugin to the team), and a pack without a manifest gets the one
+ * `renderPluginManifest` writes for any new plugin. A plugin folder that is
+ * already there — or another plugin answering to the same name, at any
+ * depth, by plugin discovery's own reading of the checkout — is left alone
+ * entirely: a pack does not write into somebody else's plugin, and never
+ * makes a second plugin with the name of one in a grouping folder. That
+ * check and the commit happen under the plugin creation's own identity lock
+ * (`PluginProvisionService.withIdentities`), so a creation or a deletion of
+ * the same name cannot slip between them.
+ */
+
+import path from 'node:path';
+import {
+  PERSONAL_PLUGIN_PREFIX,
+  PLUGIN_MANIFEST_FILE,
+  pluginManifestName,
+  renderPluginManifest,
+  type AuthUser,
+  type IWorkflowService,
+} from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { KbContext } from '../../shared/kb-context.js';
+import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAccessControl } from '../access/access-control.interface.js';
+import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
+import {
+  isUntouchedStarterPage,
+  knowledgeFolderIsNew,
+  type FirstRunStarter,
+  type FirstRunStarterSource,
+  type MayRead,
+} from '../workspace/first-run.js';
+import { pluginAccessMd, withCreatorGrants, type PluginSource } from '../plugins/index.js';
+import {
+  NO_STARTER_PACK,
+  loadStarterPacks,
+  starterPackFiles,
+  type StarterPack,
+  type StarterPackFile,
+} from './starter-packs.js';
+import type {
+  IStarterPackService,
+  PluginIdentityLocks,
+  StarterPackApplied,
+  StarterPackSettings,
+  StarterPackWorkspaces,
+  StarterPacksAnswer,
+} from './onboarding.contract.js';
+
+const log = logger('starter-packs');
+
+/** The deployment setting the choice is recorded in. */
+export const STARTER_PACK_SETTING = 'starterPack';
+/** The claim held while a choice is written (see the module doc): `<user id> <epoch ms>`. */
+export const STARTER_PACK_CLAIM_SETTING = 'starterPackClaim';
+/** A claim older than this was left by a process that died mid-write: a write takes seconds, not minutes. */
+export const CLAIM_TTL_MS = 10 * 60_000;
+
+/**
+ * The catch-all pack, offered as "Something else": its name is that chip's
+ * label, so the sentences that would name the team ("for Sales") leave it out.
+ */
+const CATCH_ALL_PACK = 'general';
+
+export type { ChosenStarterPack, IStarterPackService, StarterPackApplied, StarterPacksAnswer } from './onboarding.contract.js';
+
+/** A refusal the route passes through as its status. */
+export class StarterPackError extends WorkflowDomainError {
+  constructor(message: string, status: number) {
+    super(message, status);
+    this.name = 'StarterPackError';
+  }
+}
+
+export interface StarterPackServiceDeps {
+  /** The packs folder (`STARTER_PACKS_DIR`, else the packaged `starter-packs/`). */
+  packsDir: string;
+  kb: KbContext;
+  workspaceService: StarterPackWorkspaces;
+  workflow: IWorkflowService;
+  adminAccess: IAdminAccessService;
+  /** The claim and the answer (see the module doc). */
+  settings: StarterPackSettings;
+  /**
+   * `canReadBatch`: what the caller may know about at all — which of a
+   * pack's pages (see `untouchedPages`), and which pages make the knowledge
+   * folder old for them (see `knowledgeIsNew`).
+   */
+  accessControl: Pick<IAccessControl, 'invalidate' | 'canReadBatch'>;
+  /**
+   * The one tree walk and the one probe (see `shared/fs.contract.ts`): the
+   * packs folder and a pack's files are listed through them, and so are the
+   * knowledge folder `knowledgeIsNew` looks at and the checkout `apply`
+   * judges its writes against.
+   */
+  disk: ITreeWalker & IFsProbe;
+  /** Plugin discovery over the checkout: what "a plugin by that name is already there" means, at any depth. */
+  pluginSource: Pick<PluginSource, 'discover'>;
+  /** The plugin creation's identity lock, held over the name check and the commit of the pack's plugins. */
+  pluginLocks: PluginIdentityLocks;
+  /** The SSE bus: `fs-tree-changed` sends every open tree on the branch to fetch again. */
+  events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void };
+  /** The post-commit hook catalogs refresh on — the plugin's skills appear without a restart. */
+  fileChanges?: FileChangeNotifier;
+}
+
+export class StarterPackService implements IStarterPackService, FirstRunStarterSource {
+  /**
+   * One choice at a time on this replica: the second of two quick clicks
+   * finds the first one's answer recorded. Across replicas the recorded
+   * answer itself is the guard (see `choose`).
+   */
+  private readonly choosing = new WorkspaceMutex();
+
+  constructor(private readonly deps: StarterPackServiceDeps) {}
+
+  /** What the caller is offered, and what was chosen. */
+  async status(user: Pick<AuthUser, 'email'>): Promise<StarterPacksAnswer> {
+    const [chosen, isAdmin, packs] = await Promise.all([
+      this.recordedChoice(),
+      this.deps.adminAccess.isAdmin(user.email),
+      loadStarterPacks(this.deps.disk, this.deps.packsDir),
+    ]);
+    const offered = isAdmin && chosen === null && packs.length > 0 && (await this.knowledgeIsNew(false, user.email));
+    const pack = chosen && chosen !== NO_STARTER_PACK ? packs.find((p) => p.id === chosen) : undefined;
+    return {
+      offered,
+      chosen,
+      packs: isAdmin ? packs.map(({ id, name, description, order }) => ({ id, name, description, order })) : [],
+      chosenPack: pack
+        ? {
+            id: pack.id,
+            name: pack.name,
+            firstPagePrompt: pack.firstPagePrompt,
+            starterPages: await this.untouchedPages(pack, user.email),
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Record `id` as the answer and, for a pack, add what it holds. `none`
+   * records the skip and adds nothing. Refused with 403 for a member, 409
+   * once the question is no longer asked (answered, or the knowledge base
+   * has pages now), 404 for a pack that does not exist.
+   */
+  async choose(user: AuthUser, id: string): Promise<StarterPackApplied> {
+    if (!(await this.deps.adminAccess.isAdmin(user.email))) {
+      throw new StarterPackError('Only an admin can add starter pages.', 403);
+    }
+    return this.choosing.run('starter-pack', async () => {
+      /**
+       * Every value this call has written as its claim, newest first: the one
+       * taken, and each renewal the fence wrote — or may have written, since a
+       * renewal whose outcome is unknown is still this call's to release.
+       */
+      const lease: Lease = { claims: [await this.claim(user)] };
+      let pack: StarterPack | null = null;
+      let added: string[] = [];
+      try {
+        // Judged UNDER the claim, so an answer another replica recorded and
+        // released between this call's start and its claim — a `none`, say
+        // — is found here rather than written over with a pack.
+        if ((await this.recordedChoice()) !== null) throw alreadyChosen();
+        if (!(await this.knowledgeIsNew(true, user.email))) {
+          throw new StarterPackError('This knowledge base already has pages, so starter pages are no longer offered.', 409);
+        }
+        pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.disk, this.deps.packsDir)).find((p) => p.id === id) ?? null);
+        if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
+        if (pack) added = await this.apply(user, pack, lease);
+        else {
+          // The skip is the effect itself: fenced the same way, and recorded
+          // only where nothing is answered.
+          await this.fence(lease, user);
+          if (!(await this.deps.settings.recordIfAbsent(STARTER_PACK_SETTING, id, user.id))) throw alreadyChosen();
+        }
+      } catch (err) {
+        // Refused, or nothing landed: the claim goes, and the question is
+        // open again (or answered, as the refusal said).
+        await this.release(lease);
+        throw err;
+      }
+      if (pack) {
+        // The answer, kept once the pack is there (or committed and waiting
+        // on its push) — and only where none is: an answer another replica
+        // recorded in the moment since the fence is theirs to keep. Should
+        // this fail now, the pack IS added: said in the log, answered as the
+        // success it is, and the pages close the question from here on
+        // (`knowledgeIsNew`).
+        await this.deps.settings
+          .recordIfAbsent(STARTER_PACK_SETTING, id, user.id)
+          .then((recorded) => {
+            if (!recorded) log.error(`starter pack "${id}" was added, but another answer was recorded meanwhile`);
+          })
+          .catch((err: unknown) => {
+            log.error(`starter pack "${id}" was added, but the choice could not be recorded`, { err });
+          });
+      }
+      await this.release(lease);
+      if (!pack) return { id, name: null, pages: 0, skills: 0, summary: '' };
+      const pages = added.filter((p) => this.isPage(p)).length;
+      const skills = added.filter((p) => path.posix.basename(p) === 'SKILL.md').length;
+      return { id: pack.id, name: pack.name, pages, skills, summary: summaryOf(pack, pages, skills) };
+    });
+  }
+
+  /** The chosen pack as the agent's first-run note needs it, or null. */
+  async firstRunStarter(): Promise<FirstRunStarter | null> {
+    const chosen = await this.recordedChoice();
+    if (!chosen || chosen === NO_STARTER_PACK) return null;
+    const pack = (await loadStarterPacks(this.deps.disk, this.deps.packsDir)).find((p) => p.id === chosen);
+    if (!pack) return null;
+    const knowledgeDir = this.deps.kb.layout.knowledgeBaseDir;
+    const pages = new Map<string, string>();
+    for (const file of await this.pagesOf(pack)) {
+      pages.set(file.repoPath.slice(knowledgeDir.length + 1), file.content as string);
+    }
+    return { name: pack.name, suggestedPages: pack.suggestedPages, pages };
+  }
+
+  /** The recorded answer, read from the database so every replica agrees. */
+  private async recordedChoice(): Promise<string | null> {
+    return (await this.deps.settings.reload(STARTER_PACK_SETTING)) || null;
+  }
+
+  /**
+   * Take the claim or be refused: a live one is another admin's choice in
+   * flight, here or on another replica. One older than `CLAIM_TTL_MS` was
+   * left by a process that died mid-write and is taken over — through the
+   * same insert-if-absent, so two take-overs at once still end with one
+   * holder.
+   */
+  private async claim(user: AuthUser): Promise<string> {
+    const { settings } = this.deps;
+    const value = `${user.id} ${Date.now()}`;
+    if (await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id)) return value;
+    const held = await settings.reload(STARTER_PACK_CLAIM_SETTING);
+    const since = Number(held.split(' ').pop());
+    if (Number.isFinite(since) && Date.now() - since < CLAIM_TTL_MS) throw beingAdded();
+    // The take-over replaces THAT claim, in one statement: two replicas that
+    // both read it expired cannot both succeed, since the second finds the
+    // first's claim where the expired one was and is refused.
+    log.warn('taking over a starter-pack claim nobody released', { held });
+    if (await settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, held, value, user.id)) return value;
+    // The claim moved under this read: another replica took it over — or
+    // its holder finished and released it, and the row is gone. One more
+    // try at an empty row before saying a choice is in progress.
+    if (await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id)) return value;
+    throw beingAdded();
+  }
+
+  /**
+   * THE FENCE before the one effect: that the claim is still this call's,
+   * and that nothing has been answered. A claim is a promise with a deadline
+   * — one that expired while its holder was still at work (a clone that
+   * took minutes) is taken over, and the new holder may answer `none` — so
+   * the holder's own word that it holds the claim is checked against the
+   * database at the last moment, with every lock held and nothing written.
+   *
+   * Checked by RENEWING it, in one statement: the claim is replaced with a
+   * fresh one of this call's only where it still reads as this call's
+   * (`swapIfValue`), which both proves the claim and dates it anew, so the
+   * effect that follows has a whole `CLAIM_TTL_MS` before anyone may take
+   * the claim over — a commit takes seconds. Refused: nothing lands, and the
+   * claim, now a successor's, is left to them.
+   *
+   * The renewal joins the lease BEFORE it is written: a write whose outcome
+   * is unknown (the statement reached the database, its answer did not) may
+   * have landed, and a claim this call may have written is this call's to
+   * release, or the question would stand closed until it expired.
+   */
+  private async fence(lease: Lease, user: AuthUser): Promise<void> {
+    const held = lease.claims[0]!;
+    const renewed = `${user.id} ${Date.now()}`;
+    lease.claims.unshift(renewed);
+    if (!(await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, held, renewed, user.id))) {
+      throw new StarterPackError('Another admin took this choice over while it was in progress; nothing was added. Try again.', 409);
+    }
+    if ((await this.recordedChoice()) !== null) throw alreadyChosen();
+  }
+
+  /**
+   * Release one's OWN claim — never a successor's: a claim taken over after
+   * it expired is somebody else's now, and a late release must leave it.
+   * Whichever of the values this call wrote the row holds is released;
+   * each other value is simply not there. One that cannot be released
+   * expires on its own.
+   */
+  private async release(lease: Lease): Promise<void> {
+    for (const claim of lease.claims) {
+      const released = await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, claim, null, null).catch((err: unknown) => {
+        log.error('the starter-pack claim could not be released; it expires on its own', { err });
+        return false;
+      });
+      if (released) return;
+    }
+  }
+
+  /**
+   * Whether the default branch's knowledge folder is still new. `clone`:
+   * whether a knowledge base not checked out yet may be (the choice writes to
+   * it, so it must); the status question never clones, and answers "no".
+   */
+  private async knowledgeIsNew(clone: boolean, userEmail: string): Promise<boolean> {
+    const { kb, workspaceService, accessControl, disk } = this.deps;
+    if (!kb.isBranchModelConfigured()) return false;
+    const workspaceId = kb.defaultWorkspaceId();
+    if (!clone && !(await workspaceService.hasBootstrappedWorkspace(workspaceId))) return false;
+    const ws = clone ? await workspaceService.getOrCreateForBranch(kb.defaultBranch) : { id: workspaceId };
+    const root = await workspaceService.getWorkspacePath(ws.id);
+    // As the CALLER may see it: being an admin grants no read of every page,
+    // and "offered" or "already has pages" must not tell them of one they
+    // may not read. The same gate `start_session`'s first-run note keeps —
+    // the knowledge folder itself first, then what is in it.
+    const knowledgeDir = kb.layout.knowledgeBaseDir;
+    const folder = await accessControl.canReadBatch(ws.id, userEmail, [knowledgeDir]);
+    if (folder.get(knowledgeDir) !== true) return false;
+    const mayRead: MayRead = async (rels) => {
+      const verdicts = await accessControl.canReadBatch(ws.id, userEmail, rels.map((rel) => `${knowledgeDir}/${rel}`));
+      return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));
+    };
+    return knowledgeFolderIsNew(disk, path.join(root, kb.kbDirName), knowledgeDir, undefined, mayRead);
+  }
+
+  /** The pack's pages: its text files under the knowledge folder. */
+  private async pagesOf(pack: StarterPack): Promise<StarterPackFile[]> {
+    const files = await starterPackFiles(this.deps.disk, pack, this.deps.kb.layout);
+    return files.filter((f) => f.root === 'KnowledgeBase' && typeof f.content === 'string' && this.isPage(f.repoPath));
+  }
+
+  /** A page: a file under the knowledge folder that is not its access rules. */
+  private isPage(repoOrWsPath: string): boolean {
+    const { kbDirName, layout } = this.deps.kb;
+    const rel = repoOrWsPath.startsWith(`${kbDirName}/`) ? repoOrWsPath.slice(kbDirName.length + 1) : repoOrWsPath;
+    return rel.startsWith(`${layout.knowledgeBaseDir}/`) && path.posix.basename(rel) !== 'access.md';
+  }
+
+  /**
+   * The pack's pages still as it wrote them, workspace-relative, and only
+   * those the caller may read: the list says a page exists and holds what
+   * the pack wrote, which is nothing to tell someone the page's access rules
+   * keep out — the same verdict the file routes give. Never clones.
+   */
+  private async untouchedPages(pack: StarterPack, userEmail: string): Promise<string[]> {
+    const { kb, workspaceService, accessControl } = this.deps;
+    try {
+      if (!kb.isBranchModelConfigured()) return [];
+      const workspaceId = kb.defaultWorkspaceId();
+      if (!(await workspaceService.hasBootstrappedWorkspace(workspaceId))) return [];
+      const root = await workspaceService.getWorkspacePath(workspaceId);
+      const pages = await this.pagesOf(pack);
+      const readable = await accessControl.canReadBatch(
+        workspaceId,
+        userEmail,
+        pages.map((p) => p.repoPath),
+      );
+      const out: string[] = [];
+      for (const page of pages) {
+        if (!readable.get(page.repoPath)) continue;
+        const wsPath = `${kb.kbDirName}/${page.repoPath}`;
+        if (await isUntouchedStarterPage(path.join(root, ...wsPath.split('/')), page.content as string)) out.push(wsPath);
+      }
+      return out;
+    } catch (err) {
+      // A courtesy for the first-page step; an unreadable clone just means
+      // every page counts as written.
+      log.debug('could not tell which starter pages are untouched', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Write the pack's absent files to the default branch as one commit;
+   * resolve to the paths written. `lease` is this call's claim, checked and
+   * renewed at the last moment (see `fence`).
+   */
+  private async apply(user: AuthUser, pack: StarterPack, lease: Lease): Promise<string[]> {
+    const { kb, workspaceService, workflow, disk } = this.deps;
+    const branch = kb.defaultBranch;
+    const ws = await workspaceService.getOrCreateForBranch(branch);
+    const basePath = await workspaceService.getWorkspacePath(ws.id);
+    const files = await starterPackFiles(disk, pack, kb.layout);
+    // Held from the name check to the commit: the names the pack's plugins
+    // would take, on the lock a creation or a deletion of one of them takes.
+    return this.deps.pluginLocks.withIdentities(packPluginFolders(files, kb.layout.pluginsDir), async () => {
+      const writes = await this.plan(user, pack, files, path.join(basePath, kb.kbDirName));
+      const fsys = new LockingFilesystem(
+        { basePath, contained: true },
+        { workflow, workspaceId: ws.id, branch, user, kbDirName: kb.kbDirName, fileChanges: this.deps.fileChanges },
+      );
+      let written: string[] = [];
+      try {
+        await fsys.writeFiles(writes, commitSubjectOf(pack), [], async (candidates) => {
+          // With every lock held and nothing written yet: first that this
+          // call may still add anything at all (a check that throws refuses
+          // the whole batch untouched), then only what is STILL absent, so a
+          // page someone made a moment ago is never replaced.
+          await this.fence(lease, user);
+          const absent: (typeof candidates)[number][] = [];
+          for (const w of candidates) {
+            if (!(await disk.exists(path.join(basePath, ...w.path.split('/'))))) absent.push(w);
+          }
+          written = absent.map((w) => w.path);
+          return absent;
+        });
+      } catch (err) {
+        // The commit landed and only its push is waiting: the pending-commit
+        // worker retries it, and the sync banner says so. The pack IS added.
+        if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+        log.warn(`starter pack "${pack.id}" committed; its push is being retried`, { error: err.message });
+      }
+      if (written.length > 0) {
+        // The plugin's rules joined the access model.
+        this.deps.accessControl.invalidate(ws.id);
+        this.deps.events?.emit({ kind: 'fs-tree-changed', workspaceId: ws.id, branch });
+      }
+      return written;
+    });
+  }
+
+  /**
+   * The batch to write, workspace-relative: every pack file, with each plugin
+   * the pack carries made the admin's (see the module doc) — or left out
+   * whole when a plugin by that name is already there: a folder of that name
+   * at the plugins root, whatever it holds, or a plugin discovery lists under
+   * the same slug at any depth (one in a grouping folder included — the
+   * catalog would show two plugins of one name, and a grant would reach the
+   * wrong one). Refused outright when discovery could not read part of the
+   * checkout: a name cannot be proved free over a hole.
+   */
+  private async plan(
+    user: AuthUser,
+    pack: StarterPack,
+    files: StarterPackFile[],
+    repoDir: string,
+  ): Promise<{ path: string; content: string | Buffer }[]> {
+    const { kbDirName, layout } = this.deps.kb;
+    const [existingFolders, discovered] = await Promise.all([
+      folderNames(this.deps.disk, path.join(repoDir, layout.pluginsDir)),
+      this.deps.pluginSource.discover(repoDir),
+    ]);
+    if (discovered.unreadable.length > 0) {
+      throw new StarterPackError(
+        `Some of the knowledge base could not be read (${discovered.unreadable.join(', ')}), so the pack cannot be checked against the plugins already there. Try again.`,
+        503,
+      );
+    }
+    const writes: { path: string; content: string | Buffer }[] = [];
+    const plugins = new Map<string, StarterPackFile[]>();
+    for (const file of files) {
+      if (file.root !== 'Plugins') {
+        writes.push({ path: `${kbDirName}/${file.repoPath}`, content: file.content });
+        continue;
+      }
+      const folder = pluginFolderOf(file, layout.pluginsDir);
+      plugins.set(folder, [...(plugins.get(folder) ?? []), file]);
+    }
+    for (const [folder, pluginFiles] of plugins) {
+      const slug = pluginManifestName(folder);
+      if (slug.startsWith(PERSONAL_PLUGIN_PREFIX)) {
+        log.warn(`starter pack "${pack.id}": "${folder}" is a personal folder's name — plugin skipped.`);
+        continue;
+      }
+      const taken =
+        existingFolders.find((name) => name.toLowerCase() === folder.toLowerCase() || pluginManifestName(name) === slug) ??
+        discovered.plugins.find((p) => pluginManifestName(p.name) === slug)?.folder;
+      if (taken) {
+        log.info(`starter pack "${pack.id}": a plugin "${taken}" is already there — its files are left as they are.`);
+        continue;
+      }
+      const root = `${layout.pluginsDir}/${folder}`;
+      let shippedAccess: string | null = null;
+      let hasManifest = false;
+      for (const file of pluginFiles) {
+        if (file.repoPath === `${root}/access.md`) {
+          shippedAccess = typeof file.content === 'string' ? file.content : null;
+          continue;
+        }
+        if (file.repoPath === `${root}/${PLUGIN_MANIFEST_FILE}`) hasManifest = true;
+        writes.push({ path: `${kbDirName}/${file.repoPath}`, content: file.content });
+      }
+      writes.push({
+        path: `${kbDirName}/${root}/access.md`,
+        content: shippedAccess ? withCreatorGrants(shippedAccess, user) : pluginAccessMd(user),
+      });
+      if (!hasManifest) writes.push({ path: `${kbDirName}/${root}/${PLUGIN_MANIFEST_FILE}`, content: renderPluginManifest(folder) });
+    }
+    return writes;
+  }
+}
+
+/** One call's claim over time: every value it wrote as the claim, newest first (see `fence`, `release`). */
+interface Lease {
+  claims: string[];
+}
+
+function alreadyChosen(): StarterPackError {
+  return new StarterPackError('Starter pages were already chosen for this knowledge base.', 409);
+}
+
+function beingAdded(): StarterPackError {
+  return new StarterPackError('Starter pages are being added right now. Try again in a moment.', 409);
+}
+
+/** The plugin folder (its first segment under the plugins root) a pack's plugin file belongs to. */
+function pluginFolderOf(file: StarterPackFile, pluginsDir: string): string {
+  return file.repoPath.slice(pluginsDir.length + 1).split('/')[0]!;
+}
+
+/** The plugin folders a pack carries, each once. */
+function packPluginFolders(files: StarterPackFile[], pluginsDir: string): string[] {
+  return [...new Set(files.filter((f) => f.root === 'Plugins').map((f) => pluginFolderOf(f, pluginsDir)))];
+}
+
+/** The commit's subject: "Add starter pages and skills for Sales". */
+export function commitSubjectOf(pack: Pick<StarterPack, 'id' | 'name'>): string {
+  return pack.id === CATCH_ALL_PACK ? 'Add starter pages and skills' : `Add starter pages and skills for ${pack.name}`;
+}
+
+/** "Added 4 pages and 1 skill for Sales." */
+export function summaryOf(pack: Pick<StarterPack, 'id' | 'name'>, pages: number, skills: number): string {
+  const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const parts = [pages > 0 ? count(pages, 'page') : null, skills > 0 ? count(skills, 'skill') : null].filter(Boolean);
+  if (parts.length === 0) return 'Everything in this pack was already here.';
+  return `Added ${parts.join(' and ')}${pack.id === CATCH_ALL_PACK ? '' : ` for ${pack.name}`}.`;
+}
+
+/** The folders in `dir`, by name; none when it is not there. A folder that cannot be listed is the error: a name cannot be proved free over a hole. */
+async function folderNames(disk: IFsProbe, dir: string): Promise<string[]> {
+  return ((await disk.listDir(dir)) ?? []).filter((e) => e.isDirectory()).map((e) => e.name);
+}

@@ -33,7 +33,7 @@ import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
-import { isAbsence } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
 import { accessRoster, resolveAccessView } from '../access/access-view.js';
 import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/access-mutation.service.js';
@@ -69,6 +69,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
@@ -920,6 +921,19 @@ export function registerWorkspaceTools(
    * mounted.
    */
   downloads?: IAgentDownloadStore,
+  /**
+   * The starter pack the knowledge base was filled from, if any (see
+   * `modules/onboarding`): its untouched pages do not end the `firstRun`
+   * note, and the note names the pages it suggests. Optional; without it the
+   * note reads the knowledge folder alone.
+   */
+  starterPacks?: FirstRunStarterSource,
+  /**
+   * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
+   * note's look at the knowledge folder. Optional for the harnesses about the
+   * file primitives; without it `start_session` answers the id alone.
+   */
+  disk?: ITreeWalker,
 ): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
@@ -1702,12 +1716,17 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call, inside `call_tool_chain` too. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
-      properties: { sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.') },
+      properties: {
+        sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.'),
+        firstRun: str(
+          `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
+        ),
+      },
       required: ['sessionId'],
     },
     tags: ['workspace'],
@@ -1727,9 +1746,67 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
-      return { sessionId };
+      const firstRun = await firstRunFor(ctx);
+      return firstRun ? { sessionId, firstRun } : { sessionId };
     }),
   );
+
+  /**
+   * The `firstRun` note (see `first-run.ts`) while the default branch's
+   * knowledge folder holds nothing but the starter guide, else null. Asked of
+   * a clone that is ALREADY there — never one this call would have to make, so
+   * the first call of a conversation does no clone — and never allowed to fail
+   * the call: minting the id is what `start_session` is for, and the note is a
+   * courtesy on top of it.
+   */
+  const firstRunFor = async (ctx: ToolContext): Promise<string | null> => {
+    try {
+      if (!disk || !kb.isBranchModelConfigured()) return null;
+      const workspaceId = kb.defaultWorkspaceId();
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceId))) return null;
+      const knowledgeDir = kb.layout.knowledgeBaseDir;
+      // GATED LIKE A READ. The note says what the knowledge folder holds —
+      // nothing, or a pack's pages still as the pack wrote them — so it goes
+      // only to a caller who may read that folder, and judges the folder as
+      // THEY may see it: a page they may not read does not make it old for
+      // them (`mayRead` below), since reading the folder is no leave to learn
+      // what restricted pages sit in it.
+      if (!(await accessControl.canRead(workspaceId, ctx.user.email, knowledgeDir))) return null;
+      const root = await ctx.workspaceService.getWorkspacePath(workspaceId);
+      const mayRead = async (rels: string[]) => {
+        const verdicts = await accessControl.canReadBatch(workspaceId, ctx.user.email, rels.map((rel) => `${knowledgeDir}/${rel}`));
+        return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));
+      };
+      // A starter pack's pages, still as the pack wrote them, are tasks to
+      // fill in rather than pages anyone wrote: they leave the note standing,
+      // and the note names what the pack suggests drafting first. A pack
+      // page the caller may not read keeps the note away altogether: it
+      // names the pack and what it suggests drafting, which is about pages
+      // this caller is not to know of — in the checkout or gone from it.
+      const starter = (await starterPacks?.firstRunStarter()) ?? null;
+      const pages = starter ? await readableStarterPages(ctx, workspaceId, knowledgeDir, starter.pages) : undefined;
+      if (starter && pages && pages.size < starter.pages.size) return null;
+      if (!(await knowledgeFolderIsNew(disk, join(root, kbDirName), knowledgeDir, pages, mayRead))) return null;
+      return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
+    } catch (err) {
+      log.debug('start_session: could not tell whether the knowledge base is new', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  };
+
+  /** The starter pages (paths below the knowledge folder → text) the caller may read, and no other. */
+  const readableStarterPages = async (
+    ctx: ToolContext,
+    workspaceId: string,
+    knowledgeDir: string,
+    pages: ReadonlyMap<string, string>,
+  ): Promise<ReadonlyMap<string, string>> => {
+    const rels = [...pages.keys()];
+    const verdicts = await accessControl.canReadBatch(workspaceId, ctx.user.email, rels.map((rel) => `${knowledgeDir}/${rel}`));
+    return new Map(rels.filter((rel) => verdicts.get(`${knowledgeDir}/${rel}`)).map((rel) => [rel, pages.get(rel)!]));
+  };
 
   // ── reads ──────────────────────────────────────────────────────────────
 

@@ -114,7 +114,7 @@ function renderDialog(bus: ReturnType<typeof makeBus>) {
 }
 
 const syncBanner = () =>
-  screen.queryAllByRole('alert').find((el) => el.textContent?.includes('reaching the remote repository')) ?? null;
+  screen.queryAllByRole('alert').find((el) => el.textContent?.includes('reaching your git host')) ?? null;
 
 beforeEach(() => {
   detailMock.fetchPrDetail.mockReset();

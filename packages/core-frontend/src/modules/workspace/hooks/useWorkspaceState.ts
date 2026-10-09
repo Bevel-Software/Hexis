@@ -43,6 +43,7 @@ import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
 import { traceFiles } from '../utils/file-trace';
+import { displayFileName } from '../utils/display-file-name';
 import { useConfirm } from '../../../shared/components';
 
 const PERSIST_DEBOUNCE_MS = 200;
@@ -524,13 +525,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const notClosed = () => ({ closed: false, newActivePath: activeTabPathRef.current });
     if (workspaceIdRef.current !== closeWorkspaceId) return notClosed();
     if (tab.isDirty && !options?.skipConfirm) {
+      // The name the tab shows, so this prompt and the bulk one agree.
       if (askingClosePathsRef.current.has(tab.path)) return notClosed();
       askingClosePathsRef.current.add(tab.path);
       let confirmed: boolean;
       try {
         ({ confirmed } = await confirm({
           title: 'Unsaved changes',
-          message: UNSAVED_TAB_WARNING(basename(tab.path)),
+          message: UNSAVED_TAB_WARNING(displayFileName(tab.path, kbDirName)),
           confirmLabel: 'Close anyway',
           destructive: true,
         }));
@@ -552,7 +554,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       setActiveTabPath(newActivePath);
     }
     return { closed: true, newActivePath };
-  }, [confirm]);
+  }, [kbDirName, confirm]);
 
   const closeAllTabs = useCallback(() => {
     setOpenTabs([]);
@@ -719,9 +721,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   // ── Working-tree mutations ────────────────────────────────────────────────
 
-  const createFile = useCallback(async (relativePath: string, content?: string) => {
+  const createFile = useCallback(async (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => {
     if (!workspaceId) return;
-    await writeFile(workspaceId, relativePath, content ?? '');
+    await writeFile(workspaceId, relativePath, content ?? '', options);
     await refreshFileTree();
     bumpFs();
   }, [workspaceId, refreshFileTree, bumpFs]);
@@ -1259,7 +1261,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     if (dirty.length > 0) {
       const { confirmed } = await confirm({
         title: 'Unsaved changes',
-        message: UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))),
+        message: UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path, kbDirName))),
         confirmLabel: 'Close anyway',
         destructive: true,
       });
@@ -1308,7 +1310,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // server state. The backend's end-of-batch `fs-tree-changed` SSE
     // event triggers a refresh anyway as belt-and-suspenders. No second
     // `bumpFs()` either — the optimistic bump above already counted.
-  }, [workspaceId, refreshFileTree, bumpFs, confirm]);
+  }, [workspaceId, kbDirName, refreshFileTree, bumpFs, confirm]);
 
   const reloadTabFromDisk = useCallback(async (relativePath: string) => {
     if (!workspaceId) return;
