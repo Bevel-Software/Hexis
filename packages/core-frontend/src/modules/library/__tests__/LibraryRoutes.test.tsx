@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -64,6 +64,19 @@ vi.mock('../../access/api', async (importOriginal) => {
     fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
   };
 });
+
+// "Connect your tools" fetches its own listing and writes keys through these;
+// everything else in both modules stays real for the pages that use it.
+const connectMock = vi.hoisted(() => ({ getConnectPending: vi.fn(), getMcpOAuthRequest: vi.fn() }));
+vi.mock('../../secrets-vault/services/connect.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../secrets-vault/services/connect.api')>()),
+  ...connectMock,
+}));
+const varsMock = vi.hoisted(() => ({ setUserVar: vi.fn(), checkToolConnection: vi.fn() }));
+vi.mock('../../secrets-vault/services/tool-secrets.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../secrets-vault/services/tool-secrets.api')>()),
+  ...varsMock,
+}));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
@@ -577,5 +590,105 @@ describe('LibraryRoutes', () => {
     const row = await within(main()).findByRole('button', { name: /^GTM/ });
     expect(row).toHaveTextContent('1 skills · 0 tools');
     expect(screen.queryByTestId('library-card-integration-heyreach')).toBeNull();
+  });
+});
+
+/**
+ * "Connect your tools" is a Skills & Tools page: inside the layout, so the
+ * sidebar (and, in the shell, the toggle and the selected tab) are on screen
+ * with it. The shell's `/connect` redirects here; see `ShellRoutes.test`.
+ */
+describe('LibraryRoutes — Connect your tools', () => {
+  /** heyreach, holding one per-person key that is or is not saved. */
+  const keyedTool = (saved: boolean) =>
+    tool({
+      variables: [
+        { name: 'API_KEY', scope: 'user', label: null, key: 'heyreach_API_KEY', adminConfigured: false, userConfigured: saved },
+      ],
+    });
+
+  beforeEach(() => {
+    dataMock.useLibraryData.mockReturnValue(CATALOG);
+    pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
+    teamsMock.listTeams.mockResolvedValue(TEAMS);
+    pluginsMock.listJoinRequests.mockResolvedValue([]);
+    window.history.replaceState(null, '', '/skills-and-tools/connect');
+    sessionStorage.clear();
+    connectMock.getConnectPending.mockReset().mockResolvedValue({
+      tools: [
+        {
+          slug: 'heyreach',
+          name: 'heyreach',
+          path: 'Plugins/GTM/heyreach.tool',
+          type: 'inline',
+          canWrite: false,
+          variables: [
+            { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', scope: 'user', configured: false, ownerOnly: false },
+          ],
+        },
+      ],
+      oauth: [],
+      toolOAuth: [],
+    });
+    connectMock.getMcpOAuthRequest.mockReset();
+    varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
+    varsMock.checkToolConnection.mockReset().mockResolvedValue({
+      status: 'ok',
+      detail: null,
+      checkedAt: new Date().toISOString(),
+    });
+  });
+
+  it('renders the page inside the Skills & Tools layout, with no sidebar row selected', async () => {
+    renderAt('/skills-and-tools/connect');
+    expect(await screen.findByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+    expect(within(main()).getByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+    expect(nav()).toBeInTheDocument();
+    // The page has no row of its own, so nothing is lit — not even Everything.
+    await within(nav()).findByRole('button', { name: /^GTM Team/ });
+    for (const row of within(nav()).getAllByRole('button')) {
+      expect(row).not.toHaveAttribute('aria-current', 'true');
+    }
+    expect(pathname()).toBe('/skills-and-tools/connect');
+    // The way back is the sidebar now, not a link of its own.
+    expect(screen.queryByRole('link', { name: /Skills & tools/i })).toBeNull();
+  });
+
+  it('keeps agent-connect mode, with the same sidebar beside it', async () => {
+    connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null });
+    // The page reads the browser's own address, as the BrowserRouter keeps it.
+    window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=signed-state');
+    renderAt('/skills-and-tools/connect?oauth=signed-state');
+    expect(
+      await screen.findByRole('button', { name: 'Finish & return to your agent' }),
+    ).toBeInTheDocument();
+    expect(nav()).toBeInTheDocument();
+    expect(connectMock.getMcpOAuthRequest).toHaveBeenCalledWith('signed-state');
+  });
+
+  it("the sidebar's setup reminder opens the page at its own address", async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [keyedTool(false)] });
+    renderAt('/skills-and-tools');
+    fireEvent.click(await screen.findByRole('button', { name: /1 integration needs setup/ }));
+    expect(pathname()).toBe('/skills-and-tools/connect');
+    expect(await screen.findByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+  });
+
+  // The sidebar now sits beside the page, so a count that lagged a save
+  // would read as a bug. The page's announcement reaches the provider the
+  // sidebar reads from; the mock stands in for the real hook's refetch.
+  it('a key saved on the page updates the setup reminder without a reload', async () => {
+    dataMock.useLibraryData.mockImplementation(() => {
+      const [saved, setSaved] = useState(false);
+      return { ...CATALOG, tools: [keyedTool(saved)], reload: () => setSaved(true) };
+    });
+    renderAt('/skills-and-tools/connect');
+    expect(await screen.findByRole('button', { name: /1 integration needs setup/ })).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value: 'k' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /integrations? needs? setup/ })).toBeNull());
+    expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k');
   });
 });

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
+import { pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '../services/tool-secrets.api';
@@ -300,15 +300,6 @@ export function ConnectToolsPage() {
   return (
     <div className="flex h-full flex-col bg-canvas text-ink">
       <header className="flex shrink-0 items-center gap-3 border-b border-line px-8 py-4">
-        {/* The one page that had NO way back: it is reached from the library's
-            "Finish setup" and from tool pages, and stranded everyone it
-            helped. The Library is where every one of those journeys starts. */}
-        <Link
-          to={LIBRARY_ROOT}
-          className="rounded-xs text-detail text-ink-muted hover:text-ink"
-        >
-          {'‹ Skills & tools'}
-        </Link>
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
         {/* Quiet, like the refetch a save triggers. A loud one drops the page
             to "Loading…", which unmounts the row holding the verdict of the

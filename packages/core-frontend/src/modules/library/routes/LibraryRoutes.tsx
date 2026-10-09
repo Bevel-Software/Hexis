@@ -9,6 +9,7 @@ import { PersonalPluginPage } from '../components/PersonalPluginPage';
 import { TeamRoute } from '../components/TeamRoute';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
+import { ConnectToolsPage } from '../../secrets-vault/components/ConnectToolsPage';
 import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForLibraryItem, urlForSkillFile } from './library-paths';
 
 /**
@@ -50,6 +51,14 @@ export function LibraryRoutes() {
                 Never reached automatically (see `RootLanding`): opened from
                 the pill, the Get set up list and by URL. */}
             <Route path="welcome" element={<WelcomePage />} />
+
+            {/* Connect your tools — inside the layout for the same reason as
+                the welcome page: the sidebar, its toggle and the selected tab
+                come with it. It has no sidebar row, so none is lit. Both of
+                its modes live here, agent-connect (`?oauth=`) included; the
+                shell's `/connect` redirects here for every link the server
+                hands out. */}
+            <Route path="connect" element={<ConnectToolsPage />} />
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 

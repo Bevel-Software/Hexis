@@ -124,9 +124,9 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
  *
  * The consequence is a rule worth having: a settings page reaches the nav by
  * having a row, and a settings page with no way to navigate to it is the
- * original bug. `/connect` is outside this set for that reason — it is a flow
- * page with no row, an OAuth landing target whose agent-connect mode has
- * somebody else blocked on a Finish button.
+ * original bug. "Connect your tools" is outside this set for that reason — it
+ * is a flow page with no row, an OAuth landing target whose agent-connect mode
+ * has somebody else blocked on a Finish button — and lives in Skills & Tools.
  */
 export const SETTINGS_NAV_PATHS: readonly string[] = CORE_MENU_ITEMS.map(
   (item) => item.path,

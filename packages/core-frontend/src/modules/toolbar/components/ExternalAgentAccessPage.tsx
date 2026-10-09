@@ -20,6 +20,7 @@ import {
 } from '../../../shared/mcp';
 import { CODEX_LOGIN_NOTE, GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { AgentInstructionsCard } from './AgentInstructionsCard';
+import { CONNECT_TOOLS_PATH } from '../../library/routes/library-paths';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
 import {
@@ -48,7 +49,7 @@ function formatRelative(ts: number | null): string {
  *  - "Your agent" (default) — connecting the user's own interactive agent
  *    (Claude, ChatGPT, Claude Code, Cursor…). No key: the agent gets only the
  *    server URL, and on first connect the browser opens our authorization
- *    flow (sign in + choose tools on /connect). Copy-paste configs only.
+ *    flow (sign in + choose tools on Connect your tools). Copy-paste configs only.
  *  - "Marketplaces" — skills as native plugins rather than through the MCP
  *    server: the git remote Claude Code and Codex install from (with a key
  *    from the autonomous tab), and the Cowork / claude.ai route, where the
@@ -257,7 +258,7 @@ export function ExternalAgentAccessPage() {
                     variants between them, and its docstring prescribes exactly
                     this shape for links. */}
                 <Link
-                  to="/connect"
+                  to={CONNECT_TOOLS_PATH}
                   target="_blank"
                   rel="noopener noreferrer"
                   className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full' })}
