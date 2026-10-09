@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { timingSafeStringEqual } from '../auth/password-hash.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
 import jwt from 'jsonwebtoken';
 import type { AuthUser, IGitService, IWorkflowService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
@@ -560,6 +561,10 @@ export class EmbedService implements IEmbedService {
     if (!userId) return unresolved;
     const user = await this.authService.getUserById(userId);
     if (!user) return unresolved;
+    // The gate every credential passes: a token minted for an account an
+    // admin has since switched off reads, saves and proposes nothing, and is
+    // told what every other door tells that person.
+    if (!(await this.authService.isActive(userId))) throw new EmbedAccessError(ACCOUNT_DEACTIVATED_MESSAGE);
     const workspaceId = this.defaultWorkspaceId();
     const canRead = await this.accessControl.canRead(workspaceId, user.email, claims.repoRelative);
     // Write implies read in the access resolver; the `canRead &&` guard pins

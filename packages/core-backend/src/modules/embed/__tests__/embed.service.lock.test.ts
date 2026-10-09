@@ -75,7 +75,11 @@ function build() {
     testKbContext({ kbDirName: KB }),
     workspaceService as never,
     { canRead: async () => true, canWrite: async () => true } as never,
-    { getUserById: async (id: string) => (id === ALICE.id ? ALICE : BOB), isEmailDomainAllowed: () => true } as never,
+    {
+      getUserById: async (id: string) => (id === ALICE.id ? ALICE : BOB),
+      isEmailDomainAllowed: () => true,
+      isActive: async () => true,
+    } as never,
     workflowService as never,
     { createBranch: async () => ({}) } as never,
     { getUserId: async () => null } as never,

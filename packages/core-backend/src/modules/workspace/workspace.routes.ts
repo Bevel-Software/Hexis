@@ -43,6 +43,7 @@ import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
+import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
 
 /**
  * One file identity from one request field, or `null` when the caller sent
@@ -859,27 +860,15 @@ export function createWorkspaceRoutes(
         // its own weak ETag and answers a matching If-None-Match with a 304.
         res.setHeader('ETag', `"${at.blobId}"`);
       }
-      const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
-      const mimeTypes: Record<string, string> = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.webp': 'image/webp',
-        '.svg': 'image/svg+xml',
-        '.bmp': 'image/bmp',
-        '.ico': 'image/x-icon',
-        '.pdf': 'application/pdf',
-        '.docx':
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        '.xlsx':
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      };
+      // The type from the extension, the one table the embed's raw route
+      // serves from as well (`file-readers/raw-mime.ts`).
+      const ext = rawExtensionOf(filePath);
+      const inlineMime = rawMimeFor(filePath);
       // SVG is active web content (it can carry <script>), and it is active in
       // BOTH directions: a saved-to-disk SVG re-opened later runs its scripts
       // under the file:// origin, so a download is forced to octet-stream.
-      const downloadMime = ext === '.svg' ? 'application/octet-stream' : (mimeTypes[ext] || 'application/octet-stream');
-      res.setHeader('Content-Type', wantsDownload ? downloadMime : (mimeTypes[ext] || 'application/octet-stream'));
+      const downloadMime = ext === '.svg' ? OCTET_STREAM : inlineMime;
+      res.setHeader('Content-Type', wantsDownload ? downloadMime : inlineMime);
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');

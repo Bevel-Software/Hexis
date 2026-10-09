@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
 import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/roles-yaml-guard.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/account-admission.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
 import {
@@ -43,6 +44,8 @@ interface Opts {
   holderName?: string;
   files?: Record<string, string | Buffer>;
   emailDomainAllowed?: boolean;
+  /** Whether the token's account is still on; `false` = an admin switched it off. */
+  active?: boolean;
   openChangeRequest?: ReturnType<typeof vi.fn>;
   createBranch?: ReturnType<typeof vi.fn>;
   /** Whether origin already carries the viewer's suggestions branch. */
@@ -97,6 +100,7 @@ function build(opts: Opts = {}) {
   const authService = {
     getUserById: vi.fn(async () => USER),
     isEmailDomainAllowed: vi.fn(() => opts.emailDomainAllowed ?? true),
+    isActive: vi.fn(async () => opts.active ?? true),
   };
   const workflowService = {
     // No live lock: a save takes it. The contention rules themselves are
@@ -682,6 +686,27 @@ describe('EmbedService: proposing as a non-writer', () => {
  * embed asks that same gate first, so a chat cannot commit what the app
  * would refuse.
  */
+describe('EmbedService: a switched-off account', () => {
+  it('reads, saves and proposes nothing on a token minted for it, and is told why', async () => {
+    const { service, workspaceService, workflowService } = build({ active: false });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    for (const call of [
+      () => service.loadFile(token),
+      () => service.readBytes(token),
+      () => service.acquireLock(token),
+      () => service.save(token, 'x'),
+      () => service.propose(token, 'x'),
+    ]) {
+      await expect(call()).rejects.toThrow(EmbedAccessError);
+      await expect(call()).rejects.toThrow(ACCOUNT_DEACTIVATED_MESSAGE);
+    }
+    expect(workspaceService.readFileBinary).not.toHaveBeenCalled();
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.acquireLock).not.toHaveBeenCalled();
+    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+  });
+});
+
 describe('EmbedService: the roles.yaml write gate', () => {
   const ROLES = `${KB}/roles.yaml`;
   const VALID = 'roles:\n  Admin:\n    - a@x.eu\n';
