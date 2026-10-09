@@ -8,6 +8,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { ReadForTool } from '../workspace/workspace.tools.js';
 import type { IEmbedService } from './embed.interface.js';
 import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
+import { SESSION_ID_INPUT } from '../workspace/agent-access.gate.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
 export const OPEN_PAGE_TOOL = 'open_page';
@@ -88,6 +89,9 @@ export function registerEmbedTools(
             'Optional: the anchor slug of one heading (e.g. `problem-statement`) the view should open at. ' +
             'The whole page is shown either way — this only says where to start reading.',
         },
+        // As `read_file` takes it: the read is `read_file`'s own, and a
+        // deployment whose read hook wants the session must be able to get it.
+        sessionId: SESSION_ID_INPUT,
       },
       required: ['path'],
       additionalProperties: false,
