@@ -609,6 +609,22 @@ describe('EmbedService: proposing as a non-writer', () => {
     await expect(service.propose(token, 'x')).rejects.toThrow(EmbedAccessError);
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
   });
+
+  it('refuses to propose text over bytes that are not text, as a save is refused', async () => {
+    // The same PNG-under-a-markdown-name the save test uses: a proposal is a
+    // commit of text, and must not commit text over bytes a Save refuses.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const { service, workspaceService, workflowService, gitService } = build({
+      canWrite: false,
+      files: { [WS]: png },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.propose(token, '# replaced')).rejects.toThrow(EmbedAccessError);
+    expect(gitService.createBranch).not.toHaveBeenCalled();
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+    expect(workflowService.openChangeRequest).not.toHaveBeenCalled();
+  });
 });
 
 /**

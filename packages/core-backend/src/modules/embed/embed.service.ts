@@ -399,6 +399,10 @@ export class EmbedService implements IEmbedService {
     // file's new text beside its old, so proposing on a file you may not read
     // would publish what you were not allowed to see.
     if (!canRead) throw new EmbedAccessError(`You don't have permission to read "${claims.repoRelative}".`);
+    // The guard a save runs: a proposal is text, so what it proposes over
+    // has to be text too — a PDF, an image or bytes under a markdown name
+    // are refused here as they are on Save, not committed as text.
+    await this.assertTextEditable(claims.repoRelative);
     const wsPath = this.wsPathFor(claims.repoRelative);
     // The same write gate as a save, before a branch is made for the text: a
     // proposal is a commit, and a commit of an unparseable `roles.yaml` is
