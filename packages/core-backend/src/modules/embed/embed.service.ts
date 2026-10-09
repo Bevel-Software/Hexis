@@ -427,8 +427,11 @@ export class EmbedService implements IEmbedService {
     // ORIGIN first: a second proposal finds the branch already pushed, and
     // creating it again would fail as a non-fast-forward push, not as
     // "already exists" — the race between the two is still caught below.
+    // Created through the workflow service, under its branch-lifecycle lock,
+    // as every branch the app creates is: creating one is the one operation
+    // that can bring a "gone" branch back under a retirement's feet.
     if (!(await this.gitService.remoteBranchExists(this.defaultWorkspaceId(), branch))) {
-      await this.gitService
+      await this.workflowService
         .createBranch(this.defaultWorkspaceId(), branch, this.kb.defaultBranch)
         .catch((err: unknown) => {
           if (err instanceof Error && /already exists|non-fast-forward|fetch first/i.test(err.message)) return;
