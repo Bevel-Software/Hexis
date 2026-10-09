@@ -38,10 +38,12 @@ export interface ConnectionProbe {
   invalidate(): void;
   /**
    * Ask the host about `answers`. Resolves to the host's answer — a refusal is
-   * an answer — and whether the answers were edited while the request was out
-   * (`stale`). A stale answer is not shown; it is the caller's to use only
-   * against the snapshot it sent. Rejects with {@link ConnectionProbeFailed}
-   * when the request itself failed, flagged stale the same way.
+   * an answer — and whether it is `stale`: the answers were edited, or a newer
+   * request went out, while this one was out, so the answer on screen is not
+   * this one's to set. A stale answer is not shown; it is the caller's to use
+   * only against the snapshot it sent. Rejects with
+   * {@link ConnectionProbeFailed} when the request itself failed, flagged
+   * stale the same way.
    */
   ask(answers: Record<string, string>): Promise<{ result: ConnectionTest; stale: boolean }>;
 }
@@ -55,6 +57,12 @@ export function useConnectionProbe(): ConnectionProbe {
    * the time it lands means the answers it describes are gone.
    */
   const epoch = useRef(0);
+  /**
+   * Which request is the newest. Two requests for the same answers can land
+   * in either order; only the newest one's answer is the answer on screen,
+   * or an older response would overwrite a newer one.
+   */
+  const newest = useRef(0);
   const inFlight = useRef(0);
 
   const invalidate = () => {
@@ -64,18 +72,17 @@ export function useConnectionProbe(): ConnectionProbe {
 
   const ask = async (answers: Record<string, string>) => {
     const asked = epoch.current;
+    const request = ++newest.current;
+    const isStale = () => asked !== epoch.current || request !== newest.current;
     inFlight.current++;
     setTesting(true);
     try {
       const answer = await testConnection(answers);
-      const stale = asked !== epoch.current;
+      const stale = isStale();
       if (!stale) setResult(answer);
       return { result: answer, stale };
     } catch (err) {
-      throw new ConnectionProbeFailed(
-        err instanceof Error ? err.message : 'Could not test the connection.',
-        asked !== epoch.current,
-      );
+      throw new ConnectionProbeFailed(err instanceof Error ? err.message : 'Could not test the connection.', isStale());
     } finally {
       inFlight.current--;
       if (inFlight.current === 0) setTesting(false);
