@@ -470,3 +470,18 @@ export async function fetchAccessOverrides(
   );
 }
 
+
+/** One admin, as `GET /api/access/admins` names them to anyone signed in. */
+export interface AdminContact {
+  name: string;
+  email: string;
+}
+
+/**
+ * Who the admins are — names and emails, nothing else about roles. Open to
+ * everyone signed in, so someone who is not an admin knows whom to ask.
+ */
+export async function fetchAdmins(): Promise<AdminContact[]> {
+  const body = await handleApiResponse<{ admins: AdminContact[] }>(await authFetch('/api/access/admins'));
+  return body.admins;
+}

@@ -1228,6 +1228,34 @@ export function createAccessRoutes(
     }
   });
 
+  // Who the admins are, for anyone signed in: the top bar tells someone who
+  // is not an admin to ask one, and names them. Names and emails ONLY — the
+  // roster above (every role, its members, groups and references) stays
+  // admin-only. Names come from the accounts table; an admin with no account
+  // yet (a deployment admin before first sign-in, say) is named by address.
+  router.get('/access/admins', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const emails = await rolesAdmin.getAdminEmails();
+      const rows =
+        emails.length === 0
+          ? []
+          : await db
+              .select({ email: users.email, name: users.name })
+              .from(users)
+              .where(inArray(users.emailBidx, emails));
+      const names = new Map(rows.map((r) => [r.email.trim().toLowerCase(), r.name?.trim() ?? '']));
+      const admins = emails
+        .map((email) => ({ name: names.get(email) || email, email }))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.email.localeCompare(b.email));
+      res.json({ admins });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   // NOTE: POST /access/roles (create), PATCH /access/roles/:canonical
   // (rename), and DELETE /access/roles/:canonical are GONE — roles are
   // app-defined capabilities, not user-editable objects.
