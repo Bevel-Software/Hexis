@@ -50,7 +50,7 @@ export async function ensureRecoveryBotUser(db: Database): Promise<AuthUser> {
     .returning();
   if (inserted.length > 0) {
     const row = inserted[0];
-    log.info(`created recovery-bot user id=${row.id} email=${row.email}`);
+    log.info(`created recovery-bot user id=${row.id}`);
     return {
       id: row.id,
       email: row.email,
