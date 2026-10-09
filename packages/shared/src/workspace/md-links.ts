@@ -129,7 +129,8 @@ function maskMarkdownCode(text: string): string {
     prose: keep,
     definition: (span) => keep(span.start, span.end),
   });
-  return chars.join('');
+  // An HTML comment is not rendered: a tag inside one is blanked with it.
+  return chars.join('').replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
 }
 
 /**
@@ -139,8 +140,8 @@ function maskMarkdownCode(text: string): string {
  * fence, a code span or behind a `\<` is an example, and a bare `href=` in
  * prose is prose.
  */
-export function scanMarkdownHtmlLinks(text: string): string[] {
-  const out: string[] = [];
+export function scanMarkdownHtmlLinks(text: string): HtmlLinkTarget[] {
+  const out: HtmlLinkTarget[] = [];
   const masked = maskMarkdownCode(text);
   const tag = new RegExp(HTML_TAG_RE.source, 'g');
   for (let m = tag.exec(masked); m !== null; m = tag.exec(masked)) {
@@ -449,8 +450,20 @@ function parseInlineDestination(
  * read, to report the page.
  */
 export function scanHtmlLinks(text: string): string[] {
-  const out: string[] = [];
-  for (let m = HTML_TAG_RE.exec(text); m !== null; m = HTML_TAG_RE.exec(text)) out.push(...attributeLinks(m[0]));
+  return scanHtmlLinkTargets(text).map((t) => t.destination);
+}
+
+/** One `href` or `src` value in an HTML tag; `image` says which — a `src` is a picture, and a picture resolves as one. */
+export interface HtmlLinkTarget {
+  destination: string;
+  image: boolean;
+}
+
+/** {@link scanHtmlLinks}, with each value's attribute kept: `src` is an image, `href` a link. */
+export function scanHtmlLinkTargets(text: string): HtmlLinkTarget[] {
+  const out: HtmlLinkTarget[] = [];
+  const tag = new RegExp(HTML_TAG_RE.source, 'g');
+  for (let m = tag.exec(text); m !== null; m = tag.exec(text)) out.push(...attributeLinks(m[0]));
   return out;
 }
 
@@ -462,16 +475,16 @@ const HTML_TAG_RE = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s+(?:"[^"]*"|'[^']*'|[^<>"'])*)?>
  * name has to be exactly that (a `data-href` is not a link), and a value that
  * happens to contain `href=` is a value, not an attribute.
  */
-function attributeLinks(tag: string): string[] {
-  const out: string[] = [];
+function attributeLinks(tag: string): HtmlLinkTarget[] {
+  const out: HtmlLinkTarget[] = [];
   const nameEnd = tag.search(/[\s/>]/);
   const attrs = nameEnd < 0 ? '' : tag.slice(nameEnd, -1);
   const re = /([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
   for (let m = re.exec(attrs); m !== null; m = re.exec(attrs)) {
     const name = m[1].toLowerCase();
-    if ((name === 'href' || name === 'src') && m[2] !== undefined) out.push(m[2]);
-    else if ((name === 'href' || name === 'src') && m[3] !== undefined) out.push(m[3]);
-    else if ((name === 'href' || name === 'src') && m[4] !== undefined) out.push(m[4]);
+    if (name !== 'href' && name !== 'src') continue;
+    const destination = m[2] ?? m[3] ?? m[4];
+    if (destination !== undefined) out.push({ destination, image: name === 'src' });
   }
   return out;
 }
@@ -614,8 +627,9 @@ function encodePath(path: string, how: { encoded: boolean; angle: boolean; inFro
     // Only what would break the link: a balanced bare path stays as it is.
     out = /[\s<>\\]/.test(path) || !balanced(path) ? escapeBare(path) : path;
   }
-  // A frontmatter link sits inside a YAML double-quoted string.
-  return how.inFrontmatter ? out.replace(/"/g, '%22') : out;
+  // A frontmatter link sits inside a YAML quoted string, double or single:
+  // either quote in the path would end the string early.
+  return how.inFrontmatter ? out.replace(/["']/g, (c) => (c === '"' ? '%22' : '%27')) : out;
 }
 
 function balanced(path: string): boolean {
@@ -724,15 +738,19 @@ export function rewriteMdLinks(text: string, opts: RewriteMdLinksOptions): { tex
 export function htmlLinksAffectedByMove(
   text: string,
   opts: RewriteMdLinksOptions,
-  /** The destinations to judge: an HTML page's by default, a markdown page's from {@link scanMarkdownHtmlLinks}. */
-  destinations: string[] = scanHtmlLinks(text),
+  /** The targets to judge: an HTML page's by default, a markdown page's from {@link scanMarkdownHtmlLinks}. */
+  targets: HtmlLinkTarget[] = scanHtmlLinkTargets(text),
 ): string[] {
   const out: string[] = [];
-  for (const destination of destinations) {
-    const before = resolveMdLink(destination, { basePath: opts.oldPath, kbDirName: opts.kbDirName });
-    if (!before || (before.branch !== null && before.branch !== opts.branch)) continue;
+  for (const { destination, image } of targets) {
+    // A picture resolves as the markdown image rule resolves one: no
+    // mangled-path repair, and served from the branch the page is read on
+    // whatever branch its address names — so another branch's app URL on an
+    // image is a reference to THIS branch and is judged, where a link's is not.
+    const before = resolveMdLink(destination, { basePath: opts.oldPath, kbDirName: opts.kbDirName, image });
+    if (!before || (!image && before.branch !== null && before.branch !== opts.branch)) continue;
     const target = opts.mapPath(before.path) ?? before.path;
-    const after = resolveMdLink(destination, { basePath: opts.newPath, kbDirName: opts.kbDirName });
+    const after = resolveMdLink(destination, { basePath: opts.newPath, kbDirName: opts.kbDirName, image });
     if (!after || after.path !== target) out.push(destination);
   }
   return out;
