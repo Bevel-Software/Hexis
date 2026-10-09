@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 
 /**
@@ -29,6 +29,9 @@ const ANSWERS = { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 't' };
 type Asked = ReturnType<ReturnType<typeof useConnectionProbe>['ask']>;
 
 describe('useConnectionProbe', () => {
+  // A queued answer a failed test never consumed must not feed the next one.
+  beforeEach(() => api.testConnection.mockReset());
+
   it("shows the newest request's answer when two for the same answers land newest-first", async () => {
     const first = deferred<ConnectionTest>();
     const second = deferred<ConnectionTest>();
