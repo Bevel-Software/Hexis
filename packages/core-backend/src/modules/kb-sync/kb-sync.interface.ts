@@ -61,6 +61,8 @@ export interface SyncWorkflowPort {
   retireRemoteGoneClone(workspaceId: string): Promise<boolean>;
   /** The existing sweep; returns how many requests it closed. */
   closeChangeRequestsWithDeletedBranches(): Promise<number>;
+  /** The tidy-up after the sweep — empty open requests closed, leftover branches removed; never throws. */
+  tidyAfterSweep(): Promise<{ closedEmpty: number; removedLeftovers: number }>;
 }
 
 /**

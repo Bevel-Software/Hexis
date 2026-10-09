@@ -12,6 +12,10 @@ export interface AccountSummary {
    * in with the environment password whether or not a hash is stored.
    */
   isEnvAdmin: boolean;
+  /** When an admin switched the account off; null while it is on. */
+  deactivatedAt: string | null;
+  /** One of the accounts the platform runs its own work as: it is never switched off. */
+  isSystem: boolean;
   createdAt: string;
 }
 
@@ -40,18 +44,37 @@ export async function listAccounts(): Promise<AccountSummary[]> {
   return body.accounts;
 }
 
-/** Create an account (or reset an existing account's password — deliberate upsert). */
+/**
+ * Create an account (or reset an existing account's password — deliberate
+ * upsert). Without a password the account is for single sign-on: the person
+ * finds it waiting the first time they sign in.
+ */
 export async function createAccount(
   email: string,
   name: string,
-  password: string,
+  password?: string,
 ): Promise<void> {
   const res = await authFetch('/api/admin/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name: name || undefined, password }),
+    body: JSON.stringify({ email, name: name || undefined, password: password || undefined }),
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not create account'));
+}
+
+/**
+ * Switch an account off: it keeps its history and its place in roles and
+ * groups, but cannot sign in, and its keys and agent connections stop working.
+ */
+export async function deactivateAccount(userId: string): Promise<void> {
+  const res = await authFetch(`/api/admin/accounts/${encodeURIComponent(userId)}/deactivate`, { method: 'POST' });
+  if (!res.ok) throw new Error(await readError(res, 'Could not switch this account off'));
+}
+
+/** Switch it back on — refused (with the deployment's reason) when there is no room for it. */
+export async function reactivateAccount(userId: string): Promise<void> {
+  const res = await authFetch(`/api/admin/accounts/${encodeURIComponent(userId)}/reactivate`, { method: 'POST' });
+  if (!res.ok) throw new Error(await readError(res, 'Could not switch this account on'));
 }
 
 /**

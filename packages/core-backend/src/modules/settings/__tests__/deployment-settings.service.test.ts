@@ -5,6 +5,7 @@ import {
   SettingsValidationError,
   CORE_SETTINGS,
   LEGACY_LAYOUT_ENV_VARS,
+  retireMergedBranchesOn,
 } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 
@@ -119,6 +120,56 @@ describe('DeploymentSettingsService — a blank that means the default', () => {
   });
 });
 
+describe('DeploymentSettingsService — the leftover-branch cleanup switch', () => {
+  /**
+   * On by default; an admin switches it off on the Deployment page, and the
+   * environment variable wins over the page, as for every setting.
+   */
+  it('is on by default, off once saved as false, and on again when cleared — after a reload too', async () => {
+    const { db, rows } = makeDb();
+    // Clearing deletes the row: the fake does so for real, so a reload proves it.
+    (db as unknown as { delete: () => unknown }).delete = () => ({
+      where: () => {
+        const at = rows.findIndex((r) => r.key === 'retireMergedBranches');
+        if (at >= 0) rows.splice(at, 1);
+        return Promise.resolve();
+      },
+    });
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    const on = (s: DeploymentSettingsService) => retireMergedBranchesOn(s.resolve('retireMergedBranches'));
+    const reloaded = async () => {
+      const fresh = new DeploymentSettingsService(db, ENC_KEY);
+      await fresh.load();
+      return fresh;
+    };
+    expect(on(settings)).toBe(true);
+    await settings.save({ retireMergedBranches: 'false' }, null);
+    expect(on(settings)).toBe(false);
+    expect(on(await reloaded())).toBe(false);
+    await settings.save({ retireMergedBranches: '' }, null);
+    expect(on(settings)).toBe(true);
+    expect(rows.some((r) => r.key === 'retireMergedBranches')).toBe(false);
+    expect(on(await reloaded())).toBe(true);
+  });
+
+  it('lets RETIRE_MERGED_BRANCHES win over the page', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ retireMergedBranches: 'true' }, null);
+    process.env.RETIRE_MERGED_BRANCHES = 'false';
+    expect(settings.sourceOf('retireMergedBranches')).toBe('env');
+    expect(retireMergedBranchesOn(settings.resolve('retireMergedBranches'))).toBe(false);
+  });
+
+  it('saves only true or false, and reads the ways a person writes "off" as off', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await expect(settings.save({ retireMergedBranches: 'maybe' }, null)).rejects.toBeInstanceOf(SettingsValidationError);
+    for (const off of ['false', 'FALSE', '0', 'off', 'no']) expect(retireMergedBranchesOn(off), off).toBe(false);
+    for (const on of ['', 'true', '1', 'yes']) expect(retireMergedBranchesOn(on), on).toBe(true);
+  });
+});
+
 describe('DeploymentSettingsService — secrets', () => {
   it('stores the token as ciphertext and reads it back', async () => {
     const { db, rows } = makeDb();
@@ -191,8 +242,6 @@ describe('DeploymentSettingsService — KB layout', () => {
       pluginsDir: 'Plugins',
       agentsFile: 'AGENTS.md',
     });
-    // The pointer is on until someone says otherwise.
-    expect(settings.resolveAgentsFileLink()).toBe(true);
   });
 
   /**
@@ -225,9 +274,9 @@ describe('DeploymentSettingsService — KB layout', () => {
   it('ignores the environment for the four layout names', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins', agentsFile: 'HEXIS.md' }, null);
+    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins' }, null);
     process.env.KB_SKILLS_DIR = 'capabilities';
-    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills', agentsFile: 'HEXIS.md' });
+    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills' });
     expect(settings.sourceOf('skillsDir')).toBe('stored');
     // Not locked: the field stays editable in the app, and a save of it is
     // accepted rather than refused as 'set by the environment'.
@@ -284,68 +333,41 @@ describe('DeploymentSettingsService — KB layout', () => {
   });
 
   /**
-   * The guide's file name is saved beside the folders and judged with them:
-   * the four must differ, and a name that is not one markdown file is refused
-   * with the rule it broke.
+   * The guide's name was a setting while the guide was written to disk. It is
+   * gone: the setup screen no longer offers it, a save naming it is refused
+   * as unknown, and the guide is read as `AGENTS.md` on every deployment
+   * whatever a deployment saved before.
    */
-  it('refuses a guide name that is not one markdown file of its own', async () => {
-    const { db } = makeDb();
+  it('knows no guide name any more: a save naming one is refused, and the layout always says AGENTS.md', async () => {
+    const { db, rows } = makeDb();
+    // The row a deployment saved while the setting existed is still in its
+    // database. It is loaded like any other row, and changes nothing.
+    rows.push({ key: 'agentsFile', value: 'HEXIS.md', encrypted: false });
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    for (const bad of ['guides/HEXIS.md', 'HEXIS.txt', 'CLAUDE.md', 'access.md', 'roles.yaml']) {
-      await expect(settings.save({ agentsFile: bad }, null)).rejects.toBeInstanceOf(
-        SettingsValidationError,
-      );
-    }
-    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).resolves.toBeTruthy();
-  });
-
-  it('refuses a guide named after a root folder, from either side of the pair', async () => {
-    const { db } = makeDb();
-    const settings = new DeploymentSettingsService(db, ENC_KEY);
-    // The plugins folder already in effect, named by the guide alone.
-    await settings.save({ pluginsDir: 'Guide.md' }, null);
-    await expect(settings.save({ agentsFile: 'guide.md' }, null)).rejects.toBeInstanceOf(
-      SettingsValidationError,
-    );
-    // And the other way round, in one batch.
-    await expect(
-      settings.save({ agentsFile: 'HEXIS.md', skillsDir: 'hexis.md' }, null),
-    ).rejects.toBeInstanceOf(SettingsValidationError);
-  });
-
-  it('marks the guide name and its pointer setting as restart-to-apply', async () => {
-    const { db } = makeDb();
-    const settings = new DeploymentSettingsService(db, ENC_KEY);
-    expect((await settings.save({ agentsFile: 'HEXIS.md' }, null)).restartKeys).toContain('agentsFile');
-    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
-      'agentsFileLink',
-    );
-    expect(settings.resolveAgentsFileLink()).toBe(false);
+    await settings.load();
+    expect(settings.resolveKbLayout().agentsFile).toBe('AGENTS.md');
+    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).rejects.toMatchObject({
+      problems: { agentsFile: 'Unknown setting.' },
+    });
+    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null, 'deployment')).rejects.toMatchObject({
+      problems: { agentsFile: 'Unknown setting.' },
+    });
+    expect(settings.resolveKbLayout().agentsFile).toBe('AGENTS.md');
+    expect(settings.describe().map((s) => s.key)).not.toContain('agentsFile');
   });
 
   /**
    * A restart is owed for a CHANGE, and saving what a deployment is already
-   * running on is not one. Both of these settings mean something while unset —
-   * the guide is `AGENTS.md`, the pointer is on — so the first save of that
-   * same answer changes nothing the process would pick up at a restart.
+   * running on is not one. A root name means something while unset — the
+   * default — so the first save of that same answer changes nothing the
+   * process would pick up at a restart.
    */
   it('owes no restart for saving the value an unset setting already meant', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    // The checkbox arrives ticked, and ticked is what an unset one already is.
-    expect((await settings.save({ agentsFileLink: 'true' }, null)).restartKeys).not.toContain(
-      'agentsFileLink',
-    );
-    expect((await settings.save({ agentsFile: 'AGENTS.md' }, null)).restartKeys).not.toContain(
-      'agentsFile',
-    );
     expect((await settings.save({ skillsDir: 'Skills' }, null)).restartKeys).not.toContain('skillsDir');
-    // And the setting still reads as it did.
-    expect(settings.resolveAgentsFileLink()).toBe(true);
-    // Turning it off from there IS a change, and still reports one.
-    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
-      'agentsFileLink',
-    );
+    // Renaming it from there IS a change, and still reports one.
+    expect((await settings.save({ skillsDir: 'Abilities' }, null)).restartKeys).toContain('skillsDir');
   });
 
   /**
@@ -411,6 +433,22 @@ describe('DeploymentSettingsService — validation', () => {
     await expect(settings.save({ kbDirName: '../elsewhere' }, null)).rejects.toThrow(
       /Invalid settings/,
     );
+  });
+
+  it('rejects a directory name carrying a line break, which every path is prefixed with', async () => {
+    // The name is joined onto every workspace-relative path, and a line break
+    // in a path is a separator to git's `cat-file --batch` — so a name
+    // carrying one would make the normaliser emit a path it refuses from a
+    // caller. Refused where the name is SET, which is here and at boot.
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    for (const bad of ['kb\nname', 'kb\rname', 'kb\u0000name', 'kb\u007Fname']) {
+      await expect(settings.save({ kbDirName: bad }, null), bad).rejects.toThrow(
+        /Invalid settings/,
+      );
+    }
+    // The ordinary name beside them, so the rule is not simply refusing both.
+    await expect(settings.save({ kbDirName: 'company-brain' }, null)).resolves.toBeTruthy();
   });
 
   it('rejects a username that would break out of the credential-helper snippet', async () => {

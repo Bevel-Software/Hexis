@@ -2,8 +2,10 @@ import {
   currentKbLayout,
   isPlatformFile,
   isPlatformRestoreShape,
+  isRepositoryOwnFile,
   isRootPlatformFile,
   platformFileRefusal,
+  repositoryOwnFileDeleteRefusal,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import {
@@ -30,11 +32,13 @@ function repoRelative(wsRelativePath: string, kbDirName: string | null): string 
  * server refuses with — or null when it may.
  *
  * Judged on the path's REPO-relative form, because that is what the platform
- * reads: `roles.yaml` and the agent guide (`AGENTS.md` unless this deployment
- * named it something else) count at the repository root only, so a nested file
- * of either name is ordinary content and stays draggable. Outside
- * the KB clone, and before `kbDirName` is known, nothing is refused here — the
- * server is the gate and says the same sentence.
+ * reads: `roles.yaml` counts at the repository root only, so a nested file of
+ * that name is ordinary content and stays draggable. (A file under the
+ * guide's name — `AGENTS.md`, or the name a deployment saved for the guide —
+ * is content wherever it sits: the platform's guide is served from code, not
+ * written to the tree.) Outside the KB clone, and before `kbDirName` is
+ * known, nothing is refused here — the server is the gate and says the same
+ * sentence.
  */
 export function platformFileMoveRefusal(
   wsRelativePath: string,
@@ -43,6 +47,19 @@ export function platformFileMoveRefusal(
   const rel = repoRelative(wsRelativePath, kbDirName);
   if (rel === null) return null;
   return isPlatformFile(rel, currentKbLayout()) ? platformFileRefusal(rel) : null;
+}
+
+/**
+ * Why this row may not be DELETED whoever asks — the same sentence the server
+ * refuses with — or null when the caller's write access decides. Only the
+ * repository's own files are refused: the root's `access.md` and
+ * `roles.yaml`. A nested `access.md` is deleted like any file its caller may
+ * write, which hands its folder back to the parent's rules.
+ */
+export function platformFileDeleteRefusal(wsRelativePath: string, kbDirName: string | null): string | null {
+  const rel = repoRelative(wsRelativePath, kbDirName);
+  if (rel === null) return null;
+  return isRepositoryOwnFile(rel, currentKbLayout()) ? repositoryOwnFileDeleteRefusal(rel) : null;
 }
 
 /**

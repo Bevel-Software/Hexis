@@ -1,16 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {
-  LEGACY_AGENTS_FILE,
-  renderKbLayoutPlaceholders,
-} from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { reservedRootDirs } from './template-files.step.js';
-import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource } from './template-source.js';
+import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from './template-source.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 import { GitInternalsError } from '../../../../shared/domain-errors.js';
+import { isManagedGuide } from '../../../agent-guide/agent-guide.js';
 
 /**
  * The empty-remote seed builder the runner takes as `buildSeedTree`: the full
@@ -145,45 +142,39 @@ class KbSeedTree {
       }
       return;
     }
-    // The agent guide ships under one name and lands under this deployment's.
-    // Done HERE rather than left to the top-up step, which would otherwise
-    // write the guide under its configured name and then delete the
-    // `AGENTS.md` this seed had just laid down — two commits saying opposite
-    // things about a knowledge base nobody had used yet.
-    if (relDir === '' && name === LEGACY_AGENTS_FILE) {
-      await this.copyTemplateFile(name, dest, this.kb.layout.agentsFile);
-      return;
-    }
-    // TWO template entries, ONE destination. A custom template that happens to
-    // carry a root file under the name THIS deployment gave its guide
-    // (`HEXIS.md` in the template, `HEXIS.md` in the setting) would be copied
-    // over the guide the branch above just wrote, or under it, depending on
-    // which order the walk happened to reach them in — and an empty deployment
-    // would be seeded with whichever won. The MANAGED guide wins, always: it
-    // is the file the platform owns, refreshes from the packaged template on
-    // every start and tells every agent to read. The twin is skipped, on the
-    // same reasoning as the packable spelling above.
-    if (relDir === '' && name === this.kb.layout.agentsFile && (await this.templates.carries(LEGACY_AGENTS_FILE))) {
-      return;
+    // The agent guide is not a file any more: the platform serves it from
+    // code (see `modules/agent-guide`). A template that still carries one at
+    // the root — a distribution's own, forked while the guide was a file — is
+    // not seeded, or the first start would remove what the seed just wrote.
+    // Recognised by the platform's own header under ANY root Markdown name —
+    // the guide was written under a name a deployment chose, and a template
+    // forked then still carries it there — so a template whose root `.md` is
+    // the organisation's own text is seeded as the content it is. The same
+    // judgement the first start makes when it retires copies.
+    if (relDir === '' && /\.md$/i.test(name)) {
+      // Judged the way the copy below judges: a binary under the name is
+      // spotted from its first bytes and never read whole.
+      const source = await this.templates.pathOf(name);
+      const text = (await headHasNul(source)) ? null : asText(await fs.readFile(source));
+      if (text !== null && isManagedGuide(text)) return;
     }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
   }
 
   /**
    * Copy one template file (by repo-relative path) into `dest`, creating
-   * parents. `destRel` is the name it lands under when that differs from the
-   * template's — true of the agent guide and nothing else. Text files are RENDERED — the managed guide and the ignore file
-   * name the three root folders, which a deployment may have renamed — and a
-   * file without placeholders comes out byte-identical to its source.
+   * parents. Text files are RENDERED — the ignore file names the three root
+   * folders, which a deployment may have renamed — and a file without
+   * placeholders comes out byte-identical to its source.
    *
    * "Text" is decided by the BYTES, not the name: strict UTF-8 with no NUL.
    * A name-based rule mistook a hidden binary for text and re-encoded it;
    * anything that does not decode is copied byte for byte. Either way the
    * source's mode survives — a template script keeps its executable bit.
    */
-  private async copyTemplateFile(relPath: string, dest: string, destRel: string = relPath): Promise<void> {
+  private async copyTemplateFile(relPath: string, dest: string): Promise<void> {
     const from = await this.templates.pathOf(relPath);
-    const to = path.join(dest, destRel);
+    const to = path.join(dest, relPath);
     await fs.mkdir(path.dirname(to), { recursive: true });
     // A binary is spotted from its first bytes (a NUL turns up early in any
     // real one) and streamed across without ever being read whole; only what
@@ -192,7 +183,7 @@ class KbSeedTree {
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
-      await fs.writeFile(to, renderKbLayoutPlaceholders(text, this.kb.layout), 'utf8');
+      await fs.writeFile(to, renderTemplateText(text, this.kb.layout), 'utf8');
     }
     await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
   }

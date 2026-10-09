@@ -1,7 +1,9 @@
 /**
  * What a connected agent is told at the start of an MCP session, composed
- * from two layers: a platform header the code owns, and the deployment
- * preamble an admin writes in `mcp-description.md` at the repository root.
+ * from three layers: a platform header the code owns, the rules every file tool
+ * shares (`shared-file-rules.ts`, the same text the managed guide carries), and
+ * the deployment preamble an admin writes in `mcp-description.md` at the
+ * repository root.
  *
  * Two channels carry the result. The full text goes out as `instructions` on
  * the initialize handshake, which Claude Code, Claude Desktop and Cursor place
@@ -21,11 +23,15 @@
 // apart. Re-exported here because this module is where the backend reads them
 // from.
 import {
+  DEFAULT_KB_LAYOUT,
   PREAMBLE_CAP,
   PREAMBLE_FILE,
   TOOL_PREFIX_CAP,
   stripHtmlComments,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
+import { splitCallLine } from '@bevel-software/platform-mcp-core';
+import { sharedFileRulesSection } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 
@@ -43,7 +49,13 @@ export const PLATFORM_HEADER =
   'Before answering a question about the organisation, its people, customers, products, processes, projects or internal terms, ' +
   'search the knowledge base: call `start_session` once, then `grep` for the key terms, `list_files` to orient, and `read_file` what matches. ' +
   'Prefer what you find there over memory or the web, and say so when the knowledge base is silent on something the organisation should have documented. ' +
-  'Skills are available as prompts and through `list_skills` and `get_skill`.';
+  'Skills are available as prompts and through `list_skills` and `get_skill`. ' +
+  // There is no one calling shape to state: the knowledge-base tools take
+  // their arguments under `body`, a tool that calls another service takes them
+  // flat, and an agent told one rule for all of them sends a GET with a body.
+  // The per-tool `Call:` line is generated from each tool's own input schema,
+  // so pointing at it is both shorter and always right.
+  'Tools do not share one calling shape: call each tool exactly as the `Call:` line at the top of its description shows.';
 
 /**
  * The fixed first line of the tool prefix. It always leads, so an admin's
@@ -53,13 +65,44 @@ export const PLATFORM_HEADER =
  */
 export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it before answering from memory.";
 
+/**
+ * The whole platform-owned part of the handshake text: what Hexis is, then the
+ * rules every file tool shares (see `shared-file-rules.ts`). This is what the
+ * `header` field carries and what the card shows as fixed and not editable;
+ * the admin's preamble follows it.
+ *
+ * A FUNCTION of the layout, because the shared rules name the platform files
+ * by the root names a deployment chose (`Skills/`, `Plugins/`), which are
+ * deployment settings. The guide's name is not one of them: it is `AGENTS.md`
+ * everywhere.
+ */
+export function platformInstructions(layout: KbLayout): string {
+  return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout)}`;
+}
+
+/**
+ * The ceiling on the WHOLE handshake text, pinned by a test.
+ *
+ * No client publishes a limit for `instructions` — what was observed being cut
+ * was tool descriptions — so this is not a measured client limit but the
+ * arithmetic ceiling of the parts, held low enough that it stays a plausible
+ * system-prompt insert (~3,500 tokens): the header, the shared rules under their
+ * own cap, and the preamble under its cap plus the marker a cut appends. The
+ * test is what makes it a ceiling rather than a hope: a shared rule that grew
+ * past it fails before it reaches an agent.
+ */
+export const INSTRUCTIONS_CAP = 14_000;
+
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;
 
 export interface ComposedAgentInstructions {
-  /** The header, then the preamble body when there is one. Sent on the initialize handshake. */
+  /** The platform text, then the preamble body when there is one. Sent on the initialize handshake. */
   instructions: string;
-  /** The platform header alone, so a card can show the fixed part apart from the admin's. */
+  /**
+   * The platform-owned text alone — the header and the shared file rules — so a
+   * card can show the fixed part apart from the admin's.
+   */
   header: string;
   /** The preamble body as sent (cut and marked when over the cap); empty when there is none. */
   preamble: string;
@@ -84,15 +127,25 @@ export interface ComposedAgentInstructions {
  * absent). HTML comments are private notes and never leave the file; an
  * unterminated `<!--` strips everything after it, so the most likely editing
  * slip withholds text rather than leaking it.
+ *
+ * `layout` decides the root names the shared rules spell (`Skills/`,
+ * `Plugins/`, the knowledge folder) and defaults to the standard ones — a
+ * caller with no layout in hand (a test, a surface that predates the setting)
+ * gets the defaults. The guide's name is not among them: it is `AGENTS.md` on
+ * every deployment.
  */
-export function composeAgentInstructions(preamble: string | null): ComposedAgentInstructions {
+export function composeAgentInstructions(
+  preamble: string | null,
+  layout: KbLayout = DEFAULT_KB_LAYOUT,
+): ComposedAgentInstructions {
+  const platform = platformInstructions(layout);
   const { text, unterminated } = stripHtmlComments(preamble ?? '');
   const normalized = text.replace(/\r\n?/g, '\n');
   const stripped = normalized.trim();
   const preambleChars = stripped.length;
   const truncated = preambleChars > PREAMBLE_CAP;
   const body = truncated ? `${cutAtCodePoint(stripped, PREAMBLE_CAP)}\n${PREAMBLE_TRUNCATION_MARKER}` : stripped;
-  const instructions = body ? `${PLATFORM_HEADER}\n\n${body}` : PLATFORM_HEADER;
+  const instructions = body ? `${platform}\n\n${body}` : platform;
 
   // Classified UNTRIMMED: the leading indentation of a first line is what
   // makes it an indented code block, and the trim above would turn that
@@ -105,7 +158,7 @@ export function composeAgentInstructions(preamble: string | null): ComposedAgent
 
   return {
     instructions,
-    header: PLATFORM_HEADER,
+    header: platform,
     preamble: body,
     toolPrefix,
     toolPrefixLine: TOOL_PREFIX_LINE,
@@ -121,9 +174,17 @@ export function composeAgentInstructions(preamble: string | null): ComposedAgent
  * A tool description with the prefix ahead of it: the prefix, a blank line,
  * then the original. Purpose line first, because claude.ai cuts descriptions
  * near 500 characters.
+ *
+ * Except for the `Call:` line, which stays the very first line whatever else
+ * is prepended: it is how an agent learns the shape this tool's arguments take,
+ * and a description that opens with the purpose prefix instead would bury the
+ * one line the refusal for a wrong call points back to.
  */
 export function prefixToolDescription(toolPrefix: string, description: string | undefined): string {
-  return description ? `${toolPrefix}\n\n${description}` : toolPrefix;
+  if (!description) return toolPrefix;
+  const { call, rest } = splitCallLine(description);
+  if (call === null) return `${toolPrefix}\n\n${description}`;
+  return rest === '' ? `${call}\n\n${toolPrefix}` : `${call}\n\n${toolPrefix}\n\n${rest}`;
 }
 
 /** An ATX heading line: `#` to `######`, then a space or the end. */

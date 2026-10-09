@@ -4,6 +4,11 @@ import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import {
+  createAgentUploadRoutes,
+  isAgentUploadRawBodyPath,
+} from '../modules/workspace/agent-upload.routes.js';
+import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
@@ -22,7 +27,9 @@ import {
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+import { changeRequestScope, registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
+import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import {
   registerSkillsTools,
@@ -72,6 +79,11 @@ import { publicConfig } from './public-config.js';
 import { createReadiness } from './readiness.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
+import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/write-access/write-access.js';
+import { createEmbedRoutes, createEmbedLinkRoutes } from '../modules/embed/embed.routes.js';
+import { registerEmbedTools } from '../modules/embed/embed.tools.js';
+import { createMcpAppRoutes } from '../modules/embed/mcp-app.routes.js';
+import { isSandboxReachableOrigin } from '../modules/embed/mcp-app.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -79,6 +91,11 @@ type ExpressApp = ReturnType<typeof express>;
  * The context handed to {@link ServerExtensions.tools}: everything an overlay
  * needs to register its own tool defs + endpoint routes on the unified tool
  * surface, exactly like the core modules do.
+ *
+ * A tool that works on a branch declares it on its `toolDef` (`branch:
+ * 'required'` or, read-only tools only, `'defaults-to-default-branch'`), and
+ * `toolHandler` resolves the branch before the tool runs — see "The branch"
+ * in `modules/tool-helpers/index.ts`.
  */
 export interface ToolSurfaceCtx {
   registry: CoreServices['toolRegistry'];
@@ -200,8 +217,23 @@ export async function createCoreServer(
   // is mounted again below, once the body is parsed and once the caller is
   // known (see the two mounts under `/api/workspace/:id`).
   app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
+  // The read-only gate, ahead of every route — core's, the tool surface's
+  // and an overlay's alike — so a read-only deployment refuses a change
+  // wherever it would enter. It lets through what signs people in, manages
+  // accounts and configures the deployment (see `ALWAYS_WRITABLE`); write
+  // tools are judged by the tool layer. A no-op unless a host fills
+  // `ports.writeAccess`. Ahead of the body parser too: a refused write is
+  // refused with its own 403, never parsed first (and answered 400 or 413).
+  app.use(createWriteGateMiddleware(core.writeAccess));
   app.use((req, res, next) => {
-    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
+    // The agent upload route is exempt for the same reason `/api/sync` is:
+    // whoever needs the EXACT bytes has to see them before any parser can
+    // drain the stream. `curl --data-binary @file.zip` with a JSON
+    // content-type is a request an agent can make, and the parser would
+    // otherwise leave the handler nothing to store.
+    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path) || isAgentUploadRawBodyPath(req.path)) {
+      return next();
+    }
     return globalJson(req, res, next);
   });
 
@@ -435,18 +467,59 @@ export async function createCoreServer(
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  // `delete_branch` sees change requests as `get_change_request` does.
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee);
+  // The five read tools over change requests. Separate from the workflow tools
+  // because they are the only ones that gate their whole payload on the
+  // caller's read access, so they take the access service and nothing else.
+  registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore);
+  // `open_page` — the knowledge-base page shown inside a chat. Registered
+  // here, on the same router as the file tools, because it answers with
+  // `read_file`'s own read: the read hook, the access gate and the
+  // not-found refusal come from that registration rather than from a copy.
+  registerEmbedTools(core.toolRegistry, toolsRouter, ta, th, {
+    embedService: core.embedService,
+    kb: core.kb,
+    readForTool: workspaceTools.readForTool,
+    // A host's https sandbox cannot load from a plain-http deployment, so
+    // the tool answers the text and the app address and says so.
+    canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
+    appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+    // The read is `read_file`'s, so the notes a deployment registers for the
+    // gated tools reach this one as well.
+    notes: agentAccessGate.notes,
+  });
+  // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
+  // a host to this deployment over HTTP and has no other way to learn which
+  // tools carry a view. Same router, same `manualAuth` as `all-tools`.
+  toolsRouter.use(createMcpAppRoutes(core.mcpAppService, core.manualAuthMiddleware));
+  // The guide on its own, beside the file tools that serve it by name.
+  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
+  // The agent upload route, on the same router as the tool endpoints so it
+  // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
+  // whole credential is the single-use token in its path, which is the point
+  // (an agent's `curl` carries no session and no connection key). It resolves
+  // no workspace and writes into none; every access, platform-file and branch
+  // rule is applied later by `apply_file_upload`.
+  toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
+  // Its outgoing twin, mounted the same way and for the same reason: the
+  // one-time link is the whole credential an agent's `curl` carries. Every
+  // file behind it was judged when `request_file_download` issued it.
+  toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
-  registerPluginsTools(core.toolRegistry);
+  registerPluginsTools(core.toolRegistry, core.kb);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
     kb: core.kb,
+    // What the proxy's schema check found when each server's tools were last
+    // loaded — reported to a caller who may write the tool, nobody else.
+    hiddenTools: core.mcpService.hiddenTools,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({
@@ -480,7 +553,7 @@ export async function createCoreServer(
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
   // External agent access card. Same `manualAuth`, same router, as `all-tools`.
-  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble));
+  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble, () => core.kb.layout));
   // The fingerprint of the caller's released catalog. The local `hexis-mcp`
   // server polls it to learn that a manual or a skill changed under a
   // connection it cannot be pushed to; nothing else consults it. Same
@@ -490,6 +563,9 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: core.mcpAppService,
   }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
@@ -516,6 +592,12 @@ export async function createCoreServer(
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
+  // The embed surface, ahead of every JWT mount and of the static
+  // catch-all: its data routes authenticate by the embed token ALONE (a
+  // session reaching them must be refused, not honoured), and the two SPA
+  // routes need their framing headers stamped before `index.html` is served.
+  app.use(createEmbedRoutes(core.embedService));
+
   ext.postTools?.(app, core);
 
   // The plugin creation doors — `POST /api/plugins`, `POST /api/plugins/personal`
@@ -545,6 +627,7 @@ export async function createCoreServer(
   // request also gets the resolved form judged — a link in the repository that
   // points into the git folder — before any read gate or lock.
   app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
+  app.use('/api', core.authMiddleware, createWriteAccessRoutes(core.writeAccess));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
@@ -782,6 +865,12 @@ export async function createCoreServer(
   }));
 
   // JWT-protected overlay routes.
+  // Linking an outside account to the signed-in user, and managing those
+  // links. Under the JWT middleware, deliberately: the link acts AS the
+  // session, which is exactly why the page it is called from refuses every
+  // framing ancestor.
+  app.use('/api', core.authMiddleware, createEmbedLinkRoutes(core.embedService));
+
   ext.authed?.(app, core);
 
   // In production, serve the frontend static build

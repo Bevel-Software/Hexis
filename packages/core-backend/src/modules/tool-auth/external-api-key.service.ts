@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('external-api-key');
-import { and, asc, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
@@ -97,6 +97,19 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return resolved ? resolved.user : null;
   }
 
+  async isKeyOfSwitchedOffAccount(plaintext: string): Promise<boolean> {
+    if (!this.looksLikeExternalApiKey(plaintext)) return false;
+    // The same key `verifyAndLoadToken` would accept (known, not revoked),
+    // but on an account that is off.
+    const [row] = await this.db
+      .select({ id: externalApiKeys.id })
+      .from(externalApiKeys)
+      .innerJoin(users, eq(externalApiKeys.userId, users.id))
+      .where(and(eq(externalApiKeys.tokenHash, hashToken(plaintext)), isNull(externalApiKeys.revokedAt), isNotNull(users.deactivatedAt)))
+      .limit(1);
+    return row !== undefined;
+  }
+
   async verifyAndLoadToken(
     plaintext: string,
   ): Promise<{ tokenId: string; user: AuthUser } | null> {
@@ -108,7 +121,9 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // Join users so a single round-trip resolves both "token is valid" and
     // "load the user it belongs to". The unique index on token_hash makes
     // this a point-lookup. `isNull(revokedAt)` is what enforces revocation
-    // — the row remains for audit.
+    // — the row remains for audit — and `isNull(deactivatedAt)` is what
+    // stops a switched-off account's keys without revoking them, so
+    // switching it back on restores them.
     const [row] = await this.db
       .select({
         tokenId: externalApiKeys.id,
@@ -119,7 +134,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       })
       .from(externalApiKeys)
       .innerJoin(users, eq(externalApiKeys.userId, users.id))
-      .where(and(eq(externalApiKeys.tokenHash, tokenHash), isNull(externalApiKeys.revokedAt)))
+      .where(and(eq(externalApiKeys.tokenHash, tokenHash), isNull(externalApiKeys.revokedAt), isNull(users.deactivatedAt)))
       .limit(1);
 
     if (!row) return null;
@@ -167,6 +182,11 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // Owner joined in so the admin overview is one round-trip; ordered by
     // owner email so per-account grouping is a linear pass, newest key
     // first within an account (same order the owner sees on their own page).
+    // The email half of that order is applied in-process: the column is
+    // ciphertext in the database, where ORDER BY would sort by IV noise. The
+    // sort is stable, so the database's newest-first survives within an owner.
+    // By code unit, not by locale: a collation can call two different
+    // addresses equal, and equal here means "the same owner's group".
     const rows = await this.db
       .select({
         key: externalApiKeys,
@@ -176,7 +196,8 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       })
       .from(externalApiKeys)
       .innerJoin(users, eq(externalApiKeys.userId, users.id))
-      .orderBy(asc(users.email), desc(externalApiKeys.createdAt));
+      .orderBy(desc(externalApiKeys.createdAt));
+    rows.sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0));
     return rows.map((row) => ({
       ...toSummary(row.key),
       user: { id: row.userId, email: row.email, name: row.name },

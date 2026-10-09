@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Presentation } from 'lucide-react';
-import { useRendererWorkspaceId } from './rendererWorkspace';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
+import { useRendererRawRead } from './rendererRawRead';
 import { DownloadFileButton } from './DownloadFileButton';
 import { extractPptxOutline, type PptxSlide } from './pptxOutline';
 import { readBodyCapped } from './readBodyCapped';
@@ -48,14 +48,23 @@ const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
 const MAX_LINES_PER_SLIDE = 500;
 
 export function PptxRenderer({ filePath }: FileRendererProps) {
-  const workspaceId = useRendererWorkspaceId();
+  /**
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
+   */
+  const rawRead = useRendererRawRead();
+  const { attempt, retry } = useReadRetry();
   const [slides, setSlides] = useState<PptxSlide[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setSlides(null);
     setError(null);
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     // `cancelled` only stops this effect from PUBLISHING; the request itself
@@ -64,10 +73,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
     const abort = new AbortController();
     (async () => {
       try {
-        const res = await authFetch(
-          rawFileUrl(workspaceId, filePath),
-          { signal: abort.signal },
-        );
+        const res = await rawRead.fetch(filePath, { signal: abort.signal });
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load presentation (HTTP ${res.status})`);
@@ -97,13 +103,16 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
       cancelled = true;
       abort.abort();
     };
-  }, [workspaceId, filePath]);
+  }, [rawRead, filePath, attempt]);
 
   if (error) {
     return (
       <div className="flex min-h-40 flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-ui text-danger">{error}</p>
-        <DownloadFileButton filePath={filePath} />
+        <p role="alert" className="text-ui text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          <RetryReadButton onRetry={retry} />
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }

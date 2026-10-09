@@ -49,6 +49,8 @@ interface Harness {
   server: Server;
   baseUrl: string;
   canDownload: ReturnType<typeof vi.fn>;
+  canReadBatch: ReturnType<typeof vi.fn>;
+  canDownloadBatch: ReturnType<typeof vi.fn>;
   canWrite: ReturnType<typeof vi.fn>;
   createFolderZip: ReturnType<typeof vi.fn>;
 }
@@ -70,14 +72,21 @@ async function makeHarness(opts: {
     return opts.canDownload;
   });
   const canWrite = vi.fn();
+  // The /file/raw route now read-gates before the download gate; these tests
+  // exercise the download verb, so reads pass.
+  const canReadBatch = vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])));
+  // Every entry of a folder is judged for download too; by default each gets
+  // the folder's own verdict.
+  const canDownloadBatch = vi.fn(async (_w: string, _e: string, paths: string[]) =>
+    new Map(paths.map((p) => [p, opts.canDownload])),
+  );
   const accessControl: IAccessControl = {
     canWrite,
     canWriteBatch: vi.fn(),
-    // The /file/raw route now read-gates before the download gate; these tests
-    // exercise the download verb, so reads pass.
     canRead: vi.fn(async () => true),
-    canReadBatch: vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true]))),
+    canReadBatch,
     canDownload,
+    canDownloadBatch,
     eligibleWriters: vi.fn(),
     eligibleWriterEmails: vi.fn(),
     invalidate: vi.fn(),
@@ -109,6 +118,8 @@ async function makeHarness(opts: {
       return { userId: USER_ID, email: USER.email };
     }) as unknown as AuthService['verifyToken'],
   };
+  // A session is accepted only for an account that is on; this one is.
+  authServiceMock.resolveSession = vi.fn(async (token: string) => authServiceMock.verifyToken!(token));
   const authService = authServiceMock as AuthService;
 
   const workflowService = {} as unknown as IWorkflowService;
@@ -150,7 +161,7 @@ async function makeHarness(opts: {
     throw new Error(`Unexpected server.address() shape: ${JSON.stringify(addr)}`);
   }
   const port = (addr as AddressInfo).port;
-  return { server, baseUrl: `http://127.0.0.1:${port}`, canDownload, canWrite, createFolderZip };
+  return { server, baseUrl: `http://127.0.0.1:${port}`, canDownload, canReadBatch, canDownloadBatch, canWrite, createFolderZip };
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -336,6 +347,8 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/zip');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    // The archive holds one caller's verdicts, so a shared cache never keeps it.
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
     const dispo = res.headers.get('content-disposition');
     expect(dispo).toBeTruthy();
     expect(dispo).toContain('attachment');
@@ -347,7 +360,43 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     // verb is resolved on its repo-relative form, and the service is handed the
     // repository path it was judged as.
     expect(h.canDownload).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, 'Knowledge/Sales');
-    expect(h.createFolderZip).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/Knowledge/Sales`);
+    expect(h.createFolderZip.mock.calls[0]!.slice(0, 2)).toEqual([WORKSPACE_ID, `${KB}/Knowledge/Sales`]);
+  });
+
+  it('judges every file the zip would pack: unreadable ones and undownloadable ones are left out', async () => {
+    h = await makeHarness({ canDownload: true });
+    // What the service finds under the folder; the route's filter decides.
+    const found = ['Knowledge/Sales/open.md', 'Knowledge/Sales/hidden.md', 'Knowledge/Sales/no-save.md'];
+    h.canReadBatch.mockImplementation(async (_w: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, p !== 'Knowledge/Sales/hidden.md'])),
+    );
+    h.canDownloadBatch.mockImplementation(async (_w: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, p !== 'Knowledge/Sales/no-save.md'])),
+    );
+    let packed: ReadonlySet<string> | null = null;
+    h.createFolderZip.mockImplementation(
+      async (_id: string, _p: string, include: (paths: string[]) => Promise<ReadonlySet<string>>) => {
+        packed = await include(found);
+        return ZIP_BYTES;
+      },
+    );
+
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/folder/zip?path=${encodeURIComponent('Knowledge/Sales')}&download=1`,
+    );
+
+    expect(res.status).toBe(200);
+    expect([...packed!]).toEqual(['Knowledge/Sales/open.md']);
+    // Read first, then download on what is readable: a file the caller may
+    // not see is never asked about for download, so nothing about it is
+    // computed or counted.
+    expect(h.canReadBatch).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, found);
+    expect(h.canDownloadBatch).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, [
+      'Knowledge/Sales/open.md',
+      'Knowledge/Sales/no-save.md',
+    ]);
+    // The count covers the readable file left out, not the hidden one.
+    expect(res.headers.get('x-withheld-files')).toBe('1');
   });
 
   it('user without Download role gets 403 and no zip is built', async () => {

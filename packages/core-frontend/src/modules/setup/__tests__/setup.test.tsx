@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const api = vi.hoisted(() => ({
@@ -27,7 +27,6 @@ const facade = vi.hoisted(() => ({
 }));
 vi.mock('../../settings/services/github-facade.api', () => facade);
 
-import { agentsFilePointerSentence } from '@bevel-software/platform-shared';
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
 import { KbInitFailed, SettingsProblems, type SettingStatus } from '../services/setup.api';
@@ -42,8 +41,6 @@ const SETTINGS: SettingStatus[] = [
   { key: 'knowledgeBaseDir', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'skillsDir', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'pluginsDir', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'agentsFile', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'agentsFileLink', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: false },
@@ -368,6 +365,47 @@ describe('SetupScreen', () => {
    * putting the stored value back changes nothing — the save must not be held
    * behind a repository test for an edit that no longer exists.
    */
+  /**
+   * The leftover-branch cleanup is an on/off setting: a checkbox, ticked while
+   * unset (the server's default is on), saved as `true` / `false`.
+   */
+  it('settings mode: the leftover-branch cleanup is a checkbox, on by default, saved as false when cleared', async () => {
+    const stored = [
+      ...SETTINGS.map((s) =>
+        s.key === 'kbRepoUrl'
+          ? { ...s, source: 'stored' as const, value: 'https://example.com/kb.git', configured: true }
+          : s.key === 'defaultBranch' || s.key === 'protectedBranches'
+            ? { ...s, source: 'stored' as const, value: 'main', configured: true }
+            : s,
+      ),
+      {
+        key: 'retireMergedBranches',
+        envVar: 'RETIRE_MERGED_BRANCHES',
+        section: KB,
+        source: 'unset' as const,
+        value: '',
+        configured: false,
+        secret: false,
+        restartToApply: false,
+      },
+    ];
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" />);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: stored });
+
+    // It sits under Advanced, closed by default: opened first, as a person would.
+    const advanced = screen.getByText(/^Advanced/, { selector: 'summary' });
+    await userEvent.click(advanced);
+    expect(advanced.closest('details')).toHaveAttribute('open');
+    const box = screen.getByRole('checkbox', { name: 'Remove branches left over from merged change requests' });
+    expect(box).toBeChecked();
+    await userEvent.click(box);
+    expect(box).not.toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ retireMergedBranches: 'false' }));
+  });
+
   it('settings mode: a field restored to its stored value does not gate the save', async () => {
     const stored = SETTINGS.map((s) =>
       s.key === 'kbRepoUrl'
@@ -1278,73 +1316,19 @@ describe('SetupScreen — sync panel when the whole knowledge base is env-set', 
 });
 
 /**
- * The agent guide's file name, and the one thing that rides with it: the
- * sentence the platform would add to the customer's own `AGENTS.md`, and the
- * consent to keep it there.
+ * The agent guide is served by the platform, not written to the repository,
+ * so there is no file name to choose: the field that let an admin rename the
+ * written guide is gone from both screens.
  */
-describe('SetupScreen — the agent guide file', () => {
-  async function renderScreen(variant: 'setup' | 'settings' = 'setup') {
+describe('SetupScreen — the agent guide', () => {
+  it('offers no guide file name, on first run or on the Deployment settings page', async () => {
     api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
-    if (variant === 'settings') {
-      render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
-      return;
-    }
     render(<SetupGate>{APP}</SetupGate>);
     await screen.findByRole('heading', { name: /Set up this deployment/ });
-  }
-
-  it('offers the field on first run, beside the three folder names', async () => {
-    await renderScreen();
-    expect(screen.getByLabelText('Agent guide file')).toHaveValue('');
-    // Not tucked under Advanced, for the same reason the folders are not: a
-    // repository that already has an AGENTS.md loses it unless this is
-    // answered before the first boot.
     expect(screen.getByLabelText('Knowledge folder')).toBeInTheDocument();
-  });
-
-  it('offers it on the Deployment settings page too', async () => {
-    await renderScreen('settings');
-    expect(screen.getByLabelText('Agent guide file')).toBeInTheDocument();
-  });
-
-  it('shows nothing about a pointer while the guide is still AGENTS.md', async () => {
-    await renderScreen('settings');
-    expect(screen.queryByTestId('agents-file-link')).toBeNull();
-    await userEvent.type(screen.getByLabelText('Agent guide file'), 'AGENTS.md');
-    expect(screen.queryByTestId('agents-file-link')).toBeNull();
-  });
-
-  it('shows the exact sentence and a ticked box once the name differs', async () => {
-    await renderScreen('settings');
-    await userEvent.type(screen.getByLabelText('Agent guide file'), 'HEXIS.md');
-    const panel = within(screen.getByTestId('agents-file-link'));
-    // On by default — a renamed guide nothing points at is a guide no coding
-    // agent will find.
-    expect(panel.getByRole('checkbox')).toBeChecked();
-    // The sentence itself, from the same helper the server appends with.
-    expect(panel.getByText(agentsFilePointerSentence('HEXIS.md'))).toBeInTheDocument();
-  });
-
-  it('saves the name and the consent the admin actually gave', async () => {
-    api.saveSettings.mockResolvedValue({ restartRequired: true, complete: false, settings: SETTINGS });
+    expect(screen.queryByLabelText('Agent guide file')).toBeNull();
+    cleanup();
     render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
-    await userEvent.type(screen.getByLabelText('Agent guide file'), 'HEXIS.md');
-    await userEvent.click(within(screen.getByTestId('agents-file-link')).getByRole('checkbox'));
-    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
-    await waitFor(() =>
-      expect(api.saveSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ agentsFile: 'HEXIS.md', agentsFileLink: 'false' }),
-      ),
-    );
-  });
-
-  it('shows the server\'s rule against a name it refused', async () => {
-    api.saveSettings.mockRejectedValue(
-      new SettingsProblems({ agentsFile: 'The name must end in .md.' }),
-    );
-    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
-    await userEvent.type(screen.getByLabelText('Agent guide file'), 'HEXIS.txt');
-    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
-    expect(await screen.findByText('The name must end in .md.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Agent guide file')).toBeNull();
   });
 });

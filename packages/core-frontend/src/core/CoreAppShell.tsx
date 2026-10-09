@@ -23,6 +23,7 @@ import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBind
 import { ChangeRequestStaleBinder } from '../modules/workflow/state/ChangeRequestStaleBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
+import { ReadOnlyBanner } from '../modules/layout/components/ReadOnlyBanner';
 import { FileExplorer } from '../modules/workspace/components/FileExplorer';
 import { FileViewer } from '../modules/workspace/components/FileViewer';
 import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
@@ -53,6 +54,7 @@ import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
 import { PullRequestsForMe } from '../modules/git/components/PullRequestsForMe';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
+import { ChangeRequestLink } from '../modules/change-requests/components/ChangeRequestLink';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
 import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
@@ -66,12 +68,17 @@ import {
   useAppRegistry,
   type AppDef,
   type AppRegistry,
+  type RouteDef,
   type BannerDef,
   type CrCreationInput,
   type CrCreationPort,
   type PaneDef,
 } from './registry';
+import { withCoreModuleContributions } from './core-contributions';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
+import { EmbedView } from '../modules/embed/components/EmbedView';
+import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
+import { ConfirmProvider } from '../shared/components';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
@@ -175,6 +182,7 @@ function AuthenticatedAppInner() {
 // and its onboarding-import banner after these.
 const CORE_BANNERS: BannerDef[] = [
   { id: 'demo', order: 20, node: <DemoBanner /> },
+  { id: 'read-only', order: 25, node: <ReadOnlyBanner /> },
   { id: 'roles-corrupted', order: 30, node: <RolesCorruptedBanner /> },
 ];
 
@@ -189,6 +197,18 @@ const CORE_PANES: PaneDef[] = [
   // the shared store owns whether it is showing.
   { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
   { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },
+];
+
+/**
+ * The two pages that are not part of the app: the embed a chat host frames,
+ * and the account-link page it sends an unlinked viewer to. Routes rather
+ * than apps — neither has a place in the switcher, neither sits inside the
+ * three-pane shell, and neither goes through the session gate (see the
+ * comment at the `<Routes>` block below).
+ */
+const CORE_TOP_LEVEL_ROUTES: RouteDef[] = [
+  { path: '/embed', element: <EmbedView /> },
+  { path: '/embed/link', element: <EmbedLinkPage /> },
 ];
 
 /**
@@ -451,6 +471,14 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           and redirect targets, not settings destinations. */}
       <Route path="/" element={<RootLanding />} />
       <Route path="/auth/*" element={<RootLanding />} />
+      {/* The address every change-request link carries (the backend's
+          change-request-link helper: `open_change_request`, the read tools,
+          every summary's `url`). It opens the request itself, in the
+          change-request view, over a quiet page; closing it goes to Knowledge.
+          Before this route existed the catch-all below swallowed the link.
+          OUTSIDE the settings layout and the apps, like `/connect`: a landing
+          target, not a destination with a nav row. */}
+      <Route path="/change-requests/:number" element={<ChangeRequestLink />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );
@@ -567,12 +595,13 @@ function AppShell() {
  */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // Core contributions merge ahead of registry-contributed ones: the core
-  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
-  // The review file-viewer panel is no longer registered here — see the note
-  // on `chrome` above.
+  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read,
+  // and core modules' own rows (see `withCoreModuleContributions`). The
+  // review file-viewer panel is no longer registered here — see the note on
+  // `chrome` above.
   const mergedRegistry = useMemo<AppRegistry>(
     () => ({
-      ...registry,
+      ...withCoreModuleContributions(registry),
       apps: [...CORE_APPS, ...registry.apps],
     }),
     [registry],
@@ -590,15 +619,32 @@ export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   return (
     <AppRegistryContext.Provider value={mergedRegistry}>
       <BrowserRouter>
-        {/* Sits above every route (including /embed) — backend downtime during
-            a redeploy affects them all equally. */}
-        <MaintenanceOverlay />
-        <Routes>
-          {registry.topLevelRoutes.map((r) => (
-            <Route key={r.path} path={r.path} element={r.element} />
-          ))}
-          <Route path="*" element={<AppShell />} />
-        </Routes>
+        {/* The app's own confirmation dialog, for every route: whatever asks
+            before acting asks through `useConfirm()`, never `window.confirm`,
+            which the browser can silence. Above the state hooks
+            (`useWorkspaceState` asks before closing an unsaved tab). */}
+        <ConfirmProvider>
+          {/* Sits above every route (including /embed) — backend downtime during
+              a redeploy affects them all equally. */}
+          <MaintenanceOverlay />
+          <Routes>
+            {/* The embed surface, OUTSIDE `AppShell` and its auth gate — like
+                the registry routes below, it owns its own auth story. `/embed`
+                authenticates by the embed token in its query and by nothing
+                else (there is no session inside a host's frame);
+                `/embed/link` is the one page that DOES act under a session,
+                which is why the server refuses to let any site frame it.
+                Core's first, so a deployment adds to the app rather than
+                having to re-register these. */}
+            {CORE_TOP_LEVEL_ROUTES.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
+            {registry.topLevelRoutes.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
+            <Route path="*" element={<AppShell />} />
+          </Routes>
+        </ConfirmProvider>
       </BrowserRouter>
     </AppRegistryContext.Provider>
   );

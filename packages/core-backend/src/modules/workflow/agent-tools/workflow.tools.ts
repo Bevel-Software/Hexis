@@ -1,14 +1,19 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
-import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
+import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { KbContext } from '../../../shared/kb-context.js';
-import { assertBranchProvided } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
+import {
+  CHANGE_REQUEST_INCLUDES,
+  CHANGE_REQUEST_PATH_LIMIT,
+  parseInclude,
+  summarizeChangeRequest,
+} from './change-request-summary.js';
 
 /** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
 function stripKbDir(path: string, kbDirName: string): string {
@@ -47,20 +52,31 @@ const commitSchema: JsonSchema = {
   required: ['authorName', 'authorEmail', 'sha', 'subject', 'committedAt'],
 };
 
-const changeRequestFileSchema: JsonSchema = {
+const changeRequestSummaryFileSchema: JsonSchema = {
   type: 'object',
   properties: {
     path: { type: 'string' },
-    previousPath: { type: 'string', description: 'Set for renames/copies.' },
-    status: { type: 'string', description: '`added` | `modified` | `removed` | `renamed` | `copied` | `changed` | `unchanged`.' },
-    additions: { type: 'integer' },
-    deletions: { type: 'integer' },
-    patch: { type: 'string', description: 'Unified diff; absent for binary or oversized files.' },
-    isBinary: { type: 'boolean' },
-    sha: { type: 'string', description: 'Blob SHA at the change-request head.' },
-    rawUrl: { type: 'string' },
+    change: { type: 'string', description: '`added` | `changed` | `deleted` | `moved`.' },
+    previousPath: { type: 'string', description: 'Where a `moved` file came from.' },
+    patch: {
+      type: 'string',
+      description: 'Unified diff. Only with `include: ["patches"]`, and absent for a binary or oversized file.',
+    },
   },
-  required: ['path', 'status', 'additions', 'deletions', 'isBinary', 'sha', 'rawUrl'],
+  required: ['path', 'change'],
+};
+
+const changeRequestApproversSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string' },
+    roles: { type: 'array', items: { type: 'string' }, description: 'Roles that confer approval here; `everyone` means any signed-in approver.' },
+    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly, by display name.' },
+    approved: { type: 'boolean', description: 'True once an eligible approver has approved at the current head.' },
+    inMergeGate: { type: 'boolean', description: 'False when the merge gate does not bind this path — then nobody has to approve it.' },
+    approversUnknown: { type: 'boolean', description: 'Present when the access tree could not be resolved: empty `roles`/`users` means unknown, not nobody.' },
+  },
+  required: ['path', 'roles', 'users', 'approved', 'inMergeGate'],
 };
 
 const commentSchema: JsonSchema = {
@@ -99,24 +115,43 @@ function linkOf(cr: { number: number; url: string; urlNote?: string }): { number
   return { number: cr.number, url: cr.url, ...(cr.urlNote ? { urlNote: cr.urlNote } : {}) };
 }
 
-const changeRequestDetailSchema: JsonSchema = {
+/**
+ * What `open_change_request` answers: a summary, `url` first, with no patch and
+ * no file content. The app's dialog reads the full detail from its own route;
+ * handing that to an agent cost ~445,000 characters for 27 files of 15 KB and
+ * overflowed every tool-result limit. Built by `summarizeChangeRequest`.
+ *
+ * Property order is the answer's field order, and `url` leads it: the link is
+ * the one field the agent must hand the user, so it must survive any truncation.
+ */
+const changeRequestSummarySchema: JsonSchema = {
   type: 'object',
-  description: 'Full change-request detail (aliased from the underlying pull request).',
   properties: {
-    number: { type: 'integer' },
     url: changeRequestUrlSchema,
     urlNote: changeRequestUrlNoteSchema,
+    number: { type: 'integer' },
     title: { type: 'string' },
-    body: { type: 'string' },
-    author: { type: 'object', properties: { login: { type: 'string' }, name: { type: 'string' } }, required: ['login'] },
-    headSha: { type: 'string' },
-    baseSha: { type: 'string' },
-    files: { type: 'array', items: changeRequestFileSchema },
-    comments: { type: 'array', items: commentSchema },
-    approvals: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Per-file approval state, one entry per file in `files`.' },
+    state: { type: 'string', description: '`open` | `merged` | `closed`.' },
+    sourceBranch: { type: 'string', description: 'The draft branch carrying the changes.' },
+    targetBranch: { type: 'string', description: 'The branch the changes apply to.' },
+    approvals: {
+      type: 'array',
+      items: changeRequestApproversSchema,
+      description: 'Who must approve, one entry per listed file. A file nobody can approve (`inMergeGate: false`) blocks nothing.',
+    },
+    mergeBlockedReasons: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'What blocks the merge — every missing approval, whether its file is listed or cut. Empty when nothing blocks.',
+    },
+    files: {
+      type: 'array',
+      items: changeRequestSummaryFileSchema,
+      description: `The changed paths with their kind of change, cut to ${CHANGE_REQUEST_PATH_LIMIT}; \`include: ["all-paths"]\` lists them all.`,
+    },
+    totalFiles: { type: 'integer', description: 'How many files the request changes in total, cut or not.' },
   },
-  required: ['number', 'url', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
-  additionalProperties: true,
+  required: ['url', 'number', 'title', 'state', 'sourceBranch', 'targetBranch', 'approvals', 'mergeBlockedReasons', 'files', 'totalFiles'],
 };
 
 /**
@@ -135,6 +170,12 @@ export function registerWorkflowTools(
   toolHandler: ToolHandlerFactory,
   /** The clone folder at the workspace root (`save_file` refuses a path outside it) and the branch model. */
   kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'protectedBranches'>,
+  /**
+   * Whether the caller may see change request `number` — `get_change_request`'s
+   * own gate (`changeRequestScope(...).maySee`). `delete_branch` neither names
+   * nor links a request it answers no for.
+   */
+  maySeeChangeRequest: (ctx: ToolContext, number: number) => Promise<boolean>,
 ): void {
   const { kbDirName } = kb;
   const mount = (spec: {
@@ -155,21 +196,24 @@ export function registerWorkflowTools(
      * out of the check while still demanding the input.
      */
     skipBranch?: boolean;
+    /** Arguments this tool's handler refuses by name itself (see `ToolDefSpec`). */
+    refusesItself?: string[];
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
-    const inputs = spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs);
-    // The tool's OWN declaration is the only honest answer to "must this call
-    // name a branch": the injected input and a hand-declared one (the fork
-    // base, the draft to switch to) are equally required, and a tool that adds
-    // or drops the input later moves this with it.
-    const requiresBranch = ((inputs as { required?: string[] }).required ?? []).includes('branch');
+    // Every workflow tool that takes a branch REQUIRES it — the injected input
+    // and a hand-declared one (the fork base, the draft to switch to) alike.
+    // A hand-declared one is required by its own schema, which `toolDef`
+    // reads as `required` too; the tool handler refuses a call without it.
     const def = toolDef({
       name: spec.name,
       description: spec.description,
       path,
-      inputs,
+      inputs: spec.inputs,
+      branch: spec.skipBranch ? undefined : 'required',
+      write: spec.write,
       outputs: spec.outputs,
+      refusesItself: spec.refusesItself,
       tags: spec.write ? ['workflow', 'write'] : ['workflow'],
     });
     registry.registerInternalTool(def);
@@ -187,24 +231,12 @@ export function registerWorkflowTools(
       // workspace path, and a path with no prefix is placed under
       // `<kbDirName>/` rather than refused.
       toolHandler(
-        (args, ctx) => {
-          // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
-          // they address a workspace by id rather than going through
-          // `getFilesystem`, so the choke point that guards the file tools
-          // never sees them. Without this, a branch-less `commit_change`
-          // commits to a workspace id literally named "undefined", and a
-          // branch-less `create_branch` forks from one: it clones a branch of
-          // that name, fails, and answers `There is no branch named undefined.`
-          //
-          // Keyed on whether the SCHEMA requires `branch`, not on whether the
-          // input was injected. `create_branch` and `switch_branch` declare
-          // their own required `branch`; a check keyed on the injection skipped
-          // exactly those two, which is how the reported bug survived on
-          // `create_branch` — the one tool whose `branch` is a branch the
-          // caller must already have.
-          if (requiresBranch) assertBranchProvided(args.branch);
-          return spec.handler(normalizePathArgs(args, kbDirName), ctx);
-        },
+        // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
+        // they address a workspace by id rather than going through
+        // `getFilesystem` — so the branch-less call the tool handler refuses
+        // before this runs would otherwise commit to, or fork from, a
+        // workspace literally named "undefined".
+        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx),
         { write: spec.write },
       ),
     );
@@ -347,6 +379,9 @@ export function registerWorkflowTools(
     // workspace-`branch` injection ("the branch you are currently working on"),
     // whose wording invites filling in the draft being created instead.
     skipBranch: true,
+    // The handler refuses a missing `name` with a message that says what the
+    // name is for (`name-required`); the generic check leaves it to that.
+    refusesItself: ['name'],
     inputs: {
       type: 'object',
       properties: {
@@ -399,6 +434,12 @@ export function registerWorkflowTools(
       'Open a change request from a draft branch into a target branch. Auto-merges the latest target ' +
       'into the source first, pushes, then creates the CR. On conflicts returns a ' +
       '`change-request-conflicts` error with affected paths. The author marker is injected server-side. ' +
+      'Answers a SUMMARY, not the request\'s content: `url` first (hand it to the user), then `number`, ' +
+      '`title`, `state`, `sourceBranch`, `targetBranch`, `approvals` (who must approve each file), ' +
+      '`mergeBlockedReasons` (what blocks the merge), and `files` — the changed paths with their kind of ' +
+      `change (\`added\` / \`changed\` / \`deleted\` / \`moved\`), cut to ${CHANGE_REQUEST_PATH_LIMIT} of \`totalFiles\`. ` +
+      'No patches and no file content: ask for the diffs with `include: ["patches"]` and for every path ' +
+      'with `include: ["all-paths"]`. ' +
       'An agent proposes; a person reviews and merges the request in the app — hand the user its `url`.',
     inputs: {
       type: 'object',
@@ -407,28 +448,37 @@ export function registerWorkflowTools(
         targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${kb.defaultBranch}').` },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'Short imperative title (≤256 chars).' },
         description: { type: 'string', description: 'Optional markdown body shown verbatim to reviewers.' },
+        include: {
+          type: 'array',
+          items: { type: 'string', enum: [...CHANGE_REQUEST_INCLUDES] },
+          description:
+            'Add to the default answer, which carries neither: `patches` gives each listed file its unified diff, ' +
+            `\`all-paths\` lists every changed path instead of the first ${CHANGE_REQUEST_PATH_LIMIT}. Both may be given. ` +
+            'Patches of a large request run to hundreds of thousands of characters — ask for them only when you will read them.',
+        },
       },
       required: ['sourceBranch', 'targetBranch', 'title'],
       additionalProperties: false,
     },
-    outputs: {
-      type: 'object',
-      properties: { changeRequest: changeRequestDetailSchema },
-      required: ['changeRequest'],
-    },
+    outputs: changeRequestSummarySchema,
     write: true,
     // The workspace this acts on is the SOURCE draft's — `sourceBranch` already
     // names it, so skip the auto-injected (and here redundant) `branch` input
     // rather than asking the model for both and reading the wrong one.
     skipBranch: true,
-    handler: async (args, ctx: ToolContext) => ({
-      changeRequest: await ctx.workflowService.openChangeRequest(workspaceIdForBranch(args.sourceBranch as string), ctx.user, {
-        sourceBranch: args.sourceBranch as string,
-        targetBranch: args.targetBranch as string,
-        title: args.title as string,
-        description: typeof args.description === 'string' ? args.description : undefined,
-      }),
-    }),
+    // The service still returns the full detail — the app's routes serve the
+    // same call and must keep getting it. The shaping happens here, in the
+    // answer, so nothing below the tool changes.
+    handler: async (args, ctx: ToolContext) =>
+      summarizeChangeRequest(
+        await ctx.workflowService.openChangeRequest(workspaceIdForBranch(args.sourceBranch as string), ctx.user, {
+          sourceBranch: args.sourceBranch as string,
+          targetBranch: args.targetBranch as string,
+          title: args.title as string,
+          description: typeof args.description === 'string' ? args.description : undefined,
+        }),
+        parseInclude(args.include),
+      ),
   });
 
   mount({
@@ -477,6 +527,14 @@ export function registerWorkflowTools(
       });
       if (!detail) {        throw new ToolError(`Change request #${number} not found.`, 404);
       }
+      // A comment anchors to a commit, and a DECLINED request has none to anchor
+      // to: nothing durable records what it proposed, so its detail carries no
+      // head (see `changeSourceFor`). Say that, rather than letting the service's
+      // `head sha is required` surface as a 400 about an argument the caller
+      // never passed. An APPLIED request still takes comments — its head is the
+      // source tip its merge commit recorded.
+      if (!detail.headSha) {        throw new ToolError(`Change request #${number} is ${detail.state} and has no commit to anchor a comment to.`, 409);
+      }
       const comment = await ctx.workflowService.postComment(
         number,
         ctx.user,
@@ -491,13 +549,16 @@ export function registerWorkflowTools(
     name: 'merge_branch',
     description:
       'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
-      'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
-      'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
+      'a person merges: this tool never lands a change request. It refuses while a change request from `source` ' +
+      'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
       'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
-      'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
-      'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths ' +
-      '(nothing is written; resolve them on `source` and merge again).',
+      'is always allowed, even with the draft\'s request open. ' +
+      'Writes are committed asynchronously; the merge first waits up to 20s for those on `source`. ' +
+      'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
+      'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
+      'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
+      'paths (nothing is written; resolve them on `source` and merge again).',
     // Names both branches itself; the merge runs in `target`'s workspace.
     skipBranch: true,
     inputs: {
@@ -514,11 +575,28 @@ export function registerWorkflowTools(
       properties: {
         outcome: {
           type: 'object',
-          description: 'Either a completed merge or a signal that conflicts must be resolved first.',
+          description:
+            'A completed merge, a merge with nothing to do, writes on `source` not committed yet ' +
+            '(writes are committed asynchronously and the merge waits up to 20 seconds for them), ' +
+            'or a signal that conflicts must be resolved first.',
           properties: {
-            kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
-            sha: { type: 'string', description: 'Present when `kind` is `merged` — the tip of `target` after the merge.' },
+            kind: { type: 'string', enum: ['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution'] },
+            sha: {
+              type: 'string',
+              description:
+                'Present when `kind` is `merged` (the merge commit, now the tip of `target`) or `nothing-to-merge` ' +
+                '(the unchanged tip of `target`, which already held everything on `source`).',
+            },
             conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
+            branch: { type: 'string', description: 'Present when `kind` is `pending-commits` — the branch whose writes are not committed yet.' },
+            pending: { type: 'integer', description: 'Present when `kind` is `pending-commits` — how many commits on that branch are still queued, plus those that failed when `needsAttention` is present.' },
+            needsAttention: {
+              type: 'string',
+              description:
+                'Present when `kind` is `pending-commits` and a queued commit failed: the worker\'s message. ' +
+                'Waiting will not help; tell the user.',
+            },
+            message: { type: 'string', description: 'Present when `kind` is `pending-commits` — what to do next.' },
           },
           required: ['kind'],
         },
@@ -533,6 +611,81 @@ export function registerWorkflowTools(
         throw new ToolError('`source` and `target` are required branch names.', 400);
       }
       return { outcome: await ctx.workflowService.mergeBranch(ctx.user, source, target) };
+    },
+  });
+
+  mount({
+    name: 'delete_branch',
+    description:
+      'Delete branch `name` from the shared repository and the server. Allowed for the ' +
+      'branch\'s author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
+      'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
+      '(retry once they land). An open change request from or into it that proposes nothing is closed and the ' +
+      'delete goes ahead; one that still proposes something refuses it, naming and linking it: its author ' +
+      'withdraws it or an Admin declines it, in the app (one you cannot see is not named, nor in a preview). ' +
+      'Refuses a branch holding commits that are not on the ' +
+      'default branch, saying how many; `discardUnmerged: true` deletes it anyway and reports them as ' +
+      '`discardedCommits`. Refuses if the shared repository is unreachable. Preview with ' +
+      '`dryRun: true`: it changes nothing and answers `exists`, `canDelete`, `refusals`, `unmergedCommits`, ' +
+      '`openChangeRequests` and `lastCommit`. A preview grants nothing; checks rerun on delete. ' +
+      'Answers the deleted branch\'s `lastCommit`.',
+    // Names its branch itself; the deletion runs in the default branch's workspace.
+    skipBranch: true,
+    refusesItself: ['name'],
+    inputs: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', minLength: 1, description: 'The branch to delete.' },
+        dryRun: { type: 'boolean', description: 'Report what deleting would do, and change nothing.' },
+        discardUnmerged: {
+          type: 'boolean',
+          description: 'Delete even though the branch holds commits that are not on the default branch. They are lost.',
+        },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['preview', 'deleted'] },
+        branch: { type: 'string' },
+        lastCommit: { type: ['string', 'null'], description: 'The branch\'s tip — what a restore starts from. Null in a preview of a branch that does not exist.' },
+        discardedCommits: { type: 'integer', description: 'When `kind` is `deleted`: commits not on the default branch that went with it.' },
+        exists: { type: 'boolean', description: 'When `kind` is `preview`.' },
+        canDelete: { type: 'boolean', description: 'When `kind` is `preview`: whether a delete asked for now would go through.' },
+        refusals: { type: 'array', items: { type: 'string' }, description: 'When `kind` is `preview`: why it would not.' },
+        unmergedCommits: { type: 'integer', description: 'When `kind` is `preview`: commits not on the default branch.' },
+        openChangeRequests: {
+          type: 'array',
+          description: 'When `kind` is `preview`: open change requests from (`source`) or into (`target`) the branch that you can see.',
+          items: {
+            type: 'object',
+            properties: {
+              number: { type: 'integer' },
+              end: { type: 'string', enum: ['source', 'target'] },
+              url: { type: 'string', description: 'Link to the request in the app.' },
+              proposesNothing: { type: 'boolean', description: 'True when the delete would close it rather than be refused by it.' },
+            },
+            required: ['number', 'end', 'url', 'proposesNothing'],
+          },
+        },
+      },
+      required: ['kind', 'branch', 'lastCommit'],
+    },
+    write: true,
+    handler: async (args, ctx: ToolContext) => {
+      const name = args.name;
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new ToolError('`name` is required: pass the name of the branch to delete.', 400, {
+          kind: 'name-required',
+        });
+      }
+      return ctx.workflowService.deleteBranchChecked(ctx.user, name, {
+        dryRun: args.dryRun === true,
+        discardUnmerged: args.discardUnmerged === true,
+        maySee: (number) => maySeeChangeRequest(ctx, number),
+      });
     },
   });
 

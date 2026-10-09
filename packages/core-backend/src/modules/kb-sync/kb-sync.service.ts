@@ -187,6 +187,12 @@ export class KbSyncService implements IKbSyncService {
     } catch (err) {
       log.warn('deleted-branch sweep failed:', { err });
     }
+    // Then the tidy-up boot runs too: empty open requests closed, leftover
+    // branches of merged requests removed. Detached: it can take a while on a
+    // large repository, and the sync (often a webhook with a short timeout)
+    // must not wait on it. It never throws; the catch is for a mock or a
+    // future change that does.
+    void this.workflow.tidyAfterSweep().catch((err: unknown) => log.warn('post-sync tidy-up failed:', { err }));
 
     const result: SyncResult = {
       status: KbSyncService.statusOf(results),

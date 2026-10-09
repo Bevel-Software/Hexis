@@ -1,5 +1,5 @@
 import type { AuthUser } from '../auth/types.js';
-import type { PullRequestFile } from './pr.types.js';
+import type { AppliedChangeRef, ChangedPathPair, PullRequestFile } from './pr.types.js';
 
 export interface BranchInfo {
   name: string;
@@ -107,13 +107,16 @@ export interface IGitService {
    * has the ref (the safety property the flag has always provided).
    * Protected branches and the currently-checked-out branch are always
    * rejected.
+   *
+   * Answers the tip the branch had (origin's when it had one), or null when
+   * there was none — what a restore of the branch would start from.
    */
   deleteBranch(
     workspaceId: string,
     name: string,
     user: AuthUser,
     opts?: { onlyIfNoRemote?: boolean },
-  ): Promise<void>;
+  ): Promise<{ lastCommit: string | null }>;
   // `forkCurrentToDraft` removed: under the per-branch workspace model each
   // branch is its own workspace by construction, so the "carry uncommitted
   // edits onto a new draft" escape hatch can't fire. Use `createBranch` +
@@ -277,6 +280,81 @@ export interface IGitService {
     headBranch: string,
     opts?: { fetch?: boolean },
   ): Promise<string[]>;
+
+  /**
+   * `changedPathsForPr`'s answer AND the same diff left as rename-aware pairs,
+   * from ONE `git diff`.
+   *
+   * The flat list cannot pair a rename's two paths: git reports a rename under
+   * its new name, and `forAccessCheck` adds the old name to the same
+   * undifferentiated set. That union is enough to authorize a WRITE ("may they
+   * touch everything this lands?"), but not to decide a READ — a file renamed
+   * out of a folder the caller cannot open is readable under neither of its
+   * names, since the diff of a rename shows the old side's content, and
+   * deciding that needs to know which old path belongs to which new file. The
+   * change-request read tools gate their file lists on exactly this, and the
+   * list of requests must reach the same verdict as the detail of one.
+   */
+  changedPathsAndPairsForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts?: { fetch?: boolean },
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
+
+  /**
+   * The changed-file list an APPLIED change request landed, read from its merge
+   * commit against that commit's first parent.
+   *
+   * Its source branch is retired, so the branch pair the other two methods want
+   * no longer exists; what is left is the merge commit the row records. Its
+   * first parent is the target as it stood before the merge, so the two-dot diff
+   * between them is precisely what the request applied — and immutable, which
+   * the branch pair never was.
+   *
+   * The commit is VERIFIED to be that request's own, which is why the ref
+   * carries the number as well as the sha: a merge with nothing to merge used to
+   * record the target tip, and reading that commit's change would answer with
+   * another request's files. It must be in the clone, have a second parent, and
+   * carry a subject naming this request; anything else rejects with
+   * `WorkflowValidationError`, which every caller reads as "the file set could
+   * not be resolved" and answers fail-closed (no files, so author-only) rather
+   * than reaching for a fetch per request.
+   *
+   * No network, either way.
+   */
+  changedFilesOfAppliedChange(
+    workspaceId: string,
+    applied: AppliedChangeRef,
+    opts?: { patchCap?: number },
+  ): Promise<PullRequestFile[]>;
+
+  /**
+   * The same applied change as the two path views a change-request SUMMARY
+   * needs, out of one `git diff` — `changedPathsAndPairsForPr` for an applied
+   * request instead of a branch pair, with the same verification and the same
+   * no-network contract as {@link changedFilesOfAppliedChange}.
+   */
+  changedPathsAndPairsOfAppliedChange(
+    workspaceId: string,
+    applied: AppliedChangeRef,
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
+
+  /**
+   * The two commits an APPLIED change request spanned, recovered from its merge
+   * commit: the target before the merge (`^1`) and the source tip that was
+   * merged (`^2`).
+   *
+   * The head matters beyond being informative: an approval is called stale when
+   * the head it was given against is not the detail's `headSha`, so answering
+   * the merge commit there would report every approval a merged request ever
+   * collected as stale. Same verification, same no-network contract and the same
+   * `WorkflowValidationError` as {@link changedFilesOfAppliedChange}.
+   */
+  appliedChangeShas(
+    workspaceId: string,
+    applied: AppliedChangeRef,
+  ): Promise<{ baseSha: string; headSha: string }>;
 
   /**
    * A change request's fork point (merge base of the two resolved commits)

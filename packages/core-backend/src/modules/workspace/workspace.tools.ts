@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
+import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
-import { ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
+import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
 import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
 import {
   notifyAgentRead,
@@ -16,11 +17,18 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { assertBranchProvided } from '../../shared/domain-errors.js';
+import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { assertInsideRepo, assertRepoRootNameFreeArgs, normalizePathArgs } from '../kb-fs/repo-path.js';
+import {
+  assertInsideRepo,
+  assertRepoRootNameFree,
+  assertRepoRootNameFreeArgs,
+  isInsideRepo,
+  normalizePathArgs,
+  normalizeWorkspacePath,
+} from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
@@ -32,36 +40,60 @@ import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReaderRegistry, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
-  LEGACY_AGENTS_FILE,
   folderPlaceholderPath,
   isFolderPlaceholder,
   isPlatformFile,
   isPlatformFolder,
   platformFileCreationRefusal,
-  platformFileNames,
   platformFileRefusal,
+  platformFileUploadRefusal,
   platformFolderRefusal,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   entryExistsMessage,
   type ExistingEntryKind,
-  type KbLayout,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import {
+  AGENT_GUIDE_FILE,
+  isAgentGuidePath,
+  isManagedGuide,
+  withPlatformGuideAppended,
+  type AgentGuideReader,
+} from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import { planMoveLinks } from './move-links.js';
+import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
+import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
+import type { IAgentDownloadStore } from './agent-download.store.js';
+import { buildDownload } from './agent-download.builder.js';
+import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
+import {
+  isSymlinkZipEntry,
+  isZipNoiseEntry,
+  readZipEntry,
+  zipEntryName,
+  zipEntryNameRefusal,
+  zipEntrySegments,
+} from './zip-entry-rules.js';
 
 const log = logger('workspace-tools');
+
+/** Types that run scripts wherever they are opened, sent by `request_file_download` as plain bytes. */
+const ACTIVE_CONTENT_TYPES = new Set(['image/svg+xml', 'text/html', 'application/xhtml+xml']);
 
 /** The caller's verdict per access verb on one path. */
 interface AccessVerbs {
@@ -193,60 +225,26 @@ async function keepFolderOf(
   }
 }
 
-/**
- * Appended (centrally, in `mount`) to EVERY workspace tool description. The
- * platform's managed agent guide sits at the workspace root and documents the
- * conventions of that knowledge base; agents (ours and external) should consult
- * it before touching files. It rides on every entrypoint — reads (grep/
- * list_files/file_stat) included — because any of them can be a session's first
- * touch.
- *
- * `CLAUDE.md` is named as a fallback because knowledge bases seeded before the
- * rename still carry one, and the seeder never deletes a file it did not
- * expect. Naming both means an agent finds the conventions either way, instead
- * of reading none because it looked for the newer name and stopped.
- *
- * WHEN THE GUIDE HAS BEEN RENAMED the sentence names two files, ours first. The
- * second is the organisation's OWN `AGENTS.md`, which on such a deployment is
- * ordinary content the platform never touches — and which no harness reads for a
- * remote agent, because a remote agent has no checkout. Telling it to read both
- * is the only way the conventions the customer actually wrote reach the agent
- * working in their knowledge base. Under the default name the wording collapses
- * to the one file it has always named.
- *
- * A FUNCTION of the layout, called when a description is built: the name is a
- * deployment setting, and a module-scope string would snapshot the default.
- */
-function kbConventionsNote(layout: KbLayout): string {
-  const agentsFile = layout.agentsFile ?? LEGACY_AGENTS_FILE;
-  if (agentsFile === LEGACY_AGENTS_FILE) {
-    return ' Before your first read or change in a workspace, read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed — if either exists: it holds the author\'s conventions for this knowledge base, and you should follow them.';
-  }
-  return (
-    ` Before your first read or change in a workspace, read \`${agentsFile}\` at the KB root, then ` +
-    '`AGENTS.md` if it also exists (the organisation\'s own conventions) — or `CLAUDE.md` on a knowledge base seeded before it was renamed: together they hold the conventions for this knowledge base, and you should follow them.'
-  );
-}
-
-/** The platform files as a tool description lists them — the guide under its own name. */
-function platformFileList(layout: KbLayout): string {
-  return platformFileNames(layout)
-    .map((name) => `\`${name}\``)
-    .join(', ');
-}
-
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 
 const str = (description: string): JsonSchema => ({ type: 'string', description });
 
 /**
- * Where pictures go, on the two tools that write pages. An agent in core cannot
- * upload bytes yet (TODOS.md), but it can write the page with the link a person
- * will satisfy, and this sentence is what keeps every page it writes on the
- * README's convention: images beside the page, linked relatively.
+ * The upload route, named on every tool that takes content as a JSON string.
+ *
+ * ONE sentence, and the tools' own: it is what stops the three failures the
+ * route was built for. An agent landing 27 files read each one and typed it
+ * out again as a tool argument: a 37 KB write was truncated mid-answer, a page
+ * of regex backslashes failed to parse as a JSON parameter, and a PNG could not
+ * be sent at all. None of that is discoverable from a refusal — a truncated
+ * write reports success — so the tools that invite it name where the bytes
+ * should go instead, in the description itself, for a client that reads
+ * nothing else. WHY, and how the route is used, is one of the shared rules
+ * (`agent-instructions/shared-file-rules.ts`): said in full on three
+ * descriptions it took each of them past the length a client cuts at.
  */
-const IMAGE_CONVENTION_NOTE =
-  ' Images: keep them in an `assets/` folder next to the page that uses them and link them with a relative path, e.g. `![Approval screen](./assets/approval-screen.png)`; the page renders them inline.';
+const UPLOAD_ROUTE_NOTE =
+  ' Large, escape-heavy or binary content does not go through here: use `request_file_upload` + `apply_file_upload`.';
 
 /**
  * A path input that names the clone folder, and says what happens when it does
@@ -285,6 +283,9 @@ const RESERVED_ROOT_NAME_TARGETS: Readonly<Record<string, readonly string[]>> = 
   copy_file: ['dest'],
   move_file: ['dest'],
   unzip: ['destination'],
+  // The folder the upload lands in. Each of its own paths is checked again
+  // inside the handler — an archive chooses its entry names, not the caller.
+  apply_file_upload: ['destination'],
 };
 
 function asText(content: string | Buffer): string {
@@ -313,16 +314,6 @@ interface DocGrepState {
   skippedUncached: number;
 }
 
-/**
- * THE binary capability contract, stated once and appended (in `mount`) to
- * every file tool's description — which is also what `tools_info` returns.
- * The split it states is enforced by the reader registry: the text tools
- * refuse what their reader marks not `textEditable` (and binary content under
- * any name) with a `binary_not_writable` refusal; the byte tools never look.
- */
-export const CONTENT_RULE =
-  ' Content rule (the same on every file tool): read_file returns text for text files and extracted text for documents (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf, .eml/.msg); write_file, write_files and edit_file accept TEXT only — they refuse documents, images, archives and other binary files (legacy .doc/.ppt/.xls included) with kind `binary_not_writable`, naming the file\'s kind and the tool to use instead; copy_file, move_file, delete_file and unzip act on bytes of any kind; new binary content arrives through upload (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app). file_stat reports `contentMode` (`text` | `document` | `binary`) so you can decide before acting.';
-
 /** What a `binary_not_writable` refusal points to, in the order to try them. */
 const BINARY_USE_INSTEAD = ['upload', 'copy_file', 'move_file'] as const;
 
@@ -335,7 +326,7 @@ const BINARY_USE_INSTEAD = ['upload', 'copy_file', 'move_file'] as const;
 function binaryNotWritable(fileKind: FileKind, explanation: string): ToolError {
   return new ToolError(
     `${explanation} [binary_not_writable: this file's kind is ${fileKind}; write_file, write_files and edit_file accept text only. ` +
-      'Use upload for new bytes (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app), ' +
+      'Use upload for new bytes (`request_file_upload` + `apply_file_upload`, or Upload in the app), ' +
       'or copy_file / move_file to place bytes that are already in the workspace.]',
     415,
     { kind: 'binary_not_writable', fileKind, useInstead: [...BINARY_USE_INSTEAD] },
@@ -379,17 +370,17 @@ function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void 
  *
  * Costs one read of the existing file, and only for readers that ask the
  * question. A path with nothing at it is a CREATE: there is nothing to destroy.
- * Returns the bytes it read (so a caller that needs the content next —
- * `edit_file` — does not read the file a second time), or undefined when it
- * had no reason to read or nothing existed.
+ * For the tools that REPLACE a file without needing what it held (`write_file`,
+ * `write_files`); `edit_file` holds the bytes already and asks
+ * `assertBytesTextEditable` of each reading it takes.
  */
 async function assertNotBinaryOverwrite(
   readers: FileReaderRegistry,
   path: string,
   fs: { readFile(p: string): Promise<string | Buffer> },
-): Promise<Buffer | undefined> {
+): Promise<void> {
   const reader = readers.readerFor(path);
-  if (reader.editRefusalForExisting === undefined) return undefined;
+  if (reader.editRefusalForExisting === undefined) return;
   let existing: Buffer;
   try {
     existing = asBytes(await fs.readFile(path));
@@ -398,12 +389,21 @@ async function assertNotBinaryOverwrite(
     // FileNotFoundError carry the disk's absence codes). Any other failure —
     // permissions, I/O — means the existing content could not be inspected:
     // propagate it rather than let the write destroy bytes the gate never saw.
-    if (isAbsence(err)) return undefined; // nothing there yet
+    if (isAbsence(err)) return; // nothing there yet
     throw err;
   }
-  const refusal = reader.editRefusalForExisting(existing, path);
+  assertBytesTextEditable(readers, path, existing);
+}
+
+/**
+ * The same refusal, over bytes the caller already holds. Split out so a tool
+ * that reads the file more than once — `edit_file`, before the lock and again
+ * under it — judges EVERY reading with the one rule, and the bytes it replaces
+ * are always bytes this gate has seen.
+ */
+function assertBytesTextEditable(readers: FileReaderRegistry, path: string, existing: Buffer): void {
+  const refusal = readers.readerFor(path).editRefusalForExisting?.(existing, path) ?? null;
   if (refusal !== null) throw binaryNotWritable('binary', refusal);
-  return existing;
 }
 
 /** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
@@ -426,13 +426,6 @@ const WRITE_MODE_INPUT: JsonSchema = {
     'holds something; `overwrite` replaces what is there, and creates the file when there is nothing; `update` replaces an ' +
     'EXISTING file and refuses (`missing`) a path that holds nothing.',
 };
-
-/** The same three modes, said once, for both tool descriptions. */
-const WRITE_MODE_NOTE =
-  ' `mode` decides what may happen at a path and DEFAULTS TO `create`: `create` writes a new file and refuses a path that ' +
-  'already exists (`exists`, with the path — pass `mode: overwrite` to replace it), `overwrite` replaces what is there ' +
-  '(creating it if there is nothing), `update` replaces an existing file and refuses a path that does not exist (`missing`). ' +
-  'A refused path is left exactly as it was.';
 
 /** The refusal `create` gives on a path that already holds something. */
 function pathExists(path: string): ToolError {
@@ -463,6 +456,169 @@ function decideWrite(mode: WriteMode, path: string, exists: boolean): WriteOutco
   if (mode === 'update' && !exists) throw pathMissing(path);
   if (mode === 'update') return 'updated';
   return exists ? 'replaced' : 'created';
+}
+
+/**
+ * How many of an upload's paths the answer NAMES before it stops and says how
+ * many there were. A 300-file zip's full outcome list is pages of text an agent
+ * pays for on every call; 25 is enough to see the shape of what happened, and
+ * `total` plus `truncated` say that there is more. `all: true` asks for the
+ * rest, for a caller that really does have to read each one.
+ */
+const APPLY_ANSWER_CAP = 25;
+
+/**
+ * How many entries of one uploaded archive are landed, and how many bytes of
+ * uncompressed content in total.
+ *
+ * Tighter than `unzip`'s own caps on purpose. An apply lands its whole set as
+ * ONE commit, which means every entry's bytes are held in memory at once —
+ * the property that makes the commit atomic is the one that makes a zip bomb
+ * expensive. The upload itself is already bounded by the deployment's upload
+ * limit; these bound what that upload is allowed to expand into.
+ */
+const APPLY_MAX_ENTRIES = 5_000;
+const APPLY_MAX_TOTAL_BYTES = 128 * 1024 * 1024; // 128 MB uncompressed
+
+/**
+ * One path of an upload, as `apply_file_upload` plans it: the bytes to write,
+ * or the reason this path is refused before any gate is asked. A refused path
+ * carries the name the archive held rather than a workspace path, because for
+ * those the whole problem is that no workspace path can be built from it.
+ */
+interface PlannedUploadPath {
+  path: string;
+  content?: Buffer;
+  error?: string;
+  message?: string;
+}
+
+/**
+ * Turn a stored upload into one planned path per file.
+ *
+ * A single file is one path: the destination plus the name it was sent with.
+ * A zip is one path per member, with the member's folder structure kept under
+ * the destination — judged by the same entry rules `unzip` applies
+ * (`zip-entry-rules.ts`), plus one `unzip` does not have: an entry that is a
+ * symbolic LINK is refused outright. A zip stores a link as a member whose
+ * bytes are its target text, so a reader that ignored the mode bits would
+ * write that text out as a file — content nobody sent, under a name that was
+ * meant to point elsewhere.
+ */
+/** The refusal an entry gets when the archive would expand past what one commit lands. */
+function tooLargeToApply(): string {
+  return `This archive expands past the ${APPLY_MAX_TOTAL_BYTES} byte total the apply lands in one commit; this entry was not applied.`;
+}
+
+async function planUpload(
+  upload: ClaimedUpload,
+  destination: string,
+  kbDirName: string,
+): Promise<PlannedUploadPath[]> {
+  const bytes = await nodeFs.readFile(upload.absolutePath);
+  if (upload.kind !== 'zip') {
+    return [{ path: `${destination}/${upload.filename}`, content: bytes }];
+  }
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(bytes);
+  } catch (err) {
+    throw new ToolError(
+      `"${upload.filename}" could not be opened as a .zip archive: ${err instanceof Error ? err.message : String(err)}`,
+      422,
+      { code: 'unreadable_archive' },
+    );
+  }
+  const planned: PlannedUploadPath[] = [];
+  let seen = 0;
+  let totalBytes = 0;
+  for (const entry of zip.getEntries()) {
+    const rawName = zipEntryName(entry.entryName);
+    if (isZipNoiseEntry(rawName)) continue;
+    if (seen >= APPLY_MAX_ENTRIES) {
+      planned.push({
+        path: rawName || '(empty)',
+        error: 'too_many_entries',
+        message: `This archive holds more than ${APPLY_MAX_ENTRIES} entries; the rest were not applied.`,
+      });
+      continue;
+    }
+    seen++;
+    const nameRefusal = zipEntryNameRefusal(rawName);
+    if (nameRefusal !== null) {
+      planned.push({ path: rawName || '(empty)', error: 'invalid_entry', message: nameRefusal });
+      continue;
+    }
+    if (isSymlinkZipEntry(entry)) {
+      planned.push({
+        path: rawName,
+        error: 'link',
+        message: `"${rawName}" is a symbolic link, not a file; an upload lands files, never links.`,
+      });
+      continue;
+    }
+    // A folder comes into being with the files under it (the write path mkdirs
+    // each parent), so a directory member has nothing of its own to land.
+    if (entry.isDirectory) continue;
+    const segments = zipEntrySegments(rawName);
+    const target = [destination, ...segments].join('/');
+    // Belt and braces: `zipEntryNameRefusal` already refuses a `..` segment
+    // and a root-anchored name, so nothing should reach here that climbs out.
+    // The check stays because the cost of being wrong about that is bytes
+    // landing outside the folder the caller named.
+    if (!target.startsWith(`${destination}/`) || !isInsideRepo(target, kbDirName)) {
+      planned.push({ path: rawName, error: 'invalid_entry', message: 'Path escapes destination' });
+      continue;
+    }
+    // Through the one bounded reader `unzip` uses too, capped at what is left
+    // of the budget: a deflate stream can expand a thousandfold, and the
+    // header's declared size is the archive's claim, not a fact — an entry
+    // declaring ZERO would otherwise be inflated with no cap at all (see
+    // `readZipEntry`). A read that fails is this entry's outcome and no more.
+    const read = readZipEntry(entry, APPLY_MAX_TOTAL_BYTES - totalBytes);
+    if (!read.ok) {
+      planned.push(
+        read.reason === 'too_large'
+          ? { path: rawName, error: 'too_large', message: tooLargeToApply() }
+          : { path: rawName, error: 'unreadable_entry', message: `"${rawName}" could not be read: ${read.detail}.` },
+      );
+      continue;
+    }
+    totalBytes += read.data.byteLength;
+    planned.push({ path: target, content: read.data });
+  }
+  return planned;
+}
+
+/**
+ * Record on `entry` that this path was refused, saying what the gate that
+ * refused it said. Four kinds of refusal count as one path's outcome: a
+ * typed tool refusal (`exists`, `platform_file`, the mode gate), a permission
+ * refusal (the caller may not write this path, where the DESTINATION was
+ * writable), the git folder in any spelling, and a path-shape refusal from the
+ * repository rules. Anything else
+ * is not a verdict about this path — it is a gate failing — so it travels on
+ * and the whole apply fails loudly, exactly as it does in `write_files`.
+ */
+function refuseEntry(entry: Record<string, unknown>, err: unknown): void {
+  entry.outcome = 'refused';
+  if (err instanceof ToolError) {
+    const details = (err.details ?? {}) as { code?: string; kind?: string };
+    entry.error = details.code ?? details.kind ?? 'refused';
+    entry.message = err.message;
+    return;
+  }
+  if (err instanceof AccessDeniedError) {
+    entry.error = 'write-denied';
+    entry.message = err.message;
+    return;
+  }
+  if (err instanceof GitInternalsError || err instanceof WorkflowValidationError) {
+    entry.error = (err.payload as { kind?: string } | undefined)?.kind ?? 'refused';
+    entry.message = err.message;
+    return;
+  }
+  throw err;
 }
 
 /** The three modes, as a set the handler can check a raw argument against. */
@@ -591,6 +747,8 @@ async function grepWalk(
   gate: ReadGate,
   notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
+  /** A file the walk leaves to its caller: never opened, never counted against `max`. */
+  skip: (path: string) => boolean = () => false,
 ): Promise<void> {
   if (out.length >= max || depth > 12) return;
   let entries;
@@ -608,7 +766,9 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs);
+      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+    } else if (skip(p)) {
+      continue;
     } else {
       // Opening a file is a read of it, even when the walk started at a root
       // the read hook was already told about — so every file the walk opens
@@ -668,11 +828,38 @@ const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
  * the tools were built has to be written here rather than onto the shared
  * `SESSION_ID_INPUT` constant.
  */
-function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
+export function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
   const inputs = def.inputs as
     | { properties?: { body?: { properties?: Record<string, { description?: string }> } } }
     | undefined;
   return inputs?.properties?.body?.properties?.sessionId;
+}
+
+/**
+ * A read of ONE workspace file, exactly as `read_file` performs it: the read
+ * hook, the access gate, the not-found refusal and the per-extension reader,
+ * in that order. Rejects with the same `ToolError`s `read_file` rejects with.
+ *
+ * `offset`/`limit` and the `__tool_chain_spill__/…` ref are deliberately NOT
+ * here: they are `read_file`'s own arguments, not part of what reading a file
+ * means.
+ */
+export type ReadForTool = (
+  branch: string,
+  path: string,
+  ctx: ToolContext,
+) => Promise<ReadResult>;
+
+/**
+ * What the workspace tool registration hands back for another module to build
+ * on, rather than re-deriving.
+ *
+ * One member today, and it is the only kind of thing that belongs here: a
+ * behaviour the platform promises TWICE in the same words (`open_page`
+ * answers "the way `read_file` does") and must therefore implement once.
+ */
+export interface WorkspaceToolsPorts {
+  readForTool: ReadForTool;
 }
 
 /**
@@ -709,7 +896,31 @@ export function registerWorkspaceTools(
    * verdict alone then decides, which differs only at a root.
    */
   changeGate?: IChangeReadGate,
-): void {
+  /**
+   * The upload-token store behind `request_file_upload` / `apply_file_upload`
+   * — the route an agent lands bytes by, without their content passing
+   * through the model. Optional for the same reason the two above are: a tool
+   * harness that is about the file primitives need not stand one up. Every
+   * real composition wires it (`create-core-server.ts`), and without it the
+   * two tools are not mounted at all rather than mounted and broken.
+   */
+  uploads?: AgentUploadStore,
+  /**
+   * The platform's agent guide (see `modules/agent-guide`), which `read_file`
+   * and `file_stat` answer at the guide's name in the repository root — after
+   * the knowledge base's own file of that name, when it has one. Optional for
+   * the harnesses that are about the file primitives; without it the two
+   * tools read the disk and nothing else.
+   */
+  agentGuide?: AgentGuideReader,
+  /**
+   * The download-link store behind `request_file_download` — the way an agent
+   * takes files OUT without their content passing through the model. Optional
+   * for the harnesses about the file primitives; without it the tool is not
+   * mounted.
+   */
+  downloads?: IAgentDownloadStore,
+): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -877,6 +1088,128 @@ export function registerWorkspaceTools(
     return { read, write, download, owner };
   };
 
+  /** Whether any one of the caller's four verdicts differs between the two sides of a preview. */
+  const verbsDiffer = (before: AccessVerbs, after: AccessVerbs): boolean =>
+    (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
+
+  /**
+   * Why `copy_file` will not take a folder. One sentence, said by the dry
+   * run and by the call itself, so the preflight and the execution never
+   * disagree — the rule this whole section is built on.
+   */
+  const folderCopyRefusal = (src: string): string =>
+    `"${src}" is a folder; copy_file copies one file. Copy its files one by one, or move the folder with move_file.`;
+
+  /**
+   * The caller's verdicts at `dest` as they will be once `src` has been
+   * moved (or, with `sourceRemains`, copied) there — the `after` half of a
+   * move's or copy's preview.
+   *
+   * `accessAt(dest)` is the wrong answer to that question for a folder: the
+   * destination on disk has neither the folder nor the `access.md` files it
+   * carries, so it describes the destination's PARENT. A rename of a folder
+   * that names the caller owner in its own `access.md` therefore warned
+   * about losing owner access the move was about to hand straight back, and
+   * a warning that is wrong is a warning people learn to click through.
+   *
+   * Preview only, like everything else in this section: it answers what the
+   * caller WILL have, never whether they may do it. The write verdicts that
+   * gate the move are `writeBlocked` and the lock gate, both of which read
+   * the tree as it is.
+   */
+  const accessAfter = async (
+    branch: string,
+    ctx: ToolContext,
+    src: string,
+    dest: string,
+    opts?: { sourceRemains?: boolean },
+  ): Promise<AccessVerbs> => {
+    const from = toKbRelative(src, kbDirName);
+    const to = toKbRelative(dest, kbDirName);
+    // Outside the repository there are no rules to carry, and none to land
+    // among — the same answer `accessAt` gives for such a path.
+    if (from === null || to === null) return accessAt(branch, ctx, dest);
+    return accessControl.previewAccessAfterRelocation(
+      workspaceIdForBranch(branch),
+      ctx.user.email,
+      from,
+      to,
+      opts,
+    );
+  };
+
+  /**
+   * What `copy_file`'s dry run answers: the same impact shape `move_file`
+   * previews, over a copy's own rules.
+   *
+   * A copy LEAVES the source where it is, so the rules it carries are
+   * duplicated rather than relocated (`sourceRemains`) — otherwise the two
+   * previews ask the same question. The order of the refusals is `copy_file`'s
+   * own and is load-bearing: the write verdict on the destination outranks
+   * "that name is taken", because a caller who may not write a folder must
+   * not learn what is in it from a refusal.
+   *
+   * A folder source is reported as the refusal it is. `copy_file` copies one
+   * file; the preview says so rather than promising a copy that would fail,
+   * and still answers `access.after` for the folder it was asked about.
+   *
+   * NOTHING is probed on disk until the write verdict on the destination has
+   * been taken — not the destination, and not the source either, which is the
+   * order the call itself keeps at length: a caller who may not write there
+   * gets the same refusal whether the source is a file, a folder, or missing
+   * altogether. Probing the source first put a 404 in front of that 403 and
+   * handed a denied caller the source's kind and its file count. So a refused
+   * preview answers `allowed: false` with the sentence and no `kind` or
+   * `descendants`: those are the half of the impact the caller has to have
+   * earned. The two `access` sides are the caller's own four verbs and tell
+   * them nothing they could not ask `file_stat` for.
+   */
+  const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
+    const [before, after, blocked] = await Promise.all([
+      accessAt(branch, ctx, src),
+      accessAfter(branch, ctx, src, dest, { sourceRemains: true }),
+      writeBlocked(branch, ctx, [dest]),
+    ]);
+    const access = { before, after };
+    const accessChanges = verbsDiffer(before, after);
+    if (blocked.length > 0) {
+      return {
+        src,
+        dest,
+        access,
+        accessChanges,
+        allowed: false,
+        reason: `You may not write "${dest}", so the copy cannot run.`,
+        dryRun: true,
+        copied: false,
+      };
+    }
+    const fs = await ctx.getFilesystem(branch);
+    const kind = await kindOf(fs, src);
+    if (kind === null) throw notFound(src, 'Nothing to copy');
+    const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
+    const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
+    const reason = occupiedBy !== null
+      ? entryExistsMessage(occupiedBy, dest)
+      : kind === 'folder'
+        ? folderCopyRefusal(src)
+        : undefined;
+    return {
+      src,
+      dest,
+      kind,
+      // The placeholder travels with its folder, but it is never content —
+      // counted as `move_file` counts it.
+      descendants: srcFiles.filter((f) => !isFolderPlaceholder(f)).length,
+      access,
+      accessChanges,
+      allowed: reason === undefined,
+      ...(reason !== undefined ? { reason } : {}),
+      dryRun: true,
+      copied: false,
+    };
+  };
+
   /**
    * The paths among `paths` the caller may NOT write, judged exactly as the
    * lock gate judges them (`WorkflowService.acquireLock`): on a protected
@@ -953,6 +1286,24 @@ export function registerWorkspaceTools(
     if (norm === '' || norm === kbDirName) return platformFolderRefusal('');
     const rel = toKbRelative(norm, kbDirName);
     return rel !== null && isPlatformFolder(rel, kb.layout) ? platformFolderRefusal(rel) : undefined;
+  };
+
+  /**
+   * Why `delete_file` may not delete the FILE at `path` whoever asks, or
+   * undefined when the caller's write access decides. Narrower than
+   * {@link managedReason}: a nested `access.md` never moves, but whoever may
+   * write it may delete it — as in the app — and its folder then follows its
+   * parent's rules. The root's `access.md` and `roles.yaml` are deleted by
+   * nobody. Judged on the on-disk spelling, as `managedReason` is.
+   */
+  const fileDeleteRefusal = (path: string): string | undefined => {
+    const norm = path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
+    if (isGitMetadata(norm)) return managedReason(norm, 'file');
+    const rel = toKbRelative(norm, kbDirName);
+    if (rel === null || !isPlatformFile(rel, kb.layout)) return undefined;
+    if (isRepositoryOwnFile(rel, kb.layout)) return repositoryOwnFileDeleteRefusal(rel);
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    return name === 'access.md' ? undefined : `${name} is a platform file and cannot be deleted through the agent tools.`;
   };
 
   /** The workspace root on disk for `branch`. */
@@ -1193,6 +1544,12 @@ export function registerWorkspaceTools(
      */
     gated?: boolean;
     /**
+     * Refuse a read-only credential, as a write tool is refused, WITHOUT being
+     * a write: the read-only-deployment gate does not apply. For a read a
+     * read-only key may still not make (`request_file_download`).
+     */
+    writeScope?: boolean;
+    /**
      * This tool resolves `branch` ITSELF and must not be pre-checked here.
      * Only `execute_command` sets it: for an internal session that leaves the
      * argument off, it falls back to the caller's own focused branch (from its
@@ -1201,24 +1558,21 @@ export function registerWorkspaceTools(
      * handler. Every other tool takes the check below.
      */
     resolvesBranchItself?: boolean;
+    /** Arguments this tool refuses by name itself, with its own wording (see `ToolDefSpec.refusesItself`). */
+    refusesItself?: string[];
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
-    // Every workspace entrypoint carries the agent-guide reminder, every file
-    // tool the one content rule, and every tool a permission can refuse the
-    // proposal route — appended once here so no tool (especially the
-    // read-only ones a session hits first) can miss them.
-    // Whether a call to this tool MUST name a branch, read off the tool's own
-    // declaration rather than assumed of the family. Every tool mounted here
-    // requires `branch` today; keying on the schema means a tool that declares
-    // it optional (and resolves absence itself, as `list_tool_setup` does on its
-    // own route) is not handed a refusal it never asked for.
-    const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
+    // Every description ends with ONE sentence pointing at the rules these
+    // tools share — the content rule, the agent guide, the write modes, the
+    // dry-run protocol, the proposal route. They used to be appended here in
+    // FULL, which made a description several thousand characters of text the
+    // agent had already read on the tool above, and clients cut a long
+    // description from the END, where what is specific to the tool sits. The
+    // rules themselves are in the handshake instructions and in the managed
+    // guide (see `shared-file-rules.ts`), stated once and from one text.
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
-      (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
-      (spec.fileTool === false ? '' : CONTENT_RULE) +
-      kbConventionsNote(kb.layout) +
       (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');
     const def = toolDef({
       name: spec.name,
@@ -1226,8 +1580,14 @@ export function registerWorkspaceTools(
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
+      refusesItself: spec.refusesItself,
       tags: spec.write ? ['workspace', 'write'] : ['workspace'],
     });
+    // Every tool here declares `branch` required in its inputs, which is how
+    // `toolDef` records it: the tool handler refuses a branch-less call before
+    // the path work below and before any handler. Most of these tools would
+    // meet the same refusal one layer down at `getFilesystem`, but not all —
+    // `unzip` hands `branch` straight to the workspace service by id.
     registry.registerInternalTool(def);
     if (!spec.internalOnly) registry.registerExternalTool(def);
     /**
@@ -1276,16 +1636,6 @@ export function registerWorkspaceTools(
       // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
-          // FIRST, before the path work and before any handler: every tool
-          // mounted here declares `branch` as a required, non-empty string, and
-          // nothing enforced that, so a call that named none was carried down
-          // until `workspaceIdForBranch` made a workspace directory out of the
-          // missing value. Most of these tools would meet the same refusal one
-          // layer down at `getFilesystem`, but not all of them do — `unzip`
-          // hands `branch` straight to the workspace service by id — so the
-          // check belongs on the mount every one of them shares rather than on
-          // the resolver only some of them reach.
-          if (requiresBranch && !spec.resolvesBranchItself) assertBranchProvided(args.branch);
           // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
           if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
           const normalized = normalizePathArgs(
@@ -1319,7 +1669,8 @@ export function registerWorkspaceTools(
             );
           }
         },
-        { write: spec.write },
+        // `execute_command` resolves its own branch (see `resolvesBranchItself`).
+        { write: spec.write, writeScope: spec.writeScope, ...(spec.resolvesBranchItself ? { branch: 'own' as const } : {}) },
       ),
     );
   };
@@ -1351,7 +1702,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work and only once per run — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -1381,11 +1732,52 @@ export function registerWorkspaceTools(
   );
 
   // ── reads ──────────────────────────────────────────────────────────────
+
+  /**
+   * What reading a workspace file ANSWERS, gate and all — `read_file`'s whole
+   * behaviour minus the spill ref and the `offset`/`limit` slice, which are
+   * that tool's own arguments.
+   *
+   * Factored out because a second tool has to answer the same way: `open_page`
+   * (see `modules/embed`) promises the file's text "the way `read_file` does",
+   * and the refusals `read_file` gives for a path the caller may not read or
+   * one that does not exist. Any of that re-derived there would be a second
+   * answer to a question with one correct answer — the access gate, the read
+   * hook, the extraction and the not-found message all have to match, and a
+   * copy drifts on the first change to any of them.
+   */
+  const readForTool: ReadForTool = async (branch, p, ctx) => {
+    // The guide's name at the repository root answers with the platform's
+    // guide, which is text the code owns and every agent may read: no gate
+    // and no read hook for it. A file the knowledge base keeps under that
+    // name is ITS OWN conventions page and is read as any file is — gated,
+    // noted — and comes first, with the guide after it. A copy of the
+    // guide an earlier release wrote to disk (still on a draft, say) is
+    // recognised by its header and not served a second time.
+    if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+      return { kind: 'text', text: await guideAt(branch, ctx, p) };
+    }
+    await notifyAgentRead(agentAccessGate, ctx, branch, p);
+    await assertCanRead(readGateFor(branch, ctx), p);
+    const fs = await ctx.getFilesystem(branch);
+    // Reading (extraction, image and binary handling included) happens AFTER
+    // the access gate and the read hook above — a document read is still a
+    // KB read. ONE registry dispatch picks the reader by extension.
+    const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
+    return readers.readerFor(p).read(bytes, p);
+  };
+
   mount({
     name: 'read_file',
     gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Email files (.eml/.msg) return their EXTRACTED text the same way: a `[from]`/`[to]`/`[subject]`/`[date]` header block, the body (plain-text part preferred; an HTML-only body is stripped to text), and an `[attachments]` name list — attachments are listed, never extracted. Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.',
+      'Read a workspace file as text. Returns `{ path, content }`. What comes back for a document, an email file, an image ' +
+      'or any other binary file is the content rule\'s business (see the shared rules): text files as text, documents and ' +
+      'email files as extracted text, an image as the picture itself, anything else as a one-line description. ' +
+      'Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored ' +
+      'for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. ' +
+      'It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: such a ref belongs to no ' +
+      'workspace, so `branch` is ignored for it.',
     inputs: {
       type: 'object',
       properties: {
@@ -1411,16 +1803,13 @@ export function registerWorkspaceTools(
       if (spillStore.isSpillRef(p)) {
         return { path: p, content: await spillStore.read(p, offset, limit) };
       }
-      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
-      await assertCanRead(readGateFor(a.branch as string, ctx), p);
-      const fs = await ctx.getFilesystem(a.branch as string);
-      // Reading (extraction, image and binary handling included) happens AFTER
-      // the access gate and the read hook above — a document read is still a
-      // KB read. ONE registry dispatch picks the reader by
-      // extension; everything below just maps its ReadResult onto the tool's
-      // result shape.
-      const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-      const result = await readers.readerFor(p).read(bytes, p);
+      const slice = (content: string): string => {
+        const start = offset && offset > 0 ? offset : 0;
+        return offset !== undefined || limit !== undefined
+          ? content.slice(start, limit !== undefined ? start + limit : undefined)
+          : content;
+      };
+      const result = await readForTool(a.branch as string, p, ctx);
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1439,13 +1828,104 @@ export function registerWorkspaceTools(
       // document, unreadable binary, oversized image) IS the file's honest
       // textual answer, sliced like any other content.
       const content = result.kind === 'text' ? result.text : result.message;
-      const start = offset && offset > 0 ? offset : 0;
-      const sliced = offset !== undefined || limit !== undefined
-        ? content.slice(start, limit !== undefined ? start + limit : undefined)
-        : content;
-      return { path: p, content: sliced };
+      return { path: p, content: slice(content) };
     },
   });
+
+  /**
+   * The knowledge base's OWN file at the guide's path, read as any file is —
+   * through the read hook and the access gate — or null when there is none,
+   * when the caller MAY NOT READ IT, or when what is there is a copy of the
+   * platform's guide an earlier release wrote (recognised by its header),
+   * which the guide served beside it would only repeat. A file that is not
+   * text (a binary squatting the name) is read for what it is: its honest
+   * textual answer.
+   *
+   * A file the caller may not read answers EXACTLY as no file does: the guide
+   * alone, with nothing said. A refusal here would tell a caller the root
+   * denies that a conventions file exists, which is the one thing the
+   * platform never tells about a file someone may not read — a restricted
+   * node is indistinguishable from an absent one on every other read.
+   */
+  /** What a read of the guide's path answers: the guide, after the knowledge base's own readable file when it has one. */
+  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> => {
+    const guide = await agentGuide!();
+    const own = await ownGuideFile(branch, ctx, p);
+    return own === null ? guide : withPlatformGuideAppended(own, guide);
+  };
+
+  const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
+    const fs = await ctx.getFilesystem(branch);
+    // Existence first, then the gate, then the hook and the bytes — nothing of
+    // theirs is read, or noted as read, before they are allowed to read it.
+    if (!(await ownGuideReadable(fs, branch, ctx, p))) return null;
+    await notifyAgentRead(agentAccessGate, ctx, branch, p);
+    // Gone between the probe and the read — a concurrent delete — is the
+    // absent case: the guide alone, as a read a moment later would answer.
+    const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (bytes === null) return null;
+    const result = await readers.readerFor(p).read(bytes, p);
+    const text = result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
+    return isManagedGuide(text) ? null : text;
+  };
+
+  /**
+   * Whether there is a file of the knowledge base's own at the guide's path
+   * that THIS caller may read. False for nothing there and for a file the
+   * access rules close to them, on purpose and without distinction (see
+   * {@link ownGuideFile}).
+   */
+  const ownGuideReadable = async (fs: LocalFilesystem, branch: string, ctx: ToolContext, p: string): Promise<boolean> => {
+    // The permission verdict BEFORE the filesystem is asked anything, as on
+    // every other read: a caller the rules close the path to learns nothing
+    // from it — not that something is there, and not what the filesystem
+    // says about an entry it cannot stat.
+    const gate = readGateFor(branch, ctx);
+    const rel = toKbRelative(p, gate.kbDirName);
+    if (rel !== null && !(await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel))) return false;
+    return existsAt(fs, p);
+  };
+
+  /** Whether something is at `p` on `fs` — absence is false, any other failure is thrown. */
+  const existsAt = async (fs: LocalFilesystem, p: string): Promise<boolean> =>
+    fs.stat(p).then(
+      () => true,
+      (err: unknown) => {
+        if (isAbsence(err)) return false;
+        throw err;
+      },
+    );
+
+  /**
+   * Whether what is at `p` is an entry of the knowledge base's own for the
+   * ordinary stat to describe: anything there except a plain file that is a
+   * copy of the guide an earlier release wrote (recognised by its header).
+   * A folder at the guide's name is theirs and is never read — reading a
+   * folder is an error, not an absence. Nothing there, at the stat or at the
+   * read a moment later (a concurrent delete), is the absent case, which the
+   * caller answers with the guide.
+   */
+  const isOwnEntryStill = async (fs: LocalFilesystem, p: string): Promise<boolean> => {
+    const type = await fs.stat(p).then(
+      (st) => st.type,
+      (err: unknown) => {
+        if (isAbsence(err)) return undefined;
+        throw err;
+      },
+    );
+    if (type === undefined) return false;
+    if (type !== 'file') return true;
+    const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (bytes === null) return false;
+    const result = await readers.readerFor(p).read(bytes, p);
+    return !(result.kind === 'text' && isManagedGuide(result.text));
+  };
 
   mount({
     name: 'list_files',
@@ -1492,13 +1972,18 @@ export function registerWorkspaceTools(
   mount({
     name: 'file_stat',
     gated: true,
-    description: () =>
-      'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
-      ' Every entry also reports what you may DO with it. ' +
-      `\`managed\` is true for a platform item — a platform file (${platformFileList(kb.layout)}) or a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`); managed items are never movable or deletable through these tools. ` +
-      '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to learn why, and who else holds each verb. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
-      'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
-      'Call this before a move or delete to see what it would touch.',
+    description:
+      'Get a file/directory\'s metadata (name, type, size, …) without returning content, and what you may DO with it. ' +
+      'A file also reports `contentMode`, `kind`, `mime`, `mimeSource` and `textEditable` — decided by the same readers ' +
+      'read_file, grep and the write tools use, so an extensionless text file is `text/plain`. ' +
+      '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to ' +
+      'learn why, and who else holds each verb. ' +
+      'Call this before a move or delete: `managed`, `movable` and `deletable` answer the shared rules on what these tools ' +
+      'never move or delete, judged like the dry runs (on a draft branch writes are not gated); `movable` judges the SOURCE ' +
+      'side only, so the destination still wants a `move_file` dry run. ' +
+      'For a folder, `descendants` counts the files under it at any depth; counting stops at 10000 and ' +
+      '`descendantsTruncated` says so, past which `movable` and `deletable` are false (not judged in full): run the ' +
+      '`move_file` or `delete_folder` dry run for the real verdict.',
     inputs: {
       type: 'object',
       properties: {
@@ -1566,6 +2051,11 @@ export function registerWorkspaceTools(
         },
         textEditable: { type: 'boolean', description: 'Files only: whether write_file/write_files/edit_file accept this file as it is now.' },
         mimeNote: str('Present when `mimeSource` is `fallback`: says the MIME type is a fallback, not a detected type.'),
+        platformGuide: {
+          type: 'boolean',
+          description:
+            "True at the agent guide's name in the repository root when the knowledge base has no file of its own there: what read_file answers is the platform's guide, which is not on disk and cannot be written, moved or deleted.",
+        },
       },
       required: ['managed', 'movable', 'deletable', 'access'],
       additionalProperties: true,
@@ -1574,7 +2064,48 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const p = a.path as string;
       const branch = a.branch as string;
-      await notifyAgentRead(agentAccessGate, ctx, branch, p);
+      // The guide's name with no file of the knowledge base's own under it —
+      // or one the caller may not read, or a copy of the guide an earlier
+      // release wrote, none of which `read_file` serves: what a read answers
+      // there is the platform's guide, so stat says a text file is there to
+      // read — ungated, like the read — and that nothing can be moved,
+      // deleted or written at it through these tools. The three cases get
+      // ONE answer on purpose: a different one for the file the caller may
+      // not read would tell them it exists. A file of the knowledge base's
+      // own that the caller may read is a file like any other, and the
+      // ordinary answer below describes it.
+      let noted = false;
+      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+        const fs = await ctx.getFilesystem(branch);
+        const readable = await ownGuideReadable(fs, branch, ctx, p);
+        // Telling the organisation's own file from a stale copy READS it, so
+        // the read hook hears of it as it hears of a read_file there — after
+        // the gate, never before, and once (the ordinary stat below is told).
+        if (readable) {
+          await notifyAgentRead(agentAccessGate, ctx, branch, p);
+          noted = true;
+        }
+        const own = readable && (await isOwnEntryStill(fs, p));
+        if (!own) {
+          const guide = await agentGuide();
+          return {
+            name: p.slice(p.lastIndexOf('/') + 1),
+            type: 'file',
+            size: Buffer.byteLength(guide, 'utf8'),
+            managed: true,
+            movable: false,
+            deletable: false,
+            access: { read: true, write: false, download: false, owner: false },
+            contentMode: 'text',
+            kind: 'text',
+            mime: 'text/markdown',
+            mimeSource: 'extension',
+            textEditable: false,
+            platformGuide: true,
+          };
+        }
+      }
+      if (!noted) await notifyAgentRead(agentAccessGate, ctx, branch, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       // Nothing there is a 404, and the placeholder — never content — gets
       // exactly that answer: the one every file tool gives (see not-found.ts).
@@ -1602,7 +2133,11 @@ export function registerWorkspaceTools(
       // `mime` below, so it is never passed through.
       delete stat.mimeType;
       const kind = stat.type === 'directory' ? 'folder' : 'file';
-      const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
+      const onDisk = await onDiskSpelling(root, p);
+      const managed = managedReason(onDisk, kind) !== undefined;
+      // A nested `access.md` is managed — it never moves — yet deleted by
+      // whoever may write it, so a FILE's delete is judged on its own rule.
+      const undeletable = kind === 'file' ? fileDeleteRefusal(onDisk) !== undefined : managed;
       const verdicts = await accessAt(branch, ctx, p);
       const access =
         a.explainAccess === true ? { ...verdicts, ...(await explainAccessAt(branch, ctx, p, kind)) } : verdicts;
@@ -1622,7 +2157,7 @@ export function registerWorkspaceTools(
       //     `movable`/`deletable` false rather than judging part of a folder
       //     and calling it the whole (`delete_folder`'s dry run, which walks
       //     uncapped, remains the authority for a folder that large).
-      const decided = managed || link;
+      const decided = (managed && undeletable) || link;
       const { files, links, truncated } =
         kind === 'folder'
           ? await filesUnder(fs, p, DESCENDANTS_CAP)
@@ -1644,9 +2179,9 @@ export function registerWorkspaceTools(
       const out: Record<string, unknown> = {
         ...stat,
         managed,
-        movable: open,
+        movable: open && !managed,
         // delete_folder also refuses a folder holding a link.
-        deletable: open && links.length === 0,
+        deletable: open && !undeletable && links.length === 0,
         access,
       };
       if (kind === 'folder') {
@@ -1677,7 +2212,7 @@ export function registerWorkspaceTools(
     name: 'grep',
     gated: true,
     description:
-      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
+      'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
     inputs: {
       type: 'object',
       properties: {
@@ -1727,10 +2262,6 @@ export function registerWorkspaceTools(
       // (an empty path is the handler's to explain), and here it would
       // otherwise name the workspace directory by another spelling.
       const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
-      // The search root itself goes to the read hook here; each file the walk
-      // actually opens goes to it per-file below, so a hook sees every path a
-      // grep reached rather than only the root it started from.
-      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
       const fs = await ctx.getFilesystem(a.branch as string);
       const gate = readGateFor(a.branch as string, ctx);
       const out: { path: string; line: number; text: string }[] = [];
@@ -1748,7 +2279,51 @@ export function registerWorkspaceTools(
             : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
-      if (kind === 'directory') {
+      // The guide is searched where it is read: a search of the repository
+      // root covers it, and a search of its own path is a search of what
+      // `read_file` answers there. The composed text is what is searched —
+      // the knowledge base's own readable file first, then the platform's
+      // guide — under the guide's path and with the line numbers a read of
+      // it gives. The walk leaves that one file to this: a match the walk
+      // made there would be the same line again, and one it COUNTED against
+      // `max_results` would be a file later in the tree never searched while
+      // the answer says nothing was cut. A file the caller may not read is
+      // absent from it, as it is from the read.
+      const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
+      const rel = toKbRelative(searchRoot, kbDirName);
+      const coversGuide =
+        agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
+      // The search root goes to the read hook — once, and only when it is
+      // repository content: a folder, or a file of the knowledge base's own.
+      // The guide's own path is not told here, because `guideAt` tells the
+      // hook of the organisation's file there exactly as `read_file` does
+      // (after the gate), and the platform's guide alone is nobody's file to
+      // note. Each file the walk opens goes to the hook per file below, so a
+      // hook sees every path a grep reached rather than only its root.
+      if (!(coversGuide && kind !== 'directory')) {
+        await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
+      }
+      if (coversGuide) {
+        if (kind === 'directory') {
+          await grepWalk(
+            fs,
+            searchRoot,
+            re,
+            out,
+            max,
+            0,
+            gate,
+            (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
+            docs,
+            (p) => p === guidePath,
+          );
+        }
+        const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
+        for (let i = 0; i < lines.length && out.length < max; i++) {
+          re.lastIndex = 0;
+          if (re.test(lines[i]!)) out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
+        }
+      } else if (kind === 'directory') {
         await grepWalk(
           fs,
           searchRoot,
@@ -1802,12 +2377,13 @@ export function registerWorkspaceTools(
   // ── writes (through the lock/commit pipeline) ───────────────────────────
   mount({
     name: 'write_file',
+    // A mode that is not one of the three answers `bad_mode`, which lists them.
+    refusesItself: ['mode'],
     gated: true,
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
       '`created`, `replaced` or `updated`.' +
-      WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE,
+      UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1885,6 +2461,8 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'write_files',
+    // A mode that is not one of the three answers `bad_mode`, which lists them.
+    refusesItself: ['mode'],
     gated: true,
     description:
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
@@ -1895,8 +2473,7 @@ export function registerWorkspaceTools(
       '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
       'does not stop the others; read `files` to see what landed.' +
-      WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE,
+      UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1947,8 +2524,10 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
-      if (files.length === 0) return { count: 0, files: [] };
+      // The mode is judged before anything else, so an empty batch with a mode
+      // that is not one answers `bad_mode` like any other call would.
       const mode = modeOf(a);
+      if (files.length === 0) return { count: 0, files: [] };
       // The POLICY gate still judges the whole batch: a restricted run is a
       // call that should not have been made at all, not a per-path outcome.
       // The write hook is asked PER PATH, below, so a path it refuses is that
@@ -2065,7 +2644,8 @@ export function registerWorkspaceTools(
     name: 'edit_file',
     gated: true,
     description:
-      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.',
+      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
+      UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -2094,29 +2674,57 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
-      // The overwrite gate already read the file when its reader asked the
-      // binary question — reuse those bytes instead of reading twice.
-      const content = await orNotFound(path, async () => {
-        const existing = await assertNotBinaryOverwrite(readers, path, fs);
-        return asText(existing ?? (await fs.readFile(path)));
-      });
-      const count = oldStr ? content.split(oldStr).length - 1 : 0;
-      if (count === 0) throw new ToolError('old_string not found in the file.', 400);
-      if (count > 1 && a.replace_all !== true) {
-        throw new ToolError(`old_string appears ${count} times — add more context to make it unique, or set replace_all.`, 400);
+      // Everything the tool decides about ONE reading of the file: may these
+      // bytes be edited as text at all, is `old_string` there, is it unique,
+      // and what the file becomes. One function, because the file is read
+      // twice — before the lock and under it — and a reading that skipped any
+      // of these questions would let bytes land that were never judged.
+      // `split`/`join`, not `String.replace`, which reads `$&`, `$'`, `` $` ``
+      // and `$$` in `new_string` as patterns and writes something the caller
+      // never sent.
+      const edit = (existing: Buffer): { updated: string; replaced: number } => {
+        assertBytesTextEditable(readers, path, existing);
+        const text = asText(existing);
+        const pieces = oldStr ? text.split(oldStr) : [text];
+        const count = pieces.length - 1;
+        if (count === 0) throw new ToolError('old_string not found in the file.', 400);
+        if (count > 1 && a.replace_all !== true) {
+          throw new ToolError(`old_string appears ${count} times — add more context to make it unique, or set replace_all.`, 400);
+        }
+        return { updated: pieces.join(newStr), replaced: count };
+      };
+      // A first verdict before any lock is taken, so an ordinary refusal costs
+      // no lock cycle. It is a verdict about a file anyone may still change.
+      let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
+      // The one the answer carries is taken again with the path's lock HELD,
+      // over the bytes read there (`write: true` guarantees the locking
+      // filesystem): read, verdict and write are one step nobody can get
+      // between. Taken before the lock only, two callers replacing the same
+      // text — two runners claiming a work item by filling its empty owner
+      // field — were BOTH told their edit landed, and the second silently
+      // overwrote the first. A filesystem without the method has no lock to
+      // read under, so the first verdict stands.
+      const locking = fs as unknown as {
+        rewriteFile?(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
+      };
+      if (typeof locking.rewriteFile === 'function') {
+        await locking.rewriteFile(path, (current) => {
+          if (current === null) throw notFound(path);
+          result = edit(current);
+          return result.updated;
+        });
+      } else {
+        await fs.writeFile(path, result.updated);
       }
-      const updated = a.replace_all === true ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
-      await fs.writeFile(path, updated);
-      return { path, replaced: a.replace_all === true ? count : 1, ...(await saveWarnings(ctx, path, updated)) };
+      return { path, replaced: result.replaced, ...(await saveWarnings(ctx, path, result.updated)) };
     },
   });
 
   mount({
     name: 'delete_file',
     gated: true,
-    description: () =>
-      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
-      `A platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) and git metadata are refused.`,
+    description:
+      'Delete ONE workspace file. Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`.',
     inputs: {
       type: 'object',
       properties: {
@@ -2151,10 +2759,8 @@ export function registerWorkspaceTools(
         throw new ToolError(`"${path}" is a folder, not a file — use delete_folder to delete it and the files under it.`, 400);
       }
       const onDisk = await onDiskSpelling(root, path);
-      if (isGitMetadata(onDisk)) throw new ToolError(managedReason(onDisk, 'file')!, 400);
-      if (managedReason(onDisk, 'file') !== undefined) {
-        throw new ToolError(`${onDisk.slice(onDisk.lastIndexOf('/') + 1)} is a platform file and cannot be deleted through the agent tools.`, 400);
-      }
+      const refused = fileDeleteRefusal(onDisk);
+      if (refused !== undefined) throw new ToolError(refused, 400);
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
       await orNotFound(path, () => fs.deleteFile(path), 'Nothing to delete');
@@ -2169,10 +2775,12 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. This is the one way a folder goes away: the folder that held it stays, even if this was all it had, and a folder holding nothing but its empty-folder placeholder counts as empty. ' +
-      'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
-      'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
-      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
-      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it in that same one change, so its files are never left ungoverned part-way; you must be able to write those platform files too.',
+      'The dry run answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is ' +
+      'the file count, `files` names up to 100 of them — and a non-empty folder wants `confirm: true`. ' +
+      'Beyond what the shared rules refuse, a folder HOLDING a symbolic link, or any file you may not write, is refused ' +
+      '(the link itself is never removed), and a path that is a FILE ' +
+      'is refused with a pointer to `delete_file`. You must be able to write the folder\'s own platform files too: they go ' +
+      'with it in that same one change, so its files are never left ungoverned part-way.',
     inputs: {
       type: 'object',
       properties: {
@@ -2335,11 +2943,16 @@ export function registerWorkspaceTools(
   mount({
     name: 'move_file',
     gated: true,
-    description: () =>
-      'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
-      `Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`) and git metadata are refused; a move cannot create a platform file or folder at \`dest\` either (renaming a note to \`access.md\` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ` +
-      'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
-      'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.',
+    // A plain string again: what refuses a move names the guide, and that is in
+    // the shared rules now, which are rebuilt from the layout where they live.
+    description:
+      'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Committed + pushed as you. ' +
+      'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
+      'DESTINATION folder, so a move can change what you (and others) may do with the file: the dry run answers ' +
+      '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }`, where `access` is your ' +
+      'own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the move has landed, ' +
+      'with every `access.md` inside a moved folder counted at its new place, and a move whose `accessChanges` is true wants `confirm: true`. ' +
+      'Links are rewritten by default, in one commit with the move: those in the moved files and those in other markdown files pointing at them (`links` reports them). `rewriteLinks: false` turns that off. Path mentions in plain prose or code are never changed.',
     inputs: {
       type: 'object',
       properties: {
@@ -2348,6 +2961,7 @@ export function registerWorkspaceTools(
         dest: wsPath(kbDirName, 'Destination path — the full new path; must not exist yet'),
         dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
         confirm: { type: 'boolean', description: 'Required when the move changes your access. Set it only after a dry run.' },
+        rewriteLinks: { type: 'boolean', description: 'Rewrite the links into, out of and between the moved files (default true). `false` moves without touching any link.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -2360,14 +2974,20 @@ export function registerWorkspaceTools(
         dest: str('Destination path (echoes the input).'),
         kind: str('`file` or `folder`.'),
         descendants: int('Files that move: 1 for a file, the file count under a folder.'),
-        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and destination (`after`).' },
-        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between source and destination.' },
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the move has landed (`after`).' },
+        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after`.' },
         allowed: { type: 'boolean', description: 'Whether the move may run.' },
         reason: str('Why it may not, when `allowed` is false.'),
         dryRun: { type: 'boolean', description: 'True on a dry run.' },
         confirmationRequired: { type: 'boolean', description: 'True when the call stopped for want of `confirm: true`.' },
         message: str('One sentence on what happened (or did not).'),
         moved: { type: 'boolean', description: 'True once the move landed.' },
+        links: {
+          type: 'object',
+          description:
+            'The link rewrite, the same on a dry run and on the move: `{ filesEdited, linksRewritten, edits: [{ path, from, to }] (the first 100), ' +
+            'notRewritten: [{ path, reason, links }], unsearched? }`. Absent with `rewriteLinks: false`.',
+        },
       },
       required: ['src', 'dest', 'moved'],
     },
@@ -2401,8 +3021,13 @@ export function registerWorkspaceTools(
         writePolicy.assertPathWritable(ctx.sessionId, dest + f.slice(src.length));
       }
 
-      const [before, after] = await Promise.all([accessAt(branch, ctx, src), accessAt(branch, ctx, dest)]);
-      const accessChanges = (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
+      // `after` is the destination as it WILL be — with the `access.md` files
+      // under `src` counted where they land. See `accessAfter`.
+      const [before, after] = await Promise.all([
+        accessAt(branch, ctx, src),
+        accessAfter(branch, ctx, src, dest),
+      ]);
+      const accessChanges = verbsDiffer(before, after);
       // The placeholder moves with its folder, but it is never content.
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
@@ -2453,6 +3078,56 @@ export function registerWorkspaceTools(
           : occupiedBy !== null
             ? entryExistsMessage(occupiedBy, dest)
             : undefined;
+      // The links are planned only for a move that may run: a refused one
+      // reads no page. The plan is the same on a dry run and on the move.
+      const rewriteLinks = a.rewriteLinks !== false;
+      const linkPlan = rewriteLinks && reason === undefined
+        ? await planMoveLinks({
+          src,
+          dest,
+          branch,
+          kbDirName,
+          allFiles: await (async () => {
+            const { files, links } = await filesUnder(fs, kbDirName);
+            const symlinks = new Set(links);
+            return files.filter((f) => !symlinks.has(f));
+          })(),
+          canRead: (paths) => resolveReadableMap(
+            (wid, email, rels) => accessControl.canReadBatch(wid, email, rels),
+            workspaceIdForBranch(branch),
+            ctx.user.email,
+            kbDirName,
+            paths,
+          ),
+          writeBlocked: (paths) => writeBlocked(branch, ctx, paths),
+          // Through the guarded filesystem the tools read with, never the raw
+          // disk: a page replaced by a link since the listing is refused there
+          // instead of read through to wherever the link points.
+          readText: async (p) => String(await fs.readFile(p, { encoding: 'utf8' })),
+          // The read hook, for every page the answer would NAME — an edited
+          // one, one left with its links listed — and for no page merely
+          // searched: naming is the disclosure, and the hook's refusal makes
+          // the page one the caller cannot read, covered by the one sentence.
+          readRefused: async (path) => {
+            try {
+              await notifyAgentRead(agentAccessGate, ctx, branch, path);
+              return false;
+            } catch {
+              return true;
+            }
+          },
+          // The write hook, for a page the move would edit, at its post-move path.
+          writeRefusal: async (_lockAt, path) => {
+            try {
+              await assertAgentWriteAllowed(agentAccessGate, ctx, branch, path);
+              return null;
+            } catch (err) {
+              return `refused: ${err instanceof Error ? err.message : String(err)}`;
+            }
+          },
+        })
+        : undefined;
+      const moveReason = reason ?? linkPlan?.overCap;
       const impact = {
         src,
         dest,
@@ -2460,8 +3135,9 @@ export function registerWorkspaceTools(
         descendants,
         access: { before, after },
         accessChanges,
-        allowed: reason === undefined,
-        ...(reason !== undefined ? { reason } : {}),
+        allowed: moveReason === undefined,
+        ...(moveReason !== undefined ? { reason: moveReason } : {}),
+        ...(linkPlan ? { links: linkPlan.report } : {}),
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
@@ -2473,6 +3149,7 @@ export function registerWorkspaceTools(
         throw await writeRefusal(branch, blocked[0], folderPath ? 'dir' : 'file');
       }
       if (collision) throw new ToolError(reason!, 409);
+      if (linkPlan?.overCap !== undefined) throw new ToolError(linkPlan.overCap, 400);
       if (accessChanges && a.confirm !== true) {
         return {
           ...impact,
@@ -2485,7 +3162,37 @@ export function registerWorkspaceTools(
       // no-replace move is what guarantees it. A destination created between
       // the two — by another agent, or by the sidebar, which moves without
       // taking this lock — comes back here as a refusal, not an overwrite.
-      await asEntryExists(() => fs.moveFile(src, dest));
+      if (linkPlan === undefined) {
+        await asEntryExists(() => fs.moveFile(src, dest));
+      } else {
+        // The move and every link edit, one commit. Under the locks, each page
+        // is checked to still hold the bytes its edit was computed from.
+        const edits = linkPlan.edits.map((e) => ({ path: e.path, lockAt: e.lockAt, content: e.content }));
+        const check = async () => {
+          for (const e of linkPlan.edits) {
+            const now = await fs.readFile(e.lockAt, { encoding: 'utf8' }).then(String, () => null);
+            if (now !== e.original) {
+              throw new ToolError(`"${e.lockAt}" changed while the move was being planned, so nothing was moved. Run the move again.`, 409);
+            }
+          }
+        };
+        const summary = `Move ${src} to ${dest}`.slice(0, 200);
+        const locking = fs as LocalFilesystem & { moveWithEdits?: LockingFilesystem['moveWithEdits'] };
+        try {
+          if (typeof locking.moveWithEdits === 'function') {
+            await asEntryExists(() => locking.moveWithEdits!(src, dest, edits, summary, check));
+          } else {
+            // A filesystem without the one-commit move (none the agent is
+            // handed for writing): the move, then each edit.
+            await check();
+            await asEntryExists(() => fs.moveFile(src, dest));
+            for (const e of edits) await fs.writeFile(e.path, e.content);
+          }
+        } catch (err) {
+          if (err instanceof MoveLockedError || err instanceof MoveRacedError) throw new ToolError(err.message, 409);
+          throw err;
+        }
+      }
       // Moving the last file — or a whole folder — out leaves the folder it
       // came from in place, like a delete.
       await keepFolderOf(fs, ctx, branch, src, kbDirName);
@@ -2497,13 +3204,16 @@ export function registerWorkspaceTools(
     name: 'copy_file',
     gated: true,
     description:
-      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.',
+      'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. ' +
+      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place. ' +
+      'One exception to that shape: when the destination is one you may not write, the answer is the refusal alone — `allowed: false` with `reason`, and no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         src: wsPath(kbDirName, 'Source path'),
         dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
+        dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -2511,7 +3221,18 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { src: str('Source path (echoes the input).'), dest: str('Destination path (echoes the input).'), copied: { type: 'boolean', description: 'Always true on success.' } },
+      properties: {
+        src: str('Source path (echoes the input).'),
+        dest: str('Destination path (echoes the input).'),
+        kind: str('`file` or `folder` (dry run only; absent when `allowed` is false because you may not write the destination).'),
+        descendants: int('Files the copy would carry: 1 for a file, the file count under a folder (dry run only; absent when `allowed` is false because you may not write the destination).'),
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the copy has landed (`after`) — dry run only.' },
+        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after` (dry run only).' },
+        allowed: { type: 'boolean', description: 'Whether the copy may run (dry run only).' },
+        reason: str('Why it may not, when `allowed` is false.'),
+        dryRun: { type: 'boolean', description: 'True on a dry run.' },
+        copied: { type: 'boolean', description: 'True once the copy landed; false on a dry run.' },
+      },
       required: ['src', 'dest', 'copied'],
     },
     write: true,
@@ -2535,6 +3256,7 @@ export function registerWorkspaceTools(
       // own containment check: a path with a `..` segment must not reach
       // `lstat` outside the workspace, even to be told a name is taken.
       assertPlainPath(dest);
+      if (a.dryRun === true) return copyImpact(branch, ctx, src, dest);
       // The write verdict comes FIRST, for the reason `move_file` gives at
       // length: "already exists" is a fact about the destination folder, and a
       // caller who may not write there must not be told it. The lock gate
@@ -2571,6 +3293,12 @@ export function registerWorkspaceTools(
       try {
         await asEntryExists(() => fs.copyFile(src, dest));
       } catch (err) {
+        // The filesystem's own "that is a directory" becomes the sentence the
+        // dry run predicts, instead of escaping as a 500 carrying the
+        // server's absolute path.
+        if ((err as { name?: string } | null)?.name === 'IsDirectoryError') {
+          throw new ToolError(folderCopyRefusal(src), 400);
+        }
         const missing = isAbsence(err) || (err as { name?: string }).name === 'FileNotFoundError';
         if (missing) {
           throw (await kindOf(fs, src)) === null
@@ -2657,6 +3385,508 @@ export function registerWorkspaceTools(
       );
     },
   });
+
+  // ── uploads (bytes that never pass through the model) ───────────────────
+  //
+  // The pair exists because MCP tool arguments are JSON. Every byte an agent
+  // sends through `write_file` is first typed out by the model, which
+  // truncates long files, mangles backslash and `\u` escapes, and cannot carry
+  // a PNG at all. `request_file_upload` answers an address; the agent POSTs
+  // the file (or one zip holding many) there with any HTTP client;
+  // `apply_file_upload` lands it on a branch in one commit. The bytes go from
+  // the agent's disk to the server's and never enter a prompt.
+  //
+  /**
+   * Why one of an upload's paths may not be landed, judged on the path ALONE —
+   * or undefined when nothing about the name itself refuses it.
+   *
+   * The platform files are the whole of it. `access.md` governs who may read
+   * and write the folder it sits in, `roles.yaml` says which roles exist, and
+   * the agent guide is read as instructions: each is configuration the platform
+   * obeys, and each has a write path that CHECKS the change (the roles gate
+   * refuses an edit that would lock every admin out; a folder's access rules
+   * are judged against who is asking). Bytes arriving by upload meet none of
+   * those gates — they are a buffer the sender chose — so an upload never
+   * lands one, whatever else the caller may write. `unzip` has refused
+   * `roles.yaml` from an archive for the same reason; this is that rule, over
+   * all four names.
+   */
+  const platformFileReason = (wsPath: string): string | undefined => {
+    const rel = toKbRelative(wsPath, kbDirName);
+    return rel !== null && isPlatformFile(rel, kb.layout) ? platformFileUploadRefusal(rel) : undefined;
+  };
+
+  /**
+   * `apply_file_upload`'s handler: resolve the stored bytes into one path per
+   * file, judge each path the way `write_files` judges its own, and land the
+   * survivors as ONE commit.
+   *
+   * The judging is deliberately the same shape as `write_files`, down to the
+   * second verdict under the lock, because the promise the ticket makes is
+   * that an upload is judged "exactly as `write_file` would judge it". Three
+   * gates run per path and a path that fails one is that path's outcome and no
+   * more: the deployment's write hook, the platform-file rule above, and the
+   * `mode`. What is judged ONCE for the whole call is the destination — a
+   * caller who may not write the folder at all gets one refusal naming the
+   * change-request route, rather than the same refusal repeated per entry.
+   */
+  const applyFileUpload = async (
+    a: Record<string, unknown>,
+    ctx: ToolContext,
+    uploads: AgentUploadStore,
+  ): Promise<unknown> => {
+    const branch = a.branch as string;
+    const token = a.token;
+    if (typeof token !== 'string' || token === '') {
+      throw new ToolError(
+        'Name the `token` `request_file_upload` answered with, after POSTing the file to its `uploadUrl`.',
+        400,
+        { code: 'token-required' },
+      );
+    }
+    const mode = modeOf(a);
+    const destination = (a.destination as string).replace(/\/+$/, '');
+    assertInsideRepo(destination, kbDirName);
+    // CLAIMED, not consumed: an apply refused whole (a protected destination,
+    // an archive that will not open) leaves the token alive so the caller can
+    // retry somewhere else rather than send the bytes again. The claim is what
+    // keeps it single-use meanwhile — a second apply finds the token in use.
+    const upload = uploads.claim(token, ctx.user.id);
+    let spent = false;
+    try {
+      const fs = await ctx.getFilesystem(branch);
+      const root = await workspaceRoot(branch, ctx);
+      // The destination, once, for the whole call. On a protected branch a
+      // caller who may not write the folder gets the lock gate's own refusal —
+      // which `rethrowAsWriteDenial` turns into `write-denied` with the
+      // change-request steps — and nothing lands.
+      const blockedDest = await writeBlocked(branch, ctx, [destination]);
+      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0], 'dir');
+      if ((await kindOf(fs, destination)) === 'file') {
+        throw new ToolError(
+          `"${displayPath(destination)}" is a file, not a folder — \`destination\` names the folder the upload lands in.`,
+          409,
+          { code: 'not_a_folder' },
+        );
+      }
+
+      const planned = await planUpload(upload, destination, kbDirName);
+      const paths = planned.filter((p) => p.content !== undefined).map((p) => p.path as string);
+      // One batched access read for every path, like `write_files` — empty on
+      // a draft branch, where changes reach a protected branch only through a
+      // change request.
+      const blocked = new Set(await writeBlocked(branch, ctx, paths));
+
+      const writes: { path: string; content: Buffer }[] = [];
+      const outcomes: Record<string, unknown>[] = [];
+      /** The `files` entry for `writes[i]`, so the under-lock verdict can revise it. */
+      const entryOf: Record<string, unknown>[] = [];
+      for (const item of planned) {
+        const entry: Record<string, unknown> = { path: item.path };
+        outcomes.push(entry);
+        if (item.content === undefined) {
+          entry.outcome = 'refused';
+          entry.error = item.error;
+          entry.message = item.message;
+          continue;
+        }
+        const wsPathOf = item.path;
+        try {
+          if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
+          const platform = platformFileReason(wsPathOf);
+          if (platform !== undefined) throw new ToolError(platform, 422, { code: 'platform_file' });
+          // The git folder is never a workspace path, in any spelling. A ZIP
+          // entry's name has already met this rule in `zipEntryNameRefusal`; a
+          // SINGLE uploaded file's has not — `.git` is a name the upload
+          // route's `validateFilename` accepts — and the preflight that reads
+          // the caller's own arguments never sees it either, because the name
+          // came from the upload, not from the call. Asked here so that path
+          // is REFUSED like any other, with the rest of the upload landing,
+          // rather than failing the whole apply from inside `writeFiles`.
+          assertNoGitInternalsSegment(wsPathOf);
+          assertRepoRootNameFree(wsPathOf, kbDirName);
+          // A link already on disk under the destination must not redirect
+          // these bytes — the rule `unzip` applies per entry, applied here on
+          // the path the write will take.
+          const link = await symlinkOnPath(root, wsPathOf);
+          if (link !== undefined) {
+            throw new ToolError(
+              `"${wsPathOf}" goes through the symbolic link "${link}"; an upload never follows links.`,
+              400,
+              { code: 'symlink' },
+            );
+          }
+          writePolicy.assertPathWritable(ctx.sessionId, wsPathOf);
+          await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsPathOf);
+          // An earlier entry of this same upload counts as existing, as it
+          // does in `write_files`: two `create` entries for one path are a
+          // mistake the commit would otherwise hide.
+          const exists =
+            writes.some((w) => w.path === wsPathOf) || (await kindOf(fs, wsPathOf)) !== null;
+          entry.outcome = decideWrite(mode, wsPathOf, exists);
+          writes.push({ path: wsPathOf, content: item.content });
+          entryOf.push(entry);
+        } catch (err) {
+          refuseEntry(entry, err);
+        }
+      }
+
+      // The mode gate again, with every path's lock held — the verdict the
+      // answer carries, for the reason `write_file` states at length. A path
+      // whose verdict changed under the lock is dropped from the batch and
+      // reported refused, leaving the rest to land.
+      const recheck = async (
+        pending: readonly { path: string; content: Buffer }[],
+      ): Promise<{ path: string; content: Buffer }[]> => {
+        const kept: { path: string; content: Buffer }[] = [];
+        for (let i = 0; i < pending.length; i++) {
+          const entry = entryOf[i];
+          try {
+            const exists =
+              kept.some((k) => k.path === pending[i].path) || (await kindOf(fs, pending[i].path)) !== null;
+            entry.outcome = decideWrite(mode, pending[i].path, exists);
+            kept.push(pending[i]);
+          } catch (err) {
+            refuseEntry(entry, err);
+          }
+        }
+        return kept;
+      };
+      if (writes.length > 0) {
+        // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands
+        // the whole set as ONE commit and takes a Buffer as content, so bytes
+        // reach disk exactly as they were sent — no text decode anywhere on
+        // the way, which is what makes a PNG and a backslash-heavy page land
+        // with the checksum they were uploaded with.
+        const batching = fs as unknown as {
+          writeFiles(
+            writes: { path: string; content: Buffer }[],
+            summary: string,
+            deletes: string[],
+            check: (
+              pending: readonly { path: string; content: Buffer }[],
+            ) => Promise<{ path: string; content: Buffer }[]>,
+          ): Promise<void>;
+        };
+        // In the DESTINATION folder's TURN, which `delete_folder` takes over the
+        // same subtree (and `keepFolderOf` with it). `writeFiles` creates the
+        // destination, and any folder above a zip entry on the way to it, as
+        // part of landing the batch — and a folder delete running between that
+        // creation and the commit enumerates the folder's files BEFORE these
+        // exist and then removes the folder they are landing in, which is an
+        // answer saying `created` for bytes that are already gone. The turn is
+        // taken OUTSIDE `writeFiles`, so it is held across the under-lock
+        // recheck and the commit both, and in the same order the delete takes
+        // its own (the folder's turn first, then each path's lock), which is
+        // what keeps two callers from waiting on each other's half.
+        await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
+          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck);
+        });
+      }
+      // The token is spent once an ANSWER exists, even an answer in which
+      // every path was refused: the apply ran and said what happened at each
+      // path, and re-running it would say the same. Only a refusal that landed
+      // nothing AND answered nothing (thrown above) gives the token back.
+      spent = true;
+      await uploads.consume(token);
+      const listed = a.all === true ? outcomes : outcomes.slice(0, APPLY_ANSWER_CAP);
+      return {
+        destination,
+        count: outcomes.filter((o) => o.outcome !== 'refused').length,
+        total: outcomes.length,
+        files: listed,
+        ...(listed.length < outcomes.length ? { truncated: true } : {}),
+      };
+    } finally {
+      if (!spent) uploads.release(token);
+    }
+  };
+
+  // Mounted only when the composition supplied a store — see the `uploads`
+  // parameter. Core always does.
+  if (uploads) {
+    mount({
+      name: 'request_file_upload',
+      fileTool: false,
+      description:
+        // Within the description cap (`tool-registry/description-length.ts`):
+        // why a file goes this way is one of the shared rules, and the header
+        // spelling of the token is on the `uploadUrl` output, where the
+        // address it changes is.
+        'Ask for a one-time address to send FILE BYTES to, so their content never passes through this conversation. ' +
+        'Use it for anything `write_file` cannot carry faithfully: a large file, a file full of backslashes or `\\u` ' +
+        'escapes, a binary file (a PNG, a PDF, a zip), or many files at once (zip them). ' +
+        'Returns `{ uploadUrl, token, expiresAt, expiresInSeconds, maxBytes }`. THEN: ' +
+        '(1) POST the file as the raw request body to `uploadUrl` with `?filename=<name>` — ' +
+        '`curl -X POST --data-binary @skill.zip "<uploadUrl>?filename=skill.zip"` — which answers what it received; ' +
+        '(2) call `apply_file_upload` with the same `token`, a `branch` and a destination folder. ' +
+        'One token carries one file or one zip, is bound to you and expires at `expiresAt`: an upload nobody applies ' +
+        'by then is deleted, and one over `maxBytes` is refused when you send it, naming the limit.',
+      inputs: { type: 'object', properties: {}, additionalProperties: false },
+      outputs: {
+        type: 'object',
+        properties: {
+          uploadUrl: str(
+            'The absolute URL to POST the bytes to. Carries the token; add `?filename=<name>`. To keep the token out ' +
+              'of a URL — when the command line you send from is logged or shared — POST to this address without its ' +
+              'last (token) segment and send the token in an `x-upload-token` header instead.',
+          ),
+          token: str(
+            'The token itself — what `apply_file_upload` takes, and what an `x-upload-token` header carries when you ' +
+              'would rather it not sit in a URL. Treat it as a credential.',
+          ),
+          expiresAt: str('ISO-8601 instant after which the token, and any bytes sent with it, are gone.'),
+          expiresInSeconds: int('Seconds from now until `expiresAt`.'),
+          maxBytes: int('The largest upload this deployment accepts, in bytes.'),
+        },
+        required: ['uploadUrl', 'token', 'expiresAt', 'expiresInSeconds', 'maxBytes'],
+      },
+      // A read-scoped caller has nothing to do with an upload token: the only
+      // thing it unlocks is a write. Refused at the handler factory, by scope,
+      // before the token is minted.
+      write: true,
+      handler: async (_a, ctx: ToolContext) => uploads.issue(ctx.user),
+    });
+
+    mount({
+      name: 'apply_file_upload',
+      // A mode that is not one of the three answers `bad_mode`, which lists them.
+      refusesItself: ['mode'],
+      gated: true,
+      description:
+        'Land a file you have already uploaded (see `request_file_upload`) in a folder on a branch, in ONE commit, as you. ' +
+        'A single file lands under the name it was sent with; a zip lands as its entries, keeping their folder structure. ' +
+        'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
+        '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
+        '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
+        'Every path is judged one by one — by your write access, the platform-file rules and what is already there — ' +
+        'exactly as `write_file` judges it, and a refused path does not stop the others. ' +
+        'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
+        'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
+      inputs: {
+        type: 'object',
+        properties: {
+          branch: BRANCH_INPUT,
+          token: str('The `token` from `request_file_upload`, after you have POSTed the file to its `uploadUrl`.'),
+          destination: wsPath(kbDirName, 'Folder the upload lands in (created if it is not there yet)'),
+          mode: WRITE_MODE_INPUT,
+          all: {
+            type: 'boolean',
+            description:
+              'List EVERY path in `files` instead of the first 25. `total` always says how many there were, so ask for ' +
+              'all only when you need to read each outcome.',
+          },
+          sessionId: SESSION_ID_INPUT,
+        },
+        required: ['branch', 'token', 'destination'],
+        additionalProperties: false,
+      },
+      outputs: {
+        type: 'object',
+        properties: {
+          destination: str('The folder the upload was applied to (echoes the input).'),
+          count: int('How many paths landed — the entries in `files` whose `outcome` is not `refused`.'),
+          total: int('How many paths the upload held, whether or not `files` lists them all.'),
+          files: {
+            type: 'array',
+            description: 'One entry per path, in the order the upload held them. Cut to 25 unless `all` was true.',
+            items: {
+              type: 'object',
+              properties: {
+                path: str('The workspace path this entry was judged at.'),
+                outcome: {
+                  type: 'string',
+                  enum: ['created', 'replaced', 'updated', 'refused'],
+                  description: 'What happened at this path. `refused` means nothing was written there.',
+                },
+                error: str('Present when `outcome` is `refused`: the refusal code — e.g. `exists`, `missing`, `invalid_entry`, `platform_file`, `write-denied`.'),
+                message: str('Present when `outcome` is `refused`: the full refusal, the same one `write_file` would have given.'),
+              },
+              required: ['path', 'outcome'],
+            },
+          },
+          truncated: { type: 'boolean', description: 'True when `files` was cut: `total` is larger than what it lists. Pass `all: true` for the rest.' },
+        },
+        required: ['destination', 'count', 'total', 'files'],
+      },
+      write: true,
+      // So a protected-branch refusal arrives as `write-denied`, with the
+      // change-request steps, exactly as it does from write_file.
+      proposable: true,
+      handler: async (a, ctx: ToolContext) => applyFileUpload(a, ctx, uploads),
+    });
+  }
+
+  // ── downloads (bytes that never pass through the model, the other way) ──
+  // The twin of the upload pair: `read_file` answers content INTO the
+  // conversation, so an agent that needs exact bytes on its own disk had no
+  // way to get them. `request_file_download` judges every file on its own,
+  // captures the ones that pass, and answers a one-time link per file (and a
+  // zip per requested folder) that any HTTP client can fetch.
+
+  /** The type a file's link answers with: the reader's, as `file_stat` reports it — but never active content. */
+  const downloadContentType = (p: string, bytes: Buffer): string => {
+    const reader = readers.readerFor(p);
+    const mime = fileTypeOf(reader, p, needsContent(reader) ? bytes : undefined).mime;
+    // SVG and HTML run scripts wherever they are opened — saved to disk and
+    // re-opened under `file://`, too — so they go out as bytes, as the app's
+    // own Download button sends them.
+    return ACTIVE_CONTENT_TYPES.has(mime) ? 'application/octet-stream' : mime;
+  };
+
+  if (downloads) {
+    mount({
+      name: 'request_file_download',
+      gated: true,
+      description:
+        'Copy knowledge-base files onto your own disk without their content passing through the conversation — the ' +
+        'way out, as `request_file_upload` is the way in. Give `branch` and `paths` (files or folders). Every file, ' +
+        'each one inside a folder too, is included only if you may read AND download that file. Returns ' +
+        '`{ expiresAt, expiresInSeconds, files: [{ path, bytes, sha256, downloadUrl }], folders: [{ path, bytes, ' +
+        'downloadUrl, files }], refused: [{ path, reason }] }`: a link per file, with its own content type, and per ' +
+        `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
+        'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
+        '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
+        'Refused: `not found` (missing or unreadable), `download permission required`; no link when nothing is ' +
+        'included. At most 500 MB per request.',
+      inputs: {
+        type: 'object',
+        properties: {
+          branch: BRANCH_INPUT,
+          paths: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'string' },
+            description: `Files and folders to download, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\`.`,
+          },
+          sessionId: SESSION_ID_INPUT,
+        },
+        required: ['branch', 'paths'],
+        additionalProperties: false,
+      },
+      outputs: {
+        type: 'object',
+        properties: {
+          expiresAt: {
+            type: ['string', 'null'],
+            description: 'ISO-8601 instant after which every link of this answer is gone; null when no link was issued.',
+          },
+          expiresInSeconds: int('Seconds until `expiresAt`; 0 when no link was issued.'),
+          files: {
+            type: 'array',
+            description: 'One entry per included file, each named once however many times it was asked for.',
+            items: {
+              type: 'object',
+              properties: {
+                path: str('The workspace path.'),
+                bytes: int('Size in bytes.'),
+                sha256: str('SHA-256 of the bytes the link serves, hex.'),
+                downloadUrl: str('One-time link to the file itself.'),
+              },
+              required: ['path', 'bytes', 'sha256', 'downloadUrl'],
+            },
+          },
+          folders: {
+            type: 'array',
+            description: 'One entry per requested folder that kept at least one file.',
+            items: {
+              type: 'object',
+              properties: {
+                path: str('The folder, as requested.'),
+                bytes: int('Uncompressed total of the files in its zip.'),
+                downloadUrl: str('One-time link to the zip.'),
+                files: { type: 'array', items: { type: 'string' }, description: 'The workspace paths the zip holds.' },
+              },
+              required: ['path', 'bytes', 'downloadUrl', 'files'],
+            },
+          },
+          refused: {
+            type: 'array',
+            description: 'Every path left out, with why.',
+            items: {
+              type: 'object',
+              properties: { path: str('The path left out.'), reason: str('Why: `not found`, `download permission required`, or the deployment\'s own words.') },
+              required: ['path', 'reason'],
+            },
+          },
+        },
+        required: ['expiresAt', 'expiresInSeconds', 'files', 'folders', 'refused'],
+      },
+      // A download is a READ: a read-only deployment still serves it. A
+      // read-only CREDENTIAL may not take bytes out, though.
+      write: false,
+      writeScope: true,
+      handler: async (a, ctx: ToolContext) => requestFileDownload(a, ctx, downloads),
+    });
+  }
+
+  /** `request_file_download`'s handler: judge, capture, and issue the links. */
+  async function requestFileDownload(
+    a: Record<string, unknown>,
+    ctx: ToolContext,
+    store: IAgentDownloadStore,
+  ): Promise<unknown> {
+    const branch = a.branch as string;
+    const raw = a.paths;
+    if (!Array.isArray(raw) || raw.length === 0 || raw.some((p) => typeof p !== 'string' || p.trim() === '')) {
+      throw new ToolError('Name at least one path to download in `paths`: an array of file and folder paths.', 400);
+    }
+    // At the cap, say so before a branch is resolved; the slot below counts again.
+    store.assertCanIssue(ctx.user);
+    // Resolves (clones, if need be) the branch's workspace, as a read does —
+    // so an unknown branch is the call's refusal, not every path's.
+    await ctx.getFilesystem(branch);
+    const workspaceId = workspaceIdForBranch(branch);
+    const refusedSpelling: { path: string; reason: string }[] = [];
+    const requested: string[] = [];
+    for (const p of raw as string[]) {
+      try {
+        // As written: a name may begin or end with a space, and trimming it
+        // would ask for another file. A trailing slash is the one spelling
+        // folded, so `Shared/` and `Shared` are one request, not two zips.
+        requested.push(normalizeWorkspacePath(p, kbDirName).replace(/\/+$/, ''));
+      } catch (err) {
+        if (!hasHttpStatus(err)) throw err;
+        refusedSpelling.push({ path: p, reason: err.message });
+      }
+    }
+    // A slot is taken before anything is built (a caller at the cap is told
+    // so at once) and given back when nothing is issued.
+    return store.withRequestSlot(ctx.user, async (issue) => {
+      const built = await buildDownload(requested, {
+        kbDirName,
+        maxBytes: ZIP_DOWNLOAD_MAX_BYTES,
+        maxFiles: DOWNLOAD_MAX_FILES,
+        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
+        canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
+        canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
+        // The folder-level gate the app's zip route applies, before the files.
+        canDownloadFolder: (p) =>
+          accessControl.canDownload(workspaceId, ctx.user.email, toKbRelative(p, kbDirName) ?? p),
+        notifyRead: (p) => notifyAgentRead(agentAccessGate, ctx, branch, p),
+        readFile: (p) => ctx.workspaceService.readFileBinary(workspaceId, p),
+        contentTypeOf: downloadContentType,
+      });
+      const refused = [...refusedSpelling, ...built.refused];
+      if (built.artifacts.length === 0) {
+        return { expiresAt: null, expiresInSeconds: 0, files: [], folders: [], refused };
+      }
+      const issued = await issue(built.artifacts);
+      const urls = issued.downloadUrls;
+      return {
+        expiresAt: issued.expiresAt,
+        expiresInSeconds: issued.expiresInSeconds,
+        files: built.files.map((f, i) => ({ ...f, downloadUrl: urls[i]! })),
+        folders: built.folders.map((f, i) => ({
+          path: f.path,
+          bytes: f.bytes,
+          downloadUrl: urls[built.files.length + i]!,
+          files: f.files,
+        })),
+        refused,
+      };
+    });
+  }
 
   // ── shell (internal-only) ───────────────────────────────────────────────
   mount({
@@ -2845,4 +4075,7 @@ export function registerWorkspaceTools(
       });
     },
   });
+
+  // The one read `open_page` borrows — see `readForTool` above.
+  return { readForTool };
 }

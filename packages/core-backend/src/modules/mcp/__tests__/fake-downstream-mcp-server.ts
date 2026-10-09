@@ -8,6 +8,7 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest,
   type CallToolResult,
+  type ListToolsResult,
 } from '@modelcontextprotocol/sdk/types.js';
 
 /**
@@ -44,6 +45,13 @@ export interface FakeDownstreamOptions {
    * revoked or expired token with.
    */
   acceptsToken?: (token: string) => boolean;
+  /**
+   * What `tools/list` answers, in place of the single `echo` tool. A FUNCTION,
+   * read per request, so a test can have the server correct a schema between
+   * two discoveries the way a vendor's fix reaches us — through the next load,
+   * with nothing restarted here.
+   */
+  tools?: () => Array<{ name: string; description?: string; inputSchema: unknown }>;
 }
 
 export async function startFakeDownstreamMcpServer(opts: FakeDownstreamOptions = {}): Promise<FakeDownstreamMcpServer> {
@@ -55,13 +63,16 @@ export async function startFakeDownstreamMcpServer(opts: FakeDownstreamOptions =
   function buildServer(): Server {
     const server = new Server({ name: 'downstream', version: '0.0.0' }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
+      // Cast because a test may deliberately advertise a schema that is NOT
+      // valid JSON Schema, which is precisely what the SDK's type forbids and
+      // what a real server is free to send.
+      tools: (opts.tools?.() ?? [
         {
           name: 'echo',
           description: 'Return the text it was given.',
-          inputSchema: { type: 'object' as const, properties: { text: { type: 'string' } } },
+          inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
         },
-      ],
+      ]) as unknown as ListToolsResult['tools'],
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
       executions += 1;

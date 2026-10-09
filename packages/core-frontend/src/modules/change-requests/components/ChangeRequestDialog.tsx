@@ -17,8 +17,10 @@ import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
+import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -237,6 +239,16 @@ export function ChangeRequestDialog({
     };
   }, [bus, cr.number]);
 
+  // The request's verbs (revert, update) push its SOURCE branch, which is
+  // rarely the branch in the address bar. Watch that workspace while the
+  // dialog is open, so a push the host refuses raises the sync banner here —
+  // and the push that later lands clears it here.
+  const sourceWorkspaceId = encodeURIComponent(cr.branch);
+  useEffect(() => {
+    if (!bus) return;
+    return bus.watchWorkspace(sourceWorkspaceId);
+  }, [bus, sourceWorkspaceId]);
+
   // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
   // lifted to full paths, and every touched file lists whatever folder it is
   // in. The dialog is a decision about the WHOLE request; a file it touches
@@ -337,22 +349,35 @@ export function ChangeRequestDialog({
       const token = {};
       asked.current.set(selected, token);
       const current = () => asked.current.get(selected) === token;
+      const removes = detail.files.some((f) => f.path === selected && f.status === 'removed');
       readFileOnBranch(cr.branch, selected)
         .then((content) => {
           if (current()) setBranchContents((c) => ({ ...c, [selected]: content }));
         })
-        // NOT `''`. An unreadable branch copy stored as empty would diff as
-        // "every line deleted" — a change request that erases the file.
-        //
-        // The failure is described before it is published: naming the folder
-        // to ask about is a second read, and the pane stays on "Loading…"
-        // until it settles rather than saying "couldn't be read" and then
-        // rewriting it as "you don't have access" a moment later.
-        .catch((err: unknown) =>
-          describeReadFailure(err, cr.branch, selected).then((failure) => {
+        .catch((err: unknown) => {
+          if (!current()) return;
+          // A file the request REMOVES is not on its branch, and the FILE read
+          // says so with a 404. That is the proposal, not a failed read: the
+          // branch copy is empty, and the current copy diffs against it as
+          // every line deleted — the same rule the diff boxes apply. A branch
+          // that could not be opened is not a `WorkspaceApiError` here
+          // (`readFileOnBranch` answers that apart), so it stays a failure.
+          if (removes && err instanceof WorkspaceApiError && err.status === 404) {
+            setBranchContents((c) => ({ ...c, [selected]: '' }));
+            return;
+          }
+          // Anything else is NOT `''`. An unreadable branch copy stored as
+          // empty would diff as "every line deleted" — a change request that
+          // erases the file.
+          //
+          // The failure is described before it is published: naming the
+          // folder to ask about is a second read, and the pane stays on
+          // "Loading…" until it settles rather than saying "couldn't be read"
+          // and then rewriting it as "you don't have access" a moment later.
+          void describeReadFailure(err, cr.branch, selected).then((failure) => {
             if (current()) setBranchFailure((m) => new Map(m).set(selected, failure));
-          }),
-        );
+          });
+        });
     }
   }, [selected, selectedIsBinary, cr.branch, branchRevision, detail]);
 
@@ -1087,6 +1112,10 @@ export function ChangeRequestDialog({
             </>
           )}
         </p>
+
+        <div className="mx-8 mt-4 empty:hidden overflow-hidden rounded-lg">
+          <GitSyncFailedBanner workspaceId={sourceWorkspaceId} />
+        </div>
 
         {error && (
           <Banner tone="danger" role="alert" className="mx-8 mt-4">

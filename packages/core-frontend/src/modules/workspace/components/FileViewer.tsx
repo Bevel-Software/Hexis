@@ -38,7 +38,8 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
-import { getFileRenderer, getRendererLayout, isViewOnlyFile } from './renderers';
+import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
+import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
@@ -145,12 +146,10 @@ export function FileViewer() {
   // Registry renderer overrides win over the built-in extension map — the
   // enterprise registry swaps in its own `.html` renderer (vendored d3/mermaid
   // + KB graph client) this way.
-  const Renderer = useMemo(() => {
-    if (!openFilePath) return null;
-    const ext = openFilePath.slice(openFilePath.lastIndexOf('.')).toLowerCase();
-    const override = renderers.find((r) => r.extensions.includes(ext));
-    return override?.Component ?? getFileRenderer(openFilePath);
-  }, [openFilePath, renderers]);
+  const Renderer = useMemo(
+    () => (openFilePath ? pickFileRenderer(openFilePath, renderers) : null),
+    [openFilePath, renderers],
+  );
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState<'content' | 'history' | 'compare'>('content');
@@ -1427,7 +1426,16 @@ export function FileViewer() {
               around its files. One file-in-a-box drawing for the whole app;
               full-bleed renderers (pdf, csv, images…) are viewports, not
               documents, and keep their unframed definite-height contract. */}
-          <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
+          {/* `READ_PANE` — the file page's read region. A byte-reading viewer's
+              "Try again" unmounts itself (the error block IS the renderer's whole
+              output), so focus would fall to the body and the next Tab would
+              restart at the top of the page. This wrapper stays mounted through
+              every state the read goes through, prose and full-bleed alike, so
+              it is what focus lands on. See `RetryReadButton`. */}
+          <div
+            {...READ_PANE}
+            className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}
+          >
             {shellVariant === 'prose' ? (
               <>
                 <FilePaneCard file={fileBaseName} actions={paneActions}>

@@ -13,7 +13,10 @@ import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
+import { registerWorkspaceTools } from '../workspace.tools.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
@@ -22,13 +25,19 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
+import { AccessControlService } from '../../access/access-control.service.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { WorkspaceService } from '../workspace.service.js';
+import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
-import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
+import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
+import { compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
+import { routeToolSchemas } from '../../tool-helpers/route-tool-schemas.js';
+import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -44,6 +53,11 @@ const allowAll = {
   canDownload: async () => true,
   canOwner: async () => true,
   canWriteBatchAtRef: async () => null,
+  // The `after` half of a move's or copy's preview. Allowing everything here
+  // keeps it the same answer as the four gates above; what the relocation of
+  // a folder's `access.md` files actually does to it is exercised against
+  // REAL rules in "a move preview judges the destination as it will be".
+  previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -89,6 +103,8 @@ let unzipEntries: string[] = [];
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
+/** What the platform's guide reads as, for the tests about the guide's name. */
+let guideText = 'THE PLATFORM GUIDE\n';
 /**
  * The focused branch the resolved `ToolContext` carries — mirrors the branch an
  * internal token bakes for the in-process agent. A test sets it to prove a
@@ -173,6 +189,25 @@ async function start(
     await runRaceHook();
     await check?.();
     return plainWriteFile(path, content, options as never);
+  };
+  // `LockingFilesystem.rewriteFile`: read, compute and write with the path
+  // "locked". The other writer runs first — where the real filesystem would be
+  // acquiring the lock — so `rewrite` reads what that writer left.
+  (fs as unknown as Record<string, unknown>).rewriteFile = async (
+    path: string,
+    rewrite: (current: Buffer | null) => string | Promise<string>,
+  ) => {
+    await runRaceHook();
+    // Absent is null; any other read failure is a failure, as in the real one.
+    const current = await fs.readFile(path).then(
+      (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), 'utf8')),
+      (err: unknown) => {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
+      },
+    );
+    return plainWriteFile(path, await rewrite(current));
   };
   (fs as unknown as Record<string, unknown>).writeFiles = async (
     writes: { path: string; content: string }[],
@@ -269,7 +304,7 @@ async function start(
     recoveryBotEmail: RECOVERY_BOT,
     hooks,
     notes,
-  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */);
+  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
@@ -285,7 +320,9 @@ const postRaw = (url: string, body: unknown = {}) =>
  * POST a well-formed call. Every KB tool requires `branch` — a call that names
  * none is refused at the mount with 400 `branch-required` — so this names one
  * unless the test already did. A test ABOUT the missing input uses `postRaw`,
- * so the thing under test is never papered over by the helper.
+ * so the thing under test is never papered over by the helper. So does
+ * `start_session`, which declares no arguments at all and forbids extras: its
+ * route refuses a `branch` as an argument it does not have.
  */
 const post = (url: string, body: unknown = {}) =>
   postRaw(
@@ -297,6 +334,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   /* fresh per test via start() */
+  guideText = 'THE PLATFORM GUIDE\n';
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -352,6 +390,98 @@ describe('workspace file primitives', () => {
   it('edit_file 400s when old_string is missing', async () => {
     const base = await start();
     expect((await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'nope', new_string: 'x' })).status).toBe(400);
+  });
+
+  it('edit_file writes new_string exactly as sent, `$` patterns included', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'world', new_string: "cost: $& $1 $' $$" });
+    expect(res.status).toBe(200);
+    expect(String(await fs.readFile(`${KB_DIR}/a.md`))).toBe("hello\ncost: $& $1 $' $$\n");
+  });
+
+  /**
+   * An edit is a promise about the text it replaces, so that text has to be
+   * found in the file as it is when the write lands — read with the path's
+   * lock held, not at a preflight anybody may invalidate. `raceHook` is the
+   * other writer, running exactly where the real filesystem acquires the lock.
+   */
+  describe('edit_file looks for old_string in the file the write actually lands on', () => {
+    const EMPTY_OWNER = '# Assignee\n\n# Log';
+    const claim = (base: string, who: string) =>
+      post(`${base}/api/agent/tools/edit_file`, {
+        path: `${KB_DIR}/ticket.md`,
+        old_string: EMPTY_OWNER,
+        new_string: `# Assignee\n${who}\n\n# Log`,
+      });
+
+    it('refuses when another writer replaced that text after the preflight, and keeps their write', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\ncoder1\n\n# Log\n- filed\n'); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain('old_string not found');
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('# Assignee\ncoder1\n\n# Log\n- filed\n');
+    });
+
+    it('applies the edit to what the other writer left when the text is still there', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n- a line added meanwhile\n'); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(200);
+      // Their line is kept: the new content was computed from the file as it was under the lock.
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('# Assignee\ncoder2\n\n# Log\n- filed\n- a line added meanwhile\n');
+    });
+
+    it('refuses when the text became ambiguous after the preflight', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, `${EMPTY_OWNER}\n${EMPTY_OWNER}\n`); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain('appears 2 times');
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe(`${EMPTY_OWNER}\n${EMPTY_OWNER}\n`);
+    });
+
+    it('answers not found when the file was deleted after the preflight, and does not recreate it', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.deleteFile(`${KB_DIR}/ticket.md`); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(404);
+      await expect(fs.readFile(`${KB_DIR}/ticket.md`)).rejects.toThrow();
+    });
+
+    // Every question the tool asks of the file is asked of the bytes it is
+    // about to replace. An extensionless file may hold anything, and the app's
+    // own upload can swap it for a binary between the preflight and the lock.
+    // The binary still CONTAINS `old_string` here, so nothing but the
+    // "may these bytes be edited as text" question can refuse it.
+    it('refuses when the file became binary after the preflight, and leaves those bytes alone', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/TICKET`, '# Assignee\n\n# Log\n- filed\n');
+      const binary = Buffer.concat([Buffer.from([0x00, 0xff, 0xfe, 0x00]), Buffer.from(`${EMPTY_OWNER}\n`, 'utf8')]);
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/TICKET`, binary); };
+      const res = await post(`${base}/api/agent/tools/edit_file`, {
+        path: `${KB_DIR}/TICKET`,
+        old_string: EMPTY_OWNER,
+        new_string: '# Assignee\ncoder2\n\n# Log',
+      });
+      expect(res.status).toBe(415);
+      expect(await res.json()).toMatchObject({ kind: 'binary_not_writable' });
+      const after = await fs.readFile(`${KB_DIR}/TICKET`);
+      expect(Buffer.from(after as Buffer).equals(binary)).toBe(true);
+    });
+
+    it('counts replace_all over the file as it is under the lock', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, 'x x\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, 'x x x\n'); };
+      const res = await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/ticket.md`, old_string: 'x', new_string: 'y', replace_all: true });
+      expect(await res.json()).toMatchObject({ replaced: 3 });
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('y y y\n');
+    });
   });
 
   it('list_files + file_stat', async () => {
@@ -843,6 +973,8 @@ describe('write modes and per-path outcomes', () => {
     for (const res of [
       await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'x', mode: 'replace' }),
       await writeFiles(base, { files: [{ path: `${KB_DIR}/a.md`, content: 'x' }], mode: 'replace' }),
+      // An empty batch is no way round it: the mode is judged before the batch is.
+      await writeFiles(base, { files: [], mode: 'bogus' }),
     ]) {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; code: string };
@@ -912,19 +1044,26 @@ describe('write modes and per-path outcomes', () => {
     });
   });
 
-  it('both descriptions state the default and all three modes, and `mode` is an input on each', async () => {
+  it('states the three modes on the `mode` input of each write tool, and once in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
+    // The paragraph that said this in BOTH descriptions is one shared rule now.
+    // What stays on the tool is the input the agent fills, which is where the
+    // decision is actually taken.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'write-mode')!;
+    expect(rule.body).toContain('DEFAULTS TO `create`');
+    expect(rule.body).toContain('On write_file and write_files');
+    expect(sharedFileRulesSection(testKbContext().layout).split(rule.body)).toHaveLength(2);
     for (const name of ['write_file', 'write_files']) {
       const def = tools.find((t) => t.name === name)!;
-      expect(def.description, name).toContain('DEFAULTS TO `create`');
-      for (const mode of ['`create`', '`overwrite`', '`update`']) {
-        expect(def.description, `${name} ${mode}`).toContain(mode);
-      }
+      expect(def.description, name).not.toContain('DEFAULTS TO `create`');
       const body = (def.inputs as { properties: { body: { properties: Record<string, { enum?: string[]; description?: string }> } } }).properties.body;
       expect(body.properties.mode, name).toBeDefined();
       expect(body.properties.mode.enum, name).toEqual(['create', 'overwrite', 'update']);
       expect(body.properties.mode.description, name).toContain('default `create`');
+      for (const mode of ['`create`', '`overwrite`', '`update`']) {
+        expect(body.properties.mode.description, `${name} ${mode}`).toContain(mode);
+      }
     }
   });
 
@@ -966,6 +1105,202 @@ describe('write modes and per-path outcomes', () => {
     })).json()) as BatchAnswer;
     expect(both.count).toBe(2);
     expect(both.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
+  });
+});
+
+/**
+ * The agent guide at the repository root. It is not a file: `read_file` of
+ * its name answers with the platform's guide, after the knowledge base's own
+ * file of that name when it has one, and `file_stat` says what is there.
+ */
+describe("the agent guide at the guide's name", () => {
+  const GUIDE = `${KB_DIR}/AGENTS.md`;
+  const read = (base: string, p = GUIDE, extra: Record<string, unknown> = {}) =>
+    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string }>);
+  const statOf = (base: string, p = GUIDE) =>
+    post(`${base}/api/agent/tools/file_stat`, { path: p }).then((r) => r.json() as Promise<Record<string, unknown>>);
+
+  it('answers with the guide when the knowledge base has no file of that name', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    // By the root-anchored and the prefix-less spellings too, like any path.
+    expect((await read(base, `/${GUIDE}`)).content).toBe('THE PLATFORM GUIDE\n');
+    expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
+    // Sliced like any content.
+    expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it('answers with the platform\'s composed guide, HTML views section and all', async () => {
+    guideText = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const { content } = await read(base, 'AGENTS.md');
+    expect(content).toBe(guideText);
+    expect(content).toContain('## HTML views');
+    expect(content).toContain('**A bare fragment scrolls the page.**');
+  });
+
+  it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nWrite tickets in the present tense.\n');
+    const { content } = await read(base);
+    expect(content.startsWith('# Acme\n\nWrite tickets in the present tense.\n\n---\n')).toBe(true);
+    expect(content.endsWith('\n\nTHE PLATFORM GUIDE\n')).toBe(true);
+    expect(content).toContain("The text above is this knowledge base's own conventions file.");
+  });
+
+  it('never serves a copy of the guide an earlier release left on disk a second time', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await read(base)).content).toBe('THE PLATFORM GUIDE\n');
+  });
+
+  it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
+    // Nothing of theirs there: the guide is everyone's.
+    const absent = await read(denied);
+    const absentStat = await statOf(denied);
+    expect(absent.content).toBe('THE PLATFORM GUIDE\n');
+    // A file they may not read answers EXACTLY as no file does — a refusal
+    // would be the one thing the platform never says about a restricted
+    // file, which is that it is there.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe secret conventions.\n');
+    const closed = await post(`${denied}/api/agent/tools/read_file`, { path: GUIDE });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toEqual(absent);
+    expect(await statOf(denied)).toEqual(absentStat);
+  });
+
+  it("serves the knowledge base's own file to a caller who may read it", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const allowed = await start('read');
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe conventions.\n');
+    expect((await read(allowed)).content).toContain('The conventions.');
+  });
+
+  it("answers the guide alone when the knowledge base's own file vanishes between the probe and the read", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    // The file is there when it is probed and gone when it is read: a
+    // concurrent delete, which is the absent case and never a failure.
+    const probed = fs.stat.bind(fs);
+    let vanish = false;
+    (fs as unknown as Record<string, unknown>).stat = async (p: string) => {
+      const st = await probed(p);
+      if (vanish && p.endsWith('AGENTS.md')) {
+        vanish = false;
+        await fs.deleteFile(p);
+      }
+      return st;
+    };
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await statOf(base)).toMatchObject({ platformGuide: true });
+  });
+
+  it('leaves a folder at the guide\'s name to the ordinary stat, and never reads it as a copy', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.mkdir(`${KB_DIR}/AGENTS.md`);
+    const folder = await statOf(base);
+    expect(folder).toMatchObject({ type: 'directory' });
+    expect(folder.platformGuide).toBeUndefined();
+  });
+
+  it('is a nested AGENTS.md no concern of: that is a file like any other', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Handbook/AGENTS.md`, '# Handbook\n');
+    expect((await read(base, `${KB_DIR}/Handbook/AGENTS.md`)).content).toBe('# Handbook\n');
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Handbook/HEXIS.md` })).status).toBe(404);
+  });
+
+  it('grep finds the guide where read_file serves it: from the root and at its own path, own file first, denied file absent', async () => {
+    guideText = '# Guide\n\nName every needle you plant.\n';
+    const grep = (base: string, pattern: string, path?: string) =>
+      post(`${base}/api/agent/tools/grep`, path === undefined ? { pattern } : { pattern, path }).then(
+        (r) => r.json() as Promise<{ matches: { path: string; line: number; text: string }[] }>,
+      );
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Handbook/a.md`, 'a needle on disk\n');
+    // A search of the whole knowledge base reaches the guide, under the path
+    // a read of it answers to, with the line number that read gives.
+    const fromRoot = await grep(base, 'needle');
+    expect(fromRoot.matches).toContainEqual({ path: GUIDE, line: 3, text: 'Name every needle you plant.' });
+    expect(fromRoot.matches).toContainEqual({ path: `${KB_DIR}/Handbook/a.md`, line: 1, text: 'a needle on disk' });
+    // A search of the guide's own path is a search of what read_file answers.
+    expect((await grep(base, 'needle', GUIDE)).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+    expect((await grep(base, 'needle', 'AGENTS.md')).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+    // A search under a folder does not reach a file that is not under it.
+    expect((await grep(base, 'needle', `${KB_DIR}/Handbook`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+
+    // With the knowledge base's own AGENTS.md, the search covers the composed
+    // text — the own file first, then the guide — and once: the walk's own
+    // matches in that file are the same lines, so they are not repeated.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+    const { content } = await read(base);
+    const guideLine = content.split('\n').indexOf('Name every needle you plant.') + 1;
+    const composed = (await grep(base, 'needle')).matches.filter((m) => m.path === GUIDE);
+    expect(composed).toEqual([
+      { path: GUIDE, line: 3, text: 'Our needle rule.' },
+      { path: GUIDE, line: guideLine, text: 'Name every needle you plant.' },
+    ]);
+    expect((await grep(base, 'needle', GUIDE)).matches).toEqual(composed);
+
+    // The own file does not use up `max_results` twice: the walk leaves it to
+    // the composed search, so a file later in the tree is still reached when
+    // the own file alone has more matches than the cap. Without that, the
+    // walk filled the cap from AGENTS.md, those matches were dropped as
+    // duplicates, and Handbook/ was never searched.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, `# Acme\n\n${'needle\n'.repeat(5)}`);
+    const capped = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', max_results: 3 })).json()) as {
+      matches: { path: string }[];
+    };
+    expect(capped.matches.map((m) => m.path)).toContain(`${KB_DIR}/Handbook/a.md`);
+    expect(capped.matches).toHaveLength(3);
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+
+    // A caller who may not read the own file searches the guide alone, from
+    // the root and at the path — as read_file answers them, with no sign that
+    // anything of the organisation's is there.
+    const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+    for (const found of [await grep(denied, 'needle'), await grep(denied, 'needle', GUIDE)]) {
+      expect(found.matches.filter((m) => m.path === GUIDE)).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+      expect(JSON.stringify(found)).not.toContain('Acme');
+    }
+  });
+
+  it('file_stat says a text file is there to read, and that nothing can be written, moved or deleted at it', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    expect(await statOf(base)).toMatchObject({
+      name: 'AGENTS.md',
+      type: 'file',
+      size: Buffer.byteLength('THE PLATFORM GUIDE\n'),
+      platformGuide: true,
+      managed: true,
+      movable: false,
+      deletable: false,
+      contentMode: 'text',
+      textEditable: false,
+      access: { read: true, write: false },
+    });
+    // With a file of the knowledge base's own there, stat describes THAT file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    const own = await statOf(base);
+    expect(own).toMatchObject({ name: 'AGENTS.md', type: 'file', managed: false, movable: true, textEditable: true });
+    expect(own.platformGuide).toBeUndefined();
+    // A copy an earlier release wrote is what read_file does not serve, so
+    // stat says the same thing it says for no file at all.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect(await statOf(base)).toMatchObject({ platformGuide: true, managed: true, movable: false });
   });
 });
 
@@ -1587,28 +1922,82 @@ describe('office documents and PDFs', () => {
     expect(await readContent(base, `${KB_DIR}/deck.pptx`)).toContain('Original');
   });
 
-  it('every file tool states the SAME content rule — refused families, the byte tools and the upload path — so agents learn before the call', async () => {
+  it('every mounted tool opens with the one sentence sending the agent to the guide, and repeats none of the rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const fileTools = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'mkdir', 'move_file', 'copy_file', 'unzip'];
-    for (const name of fileTools) {
+    // The shell is in the list too: it carried the agent-guide reminder before,
+    // and that reminder is one of the rules that moved.
+    const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip', 'execute_command'];
+    for (const name of mounted) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
-      // One constant, verbatim — the description is what tools_info returns.
-      expect(def!.description, name).toContain(CONTENT_RULE);
-      expect(def!.description, name).toContain('`binary_not_writable`');
-      expect(def!.description, name).toContain('copy_file, move_file, delete_file and unzip act on bytes of any kind');
-      expect(def!.description, name).toContain('`request_upload_token` + `apply_upload`');
-      expect(def!.description, name).toContain('`contentMode`');
-      // Modern extractable formats…
-      expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
-      // …email files (extractions too, so the same refusal applies)…
-      expect(def!.description, name).toContain('.eml/.msg');
-      // …the legacy binary family the refusal also covers…
-      expect(def!.description, name).toContain('.doc/.ppt/.xls');
+      expect(def!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      // Once, at the front — not once per paragraph that used to be appended.
+      expect(def!.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
+      // EVERY shared rule, in full, is in the two shared places now (see
+      // agent-instructions/__tests__/shared-file-rules.test.ts) and in no
+      // description. Checked on the whole body rather than on a phrase: the
+      // drift this PR exists to prevent is a paragraph pasted back onto a
+      // tool, and naming only two marker phrases would catch two of eight.
+      for (const rule of sharedFileRules(testKbContext().layout)) {
+        expect(def!.description, `${name} / ${rule.id}`).not.toContain(rule.body);
+      }
+      // The two lead-in labels the paragraphs used to arrive under are gone
+      // with them — a description carrying one is carrying the old text.
+      expect(def!.description, name).not.toContain('Content rule (the same on every file tool)');
+      expect(def!.description, name).not.toContain('Before your first read or change in a workspace');
     }
-    // The shell is not a file tool: it does not carry the rule.
-    expect(tools.find((t) => t.name === 'execute_command')!.description).not.toContain(CONTENT_RULE);
+    // start_session touches no file, yet it opens with the same sentence: the
+    // guide is read before ANYTHING in the platform, a session included.
+    // External-only, so it is looked up on that surface.
+    const external = await toolRegistry.listExternal();
+    expect(external.find((t) => t.name === 'start_session')!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
+  });
+
+  /**
+   * The call example at the top of every description is generated from the
+   * tool's input schema, and the same schema is what the argument check reads.
+   * If the two could disagree, the platform would publish an example its own
+   * check refuses — so every declared tool is called with its own example here.
+   */
+  it('every declared tool can be called with its own generated example', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    // The whole family this harness declares, the four the scenarios name included.
+    for (const name of ['read_file', 'write_file', 'list_files', 'grep']) {
+      expect(tools.some((t) => t.name === name), name).toBe(true);
+    }
+    expect(tools.length).toBeGreaterThan(12);
+    for (const def of tools) {
+      const compiled = compileCheck(def.inputs);
+      expect(compiled.checkable, `${def.name}: ${compiled.checkable ? '' : compiled.reason}`).toBe(true);
+      // Narrowed by hand: the assertion above already failed the test if not.
+      if (!compiled.checkable) throw new Error(compiled.reason);
+      expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
+      // And the FLAT schema, which is what the tool's own route checks the
+      // call against: the two must agree, or a call the example produced would
+      // be refused one layer in.
+      const flat = routeToolSchemas(def.name)?.flat;
+      expect(flat, def.name).toBeDefined();
+      const flatCheck = compileCheck(flat);
+      expect(flatCheck.checkable, `${def.name} (flat): ${flatCheck.checkable ? '' : flatCheck.reason}`).toBe(true);
+      if (!flatCheck.checkable) throw new Error(flatCheck.reason);
+      expect(flatCheck.check(exampleArguments(flat)), `${def.name} (flat)`).toEqual([]);
+    }
+  });
+
+  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const def of tools) {
+      // Measured as a CLIENT receives it: the call line, the purpose prefix at
+      // its own cap (the four knowledge-base tools carry one), and the
+      // description — the three things that ride one tool's entry.
+      const received = clientVisibleLength(def);
+      expect(received, `${def.name} is ${received} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
+        TOOL_DESCRIPTION_CAP,
+      );
+    }
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
@@ -1754,14 +2143,15 @@ describe('office documents and PDFs', () => {
     });
   });
 
-  it('the page-writing tools say where images go, so an agent writes the link a page will render', async () => {
+  it('says where the images a page uses go — once, in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'images-in-pages')!;
+    expect(rule.body).toContain('`assets/` folder next to the page');
+    expect(rule.body).toContain('![Approval screen](./assets/approval-screen.png)');
+    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
     for (const name of ['write_file', 'write_files']) {
-      const def = tools.find((t) => t.name === name);
-      expect(def, name).toBeDefined();
-      expect(def!.description, name).toContain('`assets/` folder next to the page');
-      expect(def!.description, name).toContain('![Approval screen](./assets/approval-screen.png)');
+      expect(tools.find((t) => t.name === name)!.description, name).not.toContain('`assets/` folder next to the page');
     }
   });
 });
@@ -1925,13 +2315,13 @@ describe('start_session', () => {
 
   it('returns the sink-minted id as sessionId', async () => {
     const base = await startSessionApp();
-    const res = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+    const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
     expect(res.sessionId).toBe('thread-xyz');
   });
 
   it('mints the session for the authenticated user', async () => {
     const base = await startSessionApp();
-    await post(`${base}/api/agent/tools/start_session`);
+    await postRaw(`${base}/api/agent/tools/start_session`);
     expect(created).toHaveLength(1);
     expect(created[0].userId).toBe('user-42');
     expect(created[0].startedAt).toBeInstanceOf(Date);
@@ -1942,7 +2332,7 @@ describe('start_session', () => {
     // loopback token resolves to source 'external' at the verifier (see
     // tool-auth), so it is admitted here like any external agent.
     const base = await startSessionApp('internal');
-    const res = await post(`${base}/api/agent/tools/start_session`);
+    const res = await postRaw(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
   });
@@ -1966,7 +2356,7 @@ describe('start_session', () => {
     it('answers every one of them with a session id of its own', async () => {
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const responses = await Promise.all(Array.from({ length: 50 }, () => postRaw(`${base}/api/agent/tools/start_session`)));
       const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
 
       expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
@@ -1999,13 +2389,13 @@ describe('start_session', () => {
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       let failed: Awaited<ReturnType<typeof post>>;
       try {
-        failed = await post(`${base}/api/agent/tools/start_session`);
+        failed = await postRaw(`${base}/api/agent/tools/start_session`);
       } finally {
         errorLog.mockRestore();
       }
       expect(failed.status).toBeGreaterThanOrEqual(500);
 
-      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retried = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
       expect(retried.sessionId).toBe('session-2');
       expect(calls).toBe(2);
     });
@@ -2017,8 +2407,8 @@ describe('start_session', () => {
       // to other tools, and the spare is simply never mentioned again.
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
-      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
 
       expect(retry.sessionId).not.toBe(first.sessionId);
       expect(first.sessionId).toBeTruthy();
@@ -2558,6 +2948,11 @@ describe('preflight for moves and deletes', () => {
     canWriteBatchAtRef: async (_w: string, _r: string, _u: string, rels: string[]) =>
       new Map(rels.map((p) => [p, verbsFor(p).write])),
     eligibleWritersAtRef: async () => ({ roles: ['Admin'], users: [] }),
+    // This double has no access files to carry, so the destination as it will
+    // be IS the destination as it is — the answer `accessAt` gave before the
+    // preview learned to relocate them, which keeps every ordering and
+    // oracle test below about what it is about.
+    previewAccessAfterRelocation: async (_w: string, _u: string, _from: string, to: string) => verbsFor(to),
   } as unknown as IAccessControl;
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -2614,6 +3009,108 @@ describe('preflight for moves and deletes', () => {
   });
 
   describe('move_file', () => {
+    describe('rewrites links', () => {
+      /** A node at Sales/deal.md, linked from a page beside it, a read-only page, and a page the caller cannot read. */
+      async function linked(): Promise<string> {
+        const base = await seeded();
+        await fs.writeFile(KB('NodeTypes/Deal.md'), '# Deal\n');
+        await fs.writeFile(KB('Sales/deal.md'), '---\nnodeType: "[Deal](../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../HR/policy.md).\n');
+        await fs.writeFile(KB('Sales/index.md'), `[d](deal.md "Deal") [r](/${KB_DIR}/Sales/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`);
+        await fs.writeFile(KB('Locked/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Secret/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Sales/transcripts/01.md'), '[d](../deal.md)\n');
+        return base;
+      }
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
+
+      it('by default: links in and out are rewritten, the dry run answering the plan the move carries out', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.status).toBe(200);
+        expect(dry.body.links).toEqual({
+          filesEdited: 2,
+          linksRewritten: 4,
+          edits: [
+            { path: KB('Sales/2026/deal.md'), from: '../NodeTypes/Deal.md', to: '../../NodeTypes/Deal.md' },
+            { path: KB('Sales/2026/deal.md'), from: '../HR/policy.md', to: '../../HR/policy.md' },
+            { path: KB('Sales/index.md'), from: 'deal.md', to: '2026/deal.md' },
+            { path: KB('Sales/index.md'), from: `/${KB_DIR}/Sales/deal.md#terms`, to: `/${KB_DIR}/Sales/2026/deal.md#terms` },
+          ],
+          notRewritten: [{ path: KB('Locked/refs.md'), reason: 'no write access', links: ['../Sales/deal.md'] }],
+          unsearched: 'Links in files you cannot read were not searched, and may still point at the old path.',
+        });
+        // Nothing about the unreadable page leaks.
+        expect(JSON.stringify(dry.body)).not.toContain('Secret');
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(200);
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toEqual(dry.body.links);
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toBe(
+          '---\nnodeType: "[Deal](../../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../../HR/policy.md).\n',
+        );
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toBe(
+          `[d](2026/deal.md "Deal") [r](/${KB_DIR}/Sales/2026/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`,
+        );
+        // The read-only page, the unreadable page and the transcript keep the old path.
+        expect(await fs.readFile(KB('Locked/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Secret/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Sales/transcripts/01.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('`rewriteLinks: false` moves exactly as before: no link touched, no `links` block', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true, rewriteLinks: false });
+        expect(dry.body.links).toBeUndefined();
+        const run = await call(base, 'move_file', { ...args, rewriteLinks: false });
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toBeUndefined();
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toContain('../NodeTypes/Deal.md');
+      });
+
+      it('the pages the answer names reach the read hook, the edited ones the write hook, and a page merely searched neither', async () => {
+        const base = await linked();
+        const reads: string[] = [];
+        const writes: string[] = [];
+        hooks.onAgentRead(async (op) => {
+          reads.push(op.wsPath ?? '');
+        });
+        hooks.onPreWrite(async (op) => {
+          writes.push(op.wsPath ?? '');
+        });
+        expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+        // `Locked/refs.md` is named (left for want of write access, its links
+        // listed), so the read hook hears of it; the unreadable page and the
+        // transcript are never named, so it never hears of them.
+        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+        expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+      });
+
+      it('a move that would edit more than 200 files is refused, and nothing changes', async () => {
+        const base = await seeded();
+        for (let i = 0; i < 201; i++) await fs.writeFile(KB(`Sales/pages/p${i}.md`), '[d](../deal.md)\n');
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.body).toMatchObject({ allowed: false });
+        expect(dry.body.reason).toMatch(/201 files.*rewriteLinks: false/s);
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(400);
+        expect(JSON.stringify(run.body)).toContain('rewriteLinks: false');
+        expect(await exists(args.src)).toBe(true);
+        expect(await fs.readFile(KB('Sales/pages/p0.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('the description states the default, the opt-out, and that prose and code are not changed', async () => {
+        await start();
+        const def = (await toolRegistry.listInternal()).find((t) => t.name === 'move_file');
+        const description = typeof def?.description === 'string' ? def.description : '';
+        expect(description).toMatch(/rewritten by default/);
+        expect(description).toContain('`rewriteLinks: false`');
+        expect(description).toMatch(/plain prose or code are never changed/);
+      });
+    });
+
     it('a same-access move: the dry run changes nothing, the real call runs without confirm', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
@@ -2699,6 +3196,35 @@ describe('preflight for moves and deletes', () => {
       // And nothing was moved onto the name that was taken.
       expect(await fs.readFile(KB('Locked/rules.md'), { encoding: 'utf-8' })).toBe('rules');
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    /**
+     * The dry run keeps that order too, and it is the easier oracle to reach:
+     * it answers 200 rather than throwing, so a denied caller could read the
+     * source's kind and its file count off it — or a 404 saying whether a
+     * source they may not copy from exists at all. Nothing on disk is probed
+     * until the write verdict on the destination has been taken.
+     */
+    it('copy_file\'s dry run refuses a denied destination the same way whatever the source is', async () => {
+      const base = await seeded();
+      const dry = async (src: string) =>
+        (await call(base, 'copy_file', { src, dest: KB('Locked/new.md'), dryRun: true })).body;
+
+      const file = await dry(KB('Sales/deal.md'));
+      const folder = await dry(KB('Sales/archive'));
+      const missing = await dry(KB('Sales/nothing-here.md'));
+
+      // One sentence, three sources: the refusal says nothing about any of them.
+      for (const answer of [file, folder, missing]) {
+        expect(answer).toMatchObject({ allowed: false, dryRun: true, copied: false });
+        expect(answer.reason).toContain(KB('Locked/new.md'));
+        expect(answer.kind).toBeUndefined();
+        expect(answer.descendants).toBeUndefined();
+      }
+      expect(folder.reason).toBe(file.reason);
+      expect(missing.reason).toBe(file.reason);
+      // And the caller's own verbs are still answered — those are theirs.
+      expect(Object.keys(file.access).sort()).toEqual(['after', 'before']);
     });
 
     it('copy_file keeps the same order: the write refusal, not what is in the folder', async () => {
@@ -2828,19 +3354,17 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(true);
     });
 
-    it('every one of the four platform files gets the same sentence, and the agent never gets the admin restore', async () => {
+    it('every one of the three platform files gets the same sentence, and the agent never gets the admin restore', async () => {
       // The agent move tool has no exception: the recovery move is a person's,
       // made as an admin, and an agent is neither.
       const base = await seeded();
       await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
-      await fs.writeFile(KB('AGENTS.md'), 'agents\n');
       await fs.writeFile(KB('.bevelignore'), '*.tmp\n');
       await fs.writeFile(KB('Misplaced/access.md'), '---\nread: everyone\n---\n');
       const cases: [string, string][] = [
         [KB('access.md'), KB('Sales/access.md')],
         [KB('roles.yaml'), KB('Sales/roles.yaml')],
         [KB('.bevelignore'), KB('Sales/.bevelignore')],
-        [KB('AGENTS.md'), KB('Sales/AGENTS.md')],
         // Including the shape of the admin's recovery move: a misplaced
         // access.md into a folder that has none. A person holding the Admin
         // role is allowed exactly this move from the UI; the agent is not.
@@ -2945,20 +3469,98 @@ describe('preflight for moves and deletes', () => {
       expect(run.status).toBe(403);
       expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
     });
+
+    // A nested access.md is deleted the way a person deletes it in the app:
+    // by whoever may write it, through the same one-file delete (the locking
+    // filesystem's, which commits and pushes as the caller) as any file.
+    it('a nested access.md is deleted by a caller who may write it, like any file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/access.md'), '---\nread: Admin\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Sales/access.md') })).body).toMatchObject({
+        managed: true, movable: false, deletable: true,
+      });
+      const deleted: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string) => { deleted.push(p); return deleteFile(p); };
+
+      const run = await call(base, 'delete_file', { path: KB('Sales/access.md') });
+
+      expect(run.status).toBe(200);
+      expect(run.body).toEqual({ path: KB('Sales/access.md'), deleted: true });
+      expect(deleted).toEqual([KB('Sales/access.md')]);
+      expect(await exists(KB('Sales/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a nested access.md the caller may not write is the ordinary write refusal, and stays', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Locked/access.md'), '---\nread: everyone\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Locked/access.md') })).body).toMatchObject({
+        managed: true, deletable: false,
+      });
+
+      const run = await call(base, 'delete_file', { path: KB('Locked/access.md') });
+
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/access.md'), canPropose: true });
+      expect(JSON.stringify(run.body)).not.toContain('platform file');
+      expect(await exists(KB('Locked/access.md'))).toBe(true);
+    });
+
+    it('the root access.md and roles.yaml are the repository\'s own: refused for everyone, and they stay', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      for (const name of ['access.md', 'roles.yaml']) {
+        // The caller here may write and own everything: the refusal is not about who asks.
+        expect((await call(base, 'file_stat', { path: KB(name) })).body).toMatchObject({
+          managed: true, movable: false, deletable: false,
+          access: { read: true, write: true, download: true, owner: true },
+        });
+        const run = await call(base, 'delete_file', { path: KB(name) });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(`${name} is the repository's own file and cannot be deleted.`);
+        expect(await exists(KB(name))).toBe(true);
+      }
+    });
+
+    it('a nested roles.yaml is content, and .bevelignore stays refused as before', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      expect((await call(base, 'delete_file', { path: KB('Sales/roles.yaml') })).status).toBe(200);
+      const ignore = await call(base, 'delete_file', { path: KB('Sales/.bevelignore') });
+      expect(ignore.status).toBe(400);
+      expect(ignore.body.error).toBe('.bevelignore is a platform file and cannot be deleted through the agent tools.');
+      expect((await call(base, 'file_stat', { path: KB('Sales/.bevelignore') })).body).toMatchObject({ deletable: false });
+    });
+
+    it('delete_folder still refuses the repository root, which keeps its access.md', async () => {
+      const base = await seeded();
+      for (const args of [{ dryRun: true }, { confirm: true }]) {
+        const run = await call(base, 'delete_folder', { path: KB_DIR, ...args });
+        expect(run.body.allowed === false || run.status === 400).toBe(true);
+        expect(JSON.stringify(run.body)).toContain('The repository root is a platform folder and cannot be moved or deleted.');
+      }
+      expect(await exists(KB('access.md'))).toBe(true);
+    });
   });
 
   describe('what counts as the platform\'s own, and what a move or delete may reach', () => {
     const caseSensitiveDisk = process.platform === 'linux';
 
-    it('roles.yaml and AGENTS.md are platform files only at the root; access.md and .bevelignore at any depth', async () => {
+    it('roles.yaml is a platform file only at the root; access.md and .bevelignore at any depth; AGENTS.md nowhere', async () => {
       const base = await seeded();
       await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
       await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('AGENTS.md'), 'content');
       await fs.writeFile(KB('Sales/AGENTS.md'), 'content');
       await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
       const managed = async (p: string) => (await call(base, 'file_stat', { path: KB(p) })).body.managed;
       expect(await managed('roles.yaml')).toBe(true);
       expect(await managed('Sales/roles.yaml')).toBe(false);
+      // The organisation's own conventions file: the guide is served from
+      // code, so nothing under this name is the platform's.
+      expect(await managed('AGENTS.md')).toBe(false);
       expect(await managed('Sales/AGENTS.md')).toBe(false);
       expect(await managed('Sales/.bevelignore')).toBe(true);
       expect((await call(base, 'move_file', { src: KB('Sales/roles.yaml'), dest: KB('Sales/old-roles.yaml') })).body).toMatchObject({ moved: true });
@@ -3271,8 +3873,12 @@ describe('preflight for moves and deletes', () => {
       expect(d.description).toMatch(/FILE or FOLDER/);
       expect(d.description).toMatch(/folder moves recursively/);
       expect(d.description).toMatch(/destination must not exist/);
-      expect(d.description).toContain('is a platform file and stays in its folder.');
-      expect(d.description).toContain('`dryRun: true`');
+      // What refuses a move, and the dry-run/confirm protocol it shares with the
+      // deletes, are shared rules — stated once, in the two shared places.
+      const rules = sharedFileRulesSection(testKbContext().layout);
+      expect(rules).toContain('is a platform file and stays in its folder.');
+      expect(rules).toContain('`dryRun: true`');
+      expect(rules).toContain('`confirm: true`');
       expect(d.description).toContain('`confirm: true`');
       expect(Object.keys(d.inputs.properties.body.properties)).toEqual(expect.arrayContaining(['dryRun', 'confirm']));
       // What the description promises a dry run returns is what it returns.
@@ -3282,7 +3888,10 @@ describe('preflight for moves and deletes', () => {
         expect(dry.body, key).toHaveProperty(key);
       }
       const unconfirmed = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('HR/deal.md') });
-      expect(d.description).toContain('confirmationRequired: true');
+      // What an unconfirmed call answers is the shared protocol's promise; the
+      // field is still declared in this tool's own `outputs`.
+      expect(rules).toContain('confirmationRequired: true');
+      expect(declaredOutputs(d)).toContain('confirmationRequired');
       expect(unconfirmed.body.confirmationRequired).toBe(true);
       for (const body of [dry.body, unconfirmed.body]) {
         expect(declaredOutputs(d)).toEqual(expect.arrayContaining(Object.keys(body)));
@@ -3292,9 +3901,12 @@ describe('preflight for moves and deletes', () => {
     it('delete_folder states the confirm rule and refusals, and declares every field it returns', async () => {
       const base = await seeded();
       const d = await def('delete_folder');
-      expect(d.description).toContain('`dryRun: true`');
-      expect(d.description).toContain('A non-empty folder is deleted only with `confirm: true`');
-      expect(d.description).toContain('platform folder');
+      expect(d.description).toContain('a non-empty folder wants `confirm: true`');
+      // The protocol itself, and what a platform folder does to it, are shared.
+      const rules = sharedFileRulesSection(testKbContext().layout);
+      expect(rules).toContain('`dryRun: true`');
+      expect(rules).toContain('A non-empty folder is deleted, and a move that changes your access runs, only with `confirm: true`');
+      expect(rules).toContain('platform folder');
       const dry = await call(base, 'delete_folder', { path: KB('Sales/archive'), dryRun: true });
       const unconfirmed = await call(base, 'delete_folder', { path: KB('Sales/archive') });
       const confirmed = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
@@ -3312,8 +3924,12 @@ describe('preflight for moves and deletes', () => {
         expect(stat.description, key).toContain(`\`${key}`);
         expect(body, key).toHaveProperty(key);
       }
+      expect(stat.description).toContain('shared rules on what these tools never move or delete');
+      // The proposal route applies to every tool a permission can refuse, so it
+      // is stated once in the shared rules rather than on each of them.
+      expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
-        expect((await def(name)).description, name).toContain('`write-denied`');
+        expect((await def(name)).description.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
       }
     });
   });
@@ -3354,6 +3970,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       canDownload: async () => true,
       canOwner: async () => true,
       canWriteBatchAtRef: async () => null,
+      previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
       eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
     } as unknown as IAccessControl;
     return { ac, calls };
@@ -3371,7 +3988,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       throw err;
     };
     const target = fs as unknown as Record<string, unknown>;
-    for (const m of ['writeFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
+    for (const m of ['writeFile', 'rewriteFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
     target.copyFile = async (_src: string, dest: string) => refuse(dest);
     // `delete_folder` lands through the same batch with NO writes and the
     // folder's files as `deletes` — in production the refusal comes from the
@@ -3559,14 +4176,18 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(res.json).toEqual({ error: 'old_string not found in the file.' });
   });
 
-  it('each write tool mentions the proposal route in its description; read tools do not', async () => {
+  it('states the proposal route in the shared rules, not in each write tool description', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    for (const name of ['write_file', 'edit_file', 'write_files', 'move_file', 'delete_file', 'delete_folder', 'copy_file', 'mkdir']) {
-      expect(tools.find((t) => t.name === name)?.description, name).toContain(PROPOSAL_ROUTE_NOTE.trim());
-    }
-    for (const name of ['read_file', 'grep', 'list_files']) {
-      expect(tools.find((t) => t.name === name)?.description, name).not.toContain(PROPOSAL_ROUTE_NOTE.trim());
+    // It applies to every tool a permission can refuse, so it is a shared rule:
+    // stated in the handshake instructions and in the managed guide, and in no
+    // description. The refusal ITSELF still spells the steps out — that is what
+    // the tests above this one assert.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'refused-for-permissions')!;
+    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    for (const def of tools) {
+      expect(def.description ?? '', def.name).not.toContain('If this is refused for permissions');
+      expect(def.description ?? '', def.name).not.toContain(rule.body);
     }
   });
 });
@@ -3824,6 +4445,47 @@ describe('agent read/write hooks', () => {
       },
     ]);
     expect(writes).toEqual([]);
+  });
+
+  it("file_stat at the guide's name tells the read hook once when it reads the organisation's own file, and never for the guide alone", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // Nothing of the organisation's there: the guide is everyone's and no
+    // file is read, so the hook hears nothing.
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: telling it from a stale copy reads it,
+    // and the hook hears of that read exactly once — as it does of a read_file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A stale copy of the guide is read to be recognised, so it is heard of too.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`, `${KB_DIR}/AGENTS.md`]);
+  });
+
+  it("grep at the guide's name tells the read hook the same way: never for the guide alone, once for the organisation's own file", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // The guide alone: nothing of the organisation's is read, so the hook
+    // hears nothing — a search of the guide's path is not a read of a file.
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: once, as read_file tells it — not once
+    // for the search root and again for the file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme GUIDE\n');
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A search of the whole knowledge base: the root once, then each file the
+    // walk opens once — the own AGENTS.md among them exactly once, from the
+    // composed search, never again from the walk.
+    reads = [];
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', sessionId: 's1' })).status).toBe(200);
+    expect(reads[0]?.wsPath).toBe(KB_DIR);
+    expect(reads.filter((op) => op.wsPath === `${KB_DIR}/AGENTS.md`)).toHaveLength(1);
   });
 
   it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
@@ -4086,12 +4748,16 @@ describe('tool descriptions and the deployment note', () => {
     expect(all.get('read_file')!.description).not.toContain('Stay within one');
   });
 
-  it('a registered note lands at the END of every gated tool\'s description and on the sessionId input', async () => {
+  it("a registered note lands after every gated tool's own text, behind the guide-first opening, and on the sessionId input", async () => {
     await start();
     notes.registerGatedToolNote(' One folder per conversation.');
     notes.registerSessionIdNote(' It also pins that folder.');
     const all = await defs();
+    // The guide-first sentence is FIRST, always: that is the one instruction
+    // an agent needs, and a description cut short from the end must not lose
+    // it. The deployment's note is last, after the tool's own text.
     for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip']) {
+      expect(all.get(name)!.description.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
       expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
       expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
     }
@@ -4105,5 +4771,244 @@ describe('tool descriptions and the deployment note', () => {
     notes.registerGatedToolNote(' One folder per conversation.');
     const description = (await defs()).get('start_session')?.description ?? '';
     expect(description).not.toContain('One folder per conversation.');
+  });
+});
+
+/**
+ * The bug Juan reported: the dry run of renaming a top-level folder warned he
+ * would lose owner access, and after the move he was still owner. The folder
+ * carried its own `access.md`, which moved with it, and the preview judged
+ * the destination as it stood — where neither the folder nor its rules were
+ * yet.
+ *
+ * These run against the REAL resolver over a real tree, because the thing
+ * under test is what the rules say about a path nothing is at. Every preview
+ * is then held against the operation it predicted: the caller's access at the
+ * destination afterwards must be what the preview answered, or the preview is
+ * wrong again and nobody will find out until the next report.
+ */
+describe('a move preview judges the destination as it will be', () => {
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+  const MOVER = 'mover@x.io';
+  const rules = (body: string) => `---\n${body}---\n`;
+
+  /**
+   * The real `AccessControlService`, re-read from disk on every question.
+   * In production the file-change notifier invalidates the model after a
+   * write; a test leaning on the five-second cache would be asserting the
+   * cache rather than what the tree now says.
+   */
+  const liveRules = (): IAccessControl => {
+    const fresh = () =>
+      new AccessControlService(
+        {
+          getWorkspacePath: async () => tempDir,
+          ensureRemotesFetched: async () => undefined,
+        } as unknown as WorkspaceService,
+        KB_DIR,
+        new NodeFs(),
+      );
+    return {
+      canRead: (w: string, u: string, r: string) => fresh().canRead(w, u, r),
+      canReadBatch: (w: string, u: string, r: string[]) => fresh().canReadBatch(w, u, r),
+      canWrite: (w: string, u: string, r: string) => fresh().canWrite(w, u, r),
+      canDownload: (w: string, u: string, r: string) => fresh().canDownload(w, u, r),
+      canOwner: (w: string, u: string, r: string) => fresh().canOwner(w, u, r),
+      canWriteBatchAtRef: async () => null,
+      previewAccessAfterRelocation: (
+        w: string, u: string, from: string, to: string, opts?: { sourceRemains?: boolean },
+      ) => fresh().previewAccessAfterRelocation(w, u, from, to, opts),
+    } as unknown as IAccessControl;
+  };
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${tool}`, body);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a tool body is free-form JSON, probed field by field
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+
+  /**
+   * `Sales/` grants the caller write and owner in its OWN access.md. `Work/`
+   * grants both too, so `Work/Team` — which grants only write of its own —
+   * holds owner by inheritance and loses it on the way out. `Legal/` grants
+   * read to everyone and nothing else. The root grants read and nothing else,
+   * so a folder that arrives there arrives with only what it brought.
+   */
+  async function seeded(): Promise<string> {
+    const base = await start('write', liveRules(), MOVER);
+    await fs.writeFile(KB('roles.yaml'), 'roles:\n  Admin:\n    - admin@x.io\n');
+    await fs.writeFile(KB('access.md'), rules('read:\n  - everyone\n'));
+    await fs.writeFile(KB('Sales/access.md'), rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Sales/deal.md'), 'deal');
+    await fs.writeFile(KB('Work/access.md'), rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Work/Notes/note.md'), 'note');
+    await fs.writeFile(KB('Work/Team/access.md'), rules(`write:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Work/Team/plan.md'), 'plan');
+    await fs.writeFile(KB('Legal/access.md'), rules('read:\n  - everyone\n'));
+    return base;
+  }
+
+  /** The caller's verbs where the thing really is now, through `file_stat`. */
+  const verbsAt = async (base: string, path: string) =>
+    (await call(base, 'file_stat', { path })).body.access;
+
+  it('renaming a folder that names the caller owner previews no loss at all', async () => {
+    const base = await seeded();
+    const args = { src: KB('Sales'), dest: KB('Revenue') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.status).toBe(200);
+    expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, allowed: true, moved: false });
+    expect(dry.body.access.after).toEqual(dry.body.access.before);
+    expect(dry.body.access.after.owner).toBe(true);
+    // Nothing moved and nothing was written to answer the question.
+    expect(await fs.exists(args.dest)).toBe(false);
+    expect(await fs.exists(KB('Sales/access.md'))).toBe(true);
+
+    // `accessChanges: false`, so the move itself needs no confirmation.
+    expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('moving a folder with no access.md of its own still previews the loss', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ accessChanges: true, allowed: true });
+    expect(dry.body.access.before.write).toBe(true);
+    expect(dry.body.access.after.write).toBe(false);
+
+    // A changed answer still asks before it moves.
+    expect((await call(base, 'move_file', args)).body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('what the folder inherited is left behind; what its own access.md gives comes along', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Team'), dest: KB('Legal/Team') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    // Write is the folder's own and travels; owner came from `Work/`.
+    expect(dry.body.access.before).toMatchObject({ write: true, owner: true });
+    expect(dry.body.access.after).toMatchObject({ write: true, owner: false });
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('a nested access.md governs where it lands, not the folder above it', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Team'), dest: KB('Legal/Team') };
+    const withoutNested = (await call(base, 'move_file', { ...args, dryRun: true })).body.access.after;
+
+    // `Sub/` shuts the caller out and moves too, but it governs `Legal/Team/Sub`.
+    await fs.writeFile(KB('Work/Team/Sub/access.md'), rules(`read:\n  - deny Mover <${MOVER}>\n`));
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body.access.after).toEqual(withoutNested);
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(withoutNested);
+    // The nested file did land and does govern where it landed: the caller
+    // it shuts out cannot even stat the folder now.
+    expect((await call(base, 'file_stat', { path: KB('Legal/Team/Sub') })).status).toBe(403);
+  });
+
+  it('moving a single file previews as it always did', async () => {
+    const base = await seeded();
+    const args = { src: KB('Sales/deal.md'), dest: KB('Legal/deal.md') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ kind: 'file', descendants: 1 });
+    // Nothing travels with a file but its own bytes, so the answer is the
+    // destination's own rules — what `file_stat` says there already.
+    expect(dry.body.access.after).toEqual(await verbsAt(base, KB('Legal')));
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('the preview answers the caller\'s own verbs and nothing more', async () => {
+    const base = await seeded();
+    const dry = await call(base, 'move_file', { src: KB('Sales'), dest: KB('Revenue'), dryRun: true });
+
+    expect(Object.keys(dry.body.access).sort()).toEqual(['after', 'before']);
+    for (const side of ['before', 'after'] as const) {
+      expect(Object.keys(dry.body.access[side]).sort()).toEqual(['download', 'owner', 'read', 'write']);
+    }
+  });
+
+  describe('copy_file previews the same way', () => {
+    it('a folder copy counts the copied access.md at the destination', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales'), dest: KB('Sales-Copy') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, copied: false, dryRun: true });
+      expect(dry.body.access.after.owner).toBe(true);
+      expect(dry.body.access.after).toEqual(dry.body.access.before);
+
+      // `copy_file` copies ONE FILE, which the preview says rather than
+      // promising a copy that cannot land — and the call itself refuses with
+      // the same sentence, so preflight and execution never disagree.
+      expect(dry.body.allowed).toBe(false);
+      const run = await call(base, 'copy_file', args);
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(dry.body.reason);
+      expect(await fs.exists(args.dest)).toBe(false);
+    });
+
+    it('a file copy previews what the caller will have at the destination', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Legal/deal.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'file', descendants: 1, allowed: true, copied: false });
+      expect(dry.body.access.before.write).toBe(true);
+      expect(dry.body.access.after.write).toBe(false);
+      expect(dry.body.accessChanges).toBe(true);
+      expect(await fs.exists(args.dest)).toBe(false);
+
+      expect((await call(base, 'copy_file', args)).body).toMatchObject({ copied: true });
+      expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+      // A copy leaves the source exactly as it was.
+      expect(await verbsAt(base, args.src)).toEqual(dry.body.access.before);
+    });
+
+    /**
+     * `copy_file` will copy a lone `access.md`, and the moment it lands it
+     * governs the folder it landed in. The preview counts it: the rules a
+     * copy carries are the point of this ticket whether they travel inside a
+     * folder or on their own.
+     */
+    it('a lone access.md previews the access it will give at the destination', async () => {
+      const base = await seeded();
+      // A folder with no rules of its own, so the destination's answer today
+      // is the root's: read and nothing else. (`Legal/access.md` is taken, and
+      // a copy onto a name that exists is refused long before access is asked.)
+      await fs.writeFile(KB('Open/note.md'), 'note');
+      const args = { src: KB('Sales/access.md'), dest: KB('Open/access.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'file', descendants: 1, allowed: true });
+      expect(await verbsAt(base, KB('Open'))).toMatchObject({ write: false, owner: false });
+      expect(dry.body.access.after).toMatchObject({ write: true, owner: true });
+      expect(dry.body.accessChanges).toBe(false);
+
+      expect((await call(base, 'copy_file', args)).body).toMatchObject({ copied: true });
+      expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+    });
+
+    it('a destination that is taken is named, and the dry run changes nothing', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Work/Notes/note.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body.allowed).toBe(false);
+      expect(dry.body.reason).toContain('already exists');
+      expect(String(await fs.readFile(KB('Work/Notes/note.md'), { encoding: 'utf-8' }))).toContain('note');
+    });
   });
 });

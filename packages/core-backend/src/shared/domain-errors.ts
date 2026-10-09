@@ -108,21 +108,50 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
     readonly path: string,
     readonly originalDetail: string,
     readonly recoveryDetail: string,
+    /**
+     * Why the push did not land. `diverged`: the remote moved and the
+     * cooperative rebase could not reconcile. `refused`: the host turned the
+     * push away for any other reason (an outage, credentials, a dropped
+     * connection) — nothing to reconcile, the next push of the branch carries
+     * the commits. The opening clause is the same either way.
+     */
+    readonly cause: 'diverged' | 'refused' = 'diverged',
   ) {
     super(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-        `The agent will resolve this.`,
+        (cause === 'refused'
+          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
+          : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+            `The agent will resolve this.`),
       409,
-      {
-        kind: 'push-needs-resolution',
-        branch,
-        path,
-        originalDetail,
-        recoveryDetail,
-      },
+      // The two details are raw git output — stderr can quote a credentialed
+      // URL, server paths, the host's own error page. They stay on the error
+      // for the server log and never enter the payload the browser receives.
+      { kind: 'push-needs-resolution', branch, path },
     );
     this.name = 'PushNeedsAgentResolutionError';
+  }
+}
+
+/**
+ * The repository host refused to delete a branch (an outage, a protection
+ * rule, a dropped connection). Deletion pushes FIRST and deletes locally only
+ * once the host agreed, so the branch is still there — locally and remotely —
+ * and the person can try again later. Unlike a refused write there is nothing
+ * to keep "saved locally": a deleted branch has no later push to carry it.
+ *
+ * `detail` is the raw git failure, for the server log only; it never enters
+ * the message or the payload.
+ */
+export class BranchDeleteRefusedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-refused' as const;
+  constructor(readonly branchName: string, readonly detail: string) {
+    super(
+      `The repository host refused to delete "${branchName}"; it is still there. Try again later.`,
+      409,
+      { kind: 'branch-delete-refused', branchName },
+    );
+    this.name = 'BranchDeleteRefusedError';
   }
 }
 
@@ -221,8 +250,18 @@ const STRINGIFIED_ABSENT_VALUES = new Set(['undefined', 'null']);
  * nothing", which is the one case where naming the branch back is impossible.
  */
 export function assertBranchProvided(branch: unknown): asserts branch is string {
-  if (typeof branch !== 'string' || branch.length === 0) throw new BranchRequiredError();
-  if (STRINGIFIED_ABSENT_VALUES.has(branch)) throw new BranchRequiredError();
+  if (!branchProvided(branch)) throw new BranchRequiredError();
+}
+
+/**
+ * The same question as {@link assertBranchProvided}, answered rather than
+ * thrown — for a caller that must know whether the branch refusal is the one
+ * this call is going to get, without being the one to raise it. The generic
+ * argument check asks it so that refusal keeps coming first.
+ */
+export function branchProvided(branch: unknown): branch is string {
+  if (typeof branch !== 'string' || branch.length === 0) return false;
+  return !STRINGIFIED_ABSENT_VALUES.has(branch);
 }
 
 /**
@@ -242,6 +281,23 @@ export class BranchNotFoundError extends WorkflowDomainError {
       branch,
     });
     this.name = 'BranchNotFoundError';
+  }
+}
+
+/**
+ * A tool that defaults its branch was called without one, and the deployment
+ * has no default branch configured to fall back on. Not `BranchRequiredError`:
+ * the tool's schema says the branch is optional, so "you must pass one" would
+ * misdescribe the call — the caller did nothing wrong, the deployment is not
+ * set up. 503 with kind `default-branch-unset`; passing a branch works.
+ */
+export class DefaultBranchUnsetError extends WorkflowDomainError {
+  readonly kind = 'default-branch-unset' as const;
+  constructor() {
+    super('This deployment has no default branch configured: pass `branch` to name the one to use.', 503, {
+      kind: 'default-branch-unset',
+    });
+    this.name = 'DefaultBranchUnsetError';
   }
 }
 
@@ -331,6 +387,62 @@ export class WorkflowValidationError extends WorkflowDomainError {
 }
 
 /**
+ * An agent's `delete_branch` refused, for a reason a person can act on. The
+ * `reason` is the discriminator a caller branches on; the message says what
+ * to do about it. Nothing was deleted.
+ *
+ * - `open-change-request` (409) — a request is open from or into the branch;
+ *   `number` names it. Withdrawing or declining it is a person's action, in
+ *   the app.
+ * - `unmerged-commits` (409) — `unmergedCommits` commits would be lost;
+ *   `discardUnmerged` is the deliberate way past it.
+ * - `saves-landing` (409) — the branch's checkout still has saves waiting to
+ *   be committed or a file held for editing. Clears itself within seconds.
+ * - `state-unconfirmed` (503) — the shared repository could not be fetched,
+ *   so the branch's current state is unknown.
+ */
+export type BranchDeleteBlockedReason =
+  | 'open-change-request'
+  | 'unmerged-commits'
+  | 'saves-landing'
+  | 'state-unconfirmed';
+
+export class BranchDeleteBlockedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-blocked' as const;
+  constructor(
+    readonly reason: BranchDeleteBlockedReason,
+    readonly branchName: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    // `extra` first: it adds detail, and can never contradict the kind,
+    // reason or branch the status and fields above were chosen for.
+    super(message, reason === 'state-unconfirmed' ? 503 : 409, {
+      ...extra,
+      kind: 'branch-delete-blocked',
+      reason,
+      branchName,
+    });
+    this.name = 'BranchDeleteBlockedError';
+  }
+}
+
+/**
+ * The commit an applied change request records is in the clone but is NOT
+ * that request's own merge commit — no second parent (not a merge), no first
+ * parent (a root commit), or a message that does not name the request. A
+ * validation failure like the one above, told apart
+ * because it never mends: a reader may remember it, where a commit the clone
+ * merely does not hold yet must be asked for again after the next fetch.
+ */
+export class AppliedChangeMismatchError extends WorkflowValidationError {
+  constructor(message: string, payload?: Record<string, unknown>) {
+    super(message, payload);
+    this.name = 'AppliedChangeMismatchError';
+  }
+}
+
+/**
  * The next step a missing path always offers, in one sentence.
  *
  * Lives HERE, the layer with no module imports, because both surfaces that
@@ -374,6 +486,37 @@ export class PathNotFoundError extends WorkflowDomainError {
     );
     this.name = 'PathNotFoundError';
     this.path = safe;
+  }
+}
+
+/**
+ * The one sentence every read of a past save answers when that save is not in
+ * the history of the branch being viewed.
+ *
+ * Written once, here, because four surfaces have to give the same answer: the
+ * bytes route (`?ref=`), the patch route (`show-file`), the before/after
+ * contents route (`file-at-change`), and anything later that serves a file at
+ * a commit. A save the history panel listed came off `git log` on this
+ * workspace's own branch, so it can never be refused this way — what this
+ * refuses is a sha from someone else's branch, or one that was invented.
+ */
+export const VERSION_NOT_ON_BRANCH_MESSAGE =
+  "This version is not in this file's history on this branch.";
+
+/**
+ * The caller named a save that is not an ancestor of the branch this
+ * workspace has checked out.
+ *
+ * 404, and DELIBERATELY the same 404 for a sha that exists on another branch
+ * as for one that exists nowhere: telling the two apart would turn the route
+ * into an oracle for "does this commit exist in the repository", which is
+ * exactly the reading a branch-scoped rule exists to prevent.
+ */
+export class VersionNotOnBranchError extends WorkflowDomainError {
+  readonly kind = 'version-not-on-branch' as const;
+  constructor() {
+    super(VERSION_NOT_ON_BRANCH_MESSAGE, 404, { kind: 'version-not-on-branch' });
+    this.name = 'VersionNotOnBranchError';
   }
 }
 

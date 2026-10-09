@@ -71,15 +71,60 @@ async function upstream(name: string, marker: string): Promise<string> {
   return bare;
 }
 
-function service(kbRepoUrl: () => string, setAsideRoot?: string) {
+function service(
+  kbRepoUrl: () => string,
+  setAsideRoot?: string,
+  aroundSetAside?: (workspaceId: string, move: () => Promise<void>) => Promise<void>,
+  gitRunner: NodeGitRunner = new NodeGitRunner(),
+) {
   return new WorkspaceService(
     workspacesRoot,
     kbRepoUrl,
     testKbContext({ branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),
     new NodeFs(),
-    new NodeGitRunner(),
+    gitRunner,
     setAsideRoot,
+    aroundSetAside,
   );
+}
+
+/**
+ * A git runner that puts two callers' reads of a working copy's address in ONE
+ * order, the one that matters: both read the copy that is there, and the
+ * second is handed its answer only once `afterTheFirstMove` has come.
+ *
+ * Two holds, because holding the second answer back is only half of it. The
+ * FIRST answer is held until the second read has happened, so the first caller
+ * cannot move the copy before the second has looked at it — otherwise the
+ * second would read whatever replaced it, and the stale answer this is about
+ * would never exist. Then the second answer is held until the first move has
+ * ended. Neither can wait on the other forever: the first caller is held in its
+ * read, so no move is in flight for the second to wait on, and it always reads.
+ * Everything else runs as it is.
+ */
+function withTheSecondAddressReadHeldPastTheMove(afterTheFirstMove: Promise<void>): NodeGitRunner {
+  let reads = 0;
+  let secondHasRead!: () => void;
+  const onceTheSecondHasRead = new Promise<void>((resolve) => {
+    secondHasRead = resolve;
+  });
+  return new Proxy(new NodeGitRunner(), {
+    get(target, prop, receiver) {
+      if (prop !== 'run') return Reflect.get(target, prop, receiver);
+      return async (cwd: string, args: string[], opts?: never) => {
+        const answer = await target.run(cwd, args, opts);
+        const readsTheAddress = args[0] === 'config' && args.includes('--get') && args.includes('remote.origin.url');
+        if (!readsTheAddress) return answer;
+        const mine = ++reads;
+        if (mine === 1) await onceTheSecondHasRead;
+        if (mine === 2) {
+          secondHasRead();
+          await afterTheFirstMove;
+        }
+        return answer;
+      };
+    },
+  });
 }
 
 const cloneDir = () => path.join(workspacesRoot, encodeURIComponent(BRANCH), 'knowledge-base');
@@ -219,6 +264,124 @@ describe('where a working copy is set aside', () => {
     await service(() => replacement).getOrCreateForBranch(BRANCH);
 
     expect(await setAside()).toHaveLength(1);
+  });
+});
+
+/**
+ * A branch opened onto a clone of another repository sets it aside on the
+ * spot, with nobody having stopped anything for it. What the deployment does
+ * around the startup phase's set-asides (the commit worker held, the copy's
+ * queued commits held back, its locks dropped) it is handed here to do around
+ * this one.
+ */
+describe('what surrounds the setting aside of one working copy', () => {
+  async function onTheOldRepository() {
+    const old = await upstream('old', 'old repository');
+    const replacement = await upstream('replacement', 'new repository');
+    await fs.mkdir(path.dirname(cloneDir()), { recursive: true });
+    await git(root, ['clone', '-b', BRANCH, old, cloneDir()]);
+    return { old, replacement };
+  }
+
+  it('is given the working copy and the move, and the copy is where it was until the move is run', async () => {
+    const { old, replacement } = await onTheOldRepository();
+    const seen: string[] = [];
+    const svc = service(() => replacement, undefined, async (workspaceId, move) => {
+      seen.push(`before ${workspaceId}: ${(await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()}`);
+      await move();
+      seen.push(`after: ${await fs.access(cloneDir()).then(() => 'still there', () => 'gone')}`);
+    });
+
+    await svc.getOrCreateForBranch(BRANCH);
+
+    expect(seen).toEqual([`before ${encodeURIComponent(BRANCH)}: ${old}`, 'after: gone']);
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+  });
+
+  it('refuses the branch, and leaves the copy where it was, when what must happen first fails', async () => {
+    const { old, replacement } = await onTheOldRepository();
+    const svc = service(() => replacement, undefined, async () => {
+      throw new Error('the queue could not be held back');
+    });
+
+    await expect(svc.getOrCreateForBranch(BRANCH)).rejects.toThrow('the queue could not be held back');
+
+    expect((await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(old);
+    expect(await setAside()).toEqual([]);
+  });
+
+  /**
+   * What surrounds the move can wait: for the commit in flight, or for the
+   * startup phase, which may set this very copy aside in the meantime.
+   */
+  it('moves nothing, and still opens the branch, when the startup phase took the copy while it waited', async () => {
+    const { replacement } = await onTheOldRepository();
+    const phaseKept = path.join(root, 'kept-by-the-phase');
+    const svc: WorkspaceService = service(() => replacement, undefined, async (workspaceId, move) => {
+      // The phase, while this call waited: the copy moved out, and said so.
+      await fs.rename(cloneDir(), phaseKept);
+      svc.forgetClone(workspaceId);
+      await move();
+    });
+
+    await svc.getOrCreateForBranch(BRANCH);
+
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+    // Nothing of this call's own was set aside: the phase's copy is the only one.
+    expect(await setAside()).toEqual([]);
+    expect(await fs.readFile(path.join(phaseKept, 'marker.txt'), 'utf8')).toBe('old repository');
+  });
+
+  it('moves it once for two callers opening the branch together, and serves both', async () => {
+    const { replacement } = await onTheOldRepository();
+    let moves = 0;
+    const svc = service(() => replacement, undefined, async (_workspaceId, move) => {
+      moves += 1;
+      await move();
+    });
+
+    const [first, second] = await Promise.all([svc.getOrCreateForBranch(BRANCH), svc.getOrCreateForBranch(BRANCH)]);
+
+    expect(moves).toBe(1);
+    expect(first.repoDir).toBe(second.repoDir);
+    expect(await setAside()).toHaveLength(1);
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+  });
+
+  /**
+   * The same two callers, in the order the test above only sometimes got. The
+   * second reads the old copy's address, and is handed the answer after the
+   * first has finished moving that copy — when nothing says a move is in
+   * flight any more, and what sits at the path is the fresh clone the first is
+   * making. It moved that too: a second set-aside, of a working copy of the
+   * RIGHT repository, taken from under the clone that was writing it.
+   */
+  it('moves it once when the second caller comes back with the old address after the move has ended', async () => {
+    const { replacement } = await onTheOldRepository();
+    let moves = 0;
+    let firstMoveEnded!: () => void;
+    const afterTheFirstMove = new Promise<void>((resolve) => {
+      firstMoveEnded = resolve;
+    });
+    const svc = service(
+      () => replacement,
+      undefined,
+      async (_workspaceId, move) => {
+        moves += 1;
+        await move();
+        firstMoveEnded();
+      },
+      withTheSecondAddressReadHeldPastTheMove(afterTheFirstMove),
+    );
+
+    const [first, second] = await Promise.all([svc.getOrCreateForBranch(BRANCH), svc.getOrCreateForBranch(BRANCH)]);
+
+    expect(moves).toBe(1);
+    expect(first.repoDir).toBe(second.repoDir);
+    expect(await setAside()).toHaveLength(1);
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+    // And the clone both were served is whole: its address is the new one.
+    expect((await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
   });
 });
 

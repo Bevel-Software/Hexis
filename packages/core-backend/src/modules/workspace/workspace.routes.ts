@@ -13,9 +13,13 @@ import {
   canonicalRelativePath,
   folderPlaceholderPath,
   isPlatformFile,
+  isPlatformFolder,
   isPlatformRestoreShape,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   platformFileCreationRefusal,
   platformFileRefusal,
+  platformFolderRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
@@ -38,8 +42,7 @@ import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
-
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
+import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 
 /**
  * One file identity from one request field, or `null` when the caller sent
@@ -572,8 +575,11 @@ export function createWorkspaceRoutes(
     res: express.Response,
     workspaceId: string,
     relativePath: string,
+    // A caller that has already resolved the user hands it over, so one
+    // request is not looked up twice.
+    resolvedUser?: { email: string },
   ): Promise<boolean> {
-    const user = await requireUser(req, res);
+    const user = resolvedUser ?? (await requireUser(req, res));
     if (!user) return false;
     let allowed: boolean;
     try {
@@ -739,7 +745,7 @@ export function createWorkspaceRoutes(
   }
 
   /**
-   * GET /workspace/:id/file/raw?path=<file>[&download=1][&v=<n>]
+   * GET /workspace/:id/file/raw?path=<file>[&download=1][&v=<n>][&ref=<sha>[&side=before]]
    *
    * The bytes of one workspace file: for the document renderers' fetches, the
    * file tree's Download, and the `<img>` tags the markdown pipeline emits for
@@ -750,7 +756,8 @@ export function createWorkspaceRoutes(
    *   request ──▶ auth: Bearer, else the cookie
    *           ──▶ read gate on the path             403 if the caller may not read it
    *           ──▶ download gate, if ?download=1     403 without the download: verb
-   *           ──▶ readFileBinary                    404 missing, 403 traversal
+   *           ──▶ readFileBinary, or the bytes at   404 missing, 403 traversal
+   *               ?ref when one is named
    *           ──▶ Content-Type from the extension, nosniff, a CSP sandbox for
    *               inline svg, attachment disposition for a download, and
    *               Cache-Control: private, no-cache
@@ -760,6 +767,30 @@ export function createWorkspaceRoutes(
    *
    * `?v=` is not read here. The frontend bumps it when it learns an image
    * changed, so the browser asks for a URL it has not cached.
+   *
+   * `?ref=<sha>` serves the file AS IT WAS at that save instead of the working
+   * tree, so Version history can mount the very viewers this route already
+   * feeds. `&side=before` reads `<sha>^` — the version just before a save,
+   * which is the only thing the save that DELETED a file can show. Everything
+   * around the read is deliberately unchanged: the same read gate, the same
+   * download verb, the same content type, the same svg sandbox. What the ref
+   * changes is WHICH bytes, never WHO may have them:
+   *
+   *   - both gates resolve against TODAY's tree, not the rules as they were at
+   *     that save (hx-history-file-preview, decision 3): anyone who may read
+   *     the file now may read any of its past saves, and anyone who may not is
+   *     refused with the same sentence they get for the file itself;
+   *   - the save must be in the history of the branch this workspace has
+   *     checked out — `fileBytesAtChange` refuses anything else with a 404
+   *     carrying `VERSION_NOT_ON_BRANCH_MESSAGE`;
+   *   - a ref that is present but malformed is a 400, never a silent fall back
+   *     to `readFileBinary`. Serving today's bytes for a request that asked for
+   *     a past version would be the worst possible answer — it looks like a
+   *     success — so the ref branch and the working-tree branch are exclusive;
+   *   - and a read that fails for OUR reasons (a blob over the git runner's
+   *     output ceiling, a timed-out `cat-file`) is a logged 500, not the
+   *     blanket 404 the working-tree read answers with: "not found" about a
+   *     save the reader can see listed is a lie about their own history.
    */
   router.get('/workspace/:id/file/raw', async (req, res) => {
     const id = authenticated(req, res);
@@ -771,6 +802,27 @@ export function createWorkspaceRoutes(
     }
     const filePath = inRepo(res, requested);
     if (filePath === null) return;
+    // A past save, asked for by sha. Validated BEFORE the gates so a
+    // mistyped ref is a 400 rather than a 200 carrying today's bytes.
+    const rawRef = req.query.ref;
+    if (rawRef !== undefined && (typeof rawRef !== 'string' || !/^[a-f0-9]{7,40}$/i.test(rawRef))) {
+      res.status(400).json({ error: 'ref must be a commit sha' });
+      return;
+    }
+    const ref = typeof rawRef === 'string' ? rawRef : null;
+    // Only the two sides exist; `side` without `ref` names nothing, and an
+    // unrecognised value is a spelling mistake in a security-relevant
+    // parameter, not a default to guess at.
+    const rawSide = req.query.side;
+    if (rawSide !== undefined && rawSide !== 'before' && rawSide !== 'after') {
+      res.status(400).json({ error: "side must be 'before' or 'after'" });
+      return;
+    }
+    if (rawSide !== undefined && ref === null) {
+      res.status(400).json({ error: 'side requires ref' });
+      return;
+    }
+    const side = rawSide === 'before' ? 'before' : 'after';
     // `?download=1` flips this from inline-serve (used by PdfRenderer and
     // the image renderers) to "save to disk" — and the save path is gated
     // on per-path `download:` rules in access.md. The inline path stays
@@ -785,7 +837,28 @@ export function createWorkspaceRoutes(
       if (!(await requireDownloadPermission(req, res, id, filePath))) return;
     }
     try {
-      const buffer = await workspaceService.readFileBinary(id, filePath);
+      let buffer: Buffer;
+      if (ref === null) {
+        buffer = await workspaceService.readFileBinary(id, filePath);
+      } else {
+        const at = await workflowService.fileBytesAtChange(id, filePath, ref, side);
+        // Nothing at that path on that side of the save — for `before`, also
+        // how a root commit answers, since it has no parent to read.
+        if (at === null) {
+          res.status(404).json({ error: 'File not found' });
+          return;
+        }
+        // `IWorkflowService` is isomorphic, so the bytes arrive typed as a
+        // `Uint8Array`. `res.send` recognises a Buffer and JSON-encodes
+        // anything else, so a zero-copy view over the same memory is what it
+        // has to be handed — never a copy of a file that may be tens of MB.
+        buffer = Buffer.from(at.bytes.buffer, at.bytes.byteOffset, at.bytes.byteLength);
+        // The blob's object id IS the content hash, and a past version can
+        // never change, so this is the strongest ETag available and costs no
+        // second pass over the bytes. Set BEFORE `res.send`, which then skips
+        // its own weak ETag and answers a matching If-None-Match with a 304.
+        res.setHeader('ETag', `"${at.blobId}"`);
+      }
       const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
       const mimeTypes: Record<string, string> = {
         '.png': 'image/png',
@@ -844,6 +917,31 @@ export function createWorkspaceRoutes(
         sendError(res, error);
         return;
       }
+      // A refusal the ref branch raised has to reach the caller AS ITSELF: a
+      // save from another branch is answered with
+      // `VERSION_NOT_ON_BRANCH_MESSAGE`, and flattening it into the generic
+      // "File not found" would tell a reader their file had vanished. Only
+      // the ref branch can raise one, so the working-tree read keeps the
+      // blanket 404 it has always answered with.
+      if (ref !== null && error instanceof WorkflowDomainError) {
+        sendError(res, error);
+        return;
+      }
+      // Anything else out of the ref branch is OUR failure, not a missing
+      // version: the read goes through the git runner, where a blob over
+      // `MAX_OUTPUT_BYTES` and a timed-out `cat-file` both arrive here as
+      // plain errors. A 404 would tell a reader the save they can see listed
+      // had vanished, and would do it silently — so it is a logged 500, and
+      // "Try again" in the pane is then a truthful offer.
+      if (ref !== null) {
+        log.error(
+          `could not read ${printable(filePath)} at ${printable(ref)}: ${printable(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+        res.status(500).json({ error: 'Could not read this version of the file' });
+        return;
+      }
       res.status(404).json({ error: 'File not found' });
     }
   });
@@ -887,9 +985,33 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'download=1 is required for folder zip downloads' });
       return;
     }
-    if (!(await requireDownloadPermission(req, res, id, folderPath))) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    if (!(await requireDownloadPermission(req, res, id, folderPath, user))) return;
+    // `download` on the folder lets the caller ASK for the zip. What goes in
+    // it is judged file by file, through the two gates the per-file route
+    // runs in the same order: a file the caller may not read is left out, and
+    // so is one they may read but not download. Nothing in the answer names a
+    // left-out file; the count below covers only files the caller could
+    // already see in the tree, so it discloses nothing the tree does not.
+    let withheld = 0;
+    const include = async (paths: string[]): Promise<ReadonlySet<string>> => {
+      const readable = await accessControl.canReadBatch(id, user.email, paths);
+      const visible = paths.filter((p) => readable.get(p) === true);
+      const downloadable = await accessControl.canDownloadBatch(id, user.email, visible);
+      const kept = new Set(visible.filter((p) => downloadable.get(p) === true));
+      withheld = visible.length - kept.size;
+      return kept;
+    };
     try {
-      const buffer = await workspaceService.createFolderZip(id, folderPath);
+      const buffer = await workspaceService.createFolderZip(id, folderPath, include);
+      res.setHeader('X-Withheld-Files', String(withheld));
+      // One caller's archive: which files it holds, and the count beside it,
+      // are that caller's verdicts. `private` keeps a shared cache from
+      // handing it to the next caller; `no-store` because, unlike the single
+      // file, nothing here can be revalidated (no ETag), so a copy is never
+      // worth keeping.
+      res.setHeader('Cache-Control', 'private, no-store');
       // `|| 'folder'` covers the edge case where `folderPath` itself was
       // a single bare slash (`/`) that survived the trim — the service
       // would still reject it as path traversal, but the basename
@@ -908,7 +1030,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      if (error instanceof PathTraversalError) {
+      // A traversal refusal (`PathTraversalError`), or the access tree failing
+      // to load while the entries were judged (`AccessConfigError`): both are
+      // domain errors carrying their own status and payload, the same ones
+      // the single-file gate answers with.
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -1007,6 +1133,16 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
+        // A platform folder — the repository root, whose sweep would take the
+        // root's `access.md` and `roles.yaml` with it, or one of the reserved
+        // top-level folders that hold a whole section of the knowledge base —
+        // is refused here as `delete_folder` refuses it, by the same rule.
+        const trimmedFolder = filePath.replace(/\/+$/, '');
+        const folderRel = trimmedFolder === kbDirName ? '' : toKbRelative(trimmedFolder, kbDirName);
+        if (folderRel !== null && isPlatformFolder(folderRel, kb.layout)) {
+          res.status(409).json({ error: platformFolderRefusal(folderRel) });
+          return;
+        }
         const branch = branchForWorkspaceId(id);
         // In the folder's turn: keeping a folder under this one (a file delete
         // racing this one) waits until the sweep is done, and then finds the
@@ -1073,6 +1209,14 @@ export function createWorkspaceRoutes(
           eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
         }
         res.json({ status: 'deleted', count: filesInDir.length });
+        return;
+      }
+      // The root's `access.md` and `roles.yaml` govern the whole repository:
+      // nobody deletes them, here or through the agent tools. A nested
+      // `access.md` is deleted like any file its caller may write.
+      const rel = toKbRelative(filePath, kbDirName);
+      if (rel !== null && isRepositoryOwnFile(rel, kb.layout)) {
+        res.status(409).json({ error: repositoryOwnFileDeleteRefusal(rel) });
         return;
       }
       await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));

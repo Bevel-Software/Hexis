@@ -1,9 +1,11 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { sql } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('database');
-import { DEFAULT_DB_SCHEMA, dbSchemaOf, type Database } from './connection.js';
+import { DEFAULT_DB_SCHEMA, dbSchemaOf, piiKeysOf, type Database } from './connection.js';
 import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
+import { PII_SEALED_SHAPE_SQL_REGEX, isEncryptedBlob, type PiiKeys } from '../../shared/column-crypto.js';
 
 /*
  * ── Per-tier migration folders ──────────────────────────────────────────────
@@ -69,6 +71,9 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
       log.info('Running core database migrations...');
       await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core', migrationsSchema });
       log.info('Core migrations complete.');
+      // Under the same lock, before anything reads or writes a PII column:
+      // the data half of migration 0016, which SQL cannot do (see below).
+      await runPiiEncryptionBackfill(db);
     },
     { tenantKey },
   );
@@ -78,8 +83,19 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
  * Apply the ENTERPRISE migration history from `folder`, tracked in
  * `__drizzle_migrations_enterprise`. Run AFTER {@link runCoreMigrations} —
  * enterprise tables FK into core tables.
+ *
+ * `piiBackfill` is the overlay's own personal data, for the overlay that has
+ * sealed columns of its own (`encryptedText` / `blindIndexText` in its
+ * schema): the rows written before those columns were sealed are sealed here,
+ * right after the history that adds the index columns and under the same
+ * lock, exactly as {@link runCoreMigrations} does for core's tables. See
+ * {@link runPiiBackfill}.
  */
-export async function runEnterpriseMigrations(db: Database, folder: string): Promise<void> {
+export async function runEnterpriseMigrations(
+  db: Database,
+  folder: string,
+  opts: { piiBackfill?: PiiBackfillSpec } = {},
+): Promise<void> {
   const { migrationsSchema, tenantKey } = ledgerOptions(db);
   await withAdvisoryLock(
     db,
@@ -92,7 +108,529 @@ export async function runEnterpriseMigrations(db: Database, folder: string): Pro
         migrationsSchema,
       });
       log.info('Enterprise migrations complete.');
+      if (opts.piiBackfill) await runPiiBackfill(db, opts.piiBackfill);
     },
     { tenantKey },
   );
+}
+
+/*
+ * ── PII column encryption backfill ──────────────────────────────────────────
+ *
+ * Migration 0016 adds the `*_bidx` columns; the DATA change — rewriting
+ * pre-existing plaintext PII to AES-256-GCM ciphertext and filling the blind
+ * indexes — happens here, programmatically, because it needs the key the
+ * handle holds (SQL migrations cannot encrypt). Runs on every start right after
+ * the core history, under the migrations lock, and is idempotent: sealed rows
+ * carry the `PII_CIPHERTEXT_PREFIX` marker and are excluded by the SELECT's
+ * own WHERE clause, so a completed backfill degenerates to one cheap,
+ * empty-result query per table.
+ *
+ * Concurrency: the migrations lock (keyed per tenant, like the history it
+ * guards) serialises two processes booting at once. Each UPDATE is also
+ * compare-and-swap — the WHERE clause pins every value the row was read with
+ * — so a writer that slips in between the scan and the write (an old-version
+ * instance in a mixed-version window) loses nothing: the CAS update matches
+ * zero rows and the next start's pass seals whatever that writer left
+ * behind. Deployments should still stop the old app before starting the new
+ * one (see UPGRADING.md); the lock and CAS make the failure mode of not doing
+ * so "unsealed until next start", never "silently overwritten".
+ *
+ * Once every row is sealed, the same transaction applies the constraints that
+ * could not ship in the SQL migration: SET NOT NULL on the bidx columns and
+ * the unique-index swaps (`users_email_unique` on the now-randomized
+ * ciphertext is meaningless, `users_email_bidx_unq` takes over; the same for
+ * the approvals and the join requests). The new unique index goes up BEFORE
+ * the old one is dropped so duplicate protection never has a gap. Legacy rows
+ * that collide under the normalized blind index are handled first: duplicate
+ * approval and join-request rows (the same logical row, a case-variant email)
+ * are collapsed; duplicate USERS are a genuine account conflict and abort the
+ * start with the row ids so an operator can merge them deliberately. All
+ * statements are IF-EXISTS-guarded — re-running is a no-op.
+ *
+ * Runs against whatever schema the handle searches first: a tenant's own, or
+ * `public`, under that handle's key. Every table name is unqualified for that
+ * reason.
+ *
+ * This is the one place that works on the STORED form. The handle's
+ * connection opens every sealed value of a result, which here would hide
+ * exactly what has to be told apart — so the columns are read as bytes
+ * ({@link asStored}), which it leaves alone, and written as ready-made
+ * ciphertext, which it passes through.
+ */
+
+/** A blind-index column and the sealed column whose plaintext it is the index of. */
+export interface PiiBlindIndex {
+  /** One of the table's `encrypted` columns. */
+  source: string;
+  column: string;
+}
+
+/** One table of personal data, as the backfill works on it: the columns `encryptedText` and `blindIndexText` are declared on. */
+export interface PiiBackfillTable {
+  table: string;
+  /** Columns that uniquely identify a row for the write-back UPDATE. */
+  key: string[];
+  /** Columns whose plaintext values get rewritten as ciphertext. */
+  encrypted: string[];
+  /** Blind-index column(s) to fill, each from the plaintext of its `source`. */
+  bidx?: PiiBlindIndex | PiiBlindIndex[];
+}
+
+/**
+ * Whose rows a backfill seals, and what closes it. Core's own tables are one
+ * such spec ({@link runPiiEncryptionBackfill}); an overlay that seals columns
+ * of its own schema writes another and hands it to
+ * {@link runEnterpriseMigrations} (or to {@link runPiiBackfill}, for a
+ * database it migrates under a lock of its own).
+ */
+export interface PiiBackfillSpec {
+  /** Whose tables these are, for the log and the refusals: `core`, `enterprise`, … */
+  name: string;
+  tables: PiiBackfillTable[];
+  /**
+   * A blind-index column of one of `tables` that the SQL history adds
+   * NULLABLE and `finalize` makes NOT NULL. Its nullability is how a start
+   * knows whether this backfill has ever committed here: the sealing, the
+   * indexing and `finalize` are one transaction, so nullable means nothing is
+   * sealed yet, whatever a value looks like (see `needsSealing`), and NOT
+   * NULL means everything is. A spec whose `finalize` leaves it nullable is
+   * refused: every later start would take sealed rows for plaintext and seal
+   * them again.
+   */
+  marker: { table: string; column: string };
+  /**
+   * Runs in the same transaction once every row is sealed and indexed, before
+   * `finalize`: what has to happen before the constraints can go up (core
+   * collapses rows that collide under the normalised index). `first` is true
+   * on the first backfill of this database.
+   */
+  afterSealing?: (tx: PiiBackfillExecutor, run: { first: boolean }) => Promise<void>;
+  /**
+   * Statements applied last, on every start, in order: `SET NOT NULL` on the
+   * index columns, the unique indexes that move onto them. Each must be safe
+   * to run again (`IF EXISTS` / `IF NOT EXISTS`; `SET NOT NULL` is).
+   */
+  finalize: string[];
+  /** What the key is called where the operator sets it, for the refusals. Default: `SECRETS_ENC_KEY`, with its tenant note. */
+  keyName?: string;
+}
+
+const PII_BACKFILL_TABLES: PiiBackfillTable[] = [
+  { table: 'users', key: ['id'], encrypted: ['email', 'name', 'avatar_url'], bidx: { source: 'email', column: 'email_bidx' } },
+  { table: 'pr_file_approvals', key: ['id'], encrypted: ['approver_email', 'approver_name'], bidx: { source: 'approver_email', column: 'approver_email_bidx' } },
+  { table: 'pr_merge_log', key: ['id'], encrypted: ['triggered_by_email', 'triggered_by_name', 'error'], bidx: { source: 'triggered_by_email', column: 'triggered_by_email_bidx' } },
+  { table: 'pr_comments', key: ['id'], encrypted: ['author_email', 'author_name', 'body'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
+  { table: 'change_requests', key: ['id'], encrypted: ['author_email', 'author_name', 'title', 'body', 'apply_failure_reason', 'apply_failed_by_name'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
+  { table: 'pending_commits', key: ['id'], encrypted: ['author_email', 'author_name', 'last_error'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
+  { table: 'file_locks', key: ['workspace_id', 'branch', 'path'], encrypted: ['holder_name'] },
+  { table: 'plugin_join_requests', key: ['id'], encrypted: ['requester_email', 'requester_name', 'failure_reason'], bidx: { source: 'requester_email', column: 'requester_email_bidx' } },
+];
+
+const ident = (name: string) => sql.raw(`"${name}"`);
+
+/** What the backfill needs from a drizzle client — the db or a transaction. */
+export type PiiBackfillExecutor = Pick<Database, 'execute'>;
+type Executor = PiiBackfillExecutor;
+
+/** A table's blind indexes, however many it declares. */
+const indexesOf = (t: PiiBackfillTable): PiiBlindIndex[] => (t.bidx === undefined ? [] : Array.isArray(t.bidx) ? t.bidx : [t.bidx]);
+
+/** The name the refusals call the key by: the operator's own, with core's tenant note when it is core's. */
+const keyNameOf = (spec: Pick<PiiBackfillSpec, 'keyName'>): string =>
+  spec.keyName ?? 'SECRETS_ENC_KEY (for a tenant: the one derived from TENANT_MASTER_KEY)';
+
+/** A text column as it is stored: bytes, so the handle's connection does not open it. */
+const asStored = (col: string) => sql`convert_to(${ident(col)}, 'UTF8') AS ${ident(col)}`;
+
+/** What {@link asStored} selected, back as text; anything else as it came. */
+const storedText = (value: unknown): unknown => (Buffer.isBuffer(value) ? value.toString('utf8') : value);
+
+/**
+ * A column "needs sealing" when it holds non-empty text that isn't a blob.
+ * The shape regex is deliberately used as a NEGATIVE filter: anything failing
+ * it — including plaintext that merely BEGINS with the prefix — is selected
+ * and sealed, and `isEncryptedBlob` is the same pattern, so the two can never
+ * disagree about a value. Sealed rows all match, keeping the steady-state scan
+ * an empty-result query.
+ *
+ * `trustShape` is false on the FIRST backfill of a database (see
+ * {@link isFirstBackfill}): nothing has been sealed yet, so a value in this
+ * shape is plaintext somebody typed, and every non-empty value is selected.
+ */
+function needsSealing(col: string, trustShape: boolean) {
+  if (!trustShape) return sql`(${ident(col)} IS NOT NULL AND ${ident(col)} <> '')`;
+  return sql`(${ident(col)} IS NOT NULL AND ${ident(col)} <> '' AND ${ident(col)} !~ ${PII_SEALED_SHAPE_SQL_REGEX})`;
+}
+
+/**
+ * Whether this database has never been through the backfill: the spec's
+ * marker column (for core, the blind index of `users`) is still nullable.
+ * The backfill, the duplicate collapse and the constraints run in ONE
+ * transaction, so a nullable column means no backfill has ever committed
+ * here — and therefore that nothing in it is sealed, whatever it looks like.
+ *
+ * That is what lets a first backfill trust no shape at all. A blob is
+ * recognised by its shape, and a title or a display name is text a person
+ * chose: one typed in that shape before the upgrade would be read as sealed,
+ * skipped, and left in clear for good — and, sampled by
+ * {@link assertKeyOpensSealedRows}, would refuse the start for a key that is
+ * perfectly right. Once the first backfill has committed, every write goes
+ * through a handle that seals it, so no such value can arrive again.
+ *
+ * A marker that is not there at all is the SQL history not having run (or a
+ * spec naming a column it does not add): refused, rather than read as "not
+ * the first run", which would trust every shape in a database nobody sealed.
+ */
+async function isFirstBackfill(tx: Executor, spec: Pick<PiiBackfillSpec, 'name' | 'marker'>): Promise<boolean> {
+  const { table, column } = spec.marker;
+  const result = await tx.execute(sql`
+    SELECT is_nullable FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = ${table} AND column_name = ${column}
+  `);
+  const nullable = (result.rows[0] as { is_nullable?: string } | undefined)?.is_nullable;
+  if (nullable === undefined) {
+    throw new Error(
+      `PII encryption backfill (${spec.name}): the marker column ${table}.${column} does not exist. ` +
+        'Apply the migration that adds the blind-index columns before the backfill runs.',
+    );
+  }
+  return nullable === 'YES';
+}
+
+/** How many rows one backfill query reads: a table is walked in batches, never loaded whole. */
+const BACKFILL_BATCH_ROWS = 500;
+
+/**
+ * The configured key must open what earlier starts sealed. A rotated or
+ * mistyped `SECRETS_ENC_KEY` would otherwise go unnoticed here — sealed rows
+ * are exactly the ones the scan skips — and surface only as every login
+ * failing and every lookup by email missing, because the blind indexes would
+ * be computed under the new key. One sealed value per table is enough: all
+ * rows of a deployment are sealed under one key, so any one of them answers
+ * for the rest. Refusing the start is the loud failure; re-keying a database
+ * is a deliberate operation, not a boot.
+ *
+ * The sample is a sealed value from WHICHEVER column has one, not from a
+ * column chosen to stand for its table. A column may hold nothing in any
+ * row (an optional address nobody gave, an error text that never occurred),
+ * and a check that looked only there would find no sample, say nothing, and
+ * let a wrong key through to a table whose other columns are full of values
+ * it cannot open.
+ */
+async function assertKeyOpensSealedRows(tx: Executor, keys: PiiKeys, spec: Pick<PiiBackfillSpec, 'tables' | 'keyName'>): Promise<void> {
+  for (const t of spec.tables) {
+    // ONE pass over the table, which ends at the first row that has a sealed
+    // value in ANY of its sealed columns: on a sealed database, the first
+    // row. Whatever that row holds sealed is tried. (A value in it that is
+    // not sealed opens as itself, so it is no evidence either way.)
+    const sealedSomewhere = sql.join(
+      t.encrypted.map((col) => sql`${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX}`),
+      sql` OR `,
+    );
+    const sample = await tx.execute(
+      sql`SELECT ${sql.join(t.encrypted.map(asStored), sql`, `)} FROM ${ident(t.table)} WHERE ${sealedSomewhere} LIMIT 1`,
+    );
+    const row = (sample.rows[0] ?? {}) as Record<string, unknown>;
+    for (const col of t.encrypted) {
+      const value = storedText(row[col]);
+      if (typeof value === 'string' && !keys.open(value).ok) {
+        throw new Error(
+          `PII encryption: ${t.table}.${col} is sealed with a key the configured ${keyNameOf(spec)} ` +
+            'does not open — refusing to start. ' +
+            'Restore the key that sealed it; changing the key is a re-keying of the database, not a configuration change.',
+        );
+      }
+    }
+  }
+}
+
+async function backfillTable(
+  tx: Executor,
+  keys: PiiKeys,
+  t: PiiBackfillTable,
+  trustShape: boolean,
+  keyName: string,
+): Promise<number> {
+  const indexes = indexesOf(t);
+  // The key columns are read as text beside themselves, so the next batch can
+  // be asked for by value whatever their type is (a uuid, a serial, a path).
+  const keyText = (k: string) => `${k}__key`;
+  const cols = [
+    ...t.key.map(ident),
+    ...t.key.map((k) => sql`${ident(k)}::text AS ${ident(keyText(k))}`),
+    ...t.encrypted.map(asStored),
+    ...indexes.map((index) => ident(index.column)),
+  ];
+  // Only rows with work left: the ciphertext prefix makes "unsealed" a plain
+  // SQL predicate, so a fully-sealed table costs one empty-result query.
+  // AN INDEX IS THERE EXACTLY WHERE ITS SOURCE IS. A row is owed work when
+  // the two disagree, either way: a source with no index beside it, and an
+  // index left beside a source that has since been emptied to NULL (which
+  // would go on answering for an address the row no longer holds). A source
+  // that is NULL with no index is how an optional address looks, and is not
+  // asked for: it would come back on every start for nothing.
+  const pending = [
+    ...t.encrypted.map((col) => needsSealing(col, trustShape)),
+    ...indexes.map((index) => sql`((${ident(index.column)} IS NULL) <> (${ident(index.source)} IS NULL))`),
+  ];
+  const keyTuple = sql`(${sql.join(t.key.map((k) => sql`${ident(k)}::text`), sql`, `)})`;
+  // A blob, as far as this pass may believe one. On a first backfill nothing
+  // is sealed yet, so nothing is believed (see `isFirstBackfill`).
+  const sealedAlready = (value: string): boolean => trustShape && isEncryptedBlob(value);
+  let rewritten = 0;
+  /** The key of the last row read, as text: the next batch starts after it. */
+  let after: string[] | null = null;
+  // IN BATCHES, in key order. A table is never loaded whole: a deployment with
+  // years of change requests holds every title and body it ever had, and
+  // reading them into one result held the first start after the upgrade — and
+  // the memory of the process making it — for as long as that took. Walking by
+  // key rather than re-asking for "what is left" also ends: a row this pass
+  // leaves as it found it (a write overtook it) is passed, not met again.
+  for (;;) {
+    const past = after ? sql` AND ${keyTuple} > (${sql.join(after.map((v) => sql`${v}`), sql`, `)})` : sql``;
+    const result = await tx.execute(
+      sql`SELECT ${sql.join(cols, sql`, `)} FROM ${ident(t.table)} WHERE (${sql.join(pending, sql` OR `)})${past} ORDER BY ${keyTuple} LIMIT ${BACKFILL_BATCH_ROWS}`,
+    );
+    const batch = result.rows as Array<Record<string, unknown>>;
+    for (const read of batch) {
+      const row = Object.fromEntries(Object.entries(read).map(([col, value]) => [col, storedText(value)]));
+      const sets = [];
+      // Compare-and-swap: pin every value this row was read with, so a write
+      // that lands between scan and update makes this UPDATE match zero rows
+      // instead of clobbering the newer value.
+      const where = t.key.map((k) => sql`${ident(k)} = ${row[k]}`);
+      for (const col of t.encrypted) {
+        const value = row[col];
+        if (typeof value === 'string' && value !== '' && !sealedAlready(value)) {
+          sets.push(sql`${ident(col)} = ${keys.seal(value)}`);
+          where.push(sql`${ident(col)} = ${value}`);
+        }
+      }
+      for (const index of indexes) {
+        // The blind index is derived from its source, so it is (re)computed
+        // whenever the source is being sealed in this pass — a legacy writer
+        // that put a NEW plaintext email on an already-indexed row left a stale
+        // index behind, and sealing the email alone would freeze that mismatch
+        // — and whenever it was never filled. The source may already be
+        // ciphertext (an index that was never filled beside a sealed address);
+        // the index is always computed over the plaintext, never over a blob
+        // the key cannot open.
+        const source = row[index.source];
+        const stored = row[index.column];
+        // NULL is "no value", and has no index: not the index of the empty
+        // string, which every row without an address would then share where
+        // a plain unique index let any number of NULLs stand. An index found
+        // beside a NULL source is taken away, pinned to what was read like
+        // every other write here.
+        //
+        // The EMPTY STRING is a value, and keeps its index: it is what the
+        // handle writes for one (`blindIndexText`), so a row is found by it
+        // whether the application wrote it or this did, and two empty
+        // strings are equal under a unique index, as they were in clear.
+        if (typeof source !== 'string') {
+          if (stored != null) {
+            sets.push(sql`${ident(index.column)} = NULL`);
+            where.push(sql`${ident(index.column)} = ${stored}`);
+            where.push(sql`${ident(index.source)} IS NULL`);
+          }
+          continue;
+        }
+        const text = source;
+        const sealingSource = text !== '' && !sealedAlready(text);
+        if (sealingSource || stored == null) {
+          const opened = sealedAlready(text) ? keys.open(text) : ({ ok: true, plain: text } as const);
+          if (!opened.ok) {
+            throw new Error(
+              `PII encryption backfill: ${t.table}.${index.source} cannot be decrypted with the ` +
+                `configured ${keyName} — refusing to derive a blind index from ciphertext. ` +
+                'Restore the key that sealed it, then restart.',
+            );
+          }
+          sets.push(sql`${ident(index.column)} = ${keys.index(opened.plain)}`);
+          // Pin the index AND its source: if a concurrent writer replaces the
+          // email between scan and write, the CAS must not attach the OLD
+          // email's blind index to the NEW value.
+          where.push(sql`${ident(index.column)} IS NOT DISTINCT FROM ${stored ?? null}`);
+          where.push(sql`${ident(index.source)} IS NOT DISTINCT FROM ${source ?? null}`);
+        }
+      }
+      if (sets.length === 0) continue;
+      const updated = await tx.execute(
+        sql`UPDATE ${ident(t.table)} SET ${sql.join(sets, sql`, `)} WHERE ${sql.join(where, sql` AND `)}`,
+      );
+      rewritten += updated.rowCount ?? 0;
+    }
+    if (batch.length < BACKFILL_BATCH_ROWS) return rewritten;
+    const last = batch[batch.length - 1]!;
+    after = t.key.map((k) => String(last[keyText(k)]));
+  }
+}
+
+/**
+ * The name on a refused apply that was recorded BEFORE this release: the
+ * address of whoever it names was never kept, so no blind index stands beside
+ * it and an account erasure has nothing to find it by.
+ *
+ * Matching it by display name instead got both mistakes at once: a person
+ * who had since changed their name kept the old one on the request for good,
+ * and somebody else of the same name had theirs taken away. So the name goes,
+ * once, here. The refusal itself stays, with its reason and its time; it
+ * reads "could not apply" without saying who. A refusal recorded from this
+ * release on carries its index and is never touched by this.
+ */
+async function clearUnindexedRefusalNames(tx: Executor): Promise<number> {
+  const cleared = await tx.execute(sql.raw(`
+    UPDATE "change_requests" SET "apply_failed_by_name" = NULL
+    WHERE "apply_failed_by_name" IS NOT NULL AND "apply_failed_by_email_bidx" IS NULL
+  `));
+  return cleared.rowCount ?? 0;
+}
+
+/**
+ * Legacy uniqueness was on the RAW email, so rows differing only by case or
+ * whitespace could coexist; under the normalized blind index they collide and
+ * the unique-index creation below would abort the start. Approval rows and
+ * join-request rows are the same logical row — collapse them, keeping the
+ * earliest. Colliding USER rows are distinct accounts; refuse loudly with the
+ * ids so an operator resolves the conflict deliberately instead of the
+ * upgrade guessing.
+ */
+async function resolveBidxCollisions(tx: Executor): Promise<void> {
+  await tx.execute(sql.raw(`
+    DELETE FROM "pr_file_approvals" a USING "pr_file_approvals" b
+    WHERE a."pr_number" = b."pr_number" AND a."path" = b."path"
+      AND a."approver_email_bidx" = b."approver_email_bidx" AND a."head_sha" = b."head_sha"
+      AND (a."approved_at" > b."approved_at" OR (a."approved_at" = b."approved_at" AND a."id" > b."id"))
+  `));
+  await tx.execute(sql.raw(`
+    DELETE FROM "plugin_join_requests" a USING "plugin_join_requests" b
+    WHERE a."plugin_key" = b."plugin_key" AND a."requester_email_bidx" = b."requester_email_bidx"
+      AND (a."created_at" > b."created_at" OR (a."created_at" = b."created_at" AND a."id" > b."id"))
+  `));
+  const dupes = await tx.execute(sql.raw(`
+    SELECT array_agg("id") AS ids FROM "users" GROUP BY "email_bidx" HAVING count(*) > 1
+  `));
+  if (dupes.rows.length > 0) {
+    const groups = (dupes.rows as Array<{ ids: string[] }>).map((r) => r.ids.join(', '));
+    throw new Error(
+      'PII encryption backfill: multiple user rows share the same email after normalization ' +
+        '(case/whitespace variants of one address). Merge or delete the duplicates, then restart. ' +
+        `Conflicting user ids: [${groups.join('], [')}]`,
+    );
+  }
+}
+
+const PII_FINALIZE_STATEMENTS = [
+  'ALTER TABLE "users" ALTER COLUMN "email_bidx" SET NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS "users_email_bidx_unq" ON "users" ("email_bidx")',
+  'ALTER TABLE "users" DROP CONSTRAINT IF EXISTS "users_email_unique"',
+  'ALTER TABLE "pr_file_approvals" ALTER COLUMN "approver_email_bidx" SET NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS "pr_file_approvals_bidx_unq" ON "pr_file_approvals" ("pr_number","path","approver_email_bidx","head_sha")',
+  'DROP INDEX IF EXISTS "pr_file_approvals_unq"',
+  'ALTER TABLE "pr_merge_log" ALTER COLUMN "triggered_by_email_bidx" SET NOT NULL',
+  'ALTER TABLE "pr_comments" ALTER COLUMN "author_email_bidx" SET NOT NULL',
+  'ALTER TABLE "change_requests" ALTER COLUMN "author_email_bidx" SET NOT NULL',
+  'ALTER TABLE "pending_commits" ALTER COLUMN "author_email_bidx" SET NOT NULL',
+  'ALTER TABLE "plugin_join_requests" ALTER COLUMN "requester_email_bidx" SET NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS "plugin_join_requests_requester_bidx_plugin_unq" ON "plugin_join_requests" ("requester_email_bidx","plugin_key")',
+  'DROP INDEX IF EXISTS "plugin_join_requests_requester_plugin_unq"',
+];
+
+/** Core's own personal data: the tables above, and what migration 0016 deferred. */
+const CORE_PII_BACKFILL: PiiBackfillSpec = {
+  name: 'core',
+  tables: PII_BACKFILL_TABLES,
+  marker: { table: 'users', column: 'email_bidx' },
+  afterSealing: async (tx, { first }) => {
+    const cleared = await clearUnindexedRefusalNames(tx);
+    if (cleared > 0) {
+      log.info(`PII encryption backfill: took the name off ${cleared} refused apply(ies) recorded before this release.`);
+    }
+    // Only where the unique indexes are not up yet. Once they are, they are
+    // what keeps two rows from sharing an index, so there is nothing to
+    // collapse — and the collapse is two self-joins and an aggregate over
+    // whole tables, which every later start paid for nothing.
+    if (first) await resolveBidxCollisions(tx);
+  },
+  finalize: PII_FINALIZE_STATEMENTS,
+};
+
+/**
+ * Encrypt pre-existing plaintext PII rows, fill the blind-index columns, and
+ * apply the constraints migration 0016 deferred. Idempotent; `runCoreMigrations`
+ * runs it under the migrations lock right after the history. The handle must
+ * hold the knowledge base's key (`createDb(url, { piiKey })`; the composition
+ * root's does): one that holds none is refused before anything is read.
+ */
+export async function runPiiEncryptionBackfill(db: Database): Promise<void> {
+  await runPiiBackfill(db, CORE_PII_BACKFILL);
+}
+
+/**
+ * Seal the rows `spec` names that were written before their columns were
+ * sealed, fill their blind indexes, and apply `spec.finalize` — the DATA half
+ * of a migration that adds `encryptedText` / `blindIndexText` columns, which
+ * SQL cannot do because it holds no key. ONE implementation for every schema
+ * on a handle: core's own tables ({@link runPiiEncryptionBackfill}) and an
+ * overlay's, so the rules above (one transaction, a first run that trusts no
+ * shape, a key that must open what is sealed, columns read as stored, writes
+ * that pin what they read) are not rewritten per schema and cannot drift.
+ *
+ * Idempotent, and to be run on every start under the lock that guards the
+ * schema's history: {@link runEnterpriseMigrations} does that for an overlay
+ * that passes its spec. The handle must hold the key the rows are sealed
+ * with; one that holds none is refused before anything is read.
+ */
+export async function runPiiBackfill(db: Database, spec: PiiBackfillSpec): Promise<void> {
+  const keys = piiKeysOf(db);
+  assertSpecIsWhole(spec);
+  const label = spec.name === CORE_PII_BACKFILL.name ? 'PII encryption backfill' : `PII encryption backfill (${spec.name})`;
+  await db.transaction(async (tx) => {
+    const first = await isFirstBackfill(tx, spec);
+    // Nothing is sealed before the first backfill, so there is no sealed row
+    // for the key to be checked against — and a value that only LOOKS sealed
+    // must not be taken for one (see `isFirstBackfill`).
+    if (!first) await assertKeyOpensSealedRows(tx, keys, spec);
+    let rewritten = 0;
+    for (const t of spec.tables) {
+      rewritten += await backfillTable(tx, keys, t, !first, keyNameOf(spec));
+    }
+    if (rewritten > 0) log.info(`${label}: rewrote ${rewritten} row(s).`);
+    await spec.afterSealing?.(tx, { first });
+    for (const statement of spec.finalize) {
+      await tx.execute(sql.raw(statement));
+    }
+    // The marker is what the NEXT start reads. Left nullable, that start
+    // would be a "first" one again: it would believe no shape, take every
+    // sealed value for plaintext and seal it a second time, and nothing
+    // would open afterwards. So a spec that does not close its own marker
+    // does not commit.
+    if (await isFirstBackfill(tx, spec)) {
+      throw new Error(
+        `${label}: finalize left the marker column ${spec.marker.table}.${spec.marker.column} nullable. ` +
+          'It must set it NOT NULL, or the next start would seal the sealed rows again. Nothing was changed.',
+      );
+    }
+  });
+}
+
+/** A spec is refused for what would otherwise fail halfway: a marker that is no index of its tables, an index of a column that is not sealed. */
+function assertSpecIsWhole(spec: PiiBackfillSpec): void {
+  let markerIsAnIndex = false;
+  for (const t of spec.tables) {
+    for (const index of indexesOf(t)) {
+      if (!t.encrypted.includes(index.source)) {
+        throw new Error(
+          `PII encryption backfill (${spec.name}): ${t.table}.${index.column} indexes "${index.source}", which is not one of the table's encrypted columns.`,
+        );
+      }
+      if (t.table === spec.marker.table && index.column === spec.marker.column) markerIsAnIndex = true;
+    }
+  }
+  if (!markerIsAnIndex) {
+    throw new Error(
+      `PII encryption backfill (${spec.name}): the marker ${spec.marker.table}.${spec.marker.column} is not a blind-index column of the spec's tables.`,
+    );
+  }
 }

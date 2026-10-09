@@ -33,6 +33,8 @@ import type {
   ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
+  DeleteBranchPreview,
+  DeleteBranchResult,
   FileApproval,
   FileLock,
   FolderChangeRequest,
@@ -76,6 +78,28 @@ export interface IWorkflowService {
     user: AuthUser,
     opts?: { onlyIfNoRemote?: boolean },
   ): Promise<void>;
+  /**
+   * An agent's `delete_branch`: the app's author-or-Admin rule, plus the
+   * guards an agent needs and a person in the branch switcher does not.
+   * Refuses a protected branch, a name that is not a branch, a branch an open
+   * change request that still proposes something (or whose changes cannot be
+   * determined) comes from or goes into, a branch whose checkout still has
+   * saves landing or a file held, and — unless `discardUnmerged` — one holding
+   * commits that are not on the default branch. Open requests that propose
+   * nothing block nothing: they are closed only once every other check has
+   * passed, just before the branch is removed — never by a preview or a
+   * refused deletion. Fetches first, strictly: when the shared repository
+   * cannot be reached it refuses. Runs from the default branch's workspace,
+   * whichever workspace the caller is in. `dryRun` reports what a deletion
+   * would do and changes nothing. `maySee` is the caller's view of change
+   * requests: one it answers no for is left out of the preview and refused on
+   * without its number or link. Absent, every request is visible.
+   */
+  deleteBranchChecked(
+    user: AuthUser,
+    name: string,
+    opts?: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (number: number) => Promise<boolean> },
+  ): Promise<DeleteBranchPreview | DeleteBranchResult>;
   // `switchBranch` removed: under the per-branch workspace model the active
   // branch is the workspace's identity. Switching branches is a workspace
   // selection (`WorkspaceService.getOrCreateForBranch`), not an operation
@@ -227,6 +251,30 @@ export interface IWorkflowService {
     path: string,
     sha: string,
   ): Promise<{ baseline: string | null; current: string | null }>;
+  /**
+   * One file's BYTES at a change, for the viewers that read the file itself
+   * rather than a text buffer — a past save of a pdf, an image, a Word
+   * document, a deck, a workbook, a message.
+   *
+   * `side: 'after'` is the file as that save left it; `'before'` is `<sha>^`,
+   * which is what the save that DELETED a file has to show. `null` means the
+   * file was not there on the side asked for.
+   *
+   * Refuses a sha that is not in the history of the branch the workspace has
+   * checked out — a past version is served per branch, and the text history
+   * routes above carry the same rule. Access to the file itself is the
+   * caller's to check, exactly as for `fileAtChange`.
+   *
+   * `Uint8Array`, not `Buffer`: this interface is isomorphic and `packages/
+   * shared` carries no node types. The backing implementation returns a
+   * `Buffer`, which IS one.
+   */
+  fileBytesAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+    side: 'after' | 'before',
+  ): Promise<{ bytes: Uint8Array; blobId: string } | null>;
   /**
    * One file as it stood at a change request's fork point (`sha`, which must
    * lie on the target branch's history) — the "before" side of the request
@@ -413,6 +461,17 @@ export interface IWorkflowService {
   // ── Change Requests ───────────────────────────────────────────────────────
 
   listChangeRequests(opts?: { fresh?: boolean }): Promise<ChangeRequest[]>;
+  /**
+   * Change requests in ANY of `states`, newest first. `listChangeRequests`
+   * answers the open ones only — the app's lists are all about what is still
+   * being decided — so a reader catching up on what HAPPENED (the agent read
+   * tools' `state: closed` / `state: all`) needs this one.
+   */
+  listChangeRequestsByState(
+    states: ChangeRequestState[],
+    /** `workspaceId`: the clone to read file lists in; any clone will do, and a caller that resolved one passes it so the list and the by-number reads agree. */
+    opts?: { fresh?: boolean; workspaceId?: string },
+  ): Promise<ChangeRequest[]>;
   /** Change requests authored by the given user (matched on stored author identity). */
   listChangeRequestsAuthoredBy(
     emailOrLogin: string,
@@ -657,6 +716,13 @@ export interface IWorkflowService {
    *     merge resets it to the published tip, which would discard them.
    *
    * Conflicts write nothing and come back as `conflicts-need-resolution`.
+   *
+   * Writes are committed asynchronously, so before merging this waits — up to
+   * 20 seconds, holding no lock — for `sourceBranch` to have no queued commit.
+   * Still queued after that, or a queued commit escalated to a person, comes
+   * back as `pending-commits` with nothing merged. A target that already held
+   * everything on the source comes back as `nothing-to-merge` with its tip;
+   * `merged` means a merge commit was made.
    */
   mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
 }

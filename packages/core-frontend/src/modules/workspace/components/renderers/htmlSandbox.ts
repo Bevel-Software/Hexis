@@ -18,12 +18,21 @@
  *      smaller, easier to audit, and removes any chance a future CSP
  *      misconfiguration accidentally leaks something through.
  *
+ *      An `<a href>` is the one exception, because a link is not a resource
+ *      the document loads — it is an address the READER may choose to follow,
+ *      and the parent, not the iframe, is what follows it. So a link to
+ *      another document of the knowledge base, or to an `http:`, `https:` or
+ *      `mailto:` address, keeps its href and reaches the parent through the
+ *      nav bridge; see `isKeptLink`. Every other address is still removed.
+ *
  *   2. `buildSandboxedHtml` — wraps the sanitized body and the inlined
  *      knowledge-base JS library into a complete HTML document with the
  *      strict CSP and a single inline `<script type="module">` containing
  *      the library code (so `window.bevel.buildGraph()` is callable from
  *      the agent's own scripts).
  */
+
+import { isPageLinkExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
 
 const DROP_ELEMENTS = new Set([
   'link',
@@ -62,6 +71,12 @@ const URL_ATTRIBUTES = [
  * shape (absolute URL, protocol-relative, scheme-bearing, or plain
  * relative path that the browser would resolve against `about:srcdoc`)
  * is stripped.
+ *
+ * This governs every URL-bearing attribute EXCEPT an anchor's `href`, which
+ * is a destination rather than a resource and has its own rule in
+ * {@link isKeptLink}. In particular a `data:image/*` href is NOT a picture
+ * the document shows, it is an address a click would try to open, so an
+ * anchor does not get this allowance.
  */
 function isAllowedUrl(rawUrl: string): boolean {
   const url = rawUrl.trim().toLowerCase();
@@ -71,26 +86,50 @@ function isAllowedUrl(rawUrl: string): boolean {
   return false;
 }
 
+/** The scheme of a URL (`https:`), lower-cased, or null when it has none. */
+function schemeOf(url: string): string | null {
+  const match = /^[a-z][a-z0-9+.-]*:/i.exec(url);
+  return match ? match[0].toLowerCase() : null;
+}
+
 /**
- * Decide whether an `<a href>` deep-links to a node in the knowledge graph:
- * either a `.md` node path (optionally with a `#heading` anchor, e.g.
- * `../NodeTypes/Process.md#goal`) or an absolute `/workspace/<branch>/<path>`
- * citation URL — the same shapes the markdown renderer treats as internal
- * links.
+ * Decide whether an `<a href>` written in the page's markup keeps its address.
+ * Three shapes survive:
  *
- * These survive sanitization (unlike other relative URLs, which are stripped):
- * the iframe sandbox forbids navigating the top window, so the runtime
- * intercepts the click and asks the parent to navigate instead of letting the
- * browser attempt — and error on — the navigation. Any scheme-bearing
- * (`http:`, `javascript:`, …) or protocol-relative (`//host`) URL is rejected.
+ *   - another document of the knowledge base — a `.md`, `.html` or `.htm`
+ *     path, with an optional `#heading` (`../Reports/Q3.html#totals`);
+ *   - an absolute `/workspace/<branch>/<path>` citation URL;
+ *   - an external `http:`, `https:` or `mailto:` address, per
+ *     {@link isPageLinkExternalHref}.
+ *
+ * Everything else loses its href: any other scheme (`javascript:`, `data:`,
+ * `file:`, `vbscript:`, an app's own `x-foo:`), protocol-relative `//host`,
+ * and any other relative path — the iframe loads from `about:srcdoc`, where a
+ * relative URL resolves to nothing the browser can fetch.
+ *
+ * A kept link is never followed by the browser: the sandbox forbids
+ * navigating the top window, so the nav bridge in `buildSandboxedHtml` cancels
+ * the click and hands the address to the parent, which resolves a document
+ * against this page's own folder and opens an external address in a new tab
+ * (`noopener,noreferrer`). This predicate is one of two gates on that path —
+ * the other is `isOpenableExternalHref`, which guards the bridge against the
+ * strings a page's SCRIPT can post without any anchor at all.
+ *
+ * The href is read through {@link normalizeHref}, the same rule the nav bridge
+ * and the parent's resolver apply, so the string judged here is the string
+ * followed: a padded `'  Board.html  '` is kept AND resolves against the
+ * page's folder as `Board.html`, rather than becoming a filename with spaces
+ * in it. HTML entities are already decoded by the time we see the value — it
+ * comes out of `getAttribute`, past the parser.
  */
-function isInternalNodeLink(rawUrl: string): boolean {
-  const url = rawUrl.trim();
-  if (url === '') return false;
+function isKeptLink(rawUrl: string): boolean {
+  const url = normalizeHref(rawUrl);
+  if (url === '') return true; // an anchor with nowhere to go; nothing to strip
+  if (url.startsWith('#')) return true; // a section of this same page
   if (url.startsWith('//')) return false; // protocol-relative
-  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return false; // any URL scheme
+  if (schemeOf(url)) return isPageLinkExternalHref(url);
   if (url.startsWith('/workspace/')) return true;
-  return /\.md(#|$)/i.test(url);
+  return /\.(?:md|html|htm)(?:#|$)/i.test(url);
 }
 
 /**
@@ -150,10 +189,18 @@ export function sanitizeAgentHtml(html: string): string {
     for (const attr of URL_ATTRIBUTES) {
       if (!el.hasAttribute(attr)) continue;
       const value = el.getAttribute(attr) ?? '';
-      // An anchor that deep-links to a KB node keeps its href — the runtime
-      // intercepts the click and routes navigation through the parent (see
-      // the nav-bridge script in `buildSandboxedHtml`).
-      if (isAnchor && attr === 'href' && isInternalNodeLink(value)) continue;
+      // An anchor's `href` is a destination, not a resource, so `isKeptLink`
+      // decides it ALONE — not as an exception layered on top of
+      // `isAllowedUrl`. It keeps a link to another document of the knowledge
+      // base or to an allowed external address (the runtime intercepts the
+      // click and routes it through the parent — see the nav-bridge script in
+      // `buildSandboxedHtml`), and it is stricter than `isAllowedUrl` about
+      // `data:image/*`, which is a picture an `<img>` may show and not an
+      // address a reader may be sent to.
+      if (isAnchor && attr === 'href') {
+        if (!isKeptLink(value)) el.removeAttribute(attr);
+        continue;
+      }
       if (!isAllowedUrl(value)) el.removeAttribute(attr);
     }
   }
@@ -249,15 +296,79 @@ function escapeForScriptBody(source: string): string {
  * (`HtmlRenderer` / the embed) decides whether and how to navigate.
  *
  * Two entry points:
- *   - `window.bevel.openNode(href)` — for programmatic viewers (e.g. a d3 graph
- *     whose node `click` handler wants to open the underlying node).
- *   - A delegated click listener on `<a href>` — for plain HTML links. Pure
- *     in-page anchors (`#…`) are left alone so they still scroll the document.
+ *   - `window.bevel.openNode(href)` (and its alias `window.bevel.navigate`) —
+ *     for programmatic viewers (e.g. a d3 graph whose node `click` handler
+ *     wants to open the underlying node).
+ *   - A delegated click listener on `<a href>` — for plain HTML links.
+ *
+ * A bare fragment (`#totals`) is the one address the bridge keeps to itself,
+ * by either route: it scrolls the element with that id into view inside the
+ * frame and posts nothing. The browser cannot be left to do it — a `srcdoc`
+ * frame resolves `#totals` against the APP's URL, so the default action
+ * navigates the frame away and unloads the page. A fragment naming no element
+ * does nothing, except `#` and `#top`, which scroll to the top as a browser
+ * would. A click whose default a handler of the page already cancelled is
+ * left to that handler. The `html-views` section of the agent guide states this rule, and
+ * `htmlViewsGuide.test.ts` holds the two together.
  */
 const NAV_BRIDGE = `
 ;(function () {
+  // A written href is read the way a browser reads it before the bridge
+  // decides anything — the same rule as \`normalizeHref\` in the parent, kept
+  // here in ES5 because this source is a string injected into the iframe and
+  // cannot import. Without it a padded '  #goal  ' would be posted to the
+  // parent instead of scrolled to here.
+  function normalize(url) {
+    var s = url.replace(/[\\t\\n\\r]/g, '');
+    var start = 0;
+    var end = s.length;
+    while (start < end && s.charCodeAt(start) <= 0x20) start++;
+    while (end > start && s.charCodeAt(end - 1) <= 0x20) end--;
+    return s.slice(start, end);
+  }
+  function findTarget(id) {
+    if (id === '') return null;
+    var el = document.getElementById(id);
+    if (el) return el;
+    // The standard's fallback is the first <a name="…"> — an anchor, and only
+    // an anchor. A form control's name is not a fragment target: a browser
+    // leaves '#query' alone when only <input name="query"> carries it.
+    var named = document.getElementsByName ? document.getElementsByName(id) : null;
+    for (var i = 0; named && i < named.length; i++) {
+      if (named[i].tagName && named[i].tagName.toUpperCase() === 'A') return named[i];
+    }
+    return null;
+  }
+  // A bare fragment is an in-page jump, scrolled here inside the frame. The
+  // target is found as the HTML standard finds it: the fragment as written
+  // first, its percent-decoding only when that names nothing.
+  function jumpTo(fragment) {
+    if (typeof document === 'undefined') return;
+    var id = fragment.slice(1);
+    var el = findTarget(id);
+    if (!el) {
+      var decoded = id;
+      try {
+        decoded = decodeURIComponent(id);
+      } catch (err) {
+        decoded = id;
+      }
+      if (decoded !== id) el = findTarget(decoded);
+    }
+    if (el) {
+      el.scrollIntoView();
+      return;
+    }
+    if (id === '' || id.toLowerCase() === 'top') globalThis.scrollTo(0, 0);
+  }
   function navigate(target) {
-    if (typeof target !== 'string' || target === '') return;
+    if (typeof target !== 'string') return;
+    var href = normalize(target);
+    if (href === '') return;
+    if (href.charAt(0) === '#') {
+      jumpTo(href);
+      return;
+    }
     parent.postMessage({ type: 'bevel.navigate', href: target }, '*');
   }
   globalThis.bevel.openNode = navigate;
@@ -267,9 +378,14 @@ const NAV_BRIDGE = `
       var el = e.target;
       var a = el && el.closest ? el.closest('a[href]') : null;
       if (!a) return;
-      var href = a.getAttribute('href');
-      if (!href || href.charAt(0) === '#') return;
+      // A handler of the page's own that already cancelled this click owns
+      // it (a toggle, a hash router); the bridge stays out of its way.
+      if (e.defaultPrevented) return;
+      // Cancelled even when there is nowhere to go: left to the browser, an
+      // empty href reloads the frame against the app's URL, as '#…' would.
       e.preventDefault();
+      var href = normalize(a.getAttribute('href') || '');
+      if (!href) return;
       navigate(href);
     });
   }

@@ -6,9 +6,9 @@ import { useEffect, useState } from 'react';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error — mammoth ships no .d.ts
 import mammoth from 'mammoth/mammoth.browser.js';
-import { useRendererWorkspaceId } from './rendererWorkspace';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
+import { useRendererRawRead } from './rendererRawRead';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
 import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
@@ -31,19 +31,28 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function DocxRenderer({ filePath }: FileRendererProps) {
-  const workspaceId = useRendererWorkspaceId();
+  /**
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
+   */
+  const rawRead = useRendererRawRead();
+  const { attempt, retry } = useReadRetry();
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setHtml(null);
     setError(null);
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     (async () => {
       try {
-        const res = await authFetch(rawFileUrl(workspaceId, filePath));
+        const res = await rawRead.fetch(filePath);
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load Word document (HTTP ${res.status})`);
@@ -65,14 +74,17 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, filePath]);
+  }, [rawRead, filePath, attempt]);
 
   if (error) {
     return (
       <div className="flex min-h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-sm text-danger">{error}</p>
-        {/* The conversion failed; the bytes may still open fine in Word. */}
-        <DownloadFileButton filePath={filePath} />
+        <p role="alert" className="text-sm text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          <RetryReadButton onRetry={retry} />
+          {/* The conversion failed; the bytes may still open fine in Word. */}
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }

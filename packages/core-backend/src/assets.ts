@@ -23,3 +23,28 @@ export function coreMigrationsDir(): string {
 export function defaultKbTemplateDir(): string {
   return path.join(packageRoot(), 'kb-template');
 }
+
+/**
+ * The sections of the platform's agent guide, one markdown file each — the
+ * text `get_agent_guide` and a `read_file` of the guide's name serve, composed
+ * by `modules/agent-guide`. Beside `kb-template/` rather than under `src/`,
+ * so a build and the published source find it at the same place.
+ */
+export function agentGuideDir(): string {
+  return path.join(packageRoot(), 'agent-guide');
+}
+
+/**
+ * The MCP App views this deployment serves over `resources/read` — one static
+ * HTML file each, no build step. Beside `agent-guide/` and `kb-template/` for
+ * the same reason: a build and the published source find it at the same
+ * place, and `tsc` copies nothing that is not TypeScript.
+ *
+ * The backend serves these as BYTES and never imports frontend code — the
+ * view's whole job is to load the deployment's embed bundle into its own
+ * document (hosts forbid framing the deployment, see `mcp-app.ts`), where the
+ * app's renderers then draw the page.
+ */
+export function mcpAppDir(): string {
+  return path.join(packageRoot(), 'mcp-app');
+}

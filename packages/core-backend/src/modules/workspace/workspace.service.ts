@@ -8,24 +8,25 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   validateRelativePath,
-  validateFilename,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
   entryExistsMessage,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
-import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
 import {
   DestinationTakenError,
   inspectDestination,
   renameNoReplace,
 } from '../../shared/rename-no-replace.js';
-import type { IGitRunner } from '../../shared/git.contract.js';
+import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { isZipNoiseEntry, readZipEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
 import {
   GitInternalsError,
   PathNotFoundError,
@@ -47,6 +48,7 @@ import { setAsideClone, setAsideRootFor, setAsideStamp } from './set-aside-clone
 import {
   cloneCredentialArgs,
   cloneCredentialConfigArgs,
+  credentialHelperValue,
   cloneTrackingConfigArgs,
   SAFE_IMPLICIT_FETCH_ARGS,
 } from '../kb-fs/clone-config.js';
@@ -98,7 +100,20 @@ const UNZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500 MB across the whole arch
 // Folder-download cap. The whole zip is built in memory by adm-zip (no
 // streaming) so the cap also bounds peak heap usage for one download.
 // Reuses the unzip total as a single "fits in a workspace" budget.
-const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+export const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+
+// How many files one agent download request may carry: what one zip may hold
+// for `apply_file_upload` to unzip it back, and a bound on the lists a
+// request builds before anything is judged.
+export const DOWNLOAD_MAX_FILES = UNZIP_MAX_ENTRIES;
+
+/**
+ * Which of a folder's files a zip may pack: handed every file the walk found
+ * (repository-relative, POSIX separators), answers the set to include. The
+ * route builds one from the caller's `read` and `download` verdicts — see
+ * `createFolderZip` for why it is required.
+ */
+export type ZipEntryFilter = (repoRelativePaths: string[]) => Promise<ReadonlySet<string>>;
 
 /**
  * Thrown by `createFolderZip` when the cumulative uncompressed bytes exceed
@@ -319,9 +334,30 @@ export class WorkspaceService implements IWorkspaceService {
      * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
      */
     private readonly setAsideRoot?: string,
+    /**
+     * What surrounds the setting aside of ONE working copy when a branch is
+     * opened and its clone turns out to be of another repository: given the
+     * workspace id and the move, it runs the move. The composition root
+     * passes what the startup phase does around its own set-asides: the
+     * commit worker held still, the copy's queued commits held back for a
+     * person, the locks on its branch dropped. If it throws, the copy stays
+     * where it was and the branch is refused with that reason. Absent, the
+     * move runs as it is.
+     */
+    private readonly aroundSetAside: (workspaceId: string, move: () => Promise<void>) => Promise<void> = (
+      _workspaceId,
+      move,
+    ) => move(),
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
   }
+
+  /**
+   * The set-asides in flight, one per branch. Two callers opening the same
+   * branch both find the clone of another repository; the second waits for
+   * the first's move instead of trying to move a directory that has gone.
+   */
+  private readonly inFlightSetAsides = new Map<string, Promise<void>>();
 
   private get kbDirName(): string {
     return this.kb.kbDirName;
@@ -409,6 +445,50 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Does `branch` certainly not exist? Asked by the tool handler before a tool
+   * runs, so a call naming a branch nobody ever pushed is answered 404 without
+   * a workspace being created for it.
+   *
+   * Never clones and never creates a directory. A branch this platform has a
+   * clone of, is cloning, or has ever heard of is NOT missing: one that origin
+   * has since deleted is left to the open, which answers its 410. Anything
+   * else is asked of origin with `ls-remote`, and only origin's "no such ref"
+   * makes it missing. A name that is malformed, or a remote that could not be
+   * asked, is `false` too: the open then answers for it, exactly as before.
+   * A storage fault reading what this platform has heard of is NOT read as
+   * either answer: it propagates, the 500 the operator reads.
+   */
+  async isBranchMissing(branch: string): Promise<boolean> {
+    try {
+      assertValidBranchName(branch);
+    } catch {
+      return false;
+    }
+    if (this.branchDirs.has(branch) || this.inFlightBootstraps.has(branch)) return false;
+    if (await this.hasHeardOfBranch(branch)) return false;
+    const helper = credentialHelperValue(this.gitRunner.credentials);
+    try {
+      const { stdout } = await this.gitRunner.run(this.workspacesRoot, [
+        ...(helper ? ['-c', `credential.helper=${helper}`] : []),
+        'ls-remote',
+        '--exit-code',
+        '--heads',
+        '--end-of-options',
+        this.kbRepoUrl(),
+        `refs/heads/${branch}`,
+      ]);
+      // The argument is a PATTERN, matched at any slash boundary: it also
+      // lists `refs/heads/refs/heads/<branch>`. Only the exact ref counts.
+      const ref = `refs/heads/${branch}`;
+      return !stdout.split('\n').some((line) => line.split('\t')[1]?.trim() === ref);
+    } catch (err) {
+      // `--exit-code`: 2 is "the remote answered, and has no matching ref".
+      // Every other failure is a remote we could not ask.
+      return err instanceof GitRunError && err.exitCode === 2;
+    }
+  }
+
+  /**
    * Build git clone args. Credentials go in as `clone --config`, which both
    * authenticates this clone and leaves the helper in the new repo's config for
    * every later push — and keeps the token itself out of the repo URL, out of
@@ -474,6 +554,19 @@ export class WorkspaceService implements IWorkspaceService {
    * a conventional default branch isn't on the remote) just to run a global op.
    * Scans disk rather than the in-memory `branchDirs` map so clones that
    * survived a process restart are still found.
+   *
+   * INTERCHANGEABLE ONLY ONCE IT CAN REACH THE REMOTE. The clone handed back
+   * is one this process may never have opened, and opening a branch is the
+   * only other place a clone's credential helper is brought into line with the
+   * deployment's (`getOrCreateForBranch`). A clone made before the helper was
+   * persisted, or before a token was configured, has none — and it is exactly
+   * the kind that sorts first on disk, because it is old. Every repo-global
+   * operation then ran its fetches in a working copy that could not
+   * authenticate: the fetch failed, quietly, and each change request whose
+   * branch that clone had never seen was reported as `unknown branch`, list
+   * after list, while the branches sat on the remote. So the helper is stamped
+   * here too, before the clone is offered. A no-op for a clone already stamped
+   * in this process, and it never throws (see `stampCredentialHelper`).
    */
   async findAnyWorkspaceId(): Promise<string | null> {
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
@@ -484,12 +577,15 @@ export class WorkspaceService implements IWorkspaceService {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      const repoDir = path.join(this.workspacesRoot, entry.name, this.kbDirName);
       try {
-        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
-        return entry.name;
+        await fs.access(path.join(repoDir, '.git'));
       } catch {
         // No `.git` — half-built or unrelated dir; keep looking.
+        continue;
       }
+      await this.refreshCredentialHelperIfStale(branchForWorkspaceId(entry.name), repoDir);
+      return entry.name;
     }
     return null;
   }
@@ -652,18 +748,58 @@ export class WorkspaceService implements IWorkspaceService {
     // below", it would be found again by the clone step, which sees a
     // directory with a `.git` in it, calls that already-cloned, and hands back
     // the very working copy this refused to adopt.
-    if (onDisk && (await this.isCloneOfAnotherRepository(repoDir))) {
-      const kept = path.join(
-        setAsideRootFor(this.workspacesRoot, this.setAsideRoot),
-        setAsideStamp(),
-        workspaceIdForBranch(branch),
-      );
-      await setAsideClone(repoDir, kept);
-      log.warn(
-        `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
-          'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in that ' +
-          'folder: `git log` there shows it.',
-      );
+    // Counted before the disk is looked at: the startup phase may take this
+    // very copy away while the checks below are awaited (`forgetClone`), and a
+    // copy that went must not be registered as the branch's.
+    const discardsAtAdoption = this.discardsOf(id);
+    const setAsideInFlight = this.inFlightSetAsides.get(branch);
+    if (setAsideInFlight) {
+      // Someone else is moving it. Wait, then clone below; a move that failed
+      // refuses this caller with the same reason.
+      await setAsideInFlight;
+    } else if (onDisk && (await this.isCloneOfAnotherRepository(repoDir))) {
+      // Asked again: another caller may have started the move while the
+      // address was being read.
+      const startedMeanwhile = this.inFlightSetAsides.get(branch);
+      if (startedMeanwhile) {
+        await startedMeanwhile;
+      } else if (this.discardsOf(id) !== discardsAtAdoption) {
+        // The copy whose address this call read is no longer there: a move
+        // began AND ended while it was being read. An in-flight entry is
+        // cleared the moment its move ends, so a caller that comes back after
+        // that finds nobody to wait for — and its answer is about a copy that
+        // has already been set aside. Acting on it would set aside whatever is
+        // at this path NOW, which is the fresh clone the first caller is in
+        // the middle of making. Nothing is left to move; the bootstrap below
+        // waits for that clone.
+      } else {
+        const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp(), id);
+        // What surrounds the move may wait, and the startup phase may set
+        // this very copy aside meanwhile. Then there is nothing left to move:
+        // the phase did it, and said so.
+        let moved = false;
+        const moving = this.aroundSetAside(id, async () => {
+          if (this.discardsOf(id) !== discardsAtAdoption) return;
+          await setAsideClone(repoDir, kept);
+          moved = true;
+          // Said the way the startup phase says it: the copy at this path was
+          // taken away. That is what the check above reads, so every caller
+          // that looked at the old copy before this line knows its answer is
+          // stale, however late it comes back.
+          this.forgetClone(id);
+        }).finally(() => {
+          this.inFlightSetAsides.delete(branch);
+        });
+        this.inFlightSetAsides.set(branch, moving);
+        await moving;
+        if (moved) {
+          log.warn(
+            `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
+              'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in ' +
+              'that folder: `git log` there shows it.',
+          );
+        }
+      }
     } else if (onDisk) {
       try {
         // Migration for clones already on disk: re-stamp the tracking config
@@ -672,6 +808,8 @@ export class WorkspaceService implements IWorkspaceService {
         // anything pulls it. Once per branch per process — the cached paths
         // above return before reaching here.
         await this.normalizeCloneConfig(repoDir, branch);
+        // Taken away meanwhile: nothing to adopt, clone below.
+        if (this.discardsOf(id) !== discardsAtAdoption) throw new Error('the working copy was set aside');
         this.registerBranchDir(branch, workspaceDir);
         return this.buildWorkspaceInfo(branch, workspaceDir);
       } catch {
@@ -1231,6 +1369,25 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Whether a FILE is at `wsPath` — the same guards as a read, without the
+   * read: for a caller that only has to know the file is there (the embed
+   * mint), on a file that may be hundreds of megabytes.
+   */
+  async isFile(workspaceId: string, wsPath: string): Promise<boolean> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertNoGitInternalsSegment(relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
+    try {
+      return (await fs.stat(absolutePath)).isFile();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+      throw err;
+    }
+  }
+
+  /**
    * Refuse a path that reaches its file through a symbolic link — as the
    * final component, or as any directory between the workspace root and it.
    * `resolveInsideRepo`'s containment is lexical: `knowledge-base/notes.md`
@@ -1327,7 +1484,23 @@ export class WorkspaceService implements IWorkspaceService {
    * size crosses `ZIP_DOWNLOAD_MAX_BYTES`. Buffered in memory (adm-zip has
    * no streaming API); the cap therefore doubles as a peak-heap bound.
    */
-  async createFolderZip(workspaceId: string, wsPath: string): Promise<Buffer> {
+  /**
+   * Zip a folder. `include` is asked, ONCE, which of the folder's files may
+   * go in: it is handed every file the walk found, as repository-relative
+   * paths, and answers the set to pack. Required, not optional, and with no
+   * default that packs everything: the route used to gate `download` on the
+   * folder alone and pack every file under it, so a caller with `download`
+   * on a folder got files whose own rules (frontmatter, a nested access.md)
+   * denied them `read` or `download` — files the per-file route refused and
+   * the file tree never showed. A caller that wants everything says so by
+   * returning everything; it cannot get it by saying nothing.
+   *
+   * Two passes rather than a judgement per file inside the walk: the access
+   * model answers a list in one load, and a folder of a thousand files is
+   * the case a per-file call would make slow. The size cap counts only the
+   * files packed; a withheld file costs nothing and reveals nothing.
+   */
+  async createFolderZip(workspaceId: string, wsPath: string, include: ZipEntryFilter): Promise<Buffer> {
     const { workspaceDir, relativePath, absolutePath: absoluteRoot } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absoluteRoot);
@@ -1336,36 +1509,100 @@ export class WorkspaceService implements IWorkspaceService {
       throw new Error('Not a directory');
     }
 
-    const zipRoot = path.basename(absoluteRoot) || 'folder';
-    const zip = new AdmZip();
-    let totalBytes = 0;
-
+    // `relativePath` is workspace-relative, `<kbDirName>/<folder>`; the
+    // access rules are keyed inside the repository, so the prefix comes off
+    // here (and the repository root itself is the empty prefix).
+    // A trailing slash the caller wrote (`docs/`) survives normalisation and
+    // would key every file as `docs//x.md`, which no verdict matches: the
+    // filter would then withhold the whole folder in silence.
+    const folderInRepo = (relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1)).replace(/\/+$/, '');
+    const found: { dir: string; name: string; repoRelative: string }[] = [];
     await this.disk.walk(absoluteRoot, explorerWalk(), [
       {
         async onFile(dir, name) {
-          const childAbs = path.join(absoluteRoot, dir, name);
-          // Check the size cap BEFORE reading the file into memory. Reading
-          // first would let a single hostile 2 GB file allocate the whole
-          // buffer before the throw — defeating the cap as a peak-heap
-          // bound. `stat.size` is an upper bound that we re-verify after
-          // the read in case the file grew between stat and readFile.
-          const stat = await fs.stat(childAbs);
-          if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
-            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-          }
-          const data = await fs.readFile(childAbs);
-          if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
-            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-          }
-          totalBytes += data.byteLength;
-          // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
-          // separators regardless of host OS so the zip extracts cleanly
-          // on Windows/Mac/Linux alike.
-          zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
+          found.push({ dir, name, repoRelative: [folderInRepo, dir, name].filter(Boolean).join('/') });
         },
       },
     ]);
+    const allowed = await include(found.map((f) => f.repoRelative));
+
+    const zipRoot = path.basename(absoluteRoot) || 'folder';
+    const zip = new AdmZip();
+    let totalBytes = 0;
+    for (const { dir, name, repoRelative } of found) {
+      if (!allowed.has(repoRelative)) continue;
+      const childAbs = path.join(absoluteRoot, dir, name);
+      // Check the size cap BEFORE reading the file into memory. Reading
+      // first would let a single hostile 2 GB file allocate the whole
+      // buffer before the throw — defeating the cap as a peak-heap
+      // bound. `stat.size` is an upper bound that we re-verify after
+      // the read in case the file grew between stat and readFile.
+      const stat = await fs.stat(childAbs);
+      if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
+        throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+      }
+      const data = await fs.readFile(childAbs);
+      if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
+        throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+      }
+      totalBytes += data.byteLength;
+      // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
+      // separators regardless of host OS so the zip extracts cleanly
+      // on Windows/Mac/Linux alike.
+      zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
+    }
     return zip.toBuffer();
+  }
+
+  /**
+   * What is at `wsPath`, for an agent download: nothing, one file, or a folder
+   * and every file the explorer shows under it (the folder download's walk —
+   * no `.git/`, no `.gitkeep`, no `.bevelignore`d path, no link). Files come
+   * back repository-relative, with their size on disk; nothing is read, and
+   * nothing is judged — the caller judges every path on its own.
+   *
+   * The `.bevelignore` rules are those in force at the folder, its ancestors'
+   * included, as the explorer's walk from the root has them: a folder an
+   * ancestor's rule hides holds no files. The walk stops once it has found
+   * more than `maxFiles` files; the caller refuses such a request.
+   *
+   * A path that reaches its target through a link, or names the git folder,
+   * is refused as the reads refuse it; a path with nothing at it is
+   * `missing`, which the caller answers exactly as a path it may not read.
+   */
+  async downloadCandidatesAt(
+    workspaceId: string,
+    wsPath: string,
+    maxFiles: number,
+  ): Promise<{ kind: 'missing' } | { kind: 'file' | 'folder'; files: { path: string; bytes: number }[] }> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertNoGitInternalsSegment(relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
+    let stat;
+    try {
+      stat = await fs.lstat(absolutePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') {
+        return { kind: 'missing' };
+      }
+      throw err;
+    }
+    const inRepo = (relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1)).replace(/\/+$/, '');
+    if (stat.isFile()) return { kind: 'file', files: [{ path: inRepo, bytes: stat.size }] };
+    if (!stat.isDirectory()) return { kind: 'missing' };
+    const files: { path: string; bytes: number }[] = [];
+    const rules = await ignoreRulesAbove(path.join(workspaceDir, this.kbDirName), inRepo);
+    if (!rules) return { kind: 'folder', files };
+    await this.disk.walk(absolutePath, { ...explorerWalk(), ignore: rules, until: () => files.length > maxFiles }, [
+      {
+        async onFile(dir, name) {
+          const size = (await fs.lstat(path.join(absolutePath, dir, name))).size;
+          files.push({ path: [inRepo, dir, name].filter(Boolean).join('/'), bytes: size });
+        },
+      },
+    ]);
+    return { kind: 'folder', files };
   }
 
   /**
@@ -1948,43 +2185,22 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       processedCount++;
-      const rawName = entry.entryName.replace(/\\/g, '/');
+      const rawName = zipEntryName(entry.entryName);
 
-      if (
-        rawName.startsWith('__MACOSX/') ||
-        rawName === '__MACOSX' ||
-        rawName.endsWith('/.DS_Store') ||
-        rawName === '.DS_Store' ||
-        /(^|\/)\._/.test(rawName)
-      ) {
-        continue;
-      }
+      if (isZipNoiseEntry(rawName)) continue;
 
-      if (!rawName || rawName.startsWith('/') || /(^|\/)\.\.($|\/)/.test(rawName)) {
-        skipped.push({ path: rawName || '(empty)', reason: 'Invalid path' });
-        continue;
-      }
-
-      // An archive never writes into the git folder, whatever the entry's spelling.
-      if (hasGitInternalsSegment(rawName)) {
-        skipped.push({ path: rawName, reason: new GitInternalsError().message });
+      // What an entry's NAME may be — invalid path, the git folder in any
+      // spelling, a segment no filesystem keeps intact — is `zip-entry-rules`,
+      // so `apply_file_upload` judges the same names by the same rules rather
+      // than by a second copy of them.
+      const nameRefusal = zipEntryNameRefusal(rawName);
+      if (nameRefusal !== null) {
+        skipped.push({ path: rawName || '(empty)', reason: nameRefusal });
         continue;
       }
 
       const trimmed = rawName.replace(/\/+$/, '');
-      const segments = trimmed.split('/').filter((s) => s.length > 0);
-      let invalidReason: string | null = null;
-      for (const segment of segments) {
-        const reason = validateFilename(segment);
-        if (reason) {
-          invalidReason = reason;
-          break;
-        }
-      }
-      if (invalidReason) {
-        skipped.push({ path: rawName, reason: invalidReason });
-        continue;
-      }
+      const segments = zipEntrySegments(rawName);
 
       const targetAbsolute = path.resolve(destAbsolute, ...segments);
       const destRoot = path.resolve(destAbsolute);
@@ -2065,14 +2281,31 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
 
-      const data = entry.getData();
-      if (data.byteLength > UNZIP_MAX_ENTRY_BYTES) {
+      // Read through the one bounded reader (`readZipEntry`), never with the
+      // declared size above as the only bound: an entry that declares ZERO is
+      // inflated with no cap at all by the archive reader, so a few kilobytes
+      // could expand to whatever memory there is before the checks below ran.
+      // Capped at what is left of both limits, and a read that fails is this
+      // entry's refusal rather than the whole archive's.
+      const read = readZipEntry(
+        entry,
+        Math.min(UNZIP_MAX_ENTRY_BYTES, UNZIP_MAX_TOTAL_BYTES - totalUncompressed),
+      );
+      if (!read.ok && read.reason === 'unreadable') {
+        skipped.push({ path: rawName, reason: `Entry could not be read: ${read.detail}` });
+        continue;
+      }
+      if (!read.ok) {
         skipped.push({
           path: rawName,
-          reason: `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
+          reason:
+            totalUncompressed + UNZIP_MAX_ENTRY_BYTES > UNZIP_MAX_TOTAL_BYTES
+              ? `Archive exceeds ${UNZIP_MAX_TOTAL_BYTES} byte total uncompressed limit`
+              : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
         });
         continue;
       }
+      const data = read.data;
       if (totalUncompressed + data.byteLength > UNZIP_MAX_TOTAL_BYTES) {
         skipped.push({
           path: rawName,
@@ -2437,6 +2670,24 @@ export class WorkspaceService implements IWorkspaceService {
     };
     return finish(top);
   }
+}
+
+/**
+ * The `.bevelignore` rules in force ABOVE the folder `inRepo` (repository-
+ * relative, `''` for the root) — the root's file and every ancestor's, not
+ * the folder's own, which a walk from the folder layers itself — or null when
+ * one of those rules hides the folder or an ancestor, as the explorer's walk
+ * from the root would never enter it.
+ */
+async function ignoreRulesAbove(repoRoot: string, inRepo: string): Promise<IgnoreRules | null> {
+  let rules: IgnoreRules = BevelIgnoreStack.empty();
+  let dir = repoRoot;
+  for (const segment of inRepo.split('/').filter(Boolean)) {
+    rules = await rules.extendedWith(dir);
+    dir = path.join(dir, segment);
+    if (rules.isIgnored(dir, true)) return null;
+  }
+  return rules;
 }
 
 /**

@@ -122,6 +122,46 @@ export interface KbStartupRunnerOptions {
    * Never throws into the phase, for the same reason as above.
    */
   onCloneCreated?: (workspaceId: string) => void;
+  /**
+   * How long nothing may have been written to an unfinished clone before it
+   * is taken for abandoned and set aside. A clone that is still running looks
+   * the same on disk, so this is what tells the two apart. Defaults to a
+   * minute; a suite passes a short one.
+   */
+  unfinishedCloneQuietMs?: number;
+}
+
+const UNFINISHED_CLONE_QUIET_MS = 60_000;
+/** The floor `kb-git.ts` gives a startup git command, a clone included. */
+const LONGEST_CLONE_MS = 600_000;
+/**
+ * How many times one working copy is read before the start gives up on it.
+ * A pass ends by acting or by finding the path changed; a path that changes
+ * on every one of these is being worked on by something that will not stop.
+ */
+const PASSES_OVER_ONE_WORKING_COPY = 4;
+
+/** Whether `git clone` failed because its destination already held something, having written nothing. */
+function refusedAnOccupiedFolder(err: unknown): boolean {
+  return err instanceof Error && /already exists and is not an empty directory/.test(err.message);
+}
+
+/**
+ * When anything under `dir` was last written, as a time in milliseconds. Now,
+ * for a folder that cannot be read: "could not tell" counts as still in use.
+ */
+async function newestChangeUnder(dir: string): Promise<number> {
+  let newest = 0;
+  try {
+    newest = (await fs.stat(dir)).mtimeMs;
+    for (const entry of await fs.readdir(dir, { recursive: true, withFileTypes: true })) {
+      const stat = await fs.stat(path.join(entry.parentPath, entry.name)).catch(() => null);
+      if (stat && stat.mtimeMs > newest) newest = stat.mtimeMs;
+    }
+  } catch {
+    return Date.now();
+  }
+  return newest;
 }
 
 /**
@@ -678,13 +718,7 @@ export class KbStartupRunner {
       // Setting it aside already removed it from the workspaces root, so the
       // cached handle the workspace service holds for it now points at
       // nothing.
-      try {
-        await this.opts.onCloneDiscarded?.(entry.name);
-      } catch (err) {
-        startupLog.warn(`could not finish setting the working copy "${entry.name}" aside:`, {
-          detail: this.redact(err instanceof Error ? err.message : String(err)),
-        });
-      }
+      await this.announceDiscarded(entry.name);
     }
   }
 
@@ -741,24 +775,168 @@ export class KbStartupRunner {
    * commit recovery owns that work, not this phase.
    */
   private async ensureClone(branch: string): Promise<string> {
+    try {
+      return await this.cloneOrUpdate(branch);
+    } catch (err) {
+      // One branch's working copy is what failed, and every boot visits all
+      // of them: said here, so the log names the one to look at. The kind of
+      // failure git's words were read as is kept, since the setup screen and
+      // the degraded start decide by it.
+      const message = `the working copy of branch "${branch}" could not be prepared: ${err instanceof Error ? err.message : String(err)}`;
+      throw new ClassifiedFailure(message, failureOf(err), { cause: err });
+    }
+  }
+
+  /**
+   * Decided from what is at the path NOW, and decided again after anything
+   * that waited. This phase is not the only thing that touches a working
+   * copy: on a running server a branch being opened clones into the same
+   * path, and on a redeploy two processes share the volume for a few seconds.
+   * So nothing here acts on an answer it read before a wait. Each pass reads
+   * the path once and does one thing about it; a pass that found the path
+   * changed under it does nothing and lets the next one read it again.
+   */
+  private async cloneOrUpdate(branch: string): Promise<string> {
     const workspaceDir = path.join(this.opts.workspacesRoot, workspaceIdForBranch(branch));
     const repoDir = path.join(workspaceDir, this.opts.kbDirName);
-    const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
-    if (!hasGit) {
-      await fs.mkdir(workspaceDir, { recursive: true });
-      await fs.rm(repoDir, { recursive: true, force: true });
-      await git(this.opts.gitRunner, workspaceDir, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
-      await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
-      await stampIdentity(this.opts.gitRunner, repoDir);
+    for (let pass = 1; ; pass++) {
+      const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+      if (hasGit && (await this.hasCommit(repoDir))) return this.updateClone(branch, repoDir);
+      if (pass > PASSES_OVER_ONE_WORKING_COPY) {
+        throw new Error('it kept changing while this start was preparing it; something else is working on it');
+      }
+      if (hasGit) {
+        await this.setAsideUnfinishedClone(workspaceIdForBranch(branch), repoDir);
+        continue;
+      }
       try {
-        this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
+        return await this.cloneFresh(branch, workspaceDir, repoDir);
       } catch (err) {
-        startupLog.warn(`could not announce the fresh working copy for "${branch}":`, {
+        // Git refuses to clone into a folder that already holds something,
+        // and writes nothing when it does. If that is what happened, somebody
+        // else put a clone here between the look above and this one: theirs
+        // is read on the next pass. Any other failure is this clone's own.
+        if (!refusedAnOccupiedFolder(err)) throw err;
+      }
+    }
+  }
+
+  /**
+   * A `.git` WITH NO COMMIT IS NOT A CLONE. It is what a clone leaves when it
+   * is cut short (the process stopped, the disk filled), and it is found
+   * again on every start: nothing can fast-forward a branch that has no
+   * commit, so the boot failed on it for good, and one such folder kept the
+   * whole deployment from starting.
+   *
+   * It holds no commit, so no committed work of anyone's. It may still hold
+   * files somebody put there, so it is MOVED, never deleted, to where every
+   * other set-aside working copy goes. The caller clones again.
+   *
+   * It is also exactly what a clone that is STILL RUNNING looks like: git
+   * makes `.git` first and a commit appears only at the end. So it is left
+   * alone until nothing has been written to it for a while, and read once
+   * more after every wait. Returns having moved it, or having found nothing
+   * of the kind left to move.
+   */
+  private async setAsideUnfinishedClone(id: string, repoDir: string): Promise<void> {
+    if (!(await this.waitUntilNothingWritesTo(repoDir))) return;
+    await this.opts.beforeCloneSetAside?.(id);
+    // The hook above may have waited. What is here now decides.
+    if (!(await this.isUnfinishedClone(repoDir))) return;
+    const kept = path.join(setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot), setAsideStamp(), id);
+    try {
+      await setAsideClone(repoDir, kept);
+    } catch (err) {
+      // Taken away by somebody else in the instant since it was read: there
+      // is nothing left to move, which is not a reason to stop the start.
+      // Only a move this call made is logged and announced.
+      if (await fs.access(repoDir).then(() => true, () => false)) throw err;
+      await fs.rmdir(path.dirname(kept)).catch(() => undefined);
+      return;
+    }
+    startupLog.warn(
+      `working copy "${id}" has a git folder and no commit: a clone that was never finished. ` +
+        `Set aside at ${kept}; nothing was deleted, and it is cloned again now.`,
+    );
+    await this.announceDiscarded(id);
+  }
+
+  private async isUnfinishedClone(repoDir: string): Promise<boolean> {
+    const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+    return hasGit && !(await this.hasCommit(repoDir));
+  }
+
+  /**
+   * Wait until nothing under the unfinished clone's `.git` has been written
+   * for {@link KbStartupRunnerOptions.unfinishedCloneQuietMs}. True when it is
+   * then still an unfinished clone; false when it finished or went away
+   * meanwhile, so there is nothing to set aside.
+   *
+   * A running clone that has written nothing for that long (a remote still
+   * counting objects on a very large repository) is not told apart from an
+   * abandoned one. Bounded by the longest a clone may run plus the quiet
+   * time: past that, whatever is writing is not a clone.
+   */
+  private async waitUntilNothingWritesTo(repoDir: string): Promise<boolean> {
+    const quietMs = this.opts.unfinishedCloneQuietMs ?? UNFINISHED_CLONE_QUIET_MS;
+    const giveUpAt = Date.now() + Math.max(this.opts.gitRunner.defaultTimeoutMs, LONGEST_CLONE_MS) + quietMs;
+    for (;;) {
+      if (!(await this.isUnfinishedClone(repoDir))) return false;
+      const lastWrite = await newestChangeUnder(path.join(repoDir, '.git'));
+      const quietFor = Date.now() - lastWrite;
+      if (quietFor >= quietMs) return true;
+      if (Date.now() > giveUpAt) throw new Error('an unfinished clone at its path is still being written to');
+      await new Promise((resolve) => setTimeout(resolve, Math.min(Math.max(quietMs - quietFor, 25), 1_000)));
+    }
+  }
+
+  /**
+   * Tell the rest of the process a working copy was set aside. The listener
+   * releases, a second time, the work queued against the copy that went;
+   * skipped, those rows would be committed into the clone that replaces it.
+   * So it is tried twice before the failure is only logged. Never throws
+   * into the phase: a listener that fails must not stop a boot.
+   */
+  private async announceDiscarded(id: string): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.opts.onCloneDiscarded?.(id);
+        return;
+      } catch (err) {
+        if (attempt < 2) continue;
+        startupLog.warn(`could not finish setting the working copy "${id}" aside:`, {
           detail: this.redact(err instanceof Error ? err.message : String(err)),
         });
+        return;
       }
-      return repoDir;
     }
+  }
+
+  private async cloneFresh(branch: string, workspaceDir: string, repoDir: string): Promise<string> {
+    await fs.mkdir(workspaceDir, { recursive: true });
+    // Only what cannot be a clone is cleared out of the way: a folder that
+    // gained a `.git` since the caller looked is somebody's clone, and git
+    // refuses it below rather than this removing it.
+    if (!(await fs.access(path.join(repoDir, '.git')).then(() => true, () => false))) {
+      await fs.rm(repoDir, { recursive: true, force: true });
+    }
+    await git(this.opts.gitRunner, workspaceDir, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
+    // Said as soon as the clone is there, before its configuration: if a
+    // command below fails, the clone stays on disk, and the retry finds it
+    // and never comes back through here.
+    try {
+      this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
+    } catch (err) {
+      startupLog.warn(`could not announce the fresh working copy for "${branch}":`, {
+        detail: this.redact(err instanceof Error ? err.message : String(err)),
+      });
+    }
+    await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
+    await stampIdentity(this.opts.gitRunner, repoDir);
+    return repoDir;
+  }
+
+  private async updateClone(branch: string, repoDir: string): Promise<string> {
     await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);
     const local = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
     const remote = (await git(this.opts.gitRunner, repoDir, ['rev-parse', `origin/${branch}`])).trim();
@@ -770,6 +948,28 @@ export class KbStartupRunner {
       // Ahead or diverged: committed-but-unpushed work lives here; not ours to discard.
     }
     return repoDir;
+  }
+
+  /**
+   * Whether the repository at `repoDir` has a commit checked out. False for a
+   * clone that was cut short.
+   *
+   * False ONLY when git itself answered that there is none: with `--quiet
+   * --verify` that is exit status 1 and nothing else. A git that timed out,
+   * could not be started, or could not read the repository has not said the
+   * working copy is empty, and "could not tell" is no reason to move
+   * someone's work: that failure is thrown, and stops the start with the
+   * branch named.
+   */
+  private async hasCommit(repoDir: string): Promise<boolean> {
+    try {
+      await git(this.opts.gitRunner, repoDir, ['rev-parse', '--quiet', '--verify', 'HEAD^{commit}']);
+      return true;
+    } catch (err) {
+      const ran = err instanceof Error ? err.cause : undefined;
+      if (ran instanceof GitRunError && !ran.timedOut && ran.exitCode === 1) return false;
+      throw err;
+    }
   }
 
   /** One commit per dirty branch; push; the replica carve-out on rejection. */

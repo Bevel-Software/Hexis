@@ -16,6 +16,7 @@ import { domainErrorBody } from '../../shared/http-errors.js';
 import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
+import { argumentsRefusal } from '../tool-helpers/route-argument-check.js';
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
@@ -65,6 +66,24 @@ import type {
  * with an agent connection key or a manual-auth bearer.
  */
 /**
+ * Answer the arguments-do-not-match refusal when the body does not match the
+ * tool hosted at this route; `true` when it answered. A body that is not a
+ * JSON object is refused here too, with the sentence `toolHandler` uses, so a
+ * `null` or an array never reaches the handler as if it were `{}`.
+ */
+function refuseMismatchedArguments(req: express.Request, res: express.Response): boolean {
+  const body: unknown = req.body === undefined ? {} : req.body;
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    res.status(400).json({ error: 'Request body must be a JSON object.' });
+    return true;
+  }
+  const mismatch = argumentsRefusal(req.originalUrl, body as Record<string, unknown>, req.query);
+  if (!mismatch) return false;
+  res.status(mismatch.status).json({ ...mismatch.details, error: mismatch.message });
+  return true;
+}
+
+/**
  * The two doors through which plugin folders come to exist — ONE
  * implementation each, for the app and for agents alike:
  *
@@ -96,6 +115,11 @@ export function createPluginCreationRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
+    // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
+    // agent's call is checked against what those tools declare, exactly as a
+    // route-hosted tool's is in `toolHandler`: a call that does not match is
+    // refused before anything is provisioned.
+    if (refuseMismatchedArguments(req, res)) return;
     // `req.body` is undefined when no JSON body was sent at all — that is a
     // 400, not a destructuring crash.
     const { name, parent } = (req.body ?? {}) as { name?: string; parent?: unknown };
@@ -129,6 +153,11 @@ export function createPluginCreationRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
+    // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
+    // agent's call is checked against what those tools declare, exactly as a
+    // route-hosted tool's is in `toolHandler`: a call that does not match is
+    // refused before anything is provisioned.
+    if (refuseMismatchedArguments(req, res)) return;
     try {
       res.json(await provision.ensurePersonalPlugin(user));
     } catch (err) {

@@ -13,6 +13,9 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   start: 'Could not start sign-in. Please try again.',
   not_configured: 'Single sign-on is not configured on this deployment.',
   admission: 'This workspace has no seat available for your account. Ask its admin.',
+  // On file, switched off until an admin switches the account on.
+  waiting: 'This workspace has no seat left right now. Its admin can see you are waiting and can let you in.',
+  deactivated: 'Your account on this workspace is switched off. Ask its admin to turn it back on.',
   // Who you are was proven; nobody has given that person an account here.
   not_invited: 'You do not have an account in this workspace yet. Ask its admin to invite you.',
   // The provider signed the person in but does not vouch for the address.

@@ -27,6 +27,16 @@ vi.mock('../code-mode-names.js', async (importOriginal) => {
       }
       if (name === 'down.run') throw new Error('repository unavailable: ECONNREFUSED');
       if (name === 'solo.run') return { tool: { name: 'solo.run' }, utcpName: 'solo.run' };
+      if (name === 'kb.read_file') {
+        return {
+          tool: {
+            name: 'kb.read_file',
+            description: 'Read a file.',
+            inputs: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+          },
+          utcpName: 'kb.read_file',
+        };
+      }
       return null;
     }),
   };
@@ -35,7 +45,8 @@ vi.mock('../code-mode-names.js', async (importOriginal) => {
 const { createToolsInfoTool } = await import('../code-mode.tool.js');
 
 const client = {
-  toolToTypeScriptInterface: (tool: { name: string }) => `interface ${tool.name}`,
+  toolToTypeScriptInterface: (tool: { name: string; description?: string }) =>
+    tool.description ? `/** ${tool.description} */ interface ${tool.name}` : `interface ${tool.name}`,
 } as unknown as CodeModeUtcpClient;
 
 type ToolsInfoResult = { interfaces: string; not_found: string[]; errors?: string[] };
@@ -58,9 +69,14 @@ describe('tools_info', () => {
 
   it('omits the errors field entirely when every name resolves or misses cleanly', async () => {
     const result = await run(['solo.run', 'nope']);
-    expect(result.interfaces).toBe('interface solo.run');
+    expect(result.interfaces).toBe('/** Call: solo.run({}) */ interface solo.run');
     expect(result.not_found).toEqual(['nope']);
     expect(result.errors).toBeUndefined();
+  });
+
+  it('shows each tool with its Call: line, as the chain description promises', async () => {
+    const result = await run(['kb.read_file']);
+    expect(result.interfaces).toBe('/** Call: kb.read_file({ query: "..." })\n\nRead a file. */ interface kb.read_file');
   });
 
   it('contains ONLY ambiguity — an outage rethrows instead of posing as partial success', async () => {
@@ -86,7 +102,7 @@ describe('call_tool_chain image scrub', () => {
       callToolChain: vi.fn(async () => ({ result: { pic: sentinel, ok: true }, logs: [] as string[] })),
     } as unknown as CodeModeUtcpClient;
     const spill = { write: vi.fn(async () => ({ ref: '__tool_chain_spill__/x.json', bytes: 1 })) };
-    const tool = createCallToolChainTool(chainClient, spill as never) as unknown as {
+    const tool = createCallToolChainTool(chainClient, spill as never, 'KNOWLEDGE_BASE') as unknown as {
       execute: (input: { code: string }) => Promise<unknown>;
     };
     const out = JSON.stringify(await tool.execute({ code: 'return 1' }));
@@ -95,6 +111,50 @@ describe('call_tool_chain image scrub', () => {
     expect(out).toContain('Files/logo.png');
     expect(out).toContain('"ok":true');
     expect(spill.write).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `call_tool_chain` promises a STRUCTURED answer for every outcome. The work
+ * past the runner is still fallible — the spill store writes to disk, and
+ * `JSON.stringify` can meet a value it cannot serialize — and an exception
+ * escaping `execute` reaches the agent as an unhandled tool failure, which is
+ * the dropped call this ticket is about.
+ */
+describe('call_tool_chain when the result cannot be delivered', () => {
+  async function runWith(spill: { write: (json: string) => Promise<{ ref: string; bytes: number }> }, result: unknown) {
+    const { createCallToolChainTool } = await import('../code-mode.tool.js');
+    const chainClient = {
+      callToolChain: vi.fn(async () => ({ result, logs: ['[LOG] halfway'] as string[] })),
+    } as unknown as CodeModeUtcpClient;
+    const tool = createCallToolChainTool(chainClient, spill as never, 'KNOWLEDGE_BASE') as unknown as {
+      execute: (input: { code: string; max_output_size?: number }) => Promise<{
+        success: boolean;
+        error?: string;
+        logs?: string[];
+      }>;
+    };
+    return tool.execute({ code: 'return 1', max_output_size: 1_000 });
+  }
+
+  it('answers with the reason when the spill store cannot write', async () => {
+    const out = await runWith(
+      { write: vi.fn(async () => Promise.reject(new Error('ENOSPC: no space left on device'))) },
+      'x'.repeat(2_000),
+    );
+    expect(out.success).toBe(false);
+    expect(out.error).toContain('ENOSPC');
+    // The chain itself ran, so its logs are the only trace of the work left.
+    expect(out.logs).toEqual(['[LOG] halfway']);
+  });
+
+  it('answers with the reason when the chain\'s value cannot be serialized', async () => {
+    // A BigInt, not a cycle: `omitImagePayloads` already replaces a cycle with
+    // `"[Circular]"`, so a cyclic result serializes fine and is not this case.
+    const out = await runWith({ write: vi.fn(async () => ({ ref: 'r', bytes: 1 })) }, { n: 1n });
+    expect(out.success).toBe(false);
+    expect(out.error).toMatch(/could not be returned/);
+    expect(out.error).toMatch(/BigInt/);
   });
 });
 
@@ -108,7 +168,7 @@ describe('call_tool_chain and a retired tool', () => {
 
   async function runWith(chainClient: CodeModeUtcpClient, code: string) {
     const { createCallToolChainTool } = await import('../code-mode.tool.js');
-    const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never) as unknown as {
+    const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never, 'KNOWLEDGE_BASE') as unknown as {
       execute: (input: { code: string }) => Promise<{ success: boolean; error?: string; result?: unknown }>;
     };
     return tool.execute({ code });

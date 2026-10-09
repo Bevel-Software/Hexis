@@ -12,10 +12,15 @@ import { sql } from 'drizzle-orm';
 import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
+import { branchForWorkspaceId } from '../shared/workspace-id.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { AccountLinkService } from '../modules/embed/account-link.service.js';
+import { EmbedService } from '../modules/embed/embed.service.js';
+import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
+import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
@@ -25,7 +30,7 @@ import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
-import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -53,17 +58,22 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
+import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
+import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
-import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
+import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -130,17 +140,25 @@ import {
 } from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
+  createTokenVerifier,
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
 import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
+import {
+  agentGuideSections,
+  joinGuideSections,
+  type AgentGuideReader,
+  type AgentGuideSectionsReader,
+} from '../modules/agent-guide/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
+import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write-access.js';
 import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
@@ -218,6 +236,16 @@ export interface CoreServices {
   /** The scope this graph's vault is registered under with the UTCP variable loader. */
   secretsScope: string;
   spillStore: SpillStore;
+  /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
+  agentUploadStore: AgentUploadStore;
+  /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
+  agentDownloadStore: IAgentDownloadStore;
+  /**
+   * Every user a download fetch identifies itself as, by its bearer and its
+   * session cookie — none when it carries none that verifies — so the
+   * download route can refuse a link presented by someone it was not issued to.
+   */
+  agentDownloadFetcher: (req: Request) => Promise<string[]>;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -234,6 +262,14 @@ export interface CoreServices {
    * and `GET /api/agent/instructions`. See modules/agent-instructions.
    */
   readAgentPreamble: AgentPreambleReader;
+  /**
+   * Composes the platform's agent guide for the layout in effect, through
+   * the distribution's hook when it passed one: what `get_agent_guide` and a
+   * `read_file` of the guide's name answer. See modules/agent-guide.
+   */
+  agentGuide: AgentGuideReader;
+  /** The same guide as its sections, each with its title — what `get_agent_guide` lists and serves one of. */
+  agentGuideSections: AgentGuideSectionsReader;
   mcpServerEditService: McpServerEditService;
   /** Deleting one tool — the owner's verb (see ToolDeleteService). */
   toolDeleteService: ToolDeleteService;
@@ -316,6 +352,14 @@ export interface CoreServices {
   connectionProbeService: ConnectionProbeService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
+  /**
+   * The embed surface: the token-minted page a chat host frames, and the
+   * account links that let an outside identity reach it. Exposed so an
+   * overlay can mint for its own consumers and register a node-id resolver.
+   */
+  embedService: EmbedService;
+  /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
+  mcpAppService: IMcpAppService;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -331,6 +375,8 @@ export interface CoreServices {
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
+  /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
+  writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
   /** `start_session` backing — core default {@link UuidSessionSink}. */
   sessionSink: ISessionSink;
@@ -353,7 +399,11 @@ export async function createCoreServices(
   // the default schema, so a single-tenant deployment keeps the lock ids and
   // the ledger it always had.
   const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
-  const db = getDb(config.databaseUrl, { schema: config.dbSchema });
+  // The handle holds this knowledge base's key for its personal-data columns:
+  // the same `SECRETS_ENC_KEY` that seals its stored credentials — its own
+  // derived one, for a tenant — so everything in the schema opens with one
+  // key and nothing in it opens with another tenant's.
+  const db = getDb(config.databaseUrl, { schema: config.dbSchema, piiKey: config.secretsEncKey });
   // A schema of its own is created on first use, so a tenant's first
   // activation needs nothing done by hand; `public` always exists. Then the
   // server is asked whether the connections really search that schema: a
@@ -373,6 +423,10 @@ export async function createCoreServices(
   // package runs its own squashed idempotent CORE history from the packaged
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
+  // `runCoreMigrations` also seals any pre-encryption plaintext PII rows and
+  // swaps the unique constraints onto the blind-index columns (see
+  // migrate.ts), under the same lock, before any service reads or writes a
+  // PII column.
   await runCoreMigrations(db, coreMigrationsDir());
 
   // Deployment settings come next, before ANY service is built: the KB remote
@@ -503,6 +557,39 @@ export async function createCoreServices(
    * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
    */
   const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
+  /**
+   * What must leave with a working copy that is set aside, whoever sets it
+   * aside: the startup phase, or the workspace service on a branch open.
+   *
+   * Its queue: whatever still waits to be committed into that copy was
+   * written against the repository that was left, and the path it names is
+   * about to hold a fresh clone of another one. Held for a person, on every
+   * branch, never written and never deleted.
+   *
+   * And the locks on its branch: each is a claim on a file of the copy that
+   * is going. Left standing, a holder still connected keeps one alive with
+   * heartbeats, and the same path in the new repository refuses everybody
+   * else. Dropped without enqueueing anything, as when change requests are
+   * closed as "repository replaced".
+   *
+   * Throws when either cannot be done, and the caller then leaves the copy
+   * where it is. Reaches FORWARD to both services, like `gitService` below:
+   * it is only ever called long after this function has returned them.
+   */
+  const releaseWorkOnSetAsideCopy = async (workspaceId: string): Promise<void> => {
+    const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
+      workspaceId,
+      'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+        'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
+    );
+    if (held > 0) {
+      logger('kb-startup').warn(
+        `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
+          'replaced before they landed, so they were not written to the new one.',
+      );
+    }
+    await fileLockService.releaseAllOnBranch(branchForWorkspaceId(workspaceId));
+  };
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => repositorySource.url(),
@@ -510,6 +597,30 @@ export async function createCoreServices(
     disk,
     gitRunner,
     replacedWorkingCopiesRoot,
+    // A branch opened onto a clone of another repository sets it aside on
+    // the spot, with nobody having stopped the commit worker for it. So it
+    // is held here, for the one move, and the copy's work leaves first and
+    // is looked for again once the copy has gone: a release that queued its
+    // bytes in between was writing to the copy that left.
+    //
+    // Only the first look may refuse the branch: the copy has not moved yet.
+    // The second runs after the move, so its failure is tried once more and
+    // then logged, as the startup phase logs the same step. Refusing then
+    // would report a move that did happen as one that did not.
+    (workspaceId, move) =>
+      leased.whileHeld(async () => {
+        await releaseWorkOnSetAsideCopy(workspaceId);
+        await move();
+        await releaseWorkOnSetAsideCopy(workspaceId)
+          .catch(() => releaseWorkOnSetAsideCopy(workspaceId))
+          .catch((err: unknown) => {
+            logger('workspace').error(
+              `the working copy "${workspaceId}" was set aside, but what was queued or locked on it meanwhile ` +
+                'could not be looked for again:',
+              { err },
+            );
+          });
+      }),
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -534,10 +645,7 @@ export async function createCoreServices(
     // backfill would walk a tree still missing those manifests.
     new PluginDisplayNamesStep(disk, kb),
     new PersonalSpacesStep(disk, kb),
-    // A getter, not a value: the step is built here, while the process may
-    // still hold the defaults, and the save that completes first-run setup
-    // applies the admin's answer afterwards.
-    new TemplateFilesStep(disk, kb, extraDirs, () => settings.resolveAgentsFileLink()),
+    new TemplateFilesStep(disk, kb, extraDirs),
     new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
@@ -560,32 +668,24 @@ export async function createCoreServices(
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
-    // The queue of a working copy that is about to be set aside goes first.
-    // Whatever is still waiting to be committed into that copy was written
-    // against the repository that was left; the path it names is about to
-    // hold a fresh clone of another one. Held for a person, on every branch,
-    // never written and never deleted. A failure here stops the phase before
+    // The work on a working copy that is about to be set aside leaves first:
+    // its queued commits and the locks on its branch (see
+    // `releaseWorkOnSetAsideCopy`). A failure here stops the phase before
     // the copy moves: a replacement cloned over an untouched queue is how
-    // those bytes would land in the wrong repository. Reaches FORWARD to
-    // `pendingCommitsService`, like `gitService` below.
-    beforeCloneSetAside: async (workspaceId) => {
-      const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
-        workspaceId,
-        'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
-          'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
-      );
-      if (held > 0) {
-        logger('kb-startup').warn(
-          `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
-            'replaced before they landed, so they were not written to the new one.',
-        );
-      }
-    },
+    // those bytes would land in the wrong repository.
+    beforeCloneSetAside: releaseWorkOnSetAsideCopy,
     // And once it is set aside it must leave the workspace service's cache:
     // on the SAVE that moves the deployment the process is already running,
     // and a cached path to a directory that is gone is how the next reader
     // gets an ENOENT instead of a fresh clone.
-    onCloneDiscarded: (workspaceId) => workspaceService.forgetClone(workspaceId),
+    //
+    // Then the copy's work is looked for once more. A release that queued
+    // its bytes between the first look and the move was writing to the copy
+    // that has now gone; nothing can queue against it after this.
+    onCloneDiscarded: async (workspaceId) => {
+      workspaceService.forgetClone(workspaceId);
+      await releaseWorkOnSetAsideCopy(workspaceId);
+    },
     // And the replacement it cloned in its place: a fresh clone holds every
     // ref, so the git layer's per-workspace fetch record is told so. Without
     // it that record still holds the FAILED fetch of the repository that was
@@ -599,6 +699,40 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // The upload route an agent lands files by, so their content never passes
+  // through the model. Bytes live BESIDE the workspaces root (never inside
+  // one) until the apply commits them or the token expires — checked here
+  // rather than assumed, because a root configured inside a workspace would
+  // put bytes no gate has judged where the file tools read.
+  await assertUploadsRootOutsideWorkspaces(config.agentUploadsRoot, config.workspacesRoot);
+  const agentUploadStore = new AgentUploadStore({
+    root: config.agentUploadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    tokenPrefix: config.uploadTokenPrefix,
+  });
+  // The way OUT: bytes `request_file_download` captured, held beside the
+  // upload root — outside every workspace, for the same reason — until their
+  // one-time link is fetched or expires.
+  const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  // An upload root that is itself named `agent-downloads` would make the two
+  // stores one directory, each sweeping the other's files.
+  if (agentDownloadsRoot === path.resolve(config.agentUploadsRoot)) {
+    throw new Error(
+      'AGENT_UPLOADS_ROOT must not be a directory named `agent-downloads`: that name, beside it, is the agent download root.',
+    );
+  }
+  await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
+    name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
+    why:
+      'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
+      'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
+  });
+  const agentDownloadStore = new AgentDownloadStore({
+    root: agentDownloadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    // `<tenant>-down_`: recognisable by shape beside the upload token.
+    tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
+  });
   // Office-document/PDF text extraction for `read_file`/`grep`, cached by
   // content hash beside the workspaces root (see `DocExtractionCache`).
   const docExtractService = new DocExtractService(config.docExtractCacheRoot);
@@ -783,6 +917,9 @@ export async function createCoreServices(
     // it reach every hook point.
     workflowHooks,
   );
+  // The leftover-branch cleanup asks the Deployment page at every round, so
+  // switching it off there applies without a restart.
+  workflowService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
@@ -1093,6 +1230,12 @@ export async function createCoreServices(
   // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
+  // The guide every agent is told to read first, composed when asked for —
+  // the layout is read per call, so a name the setup save applies lands
+  // without a restart, and the distribution's hook sees every composition.
+  const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
+    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName });
+  const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
@@ -1100,6 +1243,34 @@ export async function createCoreServices(
   const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
     retentionDaysFrom(settings.resolve('auditRetentionDays')),
   );
+  // The embed surface. It reads files through the workspace service and
+  // judges them with the same access resolver the app file page uses, so what
+  // a reader may see and change inside a chat is what they may see and change
+  // in the app — never a second answer to the same question.
+  const embedService = new EmbedService(
+    // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+    // the environment value, empty on a deployment that took the default or
+    // named it in setup, and every path the embed builds starts with it.
+    { ...config, kbDirName },
+    kb,
+    workspaceService,
+    accessControl,
+    authService,
+    workflowService,
+    gitService,
+    new AccountLinkService(db),
+    // The SAME extension-to-reader registry `read_file` dispatches on, so the
+    // embed answer to "is this text, or bytes a renderer fetches?" cannot
+    // disagree with what a read of the file returns.
+    createFileReaderRegistry(docExtractService),
+    // The SAME pre-disk gate the file editor and the agent tools run: a
+    // `roles.yaml` that would not parse is refused before it is written, from
+    // a chat exactly as from the app.
+    makeRolesYamlWriteValidator(kbDirName),
+  );
+  // The `ui://` view `open_page` carries, with the one origin it may frame:
+  // this deployment own public origin.
+  const mcpAppService = new McpAppService({ publicFrontendUrl: config.publicFrontendUrl });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1114,6 +1285,9 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
+      // The guide's name the shared file rules spell, read per request so a name
+      // the setup save applies lands without a restart.
+      kbLayout: () => kb.layout,
       secretsScope,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
@@ -1130,12 +1304,20 @@ export async function createCoreServices(
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
     // Every attributable call lands in the Audit log through this.
     agentAuditService,
+    // The views the endpoint serves over resources/read, and the tools that
+    // carry them.
+    mcpAppService,
   );
   // A changed secret invalidates what the proxy built from the old value for
   // that user (null = shared secret → everyone): remembered manual failures,
   // so a just-repaired credential is retried on the very next request instead
   // of waiting out the failure memo's TTL, and pooled downstream connections.
   secretsVaultService.onMutation((changedUserId) => mcpService.onSecretsChanged(changedUserId));
+  // The proxy is the one place a connected server's tools are loaded, so it is
+  // the one place their schemas are checked — and the tool catalog is where the
+  // people who manage a server read what it found. Setter injection, like the
+  // OAuth discovery above: the proxy is constructed after the catalog.
+  toolManualService.setHiddenTools(mcpService.hiddenTools);
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
@@ -1182,8 +1364,23 @@ export async function createCoreServices(
     creatorAccess,
     loadActiveGroups,
   });
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
+  const writeAccess = ports.writeAccess ?? alwaysWritable;
+  // The branch every tool call runs on is resolved by the handler, before the
+  // tool: the default read live (a rename in the settings is the next call's
+  // default), the existence asked without cloning anything.
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess, {
+    defaultBranch: () => kb.defaultBranch,
+    isMissing: (branch) => workspaceService.isBranchMissing(branch),
+  });
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
+  // Every credential kind this server issues — connection keys, internal
+  // tokens and app sessions (bearer or cookie) — so a fetch carrying another
+  // user's identity of ANY kind is refused the link.
+  const agentDownloadFetcher: (req: Request) => Promise<string[]> = createDownloadFetcherIdentifier(
+    { verifyToolToken, verifySession: (token) => authService.verifyToken(token) },
+    readAuthCookie,
+  );
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
@@ -1350,6 +1547,9 @@ export async function createCoreServices(
     kb,
     kbDirName,
     spillStore,
+    agentUploadStore,
+    agentDownloadStore,
+    agentDownloadFetcher,
     docExtractService,
     accessControl,
     creatorAccess,
@@ -1360,6 +1560,8 @@ export async function createCoreServices(
     toolManualService,
     pendingToolsService,
     readAgentPreamble: readPreamble,
+    agentGuide,
+    agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
@@ -1395,6 +1597,8 @@ export async function createCoreServices(
     connectionProbeService,
     externalApiKeyService,
     internalTokenService,
+    embedService,
+    mcpAppService,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
@@ -1404,6 +1608,7 @@ export async function createCoreServices(
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,
+    writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.
     sessionSink: ports.sessionSink ?? new UuidSessionSink(),

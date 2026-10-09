@@ -698,13 +698,55 @@ describe('WorkspaceService.createFolderZip', () => {
     }));
   }
 
+  /** The filter a caller with every permission passes: pack everything found. */
+  const ALL = async (paths: string[]) => new Set(paths);
+
+  it('packs only what the filter allows, and asks it once with every file as a repository path', async () => {
+    const dir = path.join(repoDir, 'judged');
+    await fs.mkdir(path.join(dir, 'inner'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'open.md'), 'open');
+    await fs.writeFile(path.join(dir, 'withheld.md'), 'withheld');
+    await fs.writeFile(path.join(dir, 'inner', 'deep.md'), 'deep');
+    const asked: string[][] = [];
+    const include = async (paths: string[]) => {
+      asked.push([...paths].sort());
+      return new Set(paths.filter((p) => p !== 'judged/withheld.md'));
+    };
+
+    const buf = await svc.createFolderZip(workspaceId, 'judged', include);
+
+    // Asked once, with every file the walk found, keyed the way the access
+    // rules are: relative to the repository, not to the folder or the workspace.
+    expect(asked).toEqual([['judged/inner/deep.md', 'judged/open.md', 'judged/withheld.md']]);
+    const names = (await unzipEntries(buf)).map((e) => e.name).sort();
+    expect(names).toEqual(['judged/inner/deep.md', 'judged/open.md']);
+  });
+
+  it('keys the files the same way whether the folder is written with a trailing slash or not', async () => {
+    const dir = path.join(repoDir, 'slashed');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'a.md'), 'a');
+    const asked: string[][] = [];
+    const include = async (paths: string[]) => {
+      asked.push(paths);
+      return new Set(paths);
+    };
+
+    await svc.createFolderZip(workspaceId, 'slashed/', include);
+    await svc.createFolderZip(workspaceId, `${'knowledge-base'}/slashed//`, include);
+
+    // A `slashed//a.md` key would match no verdict, and the filter would
+    // withhold the whole folder without a word.
+    expect(asked).toEqual([['slashed/a.md'], ['slashed/a.md']]);
+  });
+
   it('zips a folder prefixing entries with the folder name', async () => {
     const dir = path.join(repoDir, 'docs');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, 'a.md'), 'alpha');
     await fs.writeFile(path.join(dir, 'b.md'), 'beta');
 
-    const buf = await svc.createFolderZip(workspaceId, 'docs');
+    const buf = await svc.createFolderZip(workspaceId, 'docs', ALL);
     const entries = await unzipEntries(buf);
     const names = entries.map((e) => e.name).sort();
     expect(names).toEqual(['docs/a.md', 'docs/b.md']);
@@ -719,7 +761,7 @@ describe('WorkspaceService.createFolderZip', () => {
     await fs.writeFile(path.join(dir, 'nested', 'mid.md'), 'mid');
     await fs.writeFile(path.join(dir, 'nested', 'deep', 'leaf.md'), 'leaf');
 
-    const buf = await svc.createFolderZip(workspaceId, 'tree');
+    const buf = await svc.createFolderZip(workspaceId, 'tree', ALL);
     const names = (await unzipEntries(buf)).map((e) => e.name).sort();
     expect(names).toEqual([
       'tree/nested/deep/leaf.md',
@@ -736,7 +778,7 @@ describe('WorkspaceService.createFolderZip', () => {
     await fs.writeFile(path.join(dir, '.gitkeep'), '');
     await fs.writeFile(path.join(dir, 'real.md'), 'real');
 
-    const buf = await svc.createFolderZip(workspaceId, 'mixed');
+    const buf = await svc.createFolderZip(workspaceId, 'mixed', ALL);
     const names = (await unzipEntries(buf)).map((e) => e.name).sort();
     expect(names).toEqual(['mixed/real.md']);
   });
@@ -748,7 +790,7 @@ describe('WorkspaceService.createFolderZip', () => {
     await fs.writeFile(path.join(dir, 'public.md'), 'pub');
     await fs.writeFile(path.join(dir, 'secret.md'), 'shh');
 
-    const buf = await svc.createFolderZip(workspaceId, 'with-ignore');
+    const buf = await svc.createFolderZip(workspaceId, 'with-ignore', ALL);
     const names = (await unzipEntries(buf)).map((e) => e.name).sort();
     expect(names).toContain('with-ignore/public.md');
     expect(names).not.toContain('with-ignore/secret.md');
@@ -756,17 +798,17 @@ describe('WorkspaceService.createFolderZip', () => {
 
   it('refuses to zip a file (not a directory)', async () => {
     await fs.writeFile(path.join(repoDir, 'lone.md'), 'one');
-    await expect(svc.createFolderZip(workspaceId, 'lone.md')).rejects.toThrow('Not a directory');
+    await expect(svc.createFolderZip(workspaceId, 'lone.md', ALL)).rejects.toThrow('Not a directory');
   });
 
   it('refuses a traversing path, and reads an unprefixed one as the repository folder', async () => {
-    await expect(svc.createFolderZip(workspaceId, '../escape')).rejects.toThrow(
+    await expect(svc.createFolderZip(workspaceId, '../escape', ALL)).rejects.toThrow(
       'is outside the knowledge base repository',
     );
     // The unprefixed spelling is the repository's own folder, so it zips.
     await fs.mkdir(path.join(repoDir, 'unprefixed'), { recursive: true });
     await fs.writeFile(path.join(repoDir, 'unprefixed', 'a.md'), 'a');
-    const buf = await svc.createFolderZip(workspaceId, 'unprefixed');
+    const buf = await svc.createFolderZip(workspaceId, 'unprefixed', ALL);
     expect((await unzipEntries(buf)).map((e) => e.name)).toEqual(['unprefixed/a.md']);
   });
 
@@ -796,7 +838,7 @@ describe('WorkspaceService.createFolderZip', () => {
       return result;
     });
     try {
-      await expect(svc.createFolderZip(workspaceId, 'too-big'))
+      await expect(svc.createFolderZip(workspaceId, 'too-big', ALL))
         .rejects.toBeInstanceOf(FolderTooLargeError);
     } finally {
       statSpy.mockRestore();
@@ -1181,6 +1223,63 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     await expect(fs.stat(path.join(repoDir, 'out', 'blocked-dir'))).rejects.toThrow();
   });
 
+  /**
+   * An archive reader caps the inflation at the size the header DECLARES, but
+   * only when that size is above zero: an entry declaring zero is inflated with
+   * no cap. So "check the declared size, then read" let a few kilobytes expand
+   * to whatever memory there was. Both headers are patched to say "empty" here,
+   * over four megabytes that deflate to four kilobytes.
+   */
+  it('refuses an entry whose header says it is empty and whose stream is not, and extracts the rest', async () => {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('bomb.md', Buffer.alloc(4 * 1024 * 1024, 0x61));
+    const bomb = zip.toBuffer();
+    // The uncompressed-size field: 22 bytes into the local header, 24 into the
+    // central-directory one.
+    bomb.writeUInt32LE(0, bomb.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04])) + 22);
+    bomb.writeUInt32LE(0, bomb.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 24);
+    await fs.writeFile(path.join(repoDir, 'bomb.zip'), bomb);
+
+    const res = await svc.unzipFile(workspaceId, 'bomb.zip', 'out');
+
+    expect(res.extracted).toEqual([]);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0]).toMatchObject({ path: 'bomb.md' });
+    expect(res.skipped[0].reason).toContain('declares an empty file');
+    await expect(fs.stat(path.join(repoDir, 'out', 'bomb.md'))).rejects.toThrow();
+  });
+
+  it('extracts the other entries of an archive in which one fails its checksum', async () => {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('bad.md', Buffer.from('this entry will not match its checksum'));
+    zip.addFile('fine.md', Buffer.from('fine'));
+    const archive = zip.toBuffer();
+    // The CRC field of the FIRST entry, in both of its headers: 14 bytes into
+    // the local one, 16 into the central-directory one. A reader checks one or
+    // the other depending on the entry's flags.
+    const firstLocal = archive.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    const firstCentral = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    archive.writeUInt32LE((archive.readUInt32LE(firstLocal + 14) ^ 0xffffffff) >>> 0, firstLocal + 14);
+    archive.writeUInt32LE((archive.readUInt32LE(firstCentral + 16) ^ 0xffffffff) >>> 0, firstCentral + 16);
+    await fs.writeFile(path.join(repoDir, 'crc.zip'), archive);
+
+    const res = await svc.unzipFile(workspaceId, 'crc.zip', 'out');
+
+    expect(res.extracted).toEqual(['knowledge-base/out/fine.md']);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0].path).toBe('bad.md');
+    expect(res.skipped[0].reason).toContain('could not be read');
+  });
+
+  it('still extracts a file that really is empty', async () => {
+    await writeZip('empty.zip', { 'empty.md': '', 'full.md': 'x' });
+    const res = await svc.unzipFile(workspaceId, 'empty.zip', 'out');
+    expect(res.extracted.sort()).toEqual(['knowledge-base/out/empty.md', 'knowledge-base/out/full.md']);
+    expect((await fs.readFile(path.join(repoDir, 'out', 'empty.md'))).byteLength).toBe(0);
+  });
+
   it('does not create the destination directory when every entry is blocked', async () => {
     await writeZip('d.zip', { 'a.md': '1', 'b.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'd.zip', 'out', async () => {
@@ -1213,11 +1312,22 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
         'There is no file or directory at "knowledge-base/nope.zip" in this workspace. Check the path with list_files.',
     });
     // A name carrying a line break cannot forge a second line of the answer,
-    // in the message or in the `path` a JSON consumer reads.
-    const forged = 'a\nb\u2028c.zip';
+    // in the message or in the `path` a JSON consumer reads. A LINE BREAK no
+    // longer reaches this refusal at all — the normaliser now refuses a
+    // control character outright, because git reads one in a path as the end
+    // of an object name (see `repo-path.ts`) — so the forged name here
+    // carries U+2028, which is a line break to a renderer and nothing to git:
+    // still accepted as a file name, still escaped on the way out.
+    const forged = 'a\u2028c.zip';
     await expect(svc.unzipFile(workspaceId, forged)).rejects.toMatchObject({
       status: 404,
-      payload: { kind: 'not_found', path: 'knowledge-base/a\\nb\\u2028c.zip' },
+      payload: { kind: 'not_found', path: 'knowledge-base/a\\u2028c.zip' },
+    });
+    // And the same invariant at the gate that now owns the line break: the
+    // refusal names the path with the break escaped, never raw.
+    await expect(svc.unzipFile(workspaceId, 'a\nb.zip')).rejects.toMatchObject({
+      status: 400,
+      payload: { kind: 'path-control-character', path: 'a\\nb.zip' },
     });
   });
 

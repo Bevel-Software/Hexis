@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
+import { PII_CIPHERTEXT_PREFIX, PiiParam, derivePiiKeys, type PiiKeys } from '../../shared/column-crypto.js';
 
 /**
  * One database, one schema per knowledge base.
@@ -74,6 +75,83 @@ export interface DbOptions {
   max?: number;
   /** How long an idle connection is kept before the pool closes it. Default: `pg`'s. */
   idleTimeoutMillis?: number;
+  /**
+   * The key this handle seals personal data with: the `SECRETS_ENC_KEY` of
+   * the knowledge base whose rows it holds (its own derived one, for a
+   * tenant). Without it the handle reads sealed values as their blobs and
+   * refuses to write one — right for a handle that only touches tables with
+   * no personal data, and a loud failure for one that was meant to have it.
+   */
+  piiKey?: string;
+}
+
+type QueryFn = (this: pg.Client, config?: unknown, values?: unknown, callback?: unknown) => unknown;
+type ResultCallback = (err: unknown, result: unknown) => void;
+
+/**
+ * The `pg` client of a handle that holds `keys`: the one place personal data
+ * changes form. Going in, every value a personal-data column marked (see
+ * `column-crypto.ts`) is replaced by its ciphertext or its blind index.
+ * Coming out, every sealed value of a result is opened — by its prefix, not
+ * by its column, so raw SQL through the handle reads plaintext too; a
+ * statement that needs what is STORED asks for it as bytes
+ * (`convert_to(col, 'UTF8')`).
+ *
+ * At the client, because that is what the handle owns: the pool builds every
+ * connection from this class, a transaction's included, so there is no path
+ * from this handle to the database that goes round it. Results that are
+ * streamed to a `Submittable` (a cursor) are not opened; nothing here uses one.
+ */
+function keyedClient(keys: PiiKeys | null): typeof pg.Client {
+  const stored = (value: unknown): unknown => {
+    if (!(value instanceof PiiParam)) return value;
+    return keys ? value.stored(keys) : value.toPostgres();
+  };
+  const openCell = (value: unknown): unknown =>
+    typeof value === 'string' && value.startsWith(PII_CIPHERTEXT_PREFIX) ? keys!.read(value) : value;
+  const openOne = (result: unknown): void => {
+    const rows = (result as { rows?: unknown } | null)?.rows;
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      if (Array.isArray(row)) {
+        for (let i = 0; i < row.length; i++) row[i] = openCell(row[i]);
+      } else if (row && typeof row === 'object') {
+        const record = row as Record<string, unknown>;
+        for (const column of Object.keys(record)) record[column] = openCell(record[column]);
+      }
+    }
+  };
+  const open = <T,>(result: T): T => {
+    if (!keys) return result;
+    // Several statements in one query string come back as several results.
+    if (Array.isArray(result)) result.forEach(openOne);
+    else openOne(result);
+    return result;
+  };
+
+  const base = pg.Client.prototype.query as unknown as QueryFn;
+  class KeyedClient extends pg.Client {}
+  const query: QueryFn = function (config, values, callback) {
+    if (typeof values === 'function') {
+      callback = values;
+      values = undefined;
+    }
+    if (Array.isArray(values)) {
+      values = values.map(stored);
+    } else if (config && typeof config === 'object' && Array.isArray((config as { values?: unknown }).values)) {
+      const withValues = config as { values: unknown[]; submit?: unknown };
+      if (typeof withValues.submit === 'function') withValues.values = withValues.values.map(stored);
+      else config = { ...withValues, values: withValues.values.map(stored) };
+    }
+    if (typeof callback === 'function') {
+      const done = callback as ResultCallback;
+      return base.call(this, config, values, (err: unknown, result: unknown) => done(err, err ? result : open(result)));
+    }
+    const pending = base.call(this, config, values);
+    return pending instanceof Promise ? pending.then(open) : pending;
+  };
+  Object.defineProperty(KeyedClient.prototype, 'query', { value: query, writable: true, configurable: true });
+  return KeyedClient;
 }
 
 /**
@@ -96,7 +174,11 @@ const CONNECT_TIMEOUT_MS = 30_000;
  */
 export function createDb(databaseUrl: string, opts: DbOptions = {}) {
   const dbSchema = assertSchemaName(opts.schema ?? DEFAULT_DB_SCHEMA);
+  // Only an ABSENT key means "this handle holds none". A blank or malformed
+  // one was meant to be a key, and is refused here rather than read as none.
+  const keys = opts.piiKey === undefined ? null : derivePiiKeys(opts.piiKey);
   const pool = new pg.Pool({
+    Client: keyedClient(keys),
     connectionString: databaseUrl,
     connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     max: opts.max,
@@ -109,6 +191,7 @@ export function createDb(databaseUrl: string, opts: DbOptions = {}) {
   });
   const db = drizzle(pool, { schema });
   schemas.set(db, dbSchema);
+  if (keys) piiKeys.set(db, { keys, of: opts.piiKey! });
   return db;
 }
 
@@ -119,7 +202,22 @@ export function dbSchemaOf(db: Pick<Database, '$client'>): string {
   return schemas.get(db as Database) ?? DEFAULT_DB_SCHEMA;
 }
 
+/**
+ * The keys a handle seals personal data with — for the few callers that
+ * handle the stored form themselves (the backfill at start; an overlay's own
+ * SQL). Everything else never sees a key: the column types and the handle's
+ * connection do the work. Throws for a handle built without one.
+ */
+export function piiKeysOf(db: Pick<Database, '$client'>): PiiKeys {
+  const held = piiKeys.get(db as Database);
+  if (!held) {
+    throw new Error('This database handle holds no personal-data key: build it with createDb/getDb and its piiKey.');
+  }
+  return held.keys;
+}
+
 const schemas = new WeakMap<Database, string>();
+const piiKeys = new WeakMap<Database, { keys: PiiKeys; of: string }>();
 const cache = new Map<string, Database>();
 
 const cacheKey = (databaseUrl: string, dbSchema: string) => `${dbSchema}\u0000${databaseUrl}`;
@@ -136,8 +234,27 @@ export function getDb(databaseUrl: string, opts: DbOptions = {}): Database {
   if (!db) {
     db = createDb(databaseUrl, opts);
     cache.set(key, db);
+  } else if (opts.piiKey !== undefined && !holdsKey(db, opts.piiKey)) {
+    // One schema is one knowledge base and one key. Handing back the cached
+    // pool would seal this caller's rows under the other caller's key.
+    throw new Error(`The database handle for schema "${dbSchema}" is already open with a different personal-data key.`);
   }
   return db;
+}
+
+/**
+ * Whether `db` was opened with the key `piiKey` spells. The KEY, not its
+ * spelling: `SECRETS_ENC_KEY` may be written as hex or as base64, and one
+ * process can be handed the same 32 bytes both ways — refusing the second as
+ * "a different key" would refuse a caller that holds the right one. Compared
+ * through what the two derive, so no key material is held here to compare.
+ */
+function holdsKey(db: Database, piiKey: string): boolean {
+  const held = piiKeys.get(db);
+  if (!held) return false;
+  if (held.of === piiKey) return true;
+  const probe = 'same-key?';
+  return held.keys.index(probe) === derivePiiKeys(piiKey).index(probe);
 }
 
 /**

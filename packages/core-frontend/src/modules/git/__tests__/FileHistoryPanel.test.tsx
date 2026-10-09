@@ -1,6 +1,21 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import type { BranchInfo, CommitAttribution, WorkingTreeStatus } from '@bevel-software/platform-shared';
+
+/**
+ * The version pane the panel now mounts for every non-markdown file reads
+ * bytes and resolves the file's `download:` verb. Both are stubbed so these
+ * tests stay about the PANEL — which save is selected, and which of the two
+ * histories it routes to.
+ */
+const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
+vi.mock('../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
+const accessMock = vi.hoisted(() => ({ fetchFileAccess: vi.fn() }));
+vi.mock('../../access/api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  fetchFileAccess: accessMock.fetchFileAccess,
+}));
 
 import { FileHistoryPanel } from '../components/FileHistoryPanel';
 import { GitContext, type GitContextValue } from '../state/git.context';
@@ -53,13 +68,37 @@ const workspace = {
 
 function renderWith(git: GitContextValue, filePath = 'knowledge-base/Knowledge/Foo.md') {
   return render(
-    <WorkspaceContext.Provider value={workspace}>
-      <GitContext.Provider value={git}>
-        <FileHistoryPanel filePath={filePath} />
-      </GitContext.Provider>
-    </WorkspaceContext.Provider>,
+    <MemoryRouter initialEntries={[`/workspace/ws-1/${filePath}`]}>
+      <WorkspaceContext.Provider value={workspace}>
+        <GitContext.Provider value={git}>
+          <FileHistoryPanel filePath={filePath} />
+        </GitContext.Provider>
+      </WorkspaceContext.Provider>
+    </MemoryRouter>,
   );
 }
+
+beforeEach(() => {
+  apiMock.authFetch.mockReset();
+  apiMock.authFetch.mockResolvedValue({
+    ok: true,
+    status: 200,
+    blob: async () => new Blob(['bytes']),
+    arrayBuffer: async () => new ArrayBuffer(8),
+    text: async () => '',
+  });
+  accessMock.fetchFileAccess.mockReset();
+  accessMock.fetchFileAccess.mockResolvedValue({
+    canWrite: false,
+    canDownload: true,
+    eligible: { roles: [], users: [] },
+    owners: { roles: [], users: [] },
+  });
+  (globalThis.URL as unknown as { createObjectURL: unknown }).createObjectURL = vi.fn(
+    () => 'blob:fake-url',
+  );
+  (globalThis.URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
+});
 
 describe('FileHistoryPanel', () => {
   it('renders the timeline returned from fetchFileHistory', async () => {
@@ -105,7 +144,7 @@ describe('FileHistoryPanel', () => {
     expect(screen.getByText('shared paragraph')).toBeInTheDocument();
   });
 
-  it('loads the raw diff when a non-markdown file\'s commit is selected', async () => {
+  it('loads the line changes for a text file no viewer renders', async () => {
     const fetchFileDiff = vi.fn(async () => '--- a\n+++ b\n@@ -1 +1 @@\n-foo\n+bar\n');
     const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
     renderWith(
@@ -113,13 +152,13 @@ describe('FileHistoryPanel', () => {
         fetchFileHistory: async () => history,
         fetchFileDiff,
       }),
-      'knowledge-base/Knowledge/data.csv',
+      'knowledge-base/Knowledge/notes.txt',
     );
     const row = await screen.findByText('edit');
     fireEvent.click(row);
     await waitFor(() =>
       expect(fetchFileDiff).toHaveBeenCalledWith(
-        'knowledge-base/Knowledge/data.csv',
+        'knowledge-base/Knowledge/notes.txt',
         'aaaaaaa0000000000',
       ),
     );
@@ -133,10 +172,50 @@ describe('FileHistoryPanel', () => {
         fetchFileHistory: async () => history,
         fetchFileDiff: async () => '',
       }),
-      'knowledge-base/Knowledge/data.csv',
+      'knowledge-base/Knowledge/notes.txt',
     );
     fireEvent.click(await screen.findByText('edit'));
     expect(await screen.findByText(/No file changes in this save/i)).toBeInTheDocument();
+  });
+
+  it('routes a previewable file\'s save to the version pane, not the patch', async () => {
+    // A CSV is previewable, so the pane shows the table of that save with the
+    // line changes a click away — where it used to show the patch and nothing
+    // else.
+    const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
+    renderWith(
+      makeGit({
+        fetchFileHistory: async () => history,
+        fetchFileDiff: async () => '--- a\n+++ b\n@@ -1 +1 @@\n-a,b\n+a,c\n',
+        fetchFileAtChange: async () => ({ baseline: 'a,b', current: 'region,total\n EMEA,7' }),
+      }),
+      'knowledge-base/Knowledge/data.csv',
+    );
+    fireEvent.click(await screen.findByText('edit'));
+    expect(await screen.findByText('region')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Download this version' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Source changes' }));
+    expect(await screen.findByText(/\+a,c/)).toBeInTheDocument();
+  });
+
+  it('leaves a markdown history untouched: no version pane, no download', async () => {
+    const fetchFileDiff = vi.fn(async () => 'unused');
+    const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
+    renderWith(
+      makeGit({
+        fetchFileHistory: async () => history,
+        fetchFileDiff,
+        fetchFileAtChange: async () => ({ baseline: '# Old\n', current: '# New\n' }),
+      }),
+    );
+    fireEvent.click(await screen.findByText('edit'));
+    expect(await screen.findByRole('heading', { name: 'New' })).toBeInTheDocument();
+    // The markdown path reads before/after contents and nothing else — no
+    // patch, no version pane, no bytes.
+    expect(fetchFileDiff).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Download this version' })).toBeNull();
+    expect(screen.queryByText(/As saved/)).toBeNull();
+    expect(apiMock.authFetch).not.toHaveBeenCalled();
   });
 
   it('renders the empty state for a markdown save where the file is absent on both sides', async () => {

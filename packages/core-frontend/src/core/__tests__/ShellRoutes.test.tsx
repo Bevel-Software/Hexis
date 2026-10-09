@@ -24,6 +24,17 @@ vi.mock('../../modules/secrets-vault/services/tool-secrets.api', () => ({
   deleteAdminVar: vi.fn(async () => {}),
   deleteUserVar: vi.fn(async () => {}),
 }));
+// The change-request address opens the request by number; the fetch is
+// stubbed so the route can render without a network, and the view is the
+// stand-in below — the route table is what is under test.
+vi.mock('../../modules/git/services/pr.api', () => ({
+  getPullRequest: vi.fn(async (num: number) => ({ number: num, title: `Request `, author: { login: 'bot' } })),
+  listPullRequestsForMe: vi.fn(async () => []),
+  listMyPullRequests: vi.fn(async () => []),
+}));
+vi.mock('../../modules/change-requests/components/ChangeRequestDialog', () => ({
+  ChangeRequestDialog: ({ cr }: { cr: { number: number } }) => <div data-testid="cr-dialog">{cr.number}</div>,
+}));
 
 /** Exposes the router's current pathname so redirects can be asserted. */
 function LocationProbe() {
@@ -126,5 +137,16 @@ describe('ShellRoutes', () => {
     renderAt('/workspace/main');
     expect(screen.queryByRole('navigation', { name: 'Settings' })).toBeNull();
     expect(screen.getByTestId('knowledge-surface')).toBeInTheDocument();
+  });
+});
+
+describe('ShellRoutes — the change-request address', () => {
+  // The link the backend builds for every change request. It used to fall
+  // into the catch-all and land on Knowledge with nothing open.
+  it('opens the request at /change-requests/<number> instead of redirecting', async () => {
+    renderAt('/change-requests/276');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/change-requests\/276$/);
+    expect(await screen.findByTestId('cr-dialog')).toHaveTextContent('276');
+    expect(screen.queryByTestId('knowledge-surface')).not.toBeInTheDocument();
   });
 });

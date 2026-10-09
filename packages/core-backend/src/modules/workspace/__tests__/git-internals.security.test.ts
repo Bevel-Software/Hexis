@@ -189,6 +189,7 @@ const allowAll = {
   canWriteBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   canWriteBatchAtRef: async (_w: string, _r: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   canDownload: async () => true,
+  canDownloadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   canOwner: async () => true,
   eligibleWritersAtRef: async () => [],
 } as unknown as IAccessControl;
@@ -584,7 +585,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
     ['moveEntry (source)', (p) => service.moveEntry(WS, p, `${KB}/Notes/moved`)],
     ['moveEntry (destination)', (p) => service.moveEntry(WS, `${KB}/Notes/a.md`, p)],
     ['createDirectory', (p) => service.createDirectory(WS, `${p}/new`)],
-    ['createFolderZip', (p) => service.createFolderZip(WS, p.replace(/\/config$/, ''))],
+    ['createFolderZip', (p) => service.createFolderZip(WS, p.replace(/\/config$/, ''), async (paths) => new Set(paths))],
     ['unzipFile (archive)', (p) => service.unzipFile(WS, `${p}.zip`)],
     ['unzipFile (destination)', (p) => service.unzipFile(WS, `${KB}/archive.zip`, p)],
   ];
@@ -649,7 +650,9 @@ describe('WorkspaceService refuses the git folder on its own', () => {
     await mkdir(join(workspaceDir, KB, 'Notes', '.git.'), { recursive: true });
     await writeFile(join(workspaceDir, KB, 'Notes', '.git.', 'HEAD'), 'ref\n');
 
-    const names = new AdmZip(await service.createFolderZip(WS, `${KB}/Notes`)).getEntries().map((e) => e.entryName);
+    const names = new AdmZip(await service.createFolderZip(WS, `${KB}/Notes`, async (paths) => new Set(paths)))
+      .getEntries()
+      .map((e) => e.entryName);
     expect(names).toEqual(['Notes/a.md']);
   });
 

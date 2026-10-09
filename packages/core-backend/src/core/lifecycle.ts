@@ -164,7 +164,13 @@ export function holdCommitWorkerLease(
         running = false;
         wake?.();
         await loop;
+        // The worker is asked to stop whether or not this process is running
+        // it: a worker that can be held still (`holdable`) may be in the
+        // middle of a hold that uses the database, and its stop is what
+        // waits for that. Stopping a worker that is not running is nothing.
+        const idle = !workerRunning && !stopping;
         await stopWorker();
+        if (idle) await worker.stop().catch((err: unknown) => log(`commit worker stop failed: ${String(err)}`));
         await lease.release();
       })();
       return stopped;
@@ -237,6 +243,19 @@ export interface HoldableWorker extends LeasedWorker {
 export function holdable(worker: LeasedWorker): HoldableWorker {
   let wanted = false;
   const inFlight = new Set<Promise<unknown>>();
+  /**
+   * ONE stop at a time, shared by everyone who asks. A worker's own stop is
+   * idempotent by answering a second caller at once, while the first is
+   * still waiting for the commit in flight; a second hold given that answer
+   * would set a working copy aside under that commit.
+   */
+  let stopping: Promise<void> | null = null;
+  const stopWorker = (): Promise<void> => {
+    stopping ??= worker.stop().finally(() => {
+      stopping = null;
+    });
+    return stopping;
+  };
   return {
     start() {
       wanted = true;
@@ -244,12 +263,12 @@ export function holdable(worker: LeasedWorker): HoldableWorker {
     },
     async stop() {
       wanted = false;
-      await worker.stop();
+      await stopWorker();
       await Promise.allSettled([...inFlight]);
     },
     whileHeld<T>(work: () => Promise<T>): Promise<T> {
       const held = (async () => {
-        await worker.stop();
+        await stopWorker();
         return work();
       })();
       inFlight.add(held);
@@ -272,7 +291,7 @@ export interface BootableCore {
   config: { workspacesRoot: string };
   kbDirName: string;
   kbStartupRunner: Pick<KbStartupRunner, 'runAll' | 'retryUntilMaintained'>;
-  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches'>;
+  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches' | 'tidyAfterSweep'>;
   pluginJoinRequestJobs: Pick<PluginJoinRequestJobs, 'startSweeping'>;
   /**
    * The startup phase's retry, when the boot survived an unreachable remote
@@ -371,7 +390,11 @@ export async function startCore<C extends BootableCore>(
         crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
       }
     })
-    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
+    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }))
+    // Then the tidy-up: open requests that propose nothing are closed, and the
+    // branches merged requests left behind removed (behind its own setting).
+    // Fails safe on a failed fetch, and never throws.
+    .then(() => core.workflowService.tidyAfterSweep());
 
   // Recorded join requests that are still owed, resumed — now, and then on a
   // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
@@ -409,6 +432,24 @@ export interface CoreStopDeps {
    * to it. Optional: a caller that has not built them yet passes nothing.
    */
   backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
+  /**
+   * The agent upload store, whose own sweep deletes staged bytes nobody
+   * applied. Stopped with this graph because the next graph for the same
+   * tenant stages into the SAME directory with an empty record map: a sweep
+   * left running from a store that is gone would read the replacement's files
+   * as orphans and delete them under an apply that is about to read them.
+   * Optional: a caller that has not built one passes nothing.
+   */
+  agentUploadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
+  agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /**
+   * The workflow service, for the tidy-up it runs after each sweep (closing
+   * empty requests, removing leftover branches): detached from whatever
+   * started it, so stopped and awaited here before the pool goes. Optional:
+   * a caller that has not built one passes nothing.
+   */
+  workflowService?: { stopTidying(): void; drainTidy(): Promise<void> };
   /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
   startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
@@ -492,10 +533,18 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // earliest point the interval is dead weight. Synchronous and unfailing
   // — it just clears an interval — so it needs no budget of its own.
   deps.backgroundJobs?.stopSweeping();
+  // And the upload store's sweep, for the same reason and in the same breath:
+  // synchronous, and it only clears an interval and tells a sweep already
+  // running to stop deleting.
+  deps.agentUploadStore?.stopSweeping();
+  deps.agentDownloadStore?.stopSweeping();
   // A startup phase still asking for an unreachable remote stops asking:
   // synchronous, and nothing after it must be able to clone into a
   // workspaces folder that is about to belong to nobody.
   deps.startupRetry?.stop();
+  // The post-sweep tidy-up: no new round, and the one under way stops at its
+  // next request or branch. Synchronous.
+  deps.workflowService?.stopTidying();
   // Clearing the interval stops future ticks; it does nothing to a job a
   // tick already started, which holds a claim it heartbeats through the
   // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
@@ -504,6 +553,21 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // — which is the recovery every crash already gets.
   if (deps.backgroundJobs) {
     await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+  }
+  // The sweep in flight when the interval was cleared: awaited so the next
+  // graph for this tenant cannot start staging bytes while a store it has
+  // never heard of is still walking the same directory.
+  if (deps.agentUploadStore) {
+    await bounded(deps.agentUploadStore.drainSweep(), remaining(), 'finishing the upload sweep', log);
+  }
+  if (deps.agentDownloadStore) {
+    await bounded(deps.agentDownloadStore.drainSweep(), remaining(), 'finishing the download sweep', log);
+  }
+  // The tidy-up in flight fetches and deletes branches through the pool and
+  // the default branch's checkout: awaited, so the next graph for this
+  // tenant cannot find a branch deletion still running under it.
+  if (deps.workflowService) {
+    await bounded(deps.workflowService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

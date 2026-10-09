@@ -3,10 +3,12 @@ import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js'
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
+import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
@@ -43,10 +45,21 @@ export function registerToolManualsTools(
     variableStatus: VariableStatusPort;
     /** Which branch tools are served from, and its clone. */
     kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>;
+    /**
+     * Where a hidden tool's schema finding comes from (the MCP proxy).
+     * Optional: a deployment with no MCP surface has nothing to report, and
+     * `hiddenTools` is then empty everywhere.
+     */
+    hiddenTools?: HiddenToolSource;
   },
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  // The def above is built per catalog listing (its description names the
+  // tools configured for THIS caller), so declare the arguments here as well:
+  // a direct REST call that lands before the first listing must be checked
+  // against them too.
+  declareRouteTool('list_local_tools', LIST_LOCAL_TOOLS_INPUTS);
 
   router.post(
     '/agent/tools/list_local_tools',
@@ -65,32 +78,32 @@ export function registerToolManualsTools(
 
   const listSetupDef = toolDef({
     name: 'list_tool_setup',
+    // What each FIELD means is documented on the field, in `outputs` below:
+    // `setup.kind`, `variables`, `invalid` and `hiddenTools` each carried a
+    // paragraph here, which made this description two thousand characters and
+    // so the first thing a client cut. The description says what the tool
+    // answers and the four things an agent cannot read off a field.
+    //
+    // It sits a few characters under `TOOL_DESCRIPTION_CAP` WITH the guide-first
+    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`)
+    // and the `Call:` line generated ahead of everything,
+    // which is why every sentence here is the short form: the `hiddenTools`
+    // clause and that opener both came out of the same budget, and what a
+    // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
-      'Configuration status of every `.tool` the current user can access: what each tool needs set up and ' +
-      'what is already configured. Results are scoped to the caller — a `.tool` the caller cannot READ is ' +
-      'absent entirely, and all status flags reflect the caller\'s own state. Per tool: `setup` describes ' +
-      'an MCP server\'s sign-in requirement (`open` = none; `oauth-auto` = sign-in was configured ' +
-      'automatically; `oauth-manual` = the sign-in needs an OAuth app the owner registers with the provider: ' +
-      'a writer declares its client id on a `user`-scoped variable with an `oauth` block — in the plugin.json ' +
-      'extensions entry for an mcp.json server (endpoints are discovered from the server; PKCE is on by ' +
-      'default), or in the `.tool` file with explicit URLs — and pastes the client secret on the tool\'s page. ' +
-      '`setup.reason` is present only while something still blocks the sign-in and says what). ' +
-      'Per variable: whether the shared (admin) value is set, whether the CURRENT user has ' +
-      'set/authorized their own, and whether it is an OAuth sign-in (users authorize those on the /connect ' +
-      'page, never by typing a value). `canWrite` = the caller may write THAT `.tool` FILE (per-file access ' +
-      'from its frontmatter `write:`/`owner:` verbs and the access.md chain — NOT a platform role), which ' +
-      'is exactly what gates setting its shared secrets: the people who manage the file configure the tool. ' +
-      'Secret VALUES are never returned and can never be set through a tool — an admin enters them in the ' +
-      'tool editor; users sign in on /connect. ' +
-      '`invalid` names any `.tool` file the scan REFUSED, with the reason and its location: those files ' +
-      'are the only ones missing — every other tool is listed and callable, and a refused file is listed ' +
-      'again as a normal tool on the next call once it is fixed (or removed), with nothing to restart or ' +
-      'reconnect. ' +
-      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you ' +
-      'declared on a draft is not listed, not callable and not signed-in-able until that draft is merged. ' +
-      'Pass `branch` (the draft you wrote the declaration on) and `onBranchOnly` names every tool declared ' +
-      'there that the default branch does not serve yet — open a change request, then ask the user to ' +
-      'review and merge it in the app to activate it.',
+      'Configuration status of every `.tool` the current user can access: what each needs set up and what is ' +
+      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
+      'READ is absent, and every flag is the caller\'s own. ' +
+      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
+      'editor; users sign in on /connect. ' +
+      'Setting a tool\'s shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter ' +
+      '`write:`/`owner:` verbs and the access.md chain), NOT by a platform role: who manages the file configures ' +
+      'the tool. ' +
+      '`hiddenTools` names the tools Hexis hides from agents for an invalid schema. ' +
+      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
+      'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
+      'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
+      'yet — open a change request and ask the user to merge it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -119,12 +132,48 @@ export function registerToolManualsTools(
               type: { type: 'string' },
               setup: {
                 type: ['object', 'null'],
-                description: 'MCP auto-discovery setup requirement; null for non-mcp tools.',
-                properties: { kind: { type: 'string' }, reason: { type: 'string' } },
+                description: "An MCP server's sign-in requirement; null for non-mcp tools.",
+                properties: {
+                  kind: {
+                    type: 'string',
+                    description:
+                      '`open` = no sign-in; `oauth-auto` = sign-in was configured automatically; `oauth-manual` = the ' +
+                      'sign-in needs an OAuth app the owner registers with the provider: a writer declares its client ' +
+                      'id on a `user`-scoped variable with an `oauth` block — in the plugin.json extensions entry for ' +
+                      'an mcp.json server (endpoints are discovered from the server; PKCE is on by default), or in the ' +
+                      '`.tool` file with explicit URLs — and pastes the client secret on the tool\'s page.',
+                  },
+                  reason: {
+                    type: 'string',
+                    description: 'Present only while something still blocks the sign-in, and says what.',
+                  },
+                },
               },
-              canWrite: { type: 'boolean' },
+              canWrite: {
+                type: 'boolean',
+                description: 'You may write this `.tool` FILE, which is what gates setting its shared secrets.',
+              },
+              hiddenTools: {
+                type: 'array',
+                description:
+                  'Tools of this server kept off every agent surface for an invalid input schema. Empty ' +
+                  'unless the caller may write this tool.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'The name the tool would have been offered under.' },
+                    path: { type: 'string', description: 'JSON Pointer to the place in the schema that is not valid.' },
+                    reason: { type: 'string', description: 'Why that place is not valid, in the validator\'s words.' },
+                    marker: { type: 'string', description: 'The one sentence the tool page shows for this tool.' },
+                  },
+                  required: ['name', 'path', 'reason', 'marker'],
+                },
+              },
               variables: {
                 type: 'array',
+                description:
+                  'What this tool needs configured, and by whom: per variable, whether the shared (admin) value is ' +
+                  'set and whether the CURRENT user has set or authorized their own.',
                 items: {
                   type: 'object',
                   properties: {
@@ -144,15 +193,16 @@ export function registerToolManualsTools(
                 },
               },
             },
-            required: ['slug', 'name', 'path', 'type', 'canWrite', 'variables'],
+            required: ['slug', 'name', 'path', 'type', 'canWrite', 'hiddenTools', 'variables'],
           },
         },
         invalid: {
           type: 'array',
           description:
-            '`.tool` files the scan refused — the ONLY tools missing from `tools`. Each names the file and ' +
-            'why it was refused, with the line/column or field where the validation failed. Fix the file (or ' +
-            'delete it) and the next call lists it as a normal tool. Never contains a secret value.',
+            '`.tool` files the scan refused — the ONLY tools missing from `tools`; every other tool is listed and ' +
+            'callable. Each names the file and why it was refused, with the line/column or field where the validation ' +
+            'failed. Fix the file (or delete it) and the next call lists it as a normal tool, with nothing to restart ' +
+            'or reconnect. Never contains a secret value.',
           items: {
             type: 'object',
             properties: {
@@ -206,27 +256,35 @@ export function registerToolManualsTools(
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
       const tools = await Promise.all(
-        manuals.map(async (m) => ({
-          slug: m.slug,
-          name: m.name,
-          path: m.path,
-          type: m.type,
-          setup: m.setup ?? null,
-          canWrite: await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path),
-          variables: (m.variables ?? []).map((v) => {
-            const st = statusByKey.get(varKey(m.name, v.name));
-            const isOAuth = v.oauth != null;
-            return {
-              name: v.name,
-              scope: v.scope,
-              label: v.label ?? null,
-              oauth: isOAuth,
-              adminConfigured: st?.adminConfigured ?? false,
-              userConfigured: st?.userConfigured ?? false,
-              authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
-            };
-          }),
-        })),
+        manuals.map(async (m) => {
+          const canWrite = await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path);
+          return {
+            slug: m.slug,
+            name: m.name,
+            path: m.path,
+            type: m.type,
+            setup: m.setup ?? null,
+            canWrite,
+            // The marker goes only to the people who manage the server — the
+            // same verdict that gates setting its shared secrets. A caller who
+            // may only READ the tool is told nothing about it: they cannot fix
+            // the schema, and the tool is simply not among the ones they can call.
+            hiddenTools: canWrite ? (deps.hiddenTools?.hiddenFor(m.name) ?? []) : [],
+            variables: (m.variables ?? []).map((v) => {
+              const st = statusByKey.get(varKey(m.name, v.name));
+              const isOAuth = v.oauth != null;
+              return {
+                name: v.name,
+                scope: v.scope,
+                label: v.label ?? null,
+                oauth: isOAuth,
+                adminConfigured: st?.adminConfigured ?? false,
+                userConfigured: st?.userConfigured ?? false,
+                authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
+              };
+            }),
+          };
+        }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
       if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
@@ -252,6 +310,9 @@ async function localToolsLine(svc: IToolManualService, userEmail?: string): Prom
   return `Local-only tools configured for you: ${tools.map((t) => `\`${t.name}\``).join(', ')}.`;
 }
 
+/** `list_local_tools` takes nothing; a const so the route and the def share one declaration. */
+const LIST_LOCAL_TOOLS_INPUTS = { type: 'object' as const, properties: {}, additionalProperties: false };
+
 async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
     name: 'list_local_tools',
@@ -267,7 +328,7 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       'setup by hand. ' +
       (await localToolsLine(svc, userEmail)),
     path: '/api/agent/tools/list_local_tools',
-    inputs: { type: 'object', properties: {}, additionalProperties: false },
+    inputs: LIST_LOCAL_TOOLS_INPUTS,
     outputs: {
       type: 'object',
       properties: {

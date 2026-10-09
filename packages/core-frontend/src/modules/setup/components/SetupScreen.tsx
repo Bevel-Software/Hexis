@@ -1,9 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
-import {
-  DEFAULT_KB_LAYOUT,
-  agentsFilePointerSentence,
-  type KbLayout,
-} from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
@@ -85,7 +81,14 @@ function describeOutcomes(results: LastSync['results']): string {
 /** Copy for each setting: what it is, in the words of someone who has to fill it in. */
 const FIELDS: Record<
   string,
-  { label: string; help: string; placeholder?: string; advanced?: boolean }
+  {
+    label: string;
+    help: string;
+    placeholder?: string;
+    advanced?: boolean;
+    /** An on/off setting, shown as a checkbox and saved as `true` / `false`; `on` is what an unset one means. */
+    toggle?: { on: boolean };
+  }
 > = {
   kbRepoUrl: {
     label: 'Repository address',
@@ -137,14 +140,6 @@ const FIELDS: Record<
     help: 'The top-level folder that holds plugins. The three folder names must differ.',
     placeholder: 'Plugins',
   },
-  // Beside the folders, and not under Advanced, for the same reason they are
-  // not: a repository that already has an `AGENTS.md` of its own loses it to
-  // the platform's on the first boot unless this is answered first.
-  agentsFile: {
-    label: 'Agent guide file',
-    help: 'The file the platform writes its own guide to, at the top of the repository. Change it if your repository already has an AGENTS.md you want to keep — that file then stays yours, and the platform never writes to it. Must end in .md.',
-    placeholder: 'AGENTS.md',
-  },
   defaultBranch: {
     label: 'Main branch',
     help: 'The version everyone sees. Filled in from your repository when you test the connection.',
@@ -156,6 +151,12 @@ const FIELDS: Record<
     help: 'Nobody can change these directly; edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
     advanced: true,
+  },
+  retireMergedBranches: {
+    label: 'Remove branches left over from merged change requests',
+    help: 'Removes, on its own, a draft whose change request was merged but which is still there: every commit on it is already on the main branch and no request is open from or into it. Runs at startup and whenever the server checks for deleted branches. Merging a change request removes its draft either way. Applies without a restart.',
+    advanced: true,
+    toggle: { on: true },
   },
   oidcIssuerUrl: {
     label: 'Provider address',
@@ -255,21 +256,14 @@ const isRootFolderKey = (key: string): key is (typeof ROOT_FOLDER_KEYS)[number] 
   (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
 
 /**
- * The knowledge-base LAYOUT fields — the three folders and the agent guide's
- * file name — which render together, under the connection test whose listing
- * the folders are checked against, rather than with the connection fields
- * above it.
+ * The knowledge-base LAYOUT fields — the three folders — which render
+ * together, under the connection test whose listing they are checked
+ * against, rather than with the connection fields above it. (The guide's
+ * file name was one of them while the guide was written to disk; it is
+ * served by the platform now and has no field.)
  */
-const LAYOUT_KEYS: readonly (keyof KbLayout)[] = [...ROOT_FOLDER_KEYS, 'agentsFile'];
+const LAYOUT_KEYS: readonly (keyof KbLayout)[] = [...ROOT_FOLDER_KEYS];
 const isLayoutKey = (key: string): boolean => (LAYOUT_KEYS as readonly string[]).includes(key);
-
-/**
- * The consent that rides along with a renamed guide: keep the platform's
- * one-sentence pointer in the customer's own `AGENTS.md`. Not a text field, so
- * it has no {@link FIELDS} entry and is drawn by hand under the name it
- * belongs to.
- */
-const AGENTS_LINK_KEY = 'agentsFileLink';
 
 /** How a near-miss folder differs from the configured name, as the warning words it. */
 const VARIANT_DIFFERENCE: Record<Extract<RootFolderState, { kind: 'variant' }>['difference'], string> = {
@@ -1298,42 +1292,6 @@ export function SetupScreen({
     );
   }
 
-  /**
-   * Under the guide's name, once it is no longer `AGENTS.md`: the exact
-   * sentence the platform would add to the customer's own `AGENTS.md`, and the
-   * consent to keep it there.
-   *
-   * Shown ONLY while the name differs, because that is the only time there is
-   * anything to point at — under the default name the guide IS `AGENTS.md`.
-   * The sentence is rendered by the same helper the server appends with, so
-   * what the admin reads here is what lands in their file, character for
-   * character.
-   */
-  function renderAgentsFileLink() {
-    const name = resolved('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile;
-    if (name === DEFAULT_KB_LAYOUT.agentsFile) return null;
-    // Unset means on: the server reads an unanswered setting the same way.
-    const on = (draft[AGENTS_LINK_KEY] ?? settings.find((s) => s.key === AGENTS_LINK_KEY)?.value ?? 'true') !== 'false';
-    return (
-      <div className="mt-2 space-y-2" data-testid="agents-file-link">
-        <label className="flex cursor-pointer select-none items-start gap-2 text-detail text-ink">
-          <input
-            type="checkbox"
-            className="mt-0.5"
-            checked={on}
-            onChange={(e) => set(AGENTS_LINK_KEY, e.target.checked ? 'true' : 'false')}
-          />
-          <span>Keep a pointer to {name} in your own AGENTS.md</span>
-        </label>
-        <CopyValue value={agentsFilePointerSentence(name)} label="Copy the pointer sentence" />
-        <p className="text-meta text-ink-faint">
-          While this is ticked, every start looks for “{name}” in your AGENTS.md and adds the
-          sentence at the end when it is not there — in your own words counts too. Nothing is added
-          if you have no AGENTS.md, and no file is ever created for it. Untick it to stop.
-        </p>
-      </div>
-    );
-  }
 
   function renderField(setting: SettingStatus) {
     const copy = FIELDS[setting.key];
@@ -1345,6 +1303,31 @@ export function SetupScreen({
       : isFolderField
         ? (remoteRootFolders ?? []).filter(isRootFolderSuggestion)
         : [];
+    if (copy.toggle) {
+      const raw = draft[setting.key] ?? setting.value ?? '';
+      const checked = raw === '' ? copy.toggle.on : raw !== 'false';
+      return (
+        <div key={setting.key}>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={checked}
+              onChange={(e) => set(setting.key, e.target.checked ? 'true' : 'false')}
+              aria-invalid={problems[setting.key] ? true : undefined}
+              aria-describedby={problems[setting.key] ? `${setting.key}-problem` : undefined}
+            />
+            <span className="text-detail font-medium text-ink">{copy.label}</span>
+          </label>
+          <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+          {problems[setting.key] && (
+            <p id={`${setting.key}-problem`} role="alert" className="mt-1 text-meta text-danger">
+              {problems[setting.key]}
+            </p>
+          )}
+        </div>
+      );
+    }
     const listId = suggestions.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>
@@ -1374,7 +1357,6 @@ export function SetupScreen({
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
         {isRootFolderKey(setting.key) && renderRootFolderState(setting.key)}
-        {setting.key === 'agentsFile' && renderAgentsFileLink()}
         {setting.key === 'kbSyncSecret' && renderSyncPanel()}
         {/* Only AFTER setup: on first run there is nothing yet to lose, so
             the caution would be noise. Once a deployment is live, this field
@@ -1457,7 +1439,7 @@ export function SetupScreen({
           {repositoryChanged && (
             <Banner tone="ok" role="status" className="mt-6" data-testid="repository-changed">
               <p>
-                Saved. This deployment now works on the new repository, with fresh working copies of it.
+                Saved. This deployment now works on the new repository.
               </p>
               {repositoryChanged.choice === 'close' && repositoryChanged.closedChangeRequests > 0 && (
                 <p className="mt-1">
@@ -1758,11 +1740,10 @@ export function SetupScreen({
                 )}
                 </SectionFields>
 
-                {/* The layout: the three root folders and the agent guide's
-                    file name, in the main section, directly under the test
-                    whose listing the folders are checked against — the
-                    connection fields above it stay next to the button that
-                    proves them. */}
+                {/* The layout: the three root folders, in the main section,
+                    directly under the test whose listing they are checked
+                    against — the connection fields above it stay next to the
+                    button that proves them. */}
                 {fields.filter((f) => isLayoutKey(f.key)).map((f) => renderField(f))}
 
                 {/* Everything a normal setup never touches, out of the way but

@@ -140,7 +140,8 @@ export function ProfileMenu() {
       return;
     }
     if (item.onSelect) {
-      item.onSelect({ closeMenu: close, navigate });
+      // Rows render only with a user (see the early return below).
+      if (user) item.onSelect({ closeMenu: close, navigate, user });
       return;
     }
     if (item.path) {
@@ -179,6 +180,10 @@ export function ProfileMenu() {
   // No user, no menu. Everything in it is either about a person or an action
   // taken as one; signed out there is nobody to be.
   if (!user) return null;
+
+  // Rows offered to this person right now (see `AdminMenuItem.isShown`).
+  const shownDefaultItems = defaultItems.filter((item) => item.isShown?.(user) ?? true);
+  const shownAdminItems = adminItems.filter((item) => item.isShown?.(user) ?? true);
 
   return (
     <div className="relative">
@@ -264,12 +269,12 @@ export function ProfileMenu() {
             </span>
           </div>
 
-          {defaultItems.map(renderRow)}
+          {shownDefaultItems.map(renderRow)}
 
-          {isAdmin && adminItems.length > 0 && (
+          {isAdmin && shownAdminItems.length > 0 && (
             <div role="group" aria-labelledby="profile-menu-admin-section-label">
               <MenuLabel id="profile-menu-admin-section-label">Admin only</MenuLabel>
-              {adminItems.map(renderRow)}
+              {shownAdminItems.map(renderRow)}
             </div>
           )}
 

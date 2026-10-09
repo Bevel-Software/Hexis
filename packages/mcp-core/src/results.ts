@@ -84,7 +84,17 @@ function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: 
  * MCP caller sees the tool's real message instead of a bare "status code 500".
  */
 export function describeToolFailure(err: unknown): string {
-  const data = (err as { response?: { data?: unknown } })?.response?.data;
+  // Read through to the body UNDER the guard. `err` is whatever a transport
+  // threw, and a getter or Proxy on `response` — or on `response.data` — that
+  // throws while being read must not escape: this function runs inside catch
+  // paths, and `runToolChain` promises an answer for every outcome, so a throw
+  // here would surface as the dropped connection that contract rules out.
+  let data: unknown;
+  try {
+    data = (err as { response?: { data?: unknown } })?.response?.data;
+  } catch {
+    data = undefined;
+  }
   if (data && typeof data === 'object') {
     let inner: unknown;
     try {
@@ -109,7 +119,7 @@ export function describeToolFailure(err: unknown): string {
       return inner;
     }
   }
-  if (typeof data === 'string' && data.length > 0) return data;
+  if (typeof data === 'string' && data.length > 0) return nonJsonFailure(err, data) ?? data;
   // Total, like `safeJsonText`: a thrown value whose own `toString` throws
   // (e.g. a null-prototype object) must still come back as a description —
   // this function runs inside catch paths, where a second throw would turn
@@ -119,6 +129,200 @@ export function describeToolFailure(err: unknown): string {
   } catch {
     return '(indescribable tool failure)';
   }
+}
+
+/** The `kind` an answer that was not JSON where JSON was expected carries. */
+export const NOT_JSON_KIND = 'not-json';
+
+/** How much of a non-JSON answer reaches the agent. The rest is a web page, not information. */
+const NON_JSON_MAX = 200;
+
+/** Collapse every run of whitespace, so a page's indentation doesn't fill the budget. */
+function firstLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  return collapsed.length > NON_JSON_MAX ? `${collapsed.slice(0, NON_JSON_MAX - 1)}…` : collapsed;
+}
+
+function looksLikeJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A SUCCESSFUL answer that is a web page rather than JSON, cut to its first
+ * {@link NON_JSON_MAX} characters — or `undefined` when the value is not a
+ * page. Used by the call guards, which know whether the tool answers over HTTP
+ * at all; a markdown file that happens to start with a tag is not a page, and
+ * only an http-family tool's bare string body can be one.
+ */
+export function pageInsteadOfJson(value: string): string | undefined {
+  if (!/^\s*<(!doctype|html|\?xml|head|body)\b/i.test(value)) return undefined;
+  return firstLine(value);
+}
+
+/**
+ * The short form of a failure whose body was not JSON: the status, the host
+ * that answered, and the first {@link NON_JSON_MAX} characters.
+ *
+ * A service's edge answers a refused request with its own HTML page, and that
+ * page used to reach the agent whole — thousands of characters of markup in
+ * place of a reason. The status and the first line of it say everything the
+ * agent can act on. A body that IS JSON keeps today's wording: it is the
+ * service's own message, however long, and cutting it would lose the reason.
+ */
+function nonJsonFailure(err: unknown, body: string): string | undefined {
+  if (looksLikeJson(body)) return undefined;
+  const status = readNumber(err, ['response', 'status']) ?? readNumber(err, ['status']);
+  const host = failureHost(err);
+  const where = [status === undefined ? '' : String(status), host === undefined ? '' : `from ${host}`]
+    .filter((p) => p !== '')
+    .join(' ');
+  const line = firstLine(body);
+  return where === '' ? line : `${where}: ${line}`;
+}
+
+function readNumber(source: unknown, path: string[]): number | undefined {
+  let node: unknown = source;
+  for (const key of path) {
+    if (node === null || typeof node !== 'object') return undefined;
+    try {
+      node = (node as Record<string, unknown>)[key];
+    } catch {
+      return undefined;
+    }
+  }
+  return typeof node === 'number' ? node : undefined;
+}
+
+/** The host that answered, from wherever the transport left the request's URL. */
+function failureHost(err: unknown): string | undefined {
+  for (const path of [
+    ['response', 'config', 'url'],
+    ['config', 'url'],
+    ['response', 'url'],
+    ['url'],
+  ]) {
+    let node: unknown = err;
+    for (const key of path) {
+      if (node === null || typeof node !== 'object') {
+        node = undefined;
+        break;
+      }
+      try {
+        node = (node as Record<string, unknown>)[key];
+      } catch {
+        node = undefined;
+        break;
+      }
+    }
+    if (typeof node === 'string' && node.length > 0) {
+      try {
+        return new URL(node).host;
+      } catch {
+        // not an absolute URL — nothing to name, try the next place
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Does `message` already state `status` AS a status code?
+ *
+ * The bare digits are not enough to go on: a message like `Processed 404 files`
+ * contains them without saying anything about a response code, and treating
+ * that as "already said" would drop the status from the one string the caller
+ * gets. So only the two phrasings a transport actually uses count — axios's
+ * `status code 404` and this file's own `HTTP 404` — and neither matches a
+ * longer number that merely starts with the same digits (`HTTP 4042`).
+ */
+function statesStatus(message: string, status: number): boolean {
+  return new RegExp(`(?:HTTP\\s+|status code\\s+)${status}(?!\\d)`, 'i').test(message);
+}
+
+/**
+ * `message` with the transport's own `status` and body folded INTO it, for a
+ * surface that can only answer with text.
+ *
+ * An MCP caller sees one string: the structured fields a `ToolChainOutcome`
+ * carries beside its message (`status`, `data`) reach it only if they are in
+ * that string. {@link describeToolFailure} already lifts an axios-shaped
+ * `response.data.error` out, but the UTCP http transport also throws failures
+ * carrying `status`/`data` directly, and THAT body is the actionable half —
+ * without this it was simply dropped on the way to the caller.
+ *
+ * Nothing is said twice: a message that already carries the body's own
+ * `error` reason — which is what `describeToolFailure` lifts out of an
+ * axios-shaped failure — does not get that reason again, and a status the
+ * message already STATES as a status code (see {@link statesStatus}) is not
+ * repeated either. And nothing is LOST to that: whatever else the body holds
+ * that the message does not already say (the `kind` a caller switches on, the
+ * `proposal` steps of a refused write) still follows it.
+ */
+export function withTransportDetail(message: string, status?: unknown, data?: unknown): string {
+  let out = message;
+  // An integer: a status is a response code, and `(HTTP 404.5)` would be
+  // nonsense to print and a sloppy pattern to match with.
+  if (Number.isInteger(status) && !statesStatus(out, status as number)) out += ` (HTTP ${status as number})`;
+  if (data !== undefined) {
+    // Already said? The actionable part of a body is its `error` field, and
+    // `describeToolFailure` lifts exactly that (plus `kind`) out of an
+    // axios-shaped failure — so a message already carrying it has the body in
+    // it, and appending the raw JSON beside it would read as two failures.
+    let reason: unknown;
+    try {
+      reason = (data as { error?: unknown })?.error;
+    } catch {
+      reason = undefined;
+    }
+    if (typeof reason === 'string' && reason.length > 0 && out.includes(reason)) {
+      // The reason is said. The REST of the body is said only as far as the
+      // message happens to contain it: a refusal's `kind`, its `proposal`
+      // steps or the paths it names are the half a caller acts on, and
+      // treating the whole body as covered because one of its fields was
+      // dropped them. What the message does not already carry follows it.
+      const unsaid = fieldsNotIn(out, data, 'error');
+      return unsaid === null ? out : `${out} Error data: ${unsaid}`;
+    }
+    // Total, like the rest of this file: a body that does not serialise
+    // degrades through `safeJsonText` rather than throwing in a catch path.
+    const text = typeof data === 'string' ? data : safeJsonText(data);
+    if (text.length > 0 && text !== '{}' && text !== '""' && !out.includes(text)) out += ` Error data: ${text}`;
+  }
+  return out;
+}
+
+/**
+ * The fields of `data` — all but `skip` — that `message` does not already
+ * state, as JSON; null when there is none. A field is stated when its value
+ * appears in the message: as it is for a string, a number or a boolean, as
+ * its JSON for anything else. Total: a body that cannot be walked or
+ * serialised says nothing more rather than throwing in a catch path.
+ */
+function fieldsNotIn(message: string, data: unknown, skip: string): string | null {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return null;
+  let unsaid: [string, unknown][];
+  try {
+    unsaid = Object.entries(data as Record<string, unknown>).filter(([key, value]) => {
+      if (key === skip || value === undefined) return false;
+      const scalar = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+      const said = scalar ? String(value) : safeJsonText(value);
+      return !(said.length > 0 && message.includes(said));
+    });
+  } catch {
+    return null;
+  }
+  if (unsaid.length === 0) return null;
+  // `Object.fromEntries` DEFINES each entry, where an assignment would run a
+  // setter: a body is JSON from a server, any name is a legal key in it, and
+  // one called `__proto__` assigned into a plain object sets its prototype
+  // and vanishes from what is serialised. Defined, every key is just a key.
+  const text = safeJsonText(Object.fromEntries(unsaid));
+  return text.length > 0 && text !== '{}' ? text : null;
 }
 
 /**
@@ -214,7 +418,19 @@ function noteText(value: unknown): string | undefined {
   return undefined;
 }
 
-export function toCallToolResult(value: unknown): CallToolResult {
+export function toCallToolResult(
+  value: unknown,
+  options?: {
+    /**
+     * Also answer a plain-object result as `structuredContent`. Asked for by
+     * a tool that carries an MCP App view: the view reads the result's fields
+     * from `structuredContent` (it has no other place to read them), while
+     * the model keeps reading the text block. Off for every other tool, so no
+     * client is handed each result twice.
+     */
+    structured?: boolean;
+  },
+): CallToolResult {
   // An image sentinel (see McpImageResult): the tool's result IS a picture.
   // Emit a native image content block so a multimodal client renders it, plus
   // the note as a text block so the transcript stays self-describing.
@@ -269,7 +485,22 @@ export function toCallToolResult(value: unknown): CallToolResult {
     return value as CallToolResult;
   }
   const text = typeof value === 'string' ? value : safeJsonText(value ?? null);
-  return { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+  const result: CallToolResult = { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+  if (options?.structured && value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    // The JSON-safe reading of the value, the same one the text block carries:
+    // the object itself may hold a BigInt, a cycle or a `toJSON` that throws,
+    // and the response serializer would fail on it where the text did not. A
+    // value with no JSON object reading carries no structured content.
+    try {
+      const structured: unknown = JSON.parse(text);
+      if (structured !== null && typeof structured === 'object' && !Array.isArray(structured)) {
+        result.structuredContent = structured as Record<string, unknown>;
+      }
+    } catch {
+      /* text was not JSON: nothing structured to attach */
+    }
+  }
+  return result;
 }
 
 /**

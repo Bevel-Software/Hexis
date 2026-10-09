@@ -1,11 +1,14 @@
 import jwt from 'jsonwebtoken';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   AccountAdmissionRefusedError,
+  AccountChangeRefusedError,
+  AccountDeactivatedError,
+  AuthBackendError,
   admitEveryone,
   type AccountProvisionReason,
   type IAccountAdmission,
@@ -16,8 +19,21 @@ import {
   timingSafeStringEqual,
   MIN_PASSWORD_LENGTH,
 } from './password-hash.js';
+import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * How long {@link AuthService.isActive} trusts what it last read. Every
+ * request carrying a credential asks, so the answer is kept briefly rather
+ * than read each time; switching an account off or on in THIS process
+ * forgets it at once, and another replica sees the change within this long.
+ */
+const ACTIVE_CACHE_MS = 30_000;
+
+/** The accounts core runs its own work as. Nobody signs in with them, and nobody switches them off. */
+const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL];
 
 /**
  * What every caller is told when it tries to give the deployment admin a
@@ -125,11 +141,28 @@ export class AuthService {
     const [existing] = await this.db
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.email, normalizedEmail))
+      .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
     if (existing) return;
     const verdict = await this.admission.canProvision(normalizedEmail, reason);
-    if (!verdict.ok) throw new AccountAdmissionRefusedError(verdict.message);
+    if (verdict.ok) return;
+    // A first sign-in the port would rather keep than turn away: the person
+    // is put on file, switched off, for an admin to switch on — and is still
+    // refused now, with the port's words. Only for single sign-on, the one
+    // provisioning nobody asked for (see `AccountAdmissionVerdict`).
+    if (verdict.waitForAdmin && reason === 'sso') {
+      await this.db
+        .insert(users)
+        .values({
+          email: normalizedEmail,
+          emailBidx: normalizedEmail,
+          name: normalizedEmail.split('@')[0] || normalizedEmail,
+          deactivatedAt: new Date(),
+        })
+        .onConflictDoNothing({ target: users.emailBidx });
+      throw new AccountAdmissionRefusedError(verdict.message, { waitingForAdmin: true });
+    }
+    throw new AccountAdmissionRefusedError(verdict.message);
   }
 
   /**
@@ -170,11 +203,12 @@ export class AuthService {
     // address's — one round trip short — and repeated timings would then
     // disclose which email the deployment configured as `ADMIN_EMAIL`. The
     // decoy hash already buys that uniformity for the scrypt half; this keeps
-    // the database half uniform too.
+    // the database half uniform too. Through the blind index: `email` is
+    // randomized ciphertext.
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.email, normalizedEmail))
+      .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
 
     if (this.isEnvAdminEmail(normalizedEmail)) {
@@ -200,6 +234,9 @@ export class AuthService {
         await verifyPassword(provided, await decoyHash());
         throw new Error('Invalid credentials');
       }
+      // Never refused for being switched off: the environment password is
+      // the deployment's way back in, and {@link deactivate} refuses this
+      // account for that reason.
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       await this.assertAdmitted(normalizedEmail, 'bootstrap');
       const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
@@ -215,6 +252,9 @@ export class AuthService {
     if (!user?.passwordHash || !matches) {
       throw new Error('Invalid credentials');
     }
+    // Only now, with the password proven: telling a stranger that an address
+    // is switched off would tell them it has an account.
+    if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
 
@@ -246,6 +286,7 @@ export class AuthService {
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
 
@@ -255,7 +296,13 @@ export class AuthService {
    * account (e.g. one that first arrived via SSO, or a reset for a locked-out
    * user) is deliberate admin behavior, not an error.
    *
-   * The deployment admin is the one target this refuses, for the reason
+   * WITHOUT a password the account is made for single sign-on: the person
+   * signs in through the deployment's provider and finds their account
+   * waiting, already holding its place (a seat, on a host that sells them).
+   * Password sign-in refuses it until a password is set. For an address that
+   * already has an account it changes nothing but an explicitly given name.
+   *
+   * WITH a password, the deployment admin is the one target this refuses, for the reason
    * {@link changePassword} refuses it: that account's password is the
    * environment's, so a stored hash would not replace it but ADD a second
    * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
@@ -266,11 +313,25 @@ export class AuthService {
   async createAccount(
     email: string,
     name: string | undefined,
-    password: string,
+    password?: string,
   ): Promise<AuthUser> {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
+    }
+    const suppliedName = (name ?? '').trim();
+    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
+    if (!password) {
+      await this.assertAdmitted(normalizedEmail, 'admin-create');
+      const [created] = await this.db
+        .insert(users)
+        .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
+        .onConflictDoUpdate({
+          target: users.emailBidx,
+          set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
+        })
+        .returning();
+      return this.toClientUser(created);
     }
     // Before the policy check, so the refusal names the real reason rather
     // than sending the admin off to pick a longer password first.
@@ -279,8 +340,6 @@ export class AuthService {
     }
     this.assertPasswordPolicy(password);
     await this.assertAdmitted(normalizedEmail, 'admin-create');
-    const suppliedName = (name ?? '').trim();
-    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
     const passwordHash = await hashPassword(password);
     // One atomic upsert. On conflict (re-provisioning an existing account) an
     // EXPLICITLY supplied name is persisted too; a blank name keeps the
@@ -288,9 +347,9 @@ export class AuthService {
     // fallback. `returning()` yields the authoritative row either way.
     const [row] = await this.db
       .insert(users)
-      .values({ email: normalizedEmail, name: displayName, passwordHash })
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
       .onConflictDoUpdate({
-        target: users.email,
+        target: users.emailBidx,
         set: suppliedName
           ? { passwordHash, name: suppliedName, updatedAt: new Date() }
           : { passwordHash, updatedAt: new Date() },
@@ -402,18 +461,28 @@ export class AuthService {
       name: string;
       hasPassword: boolean;
       isEnvAdmin: boolean;
+      /** When an admin switched the account off; null while it is on. */
+      deactivatedAt: Date | null;
+      /** One of the accounts the platform runs its own work as: never switched off, nobody signs in with it. */
+      isSystem: boolean;
       createdAt: Date;
     }>
   > {
-    const rows = await this.db.select().from(users).orderBy(users.email);
-    return rows.map((row) => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      hasPassword: row.passwordHash != null,
-      isEnvAdmin: this.reportsAsEnvAdmin(row.email),
-      createdAt: row.createdAt,
-    }));
+    // Sorted in-process: `email` is ciphertext in the database, so ORDER BY
+    // would sort by IV noise. The table is one row per team member.
+    const rows = await this.db.select().from(users);
+    return rows
+      .map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        hasPassword: row.passwordHash != null,
+        isEnvAdmin: this.reportsAsEnvAdmin(row.email),
+        deactivatedAt: row.deactivatedAt,
+        isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
+        createdAt: row.createdAt,
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
   }
 
   private assertPasswordPolicy(password: string): void {
@@ -443,24 +512,138 @@ export class AuthService {
     await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { id: user.id, email: user.email, name: user.name };
   }
 
   private async upsertUserByEmail(email: string, name: string) {
     const [user] = await this.db
       .insert(users)
-      .values({ email, name })
-      .onConflictDoUpdate({ target: users.email, set: { updatedAt: new Date() } })
+      .values({ email, emailBidx: email, name })
+      .onConflictDoUpdate({ target: users.emailBidx, set: { updatedAt: new Date() } })
       .returning();
     return user;
   }
 
+  /**
+   * The signature and expiry of a session token, and nothing else — whether
+   * its account is still on is {@link resolveSession}'s question. Every
+   * place a session is ACCEPTED goes through that one.
+   */
   verifyToken(token: string): { userId: string; email: string } {
     const decoded = jwt.verify(token, this.config.jwtSecret) as {
       userId: string;
       email: string;
     };
     return { userId: decoded.userId, email: decoded.email };
+  }
+
+  /**
+   * A session token that may still be used: signed by us, not expired, and
+   * its account still on. A token outlives a deactivation by up to seven
+   * days, so the signature alone no longer says the bearer may enter.
+   * Throws for an invalid token, {@link AccountDeactivatedError} for one
+   * whose account was switched off.
+   */
+  async resolveSession(token: string): Promise<{ userId: string; email: string }> {
+    const claim = this.verifyToken(token);
+    let active: boolean;
+    try {
+      active = await this.isActive(claim.userId);
+    } catch (err) {
+      // The token is fine; the database is not. Said apart from a refusal, so
+      // an outage is a 500 and not a sign-out (see `AuthBackendError`).
+      throw new AuthBackendError(err);
+    }
+    if (!active) throw new AccountDeactivatedError();
+    return claim;
+  }
+
+  private readonly activeCache = new Map<string, { active: boolean; at: number }>();
+
+  /**
+   * Whether the account behind a credential is on: it exists and no admin
+   * switched it off. Asked for every credential presented that does not
+   * already read the account (a session token, an internal token), so it is
+   * cached for {@link ACTIVE_CACHE_MS}; switching an account off or on in
+   * this process forgets its entry at once.
+   *
+   * A missing row is not on either — an erased account's tokens die with it.
+   *
+   * The deployment admin's account is always on, whatever its row says: its
+   * environment password signs it in regardless (see `loginWithPassword`),
+   * and a session that sign-in mints must then be usable too, or the way
+   * back into a deployment would lead nowhere. {@link deactivate} refuses
+   * the account, but a host may write the column itself.
+   */
+  async isActive(userId: string): Promise<boolean> {
+    const now = Date.now();
+    const hit = this.activeCache.get(userId);
+    if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit.active;
+    const [row] = await this.db
+      .select({ email: users.email, deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
+    this.activeCache.set(userId, { active, at: now });
+    return active;
+  }
+
+  /**
+   * Switch an account off. Its row, history and place in roles and groups
+   * stay; every credential it holds stops being honoured (see
+   * {@link isActive}). Idempotent: an account already off keeps the moment
+   * it was first switched off.
+   *
+   * The deployment admin is refused: the environment password is the way
+   * back into a deployment whose every other admin is gone, and switching
+   * it off would close that door from inside. So are the machine accounts
+   * core runs its own work as. Refusing an admin's own account is the
+   * route's concern, since it knows who is asking.
+   *
+   * Returns false when there is no such account.
+   */
+  async deactivate(userId: string): Promise<boolean> {
+    const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!row) return false;
+    if (this.isEnvAdminEmail(row.email)) {
+      throw new AccountChangeRefusedError('The deployment admin cannot be switched off: its password in the environment is the way back in.');
+    }
+    if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
+      throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');
+    }
+    await this.db
+      .update(users)
+      .set({ deactivatedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    this.activeCache.delete(userId);
+    return true;
+  }
+
+  /**
+   * Switch a deactivated account back on, if the deployment has room for it:
+   * the admission port is asked, as for a new account, because an account
+   * that is on takes the same place. A refusal throws
+   * {@link AccountAdmissionRefusedError} with the port's words. An account
+   * already on is not asked about.
+   *
+   * Returns false when there is no such account.
+   */
+  async reactivate(userId: string): Promise<boolean> {
+    const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!row) return false;
+    if (!row.deactivatedAt) return true;
+    if (this.admission !== admitEveryone) {
+      const verdict = await this.admission.canProvision(row.email, 'reactivate');
+      if (!verdict.ok) throw new AccountAdmissionRefusedError(verdict.message);
+    }
+    await this.db
+      .update(users)
+      .set({ deactivatedAt: null, updatedAt: new Date() })
+      .where(and(eq(users.id, userId), isNotNull(users.deactivatedAt)));
+    this.activeCache.delete(userId);
+    return true;
   }
 
   /**
@@ -513,7 +696,7 @@ export class AuthService {
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.email, canonicalEmail(email ?? '')))
+      .where(eq(users.emailBidx, canonicalEmail(email ?? '')))
       .limit(1);
 
     if (!user) return null;

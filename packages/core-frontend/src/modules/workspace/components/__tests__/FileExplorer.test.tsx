@@ -18,6 +18,13 @@ import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.con
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { PR_STALE_EVENT } from '../../../../core/events';
+import {
+  AppRegistryContext,
+  makeRegistry,
+  type FolderMenuContext,
+  type FolderMenuItemDef,
+  type FolderMenuTools,
+} from '../../../../core/registry';
 
 // authFetch is the bearer-token wrapper around window.fetch. The Download
 // click test asserts the URL + ?download=1 flag, so we mock it at the
@@ -177,8 +184,16 @@ interface RenderOptions {
   clearUploadNotice?: ReturnType<typeof vi.fn>;
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
+  createDirectory?: ReturnType<typeof vi.fn>;
+  refreshFileTree?: ReturnType<typeof vi.fn>;
   deleteEntry?: ReturnType<typeof vi.fn>;
   moveEntry?: ReturnType<typeof vi.fn>;
+  /**
+   * The DEPLOYMENT's folder-menu entries (`AppRegistry.folderMenuItems`).
+   * Omitted is the real core shape — the registry is still provided, and it is
+   * empty, which is what every other test in this file renders against.
+   */
+  folderMenuItems?: FolderMenuItemDef[];
   /** The workspace id — the encoded branch name, so it decides "protected". */
   workspaceId?: string;
   openFilePath?: string | null;
@@ -218,14 +233,20 @@ interface RenderOptions {
 
 /** The router's current query, so a test can read what a click put there. */
 function LocationProbe() {
-  const { search } = useLocation();
-  return <span data-testid="location-search">{search}</span>;
+  const { search, pathname } = useLocation();
+  return (
+    <>
+      <span data-testid="location-search">{search}</span>
+      <span data-testid="location-pathname">{pathname}</span>
+    </>
+  );
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
   const dispatchUpload = opts.dispatchUpload ?? vi.fn().mockResolvedValue(undefined);
   const clearUploadError = opts.clearUploadError ?? vi.fn();
   const createFile = opts.createFile ?? vi.fn().mockResolvedValue(undefined);
+  const createDirectory = opts.createDirectory ?? vi.fn().mockResolvedValue(undefined);
   const deleteEntry = opts.deleteEntry ?? vi.fn().mockResolvedValue(undefined);
   const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
@@ -245,16 +266,23 @@ function renderExplorer(opts: RenderOptions = {}) {
     clearUploadNotice: opts.clearUploadNotice ?? (() => {}),
     isUploading: opts.isUploading ?? false,
     openFilePath: opts.openFilePath ? atPath(opts.openFilePath) : null,
-    refreshFileTree: async () => fileTree,
+    refreshFileTree: opts.refreshFileTree ?? (async () => fileTree),
     dispatchUpload,
     clearUploadError,
     createFile,
+    createDirectory,
     deleteEntry,
     moveEntry,
     ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+    // The two travel together in the app — `WorkspaceInfo.id` is
+    // `encodeURIComponent(branch)` and `workspaceBranch` is its decode — so
+    // the fixture must not hand out a pair that cannot exist.
+    workspaceBranch: decodeURIComponent(opts.workspaceId ?? 'ws-1'),
   });
+  const registry = makeRegistry({ folderMenuItems: opts.folderMenuItems ?? [] });
   const ui = (ws: WorkspaceContextValue, mine: Map<string, number>) => (
       <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
+        <AppRegistryContext.Provider value={registry}>
         <AuthContext.Provider value={makeAuth()}>
           <AdminContext.Provider value={{ isAdmin: opts.isAdmin === true } as AdminContextValue}>
           <WorkspaceContext.Provider value={ws}>
@@ -295,6 +323,7 @@ function renderExplorer(opts: RenderOptions = {}) {
           </WorkspaceContext.Provider>
           </AdminContext.Provider>
         </AuthContext.Provider>
+        </AppRegistryContext.Provider>
       </MemoryRouter>
   );
   const minePaths = new Map([...(opts.minePaths ?? new Map<string, number>())].map(([k, n]) => [atPath(k), n]));
@@ -304,11 +333,14 @@ function renderExplorer(opts: RenderOptions = {}) {
     dispatchUpload,
     clearUploadError,
     createFile,
+    createDirectory,
     deleteEntry,
     ...result,
     /** Re-render the same explorer as though the user switched workspace. */
     switchWorkspace: (workspaceId: string) =>
-      result.rerender(ui({ ...workspace, workspaceId }, minePaths)),
+      result.rerender(
+        ui({ ...workspace, workspaceId, workspaceBranch: decodeURIComponent(workspaceId) }, minePaths),
+      ),
     /**
      * What the refetch behind a PR_STALE_EVENT does to a tree whose request
      * is gone: `/mine` stops listing it, so its paths leave `minePaths`. The
@@ -1943,7 +1975,6 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
 // follows the destination, plus whatever else about it is worth knowing.
 describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
-  const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
   const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
@@ -1973,6 +2004,10 @@ describe('FileExplorer: delete and move ask first', () => {
                     type: 'directory',
                     children: [
                       { name: 'nda.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/nda.md`, type: 'file' },
+                      // The folder in Juan's case carries its own rules, which
+                      // travel with it — the reason the resolver answers the
+                      // same holders on both sides of its move.
+                      { name: 'access.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/access.md`, type: 'file' },
                     ],
                   },
                 ],
@@ -2047,12 +2082,11 @@ describe('FileExplorer: delete and move ask first', () => {
     fireEvent.click(screen.getByText('Legal'));
   }
 
-  async function dropOn(rowName: string, sourcePath: string, kind: 'file' | 'directory' = 'file') {
+  async function dropOn(rowName: string, sourcePath: string) {
     await act(async () => {
       fireEvent.drop(screen.getByText(rowName), {
         dataTransfer: {
-          getData: (t: string) =>
-            t === DRAG_MIME ? sourcePath : t === DRAG_KIND_MIME ? kind : '',
+          getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''),
           files: [],
         },
       });
@@ -2084,7 +2118,9 @@ describe('FileExplorer: delete and move ask first', () => {
     it('counts every file under a folder, nested ones included', async () => {
       renderExplorer({ fileTree: TREE });
       await chooseDelete('Legal');
-      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 3 files?');
+      // `contract.md`, `access.md`, `Old/nda.md` and `Old/access.md` — the
+      // nested ones and the rules files count, because the delete takes them.
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 4 files?');
     });
 
     it('deletes nothing on Cancel', async () => {
@@ -2345,11 +2381,12 @@ describe('FileExplorer: delete and move ask first', () => {
      * The one drag test that actually DRAGS.
      *
      * Every other drop here hands the handler a `dataTransfer` built by the
-     * test, with the source path and kind written in by hand. That skips the
-     * handshake: `handleDragStart` writing the payload, and `handleDrop`
-     * reading it back under the same two MIME keys. Stop setting the payload,
-     * rename a key, or leave the row undraggable, and all of those tests still
-     * pass while no real drag in the app does anything at all.
+     * test, with the source path written in by hand. That skips the handshake:
+     * `handleDragStart` writing the payload, and `handleDrop` reading it back
+     * under the same MIME key — one key, the dragged row's path, since the
+     * dialog stopped needing the row's kind. Stop setting the payload, rename
+     * the key, or leave the row undraggable, and all of those tests still pass
+     * while no real drag in the app does anything at all.
      *
      * This one grabs the row, lets the component's own `dragStart` fill a
      * DataTransfer that behaves like the browser's (what `setData` stores is
@@ -2384,7 +2421,6 @@ describe('FileExplorer: delete and move ask first', () => {
       });
       // The component put the drag's subject where the drop handler looks.
       expect(store.get(DRAG_MIME)).toBe(CONTRACT);
-      expect(store.get(DRAG_KIND_MIME)).toBe('file');
 
       await act(async () => {
         fireEvent.drop(screen.getByText('Sales'), { dataTransfer });
@@ -2534,21 +2570,26 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(screen.getAllByText('Engineering: can no longer open')).toHaveLength(2);
     });
 
-    it('asks nothing about a folder being dragged, and says only what it always said', async () => {
-      const { moveEntry } = renderExplorer({ fileTree: TREE });
-      // A folder's access is its own access.md plus every file under it — not
-      // the question this lookup answers, so it is not asked.
-      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
-
-      const dialog = screen.getByRole('dialog');
-      expect(dialog).toHaveTextContent(
-        "Move Old to Sales? Access to it will follow Sales' rules from now on.",
+    it('asks about a folder being dragged too, and names what its move costs', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      // A folder's rules are the `access.md` files inside it, and they travel
+      // with it — the resolver counts them where they land, so the question
+      // is worth asking for a folder as much as for a file.
+      answerAccess({ read: [group('Engineering')] }, {});
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`);
+      await waitFor(() =>
+        expect(
+          mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+        ).toBe(true),
       );
-      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
-      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
-      expect(
-        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
-      ).toBe(false);
+      await act(async () => {});
+
+      const url = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access/prospective'))!;
+      expect(url).toContain(`from=${encodeURIComponent('KnowledgeBase/Legal/Old')}`);
+      expect(url).toContain(`toDir=${encodeURIComponent('KnowledgeBase/Sales')}`);
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
 
       // And it is still an ordinary move.
       await act(async () => {
@@ -2558,6 +2599,43 @@ describe('FileExplorer: delete and move ask first', () => {
         `${KB}/KnowledgeBase/Legal/Old`,
         `${KB}/KnowledgeBase/Sales/Old`,
       );
+    });
+
+    /**
+     * Juan's case, in the dialog. `Legal/Old` carries its own `access.md`
+     * (see the tree above), so the resolver answers the same holders on both
+     * sides — that resolution is the BACKEND's, proven over a real tree in
+     * `access-control.preview-relocation.test.ts` and
+     * `workspace.tools.test.ts`; the route is a mock here, as it is in every
+     * case in this suite.
+     *
+     * What this case proves is the half the dialog owns: given an answer with
+     * nothing in it, the dialog says so. It used to say nothing here because
+     * it asked nothing about a folder; now it says nothing because the answer
+     * says nothing, and the two are not the same sentence.
+     */
+    it('says nobody loses access when the answer is the same on both sides of a folder move', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering')], write: [group('Engineering')] },
+        { read: [group('Engineering')], write: [group('Engineering')] },
+      );
+      const dialog = await (async () => {
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`);
+        await waitFor(() =>
+          expect(
+            mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+          ).toBe(true),
+        );
+        await act(async () => {});
+        return screen.getByRole('dialog');
+      })();
+
+      // Not "could not work it out" and not a warning either: the question
+      // was asked, answered, and the answer is that nothing changes.
+      expect(dialog).toHaveTextContent("Move Old to Sales? Nobody's access changes.");
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
     });
 
     it('never decorates the next move with the last one’s answer', async () => {
@@ -3071,9 +3149,10 @@ describe('FileExplorer: platform files stay put', () => {
           file(`${KB}/access.md`),
           file(`${KB}/roles.yaml`),
           file(`${KB}/.bevelignore`),
+          // The organisation's own conventions file: the platform's guide is
+          // served from code, so an AGENTS.md is content wherever it sits —
+          // the server says the same.
           file(`${KB}/AGENTS.md`),
-          // Read from the repository root and nowhere else, so a nested one
-          // is ordinary content — the server says the same.
           file(`${KB}/Handbook/AGENTS.md`),
           file(`${KB}/Handbook/notes.md`),
           { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
@@ -3082,7 +3161,7 @@ describe('FileExplorer: platform files stay put', () => {
     ],
   });
 
-  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
+  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore'];
 
   let alertSpy: ReturnType<typeof vi.spyOn>;
 
@@ -3286,12 +3365,13 @@ describe('FileExplorer: platform files stay put', () => {
     expect(rename).toHaveAttribute('title', sentence('access.md'));
   });
 
-  it('a nested AGENTS.md is content, not a platform file: it drags like any other row', () => {
+  it('an AGENTS.md is content, not a platform file, at the root and nested: it drags like any other row', () => {
     renderExplorer({ fileTree: TREE });
-    // Both rows are named AGENTS.md; the nested one is the second.
     const rows = screen.getAllByText('AGENTS.md').map((n) => n.closest('button')!);
-    const nested = rows.find((r) => r.getAttribute('data-tree-path') === `${KB}/Handbook/AGENTS.md`);
-    expect(nested).toHaveAttribute('draggable', 'true');
+    for (const at of [`${KB}/AGENTS.md`, `${KB}/Handbook/AGENTS.md`]) {
+      const row = rows.find((r) => r.getAttribute('data-tree-path') === at);
+      expect(row, at).toHaveAttribute('draggable', 'true');
+    }
   });
 });
 
@@ -3491,5 +3571,572 @@ describe('FileExplorer: the root is the checkout', () => {
   it('says the knowledge base is empty, not missing, when the checkout is there but bare', () => {
     renderExplorer({ fileTree: workspace(d(KB_DIR, [d(`${KB_DIR}/KnowledgeBase`)])), verbatimTree: true });
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
+  });
+});
+
+// ── A deployment's own entries in a folder's right-click menu ──
+//
+// `AppRegistry.folderMenuItems`. Core registers none — "New ontology" belongs
+// to the distribution that has ontologies — so the registration point and the
+// no-change-with-nothing-registered case are tested together: the second is
+// what a core deployment actually ships.
+
+describe("FileExplorer folder menu: a deployment's own entries", () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      { name: 'reports', relativePath: 'reports', type: 'directory', children: [] },
+      { name: 'brief.md', relativePath: 'brief.md', type: 'file' },
+    ],
+  };
+
+  /** An entry with the parts a test does not care about already filled in. */
+  function anEntry(over: Partial<FolderMenuItemDef> & { id: string }): FolderMenuItemDef {
+    return {
+      label: over.id,
+      appliesTo: () => true,
+      run: () => {},
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    // The fixture's workspace is `ws-1`, which this model leaves unprotected —
+    // so the write lookup short-circuits and no test here answers `/access`
+    // unless it is about a protected branch and says so.
+    configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
+  });
+
+  /** The labels of the open menu's items, top to bottom. */
+  const menuLabels = () =>
+    [...screen.getByRole('menu').querySelectorAll('[role="menuitem"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    );
+
+  /** Right-click a row and let any lookup the menu makes land. */
+  async function openMenuOn(label: string) {
+    fireEvent.contextMenu(screen.getByText(label));
+    await act(async () => {});
+  }
+
+  /** `/access` answering one verdict, for the protected-branch cases. */
+  function answerCanWrite(canWrite: boolean) {
+    mockAuthFetch.mockImplementation(async (url: string) =>
+      String(url).includes('/access?')
+        ? { ok: true, status: 200, json: async () => ({ canRead: true, canWrite }) }
+        : undefined,
+    );
+  }
+
+  const separator = () => screen.queryByTestId('folder-menu-registered-separator');
+
+  it('shows a registered entry last, behind a separator, after the tree\'s own entries', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [anEntry({ id: 'new-thing', label: 'New thing' })],
+    });
+    await openMenuOn('reports');
+
+    const labels = menuLabels();
+    expect(labels).toContain('New thing');
+    // Last, and after Delete — the tree's own vocabulary ends before it starts.
+    expect(labels[labels.length - 1]).toBe('New thing');
+    expect(labels.indexOf('New thing')).toBeGreaterThan(labels.indexOf('Delete'));
+    const item = screen.getByRole('menuitem', { name: 'New thing' });
+    expect(item.previousElementSibling).toBe(separator());
+  });
+
+  it('draws registered entries in the order registered', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [
+        anEntry({ id: 'one', label: 'First thing' }),
+        anEntry({ id: 'two', label: 'Second thing' }),
+        anEntry({ id: 'three', label: 'Third thing' }),
+      ],
+    });
+    await openMenuOn('reports');
+
+    expect(menuLabels().slice(-3)).toEqual(['First thing', 'Second thing', 'Third thing']);
+    // One separator for the group, not one per entry.
+    expect(screen.getAllByTestId('folder-menu-registered-separator')).toHaveLength(1);
+  });
+
+  /**
+   * The negative half of the registration point, and the shape core ships:
+   * with nothing registered the menu is NOT "the same plus an empty group" —
+   * there is no separator either, and the item list is untouched.
+   */
+  it('leaves the menu exactly as it is when nothing is registered', async () => {
+    renderExplorer({ fileTree: TREE });
+    await openMenuOn('reports');
+    const asShipped = menuLabels();
+    expect(separator()).toBeNull();
+    cleanup();
+
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [anEntry({ id: 'new-thing', label: 'New thing' })],
+    });
+    await openMenuOn('reports');
+    // Nothing of the tree's own moved, changed or disappeared — the entry is
+    // an addition and only that.
+    expect(menuLabels()).toEqual([...asShipped, 'New thing']);
+  });
+
+  it('registers nothing of its own', () => {
+    expect(makeRegistry({}).folderMenuItems).toEqual([]);
+  });
+
+  it('offers them on every folder, and on no file row', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [anEntry({ id: 'new-thing', label: 'New thing' })],
+    });
+    await openMenuOn('reports');
+    expect(screen.getByRole('menuitem', { name: 'New thing' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(screen.getAllByText(KB_DIR)[0]);
+    await act(async () => {});
+    expect(screen.getByRole('menuitem', { name: 'New thing' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await openMenuOn('brief.md');
+    // A file's menu is out of scope: the entries are a folder's verbs.
+    expect(screen.queryByRole('menuitem', { name: 'New thing' })).toBeNull();
+    expect(separator()).toBeNull();
+  });
+
+  it('tells appliesTo the path, the branch, the write verdict and whether the branch is protected', async () => {
+    const appliesTo = vi.fn(() => true);
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [anEntry({ id: 'new-thing', appliesTo })],
+    });
+    await openMenuOn('reports');
+
+    expect(appliesTo).toHaveBeenCalledWith({
+      path: kbPath('reports'),
+      branch: 'ws-1',
+      canWrite: true,
+      branchProtected: false,
+    } satisfies FolderMenuContext);
+  });
+
+  it('tells appliesTo the branch is protected, and what the viewer may write there', async () => {
+    answerCanWrite(false);
+    const appliesTo = vi.fn(() => true);
+    renderExplorer({
+      fileTree: TREE,
+      workspaceId: 'main',
+      folderMenuItems: [anEntry({ id: 'new-thing', appliesTo })],
+    });
+    await openMenuOn('reports');
+    await waitFor(() =>
+      expect(appliesTo).toHaveBeenCalledWith(
+        expect.objectContaining({ branch: 'main', branchProtected: true, canWrite: false }),
+      ),
+    );
+    // Asked as a folder, repo-relative — the question the access route answers.
+    // (The menu's Download preflight asks about the same row on the same
+    // route, workspace-relative; this is the write lookup, not that one.)
+    expect(mockAuthFetch.mock.calls.map((c) => String(c[0]))).toContain(
+      `/api/workspace/main/access?path=${encodeURIComponent('reports')}&kind=folder`,
+    );
+  });
+
+  it('leaves an entry out of the folders its appliesTo refuses', async () => {
+    const writableOnly = anEntry({
+      id: 'new-thing',
+      label: 'New thing',
+      appliesTo: (folder) => folder.canWrite,
+    });
+
+    answerCanWrite(false);
+    renderExplorer({ fileTree: TREE, workspaceId: 'main', folderMenuItems: [writableOnly] });
+    await openMenuOn('reports');
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.queryByRole('menuitem', { name: 'New thing' })).toBeNull();
+    expect(separator()).toBeNull();
+    cleanup();
+
+    answerCanWrite(true);
+    renderExplorer({ fileTree: TREE, workspaceId: 'main', folderMenuItems: [writableOnly] });
+    await openMenuOn('reports');
+    expect(await screen.findByRole('menuitem', { name: 'New thing' })).toBeInTheDocument();
+  });
+
+  it('leaves out an entry whose appliesTo throws, logs it, and keeps the rest of the menu', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      renderExplorer({
+        fileTree: TREE,
+        folderMenuItems: [
+          anEntry({
+            id: 'broken',
+            label: 'Broken thing',
+            appliesTo: () => {
+              throw new Error('no idea');
+            },
+          }),
+          anEntry({ id: 'fine', label: 'Fine thing' }),
+        ],
+      });
+      await openMenuOn('reports');
+
+      expect(screen.queryByRole('menuitem', { name: 'Broken thing' })).toBeNull();
+      // The other registered entry, and the tree's own, are unaffected.
+      expect(screen.getByRole('menuitem', { name: 'Fine thing' })).toBeInTheDocument();
+      expect(screen.getByRole('menuitem', { name: /New folder/ })).toBeInTheDocument();
+      expect(screen.getByRole('menuitem', { name: /Delete/ })).toBeInTheDocument();
+      expect(errorSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain(
+        'Folder menu entry "broken" failed appliesTo',
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('says a broken appliesTo once per menu, not once per render', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const complaints = () =>
+      errorSpy.mock.calls.filter((c) => String(c[0]).includes('"broken" failed appliesTo')).length;
+    try {
+      // On a protected branch the write lookup actually goes out, and it
+      // answers `true` where the menu had assumed `false` — so the verdict
+      // MOVES, the folder the predicates are asked about is rebuilt, and
+      // every predicate is asked a second time.
+      answerCanWrite(true);
+      const broken = anEntry({
+        id: 'broken',
+        label: 'Broken thing',
+        appliesTo: () => {
+          throw new Error('no idea');
+        },
+      });
+      renderExplorer({ fileTree: TREE, workspaceId: 'main', folderMenuItems: [broken] });
+      await openMenuOn('reports');
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      await act(async () => {});
+
+      expect(complaints()).toBe(1);
+
+      // A second opening is a second menu, and says so again.
+      fireEvent.keyDown(document, { key: 'Escape' });
+      await openMenuOn('reports');
+      await act(async () => {});
+      expect(complaints()).toBe(2);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('creates what an action asks for through the workspace\'s own routes, and refreshes the tree', async () => {
+    const createDirectory = vi.fn().mockResolvedValue(undefined);
+    const createFile = vi.fn().mockResolvedValue(undefined);
+    const refreshFileTree = vi.fn().mockResolvedValue(null);
+    let seen: { folder: FolderMenuContext; tools: FolderMenuTools } | null = null;
+    renderExplorer({
+      fileTree: TREE,
+      createDirectory,
+      createFile,
+      refreshFileTree,
+      folderMenuItems: [
+        anEntry({
+          id: 'new-thing',
+          label: 'New thing',
+          run: async (folder, tools) => {
+            seen = { folder, tools };
+            await tools.createFolder(`${folder.path}/Thing`);
+            await tools.createFolder(`${folder.path}/Thing/Parts`);
+            await tools.createFile(`${folder.path}/Thing/index.md`, '# Thing\n');
+            await tools.refreshTree();
+          },
+        }),
+      ],
+    });
+    await openMenuOn('reports');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'New thing' }));
+    });
+
+    // The SAME calls `New file` and `New folder` make — so the access rules,
+    // the platform-file rules and the protected-branch rules reach an entry
+    // without the entry knowing they exist.
+    expect(createDirectory.mock.calls).toEqual([
+      [kbPath('reports/Thing')],
+      [kbPath('reports/Thing/Parts')],
+    ]);
+    expect(createFile).toHaveBeenCalledWith(kbPath('reports/Thing/index.md'), '# Thing\n');
+    expect(refreshFileTree).toHaveBeenCalled();
+    // The action is told exactly what the predicate was told.
+    expect(seen!.folder).toEqual({
+      path: kbPath('reports'),
+      branch: 'ws-1',
+      canWrite: true,
+      branchProtected: false,
+    } satisfies FolderMenuContext);
+    expect(Object.keys(seen!.tools).sort()).toEqual([
+      'createFile',
+      'createFolder',
+      'openPath',
+      'refreshTree',
+      'showError',
+    ]);
+  });
+
+  it('opens a path an action asks it to open', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [
+        anEntry({
+          id: 'new-thing',
+          label: 'New thing',
+          run: (folder, tools) => tools.openPath(`${folder.path}/Thing/index.md`),
+        }),
+      ],
+    });
+    await openMenuOn('reports');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'New thing' }));
+    });
+
+    expect(screen.getByTestId('location-pathname').textContent).toContain('index.md');
+  });
+
+  /**
+   * The route refuses, not the menu: an entry that creates into a folder the
+   * viewer may not write gets the server's own sentence, and it is shown
+   * through the same `window.alert` a refused "New folder" uses — the two must
+   * not drift into two different ways of saying the same no.
+   */
+  it('shows a refused create the way New folder shows one', async () => {
+    const refusal = 'You don\'t have permission to write to "reports"';
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      const createDirectory = vi.fn().mockRejectedValue(new Error(refusal));
+      renderExplorer({
+        fileTree: TREE,
+        workspaceId: 'main',
+        createDirectory,
+        folderMenuItems: [
+          anEntry({
+            id: 'new-thing',
+            label: 'New thing',
+            run: (folder, tools) => tools.createFolder(`${folder.path}/Thing`),
+          }),
+        ],
+      });
+      answerCanWrite(true);
+      await openMenuOn('reports');
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('menuitem', { name: 'New thing' }));
+      });
+
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+      expect(String(alertSpy.mock.calls[0][0])).toBe(`New thing failed:\n${refusal}`);
+      alertSpy.mockClear();
+
+      // The tree's own New folder, refused by the same route, says the same
+      // thing in the same place.
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('New folder in reports'));
+      });
+      const input = screen.getByPlaceholderText('folder name');
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'Thing' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+      });
+      expect(String(alertSpy.mock.calls[0][0])).toContain(refusal);
+      // One route, so one refusal: both asked the same workspace call.
+      expect(createDirectory.mock.calls).toEqual([
+        [kbPath('reports/Thing')],
+        [kbPath('reports/Thing')],
+      ]);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('closes the menu when an entry\'s action fails, and when it succeeds', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      renderExplorer({
+        fileTree: TREE,
+        folderMenuItems: [
+          anEntry({
+            id: 'boom',
+            label: 'Boom',
+            run: () => {
+              throw new Error('fell over');
+            },
+          }),
+          anEntry({ id: 'quiet', label: 'Quiet' }),
+        ],
+      });
+
+      await openMenuOn('reports');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Boom' }));
+      });
+      expect(screen.queryByRole('menu')).toBeNull();
+      expect(String(alertSpy.mock.calls[0][0])).toBe('Boom failed:\nfell over');
+
+      await openMenuOn('reports');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Quiet' }));
+      });
+      expect(screen.queryByRole('menu')).toBeNull();
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('reports a rejected action, and one that reports itself, the same way', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      renderExplorer({
+        fileTree: TREE,
+        folderMenuItems: [
+          anEntry({ id: 'rejects', label: 'Rejects', run: async () => { throw new Error('said no'); } }),
+          anEntry({
+            id: 'reports',
+            label: 'Reports',
+            run: (_folder, tools) => tools.showError('said no'),
+          }),
+        ],
+      });
+
+      await openMenuOn('reports');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Rejects' }));
+      });
+      await openMenuOn('reports');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Reports' }));
+      });
+
+      expect(alertSpy.mock.calls.map((c) => String(c[0]))).toEqual([
+        'Rejects failed:\nsaid no',
+        'Reports failed:\nsaid no',
+      ]);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('is reached and run with the keyboard, exactly as the tree\'s own entries are', async () => {
+    const user = userEvent.setup();
+    const run = vi.fn();
+    renderExplorer({
+      fileTree: TREE,
+      folderMenuItems: [anEntry({ id: 'new-thing', label: 'New thing', run })],
+    });
+    await openMenuOn('reports');
+
+    const registered = screen.getByRole('menuitem', { name: 'New thing' });
+    // An ordinary button, like `New folder` — nothing takes it out of the tab
+    // order and nothing refuses its activation.
+    expect(registered.tagName).toBe(screen.getByRole('menuitem', { name: /New folder/ }).tagName);
+    expect(registered).not.toHaveAttribute('aria-disabled');
+    expect(registered).not.toHaveAttribute('disabled');
+
+    // Tab in from the row the menu was opened on and collect what the keyboard
+    // reaches, so "reachable" is the keyboard's answer and not an assumption
+    // about the DOM.
+    screen.getByText('reports').closest('button')!.focus();
+    const reached: string[] = [];
+    for (let i = 0; i < 30 && document.activeElement !== registered; i++) {
+      await user.tab();
+      const el = document.activeElement as HTMLElement | null;
+      if (el?.getAttribute('role') === 'menuitem') reached.push((el.textContent ?? '').trim());
+    }
+    expect(document.activeElement).toBe(registered);
+    // The tree's own entries are reached the same way, on the way in.
+    expect(reached).toContain('New folder');
+    expect(reached).toContain('New thing');
+
+    await act(async () => {
+      await user.keyboard('{Enter}');
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+// Delete follows its own rule, narrower than the move's: the root's
+// `access.md` and `roles.yaml` are the repository's own and deleted by nobody,
+// with the sentence the server refuses with; a nested `access.md` is deleted
+// like any file its caller may write — the server's write gate decides.
+describe('FileExplorer: deleting platform files', () => {
+  const KB = 'knowledge-base';
+  const sentence = (name: string) => `${name} is the repository's own file and cannot be deleted.`;
+  const file = (p: string): FileTreeEntry => ({ name: p.slice(p.lastIndexOf('/') + 1), relativePath: p, type: 'file' });
+
+  const TREE: FileTreeEntry = rootedAtCheckout({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          file(`${KB}/access.md`),
+          file(`${KB}/roles.yaml`),
+          {
+            name: 'Team',
+            relativePath: `${KB}/Team`,
+            type: 'directory',
+            children: [file(`${KB}/Team/access.md`), file(`${KB}/Team/roles.yaml`)],
+          },
+        ],
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  it.each(['access.md', 'roles.yaml'])('the root %s shows Delete disabled with the sentence, for an admin too', async (name) => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
+    // The root's copy is the first row of that name.
+    fireEvent.contextMenu(screen.getAllByText(name)[0].closest('button')!);
+    const del = screen.getByRole('menuitem', { name: /Delete/i });
+    expect(del).toHaveAttribute('aria-disabled', 'true');
+    expect(del).toHaveAttribute('title', sentence(name));
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(deleteEntry).not.toHaveBeenCalled();
+  });
+
+  it('a nested access.md offers Delete, and deletes once confirmed', async () => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
+    const rows = screen.getAllByText('access.md');
+    expect(rows).toHaveLength(2);
+    fireEvent.contextMenu(rows[1].closest('button')!);
+    const del = screen.getByRole('menuitem', { name: /Delete/i });
+    expect(del).not.toHaveAttribute('aria-disabled');
+    expect(del).not.toHaveAttribute('title');
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Team/access.md`);
   });
 });

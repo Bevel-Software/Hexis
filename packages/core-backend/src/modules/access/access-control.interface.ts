@@ -84,10 +84,13 @@ export type HolderList = {
 export type PathHolders = { read: HolderList; write: HolderList };
 
 /**
- * One file's holders where it is now and where a move would put it — see
- * {@link IAccessControl.prospectiveHolders}.
+ * One file's or folder's holders where it is now and where a move would put
+ * it — see {@link IAccessControl.prospectiveHolders}.
  */
 export type ProspectiveHolders = { before: PathHolders; after: PathHolders };
+
+/** One caller's own verdict per access verb on one path. */
+export type PathVerbs = { read: boolean; write: boolean; download: boolean; owner: boolean };
 
 /**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
@@ -261,6 +264,19 @@ export interface IAccessControl {
   ): Promise<boolean>;
 
   /**
+   * Batched `canDownload` — one config load per call, the same resolution
+   * as the single form, each path's own frontmatter `download:` rules
+   * included. A folder download judges every file it would pack through
+   * this, so a folder of a thousand files costs one model load, not a
+   * thousand.
+   */
+  canDownloadBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>>;
+
+  /**
    * True iff `userEmail` is an `owner` of `relativePath` per the current
    * access tree, resolved from the `owner:` lists alone (the `write` /
    * `download` lists do NOT confer ownership — only the reverse holds).
@@ -358,25 +374,53 @@ export interface IAccessControl {
   }>;
 
   /**
-   * Who can open and who can edit one file where it IS, and where a move
-   * would put it. `toPath` names a path that does not exist yet — the point
-   * of the call is to answer before the move happens — so the resolution
-   * layers the file's OWN rules (its frontmatter, read from `fromPath`,
-   * which travels with the bytes) over the destination's folder chain.
+   * Who can open and who can edit one file or folder where it IS, and where a
+   * move would put it. `toPath` names a path that does not exist yet — the
+   * point of the call is to answer before the move happens — so the
+   * resolution is over what travels with the bytes: a file's OWN rules (its
+   * frontmatter, read from `fromPath`) layered over the destination's folder
+   * chain, or a folder's `access.md` files keyed at the directories they
+   * land in. Either way the rules the source inherited from its old parent
+   * are left behind and the new parent's apply.
    *
    * Writes nothing and moves nothing. The move confirmation diffs the two
    * sides to name who loses and who gains access.
-   *
-   * A FILE question only: a `fromPath` that is a directory is refused with a
-   * 400. A folder's access is its own `access.md` — which moves with it and
-   * governs everything beneath it — so resolving it as a file would name the
-   * wrong principals with the same confidence as the right ones.
    */
   prospectiveHolders(
     workspaceId: string,
     fromPath: string,
     toPath: string,
   ): Promise<ProspectiveHolders>;
+
+  /**
+   * The CALLER'S OWN `{ read, write, download, owner }` at `toPath` as they
+   * will be once `fromPath` has been moved (`sourceRemains: false`, the
+   * default) or copied (`sourceRemains: true`) there — the question a move's
+   * or copy's dry run asks, which the same four gates at `toPath` cannot
+   * answer because what travels with the bytes is not at the destination yet:
+   * the `access.md` files inside a folder, keyed at the directories they land
+   * in, and a file's own frontmatter.
+   *
+   * What a single file's rules GOVERN follows the name it lands under, not the
+   * one it leaves: landing as a directory's `access.md` they are that
+   * directory's rules (so copying `Sales/access.md` to `Legal/access.md`
+   * previews the access `Legal/` is about to have), and landing under any
+   * other name they are the file's own and govern nothing but it. Either way
+   * the answer is the one the gates will give a moment later.
+   *
+   * PREVIEW ONLY. It describes a tree that does not exist, so it must never
+   * decide whether an operation may run: the gates keep resolving against the
+   * tree that does. It writes nothing and moves nothing, and it answers the
+   * caller's own verbs only — never the content of an `access.md` they may
+   * not read.
+   */
+  previewAccessAfterRelocation(
+    workspaceId: string,
+    userEmail: string,
+    fromPath: string,
+    toPath: string,
+    opts?: { sourceRemains?: boolean },
+  ): Promise<PathVerbs>;
 
   /**
    * Finite expanded email set for configured users who could approve this path
@@ -594,6 +638,21 @@ export interface IAccessControl {
    * PR.
    */
   canWriteBatchAtRef(
+    workspaceId: string,
+    ref: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null>;
+
+  /**
+   * Batched variant of `canReadAtRef`, with the same null-semantics (the whole
+   * call returns null when the ref or its `roles.yaml` can't be resolved, and
+   * the caller must read that as deny). One access-tree load and one
+   * `git cat-file --batch` for the path set, the way `canWriteBatchAtRef`
+   * does it — a change request with forty files would otherwise cost forty
+   * single-path lookups to decide which of them its reader may see.
+   */
+  canReadBatchAtRef(
     workspaceId: string,
     ref: string,
     userEmail: string,

@@ -4,6 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthService } from '../auth/auth.service.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/account-admission.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
@@ -86,7 +87,8 @@ export function createMcpAuthMiddleware(
         // `externalApiKeyId` unset and are not metered.
         const resolved = await externalApiKeyService.verifyAndLoadToken(token);
         if (!resolved) {
-          rejectConnectionKey(res);
+          const switchedOff = (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) ?? false;
+          rejectConnectionKey(res, { switchedOff });
           return;
         }
         req.userId = resolved.user.id;
@@ -170,8 +172,10 @@ export function createMcpAuthMiddleware(
         return;
       }
       let user;
+      let active = false;
       try {
         user = await authService.getUserById(claim.userId);
+        if (user) active = await authService.isActive(user.id);
       } catch (err) {
         log.error('internal-token user lookup failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
@@ -179,6 +183,10 @@ export function createMcpAuthMiddleware(
       }
       if (!user) {
         unauthorized(res, 'Invalid or expired internal token');
+        return;
+      }
+      if (!active) {
+        unauthorized(res, ACCOUNT_DEACTIVATED_MESSAGE);
         return;
       }
       req.userId = user.id;
@@ -214,13 +222,20 @@ export function createMcpAuthMiddleware(
     // JWT path — same logic as `createAuthMiddleware` in modules/auth, kept
     // duplicated rather than imported because that one writes its own 401
     // body shape and we want the WWW-Authenticate header set.
+    let session: { userId: string; email: string };
     try {
-      const { userId, email } = authService.verifyToken(token);
-      req.userId = userId;
-      req.userEmail = email;
-      next();
-    } catch {
-      unauthorized(res, 'Invalid or expired token');
+      session = await authService.resolveSession(token);
+    } catch (err) {
+      if (err instanceof AuthBackendError) {
+        log.error('session account lookup failed:', { err: err.cause });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
+      unauthorized(res, err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token');
+      return;
     }
+    req.userId = session.userId;
+    req.userEmail = session.email;
+    next();
   };
 }

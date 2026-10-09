@@ -7,7 +7,9 @@ import type { ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { IErasureParticipant } from '../modules/auth/account-erasure.service.js';
 import type { IAccountAdmission } from '../modules/auth/account-admission.js';
+import type { IWriteAccess } from '../modules/write-access/write-access.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
+import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -100,6 +102,16 @@ export interface CorePorts {
    */
   kbStartupSteps?: readonly OnServerStart[];
   /**
+   * THIS distribution's say over the agent guide — the text `get_agent_guide`
+   * and a `read_file` of the guide's name serve. Called with core's sections
+   * and the layout in effect on every composition; returns the sections the
+   * guide is made of, so a distribution appends its own, replaces one of
+   * core's by id, or drops one, and every change core makes to the rest still
+   * reaches it. Core default: core's sections as they are. See
+   * `modules/agent-guide`.
+   */
+  agentGuide?: AgentGuideHook;
+  /**
    * Mirror this composition's branch model and knowledge-base layout onto the
    * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,
    * `PLUGINS_DIR`, …), for an overlay that still reads them. Core itself
@@ -117,6 +129,15 @@ export interface CorePorts {
    * admin who asked. See `modules/auth/account-admission.ts`.
    */
   accountAdmission?: IAccountAdmission;
+  /**
+   * Whether the deployment may be changed right now. Asked before every
+   * mutating route (bar the ones that sign people in, manage accounts or
+   * configure the deployment) and every write tool. Core default: always.
+   * A host that sells seats answers no while more accounts are on than its
+   * plan allows, so the workspace is read-only until an admin fixes it. See
+   * `modules/write-access/write-access.ts`.
+   */
+  writeAccess?: IWriteAccess;
 }
 
 /**

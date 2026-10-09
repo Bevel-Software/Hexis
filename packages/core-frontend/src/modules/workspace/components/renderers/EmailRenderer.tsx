@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
-import { useRendererWorkspaceId } from './rendererWorkspace';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
+import { useRendererRawRead } from './rendererRawRead';
 import { copyToClipboard } from '../../../../lib/clipboard';
 import { DownloadFileButton } from './DownloadFileButton';
 import { MAX_EMAIL_BYTES, attachmentLine, type EmailMessageView } from './emailMessage';
 import { buildEmailBody, type EmailLink } from './emailBody';
 import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
+import { useConfirm } from '../../../../shared/components';
 
 /**
  * The honest email view for `.eml` and `.msg`: labelled header fields, the
@@ -39,7 +40,16 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function EmailRenderer({ filePath }: FileRendererProps) {
-  const workspaceId = useRendererWorkspaceId();
+  /**
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
+   */
+  const rawRead = useRendererRawRead();
+  const { attempt, retry } = useReadRetry();
   const [view, setView] = useState<EmailMessageView | null>(null);
   // The sender's own markup, made safe to show. Rebuilt only when the message
   // changes — the sanitize + inline pass walks the whole body.
@@ -52,7 +62,7 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
   useEffect(() => {
     setView(null);
     setError(null);
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     // Cleanup ABORTS, not just flags: flipping `cancelled` alone would let an
@@ -60,10 +70,7 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
     const controller = new AbortController();
     (async () => {
       try {
-        const res = await authFetch(
-          rawFileUrl(workspaceId, filePath),
-          { signal: controller.signal },
-        );
+        const res = await rawRead.fetch(filePath, { signal: controller.signal });
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load email (HTTP ${res.status})`);
@@ -97,13 +104,16 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
       cancelled = true;
       controller.abort();
     };
-  }, [workspaceId, filePath]);
+  }, [rawRead, filePath, attempt]);
 
   if (error) {
     return (
       <div className="flex min-h-40 flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-ui text-danger">{error}</p>
-        <DownloadFileButton filePath={filePath} />
+        <p role="alert" className="text-ui text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          <RetryReadButton onRetry={retry} />
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }
@@ -270,6 +280,7 @@ function CopyLinkButton({ url }: { url: string }): React.ReactElement {
  * navigates at all.
  */
 function EmailLinks({ links }: { links: readonly EmailLink[] }): React.ReactElement {
+  const confirm = useConfirm();
   return (
     <div className="mt-4 border-t border-line pt-3">
       <div className="mb-1 flex items-center gap-1.5 text-meta font-medium uppercase tracking-wide text-ink-faint">
@@ -289,13 +300,19 @@ function EmailLinks({ links }: { links: readonly EmailLink[] }): React.ReactElem
               type="button"
               className="shrink-0 text-ink-faint hover:text-ink"
               title="Open in a new tab"
-              onClick={() => {
+              onClick={async () => {
                 // Asked before anything opens, with the address in the prompt:
                 // the reader decides against the REAL destination, not against
-                // whatever text the sender chose to show.
-                if (window.confirm(`Open this link?
+                // whatever text the sender chose to show. The Open click is
+                // itself the gesture the new tab rides on.
+                const { confirmed } = await confirm({
+                  title: 'Open link',
+                  message: `Open this link?
 
-${link.url}`)) {
+${link.url}`,
+                  confirmLabel: 'Open',
+                });
+                if (confirmed) {
                   window.open(link.url, '_blank', 'noopener,noreferrer');
                 }
               }}

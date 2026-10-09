@@ -47,22 +47,47 @@ export {
   type LeasedWorker,
 } from './core/lifecycle.js';
 
-// Packaged assets (migrations/, kb-template/) + the migration runners.
-export { coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
+// Packaged assets (migrations/, kb-template/, agent-guide/) + the migration runners.
+export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
 export {
   runCoreMigrations,
   runEnterpriseMigrations,
+  runPiiEncryptionBackfill,
+  // The same backfill for an overlay's own sealed columns: its spec goes to
+  // `runEnterpriseMigrations`, or to `runPiiBackfill` under a lock of its own.
+  runPiiBackfill,
+  type PiiBackfillExecutor,
+  type PiiBackfillSpec,
+  type PiiBackfillTable,
+  type PiiBlindIndex,
 } from './modules/database/migrate.js';
 export {
   getDb,
   createDb,
   closeDb,
   dbSchemaOf,
+  piiKeysOf,
   assertSchemaName,
   DEFAULT_DB_SCHEMA,
   type Database,
   type DbOptions,
 } from './modules/database/connection.js';
+
+// PII column encryption (see shared/column-crypto.ts). The key belongs to the
+// database handle (`createDb(url, { piiKey })`), so an overlay seals its own
+// schema's columns by declaring them `encryptedText` / `blindIndexText` and
+// running on the handle the composition root built. `derivePiiKeys` and
+// `piiKeysOf` are for code that handles the stored form itself: SQL written
+// by hand, or a process that reads a knowledge base's tables without a handle
+// of this package's.
+export {
+  encryptedText,
+  blindIndexText,
+  derivePiiKeys,
+  isEncryptedBlob,
+  PII_CIPHERTEXT_PREFIX,
+  type PiiKeys,
+} from './shared/column-crypto.js';
 
 // Build identity surfaced by GET /api/health.
 export { GIT_SHA, resolveGitSha } from './version.js';
@@ -102,7 +127,17 @@ export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
 export {
+  alwaysWritable,
+  READ_ONLY_CODE,
+  type IWriteAccess,
+  type WriteAccessVerdict,
+} from './modules/write-access/write-access.js';
+export {
   AccountAdmissionRefusedError,
+  AccountDeactivatedError,
+  AccountChangeRefusedError,
+  AuthBackendError,
+  ACCOUNT_DEACTIVATED_MESSAGE,
   admitEveryone,
   type AccountAdmissionVerdict,
   type AccountProvisionReason,

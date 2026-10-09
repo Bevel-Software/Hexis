@@ -47,6 +47,14 @@ describe('catalogRevision', () => {
     );
   });
 
+  it('moves when an MCP App view changes by a byte, and not when the same view is read again', () => {
+    const view = { uri: 'ui://hexis/page.html', text: '<html>v1</html>' };
+    const base = catalogRevision([manualLine('serper')], [skill()], [view]);
+    expect(catalogRevision([manualLine('serper')], [skill()], [{ ...view }])).toBe(base);
+    expect(catalogRevision([manualLine('serper')], [skill()], [{ ...view, text: '<html>v2</html>' }])).not.toBe(base);
+    expect(catalogRevision([manualLine('serper')], [skill()], [])).not.toBe(base);
+  });
+
   describe('a manual added, changed or removed', () => {
     const base = catalogRevision([manualLine('serper')], []);
 
@@ -115,6 +123,8 @@ describe('GET /agent/catalog-revision', () => {
     skills: SkillSummary[];
     userId?: string | undefined;
     resolveUserEmail?: (userId: string) => Promise<string | undefined>;
+    /** The served views, or a manifest read that fails. */
+    mcpApps?: { manifest(): Promise<{ resources: { uri: string; text: string }[] }> };
   }): Promise<{
     url: string;
     catalogFingerprints: ReturnType<typeof vi.fn>;
@@ -132,6 +142,7 @@ describe('GET /agent/catalog-revision', () => {
           next();
         },
         resolveUserEmail: deps.resolveUserEmail ?? (async () => 'someone@example.com'),
+        ...(deps.mcpApps ? { mcpApps: deps.mcpApps } : {}),
       }),
     );
     http = app.listen(0);
@@ -172,6 +183,35 @@ describe('GET /agent/catalog-revision', () => {
 
     expect(body).toEqual({ revision: catalogRevision([], []), tools: 0, skills: 0 });
     expect(catalogFingerprints).not.toHaveBeenCalled();
+  });
+
+  it('folds the served MCP App views into the revision, so a changed view moves it', async () => {
+    const view = { uri: 'ui://hexis/page.html', text: '<html>v1</html>' };
+    const { url } = await mount({
+      manuals: [manualLine('serper')],
+      skills: [skill()],
+      userId: 'u1',
+      mcpApps: { manifest: async () => ({ resources: [view] }) },
+    });
+    const body = (await (await fetch(`${url}/agent/catalog-revision`)).json()) as { revision: string };
+    expect(body.revision).toBe(catalogRevision([manualLine('serper')], [skill()], [view]));
+    expect(body.revision).not.toBe(catalogRevision([manualLine('serper')], [skill()]));
+  });
+
+  it('answers the no-views revision when the manifest cannot be read, rather than failing', async () => {
+    const { url } = await mount({
+      manuals: [manualLine('serper')],
+      skills: [skill()],
+      userId: 'u1',
+      mcpApps: {
+        manifest: async () => {
+          throw new Error('the view file is gone');
+        },
+      },
+    });
+    const res = await fetch(`${url}/agent/catalog-revision`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { revision: string }).revision).toBe(catalogRevision([manualLine('serper')], [skill()]));
   });
 
   it('does not fail the request when the email lookup throws', async () => {

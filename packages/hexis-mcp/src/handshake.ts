@@ -1,5 +1,6 @@
 import type { Transport, TransportSendOptions } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk/types.js';
+import { printable } from '@bevel-software/platform-mcp-core';
 
 /**
  * Who is running this local server — learned from the MCP handshake.
@@ -7,12 +8,13 @@ import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk
  * The agent that spawned this process (Claude Code, Cursor, Codex, …) is
  * the thing a person sees on the deployment's Audit log and the thing they
  * revoke; "hexis-mcp on <hostname>" told them neither which agent it was nor
- * let two agents on one machine be told apart. Nothing about the parent
- * process is reliable across platforms, but the very first message an MCP
+ * let two agents on one machine be told apart. The very first message an MCP
  * client sends is `initialize`, and it carries `clientInfo` — the client's
  * own name and version. That is the identity a browser sign-in registers
  * under, and what keys the stored credential, so each agent signs in once
- * and gets its own row.
+ * and gets its own row. A client that names itself to nobody gets a GUESS
+ * from the process tree instead (parent-process.ts), marked as such; only
+ * when that fails too does the sign-in say "Unknown agent".
  *
  * The catch is ordering: the sign-in has to happen BEFORE the handshake is
  * answered (the deployment's agent instructions ride the `initialize`
@@ -25,9 +27,15 @@ import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk
  */
 
 export interface AgentIdentity {
-  /** `clientInfo.name` as the client sent it, e.g. `claude-code`. */
+  /** `clientInfo.name` as the client sent it, e.g. `claude-code` — or, when guessed, the program that spawned this server. */
   name: string;
   version?: string;
+  /**
+   * True when the client named itself to nobody and the name is the parent
+   * program's (see parent-process.ts). Said on stderr at sign-in, so a wrong
+   * guess can be traced to its source.
+   */
+  guessed?: boolean;
 }
 
 /**
@@ -46,7 +54,16 @@ const KNOWN_AGENTS: Readonly<Record<string, string>> = {
   codex: 'Codex',
   'codex-mcp-client': 'Codex',
   'gemini-cli-mcp-client': 'Gemini CLI',
+  'gemini-cli': 'Gemini CLI',
   'visual studio code': 'VS Code',
+  // Program names, for an identity guessed from the parent process. `claude`
+  // is both the Claude Desktop app and the Claude Code CLI on disk, so the
+  // guess can only say "Claude".
+  claude: 'Claude',
+  code: 'VS Code',
+  'code - insiders': 'VS Code',
+  codium: 'VSCodium',
+  zed: 'Zed',
 };
 
 /** "Claude Code", "Cursor" — the agent as a person names it. */
@@ -73,12 +90,35 @@ export function agentStoreKey(agent: AgentIdentity): string {
 
 /**
  * What a browser sign-in registers this server as with the deployment — the
- * name the Audit log then shows for the connection. With an agent known:
- * "Claude Code · local server on LAPTOP-1". Without one (a client that
- * sent no `clientInfo`): the plain machine name the server always used.
+ * name the Audit log then shows for the connection. With an agent known or
+ * guessed: "Claude Code · local server on LAPTOP-1". With none at all: the
+ * truth, "Unknown agent · local server on LAPTOP-1". It used to say
+ * "hexis-mcp on LAPTOP-1", which read as if the local server itself were the
+ * agent — the one thing the Audit log must never suggest.
  */
 export function registrationName(agent: AgentIdentity | null, host: string): string {
-  return agent ? `${agentDisplayName(agent)} · local server on ${host}` : `hexis-mcp on ${host}`;
+  return `${agent ? agentDisplayName(agent) : 'Unknown agent'} · local server on ${host}`;
+}
+
+/**
+ * The one stderr line that says who this server is signing in as and where
+ * that came from — so a wrong name on the Audit log can be traced in the
+ * client's server log, instead of being a mystery for a week.
+ */
+export function identityLine(agent: AgentIdentity | null, host: string, version: string): string {
+  // The client's name and version, and the host name, are not ours: each is
+  // rendered `printable`, so a newline or an escape in them cannot forge a
+  // second log line or paint the terminal.
+  const as = `signing in as ${printable(registrationName(agent, host))}`;
+  // No agent means no identity was available from either source: none named
+  // in a handshake (a nameless `initialize`, or no `initialize` at all), and
+  // none found among the parent processes (or no process table to read).
+  const from = !agent
+    ? 'no client identity was available — none named in a handshake, none found among the parent processes'
+    : agent.guessed
+      ? `guessed from the parent process (${printable(agent.name)}) — the client named itself to nobody; a server started by hand from that program's terminal is named the same`
+      : `named by the client's handshake (${printable(agent.name)}${agent.version ? ` ${printable(agent.version)}` : ''})`;
+  return `[hexis-mcp ${version}] ${as} — ${from}`;
 }
 
 /** The agent an `initialize` request names, or null for any other message or a nameless client. */
