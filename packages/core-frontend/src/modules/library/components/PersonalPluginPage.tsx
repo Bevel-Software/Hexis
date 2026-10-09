@@ -13,7 +13,7 @@ import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
 import { PageActions } from './PageActions';
 import { PendingItemReview } from './PendingItemReview';
 import { cn } from '../../../lib/utils';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { PersonalAddDialog } from './PersonalAddDialog';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { copyToClipboard } from '../utils/clipboard';
@@ -123,7 +123,7 @@ export function PersonalPluginPage() {
             it on a narrow viewport. */}
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           <PluginBreadcrumb />
-          <h1 className="min-w-0 truncate text-display font-semibold" title={name}>
+          <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={name}>
             {name}
           </h1>
         </div>

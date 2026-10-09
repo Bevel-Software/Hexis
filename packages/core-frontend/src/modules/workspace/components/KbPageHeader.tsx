@@ -14,7 +14,7 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 
@@ -252,7 +252,7 @@ export function KbPageHeader({
           // a heading you cannot finish reading needs somewhere to say it. A
           // platform file shown by its plain name hovers its real one.
           title={fileNameTooltip(path, kbDirName) ?? titleOf(path, kbDirName)}
-          className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+          className={`min-w-0 truncate text-display font-semibold text-ink focus:outline-none ${TITLE_INK_ROOM}`}
         >
           {titleOf(path, kbDirName)}
         </h1>

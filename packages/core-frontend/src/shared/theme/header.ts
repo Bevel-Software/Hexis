@@ -31,6 +31,19 @@
 export const HEADER_BAND = 'flex h-header flex-none items-center';
 
 /**
+ * Room for the ink of a page title that truncates.
+ *
+ * A title on the band is one line at `text-display`, whose line height (1.15)
+ * is tighter than the glyphs it sets: the tails of g, y and p, and accents
+ * above capitals, reach past the line box. `truncate` clips to that box, so
+ * "Everything" lost the bottoms of its g and y. Padding widens the clipping
+ * box by the overhang and the matching negative margin hands the space back,
+ * so the title still occupies exactly its line box and the band, which
+ * centres it, does not move.
+ */
+export const TITLE_INK_ROOM = 'py-1 -my-1';
+
+/**
  * The air above the band, for every column that shows one.
  *
  * The band's TOP edge is the seam, not just its height, so a column that
