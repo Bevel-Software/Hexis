@@ -17,6 +17,10 @@ import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { AccountLinkService } from '../modules/embed/account-link.service.js';
+import { EmbedService } from '../modules/embed/embed.service.js';
+import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
+import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
@@ -26,7 +30,7 @@ import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
-import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -55,17 +59,21 @@ function parseDomainList(raw: string): string[] {
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
+import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
+import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
-import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
+import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -110,6 +118,7 @@ import { ReviewWorkflowService } from '../modules/workflow/review-workflow/revie
 import { FileLockService } from '../modules/workflow/file-lock.service.js';
 import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
+import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
@@ -132,6 +141,7 @@ import {
 } from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
+  createTokenVerifier,
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
@@ -229,6 +239,14 @@ export interface CoreServices {
   spillStore: SpillStore;
   /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
   agentUploadStore: AgentUploadStore;
+  /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
+  agentDownloadStore: IAgentDownloadStore;
+  /**
+   * Every user a download fetch identifies itself as, by its bearer and its
+   * session cookie — none when it carries none that verifies — so the
+   * download route can refuse a link presented by someone it was not issued to.
+   */
+  agentDownloadFetcher: (req: Request) => Promise<string[]>;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -258,6 +276,11 @@ export interface CoreServices {
   toolDeleteService: ToolDeleteService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
+  /**
+   * "What does your team do?" — the starter pack a new knowledge base's admin
+   * may fill it from, and the record of what was chosen. See modules/onboarding.
+   */
+  starterPackService: StarterPackService;
   joinRequestsService: JoinRequestsService;
   /**
    * Records a join request and finishes it in the background. Its `sweep()`
@@ -335,6 +358,14 @@ export interface CoreServices {
   connectionProbeService: ConnectionProbeService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
+  /**
+   * The embed surface: the token-minted page a chat host frames, and the
+   * account links that let an outside identity reach it. Exposed so an
+   * overlay can mint for its own consumers and register a node-id resolver.
+   */
+  embedService: EmbedService;
+  /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
+  mcpAppService: IMcpAppService;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -685,6 +716,29 @@ export async function createCoreServices(
     publicBaseUrl: config.publicBackendUrl,
     tokenPrefix: config.uploadTokenPrefix,
   });
+  // The way OUT: bytes `request_file_download` captured, held beside the
+  // upload root — outside every workspace, for the same reason — until their
+  // one-time link is fetched or expires.
+  const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  // An upload root that is itself named `agent-downloads` would make the two
+  // stores one directory, each sweeping the other's files.
+  if (agentDownloadsRoot === path.resolve(config.agentUploadsRoot)) {
+    throw new Error(
+      'AGENT_UPLOADS_ROOT must not be a directory named `agent-downloads`: that name, beside it, is the agent download root.',
+    );
+  }
+  await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
+    name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
+    why:
+      'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
+      'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
+  });
+  const agentDownloadStore = new AgentDownloadStore({
+    root: agentDownloadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    // `<tenant>-down_`: recognisable by shape beside the upload token.
+    tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
+  });
   // Office-document/PDF text extraction for `read_file`/`grep`, cached by
   // content hash beside the workspaces root (see `DocExtractionCache`).
   const docExtractService = new DocExtractService(config.docExtractCacheRoot);
@@ -869,6 +923,9 @@ export async function createCoreServices(
     // it reach every hook point.
     workflowHooks,
   );
+  // The leftover-branch cleanup asks the Deployment page at every round, so
+  // switching it off there applies without a restart.
+  workflowService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
@@ -1053,6 +1110,27 @@ export async function createCoreServices(
     [config.adminEmail],
   );
 
+  // The starter-pack question: one commit on the default branch through the
+  // same batch write the roles admin uses, the choice kept as a deployment
+  // setting. Read by its routes and by `start_session`'s first-run note.
+  const starterPackService = new StarterPackService({
+    packsDir: config.starterPacksDir,
+    kb,
+    workspaceService,
+    workflow: workflowService,
+    adminAccess,
+    settings,
+    accessControl,
+    disk,
+    pluginSource,
+    pluginLocks: pluginProvisionService,
+    events: eventBus,
+    fileChanges: fileChangeNotifier,
+    // Its own lock: one starter-pack choice at a time, a concern no other
+    // service's mutex serialises.
+    choosing: new WorkspaceMutex(),
+  });
+
   // In-app update check: lazily compares the running release version against
   // the newest published GitHub release, only when an admin's browser asks —
   // no timers, so a deployment nobody looks at makes zero calls. The flag
@@ -1152,9 +1230,13 @@ export async function createCoreServices(
   // Connection keys also come as GitHub-shaped links (`gho_…`, kind
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
-    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC,
-  });
+  const externalApiKeyService = new ExternalApiKeyService(
+    db,
+    config.externalApiKeyPrefix,
+    { [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC },
+    // A key's first use tells its owner's open tabs that the agent arrived.
+    eventBus,
+  );
 
   // The facade that lets products which sync marketplaces only from a GitHub
   // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
@@ -1192,6 +1274,34 @@ export async function createCoreServices(
   const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
     retentionDaysFrom(settings.resolve('auditRetentionDays')),
   );
+  // The embed surface. It reads files through the workspace service and
+  // judges them with the same access resolver the app file page uses, so what
+  // a reader may see and change inside a chat is what they may see and change
+  // in the app — never a second answer to the same question.
+  const embedService = new EmbedService(
+    // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+    // the environment value, empty on a deployment that took the default or
+    // named it in setup, and every path the embed builds starts with it.
+    { ...config, kbDirName },
+    kb,
+    workspaceService,
+    accessControl,
+    authService,
+    workflowService,
+    gitService,
+    new AccountLinkService(db),
+    // The SAME extension-to-reader registry `read_file` dispatches on, so the
+    // embed answer to "is this text, or bytes a renderer fetches?" cannot
+    // disagree with what a read of the file returns.
+    createFileReaderRegistry(docExtractService),
+    // The SAME pre-disk gate the file editor and the agent tools run: a
+    // `roles.yaml` that would not parse is refused before it is written, from
+    // a chat exactly as from the app.
+    makeRolesYamlWriteValidator(kbDirName),
+  );
+  // The `ui://` view `open_page` carries, with the one origin it may frame:
+  // this deployment own public origin.
+  const mcpAppService = new McpAppService({ publicFrontendUrl: config.publicFrontendUrl });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1225,6 +1335,9 @@ export async function createCoreServices(
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
     // Every attributable call lands in the Audit log through this.
     agentAuditService,
+    // The views the endpoint serves over resources/read, and the tools that
+    // carry them.
+    mcpAppService,
   );
   // A changed secret invalidates what the proxy built from the old value for
   // that user (null = shared secret → everyone): remembered manual failures,
@@ -1247,6 +1360,8 @@ export async function createCoreServices(
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
     tokenPrefix: config.mcpOAuthTokenPrefix,
+    // An agent connection's first use tells its owner's open tabs the agent arrived.
+    events: eventBus,
   });
   // RFC 9728 pointer carried on every MCP 401 challenge so OAuth-capable
   // clients discover the AS. Single source of truth for the resource id.
@@ -1283,8 +1398,22 @@ export async function createCoreServices(
     loadActiveGroups,
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
+  // The branch every tool call runs on is resolved by the handler, before the
+  // tool: the default read live (a rename in the settings is the next call's
+  // default), the existence asked without cloning anything.
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess, {
+    defaultBranch: () => kb.defaultBranch,
+    isMissing: (branch) => workspaceService.isBranchMissing(branch),
+  });
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
+  // Every credential kind this server issues — connection keys, internal
+  // tokens and app sessions (bearer or cookie) — so a fetch carrying another
+  // user's identity of ANY kind is refused the link.
+  const agentDownloadFetcher: (req: Request) => Promise<string[]> = createDownloadFetcherIdentifier(
+    { verifyToolToken, verifySession: (token) => authService.verifyToken(token) },
+    readAuthCookie,
+  );
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
@@ -1452,6 +1581,8 @@ export async function createCoreServices(
     kbDirName,
     spillStore,
     agentUploadStore,
+    agentDownloadStore,
+    agentDownloadFetcher,
     docExtractService,
     accessControl,
     creatorAccess,
@@ -1466,6 +1597,7 @@ export async function createCoreServices(
     agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
+    starterPackService,
     joinRequestsService,
     pluginJoinRequestJobs,
     pluginLinkIndex,
@@ -1499,6 +1631,8 @@ export async function createCoreServices(
     connectionProbeService,
     externalApiKeyService,
     internalTokenService,
+    embedService,
+    mcpAppService,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,

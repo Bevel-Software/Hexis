@@ -35,6 +35,7 @@ import type { KbContext } from '../../../shared/kb-context.js';
 import {
   AppliedChangeMismatchError,
   BranchAuthorshipError,
+  BranchDeleteRefusedError,
   WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
@@ -743,12 +744,22 @@ export class GitService implements IGitService {
   //     fresh per-branch workspace gets its backup seeded by the workspace
   //     bootstrap path, not by a branch switch on an existing one.
 
+  /**
+   * Delete a branch, here and on origin. Answers the tip it had — origin's
+   * when origin had it, else the local head's; null when neither existed —
+   * so the caller can say which commit a restore would start from.
+   *
+   * `expectTip`, when given, is the tip the caller's checks were made
+   * against: the remote delete is then leased on it, and a branch that moved
+   * since (a colleague pushed) is refused by the host rather than deleted
+   * with work nobody looked at.
+   */
   async deleteBranch(
     workspaceId: string,
     name: string,
     user: AuthUser,
-    opts: { onlyIfNoRemote?: boolean; systemCleanup?: boolean } = {},
-  ): Promise<void> {
+    opts: { onlyIfNoRemote?: boolean; systemCleanup?: boolean; expectTip?: string } = {},
+  ): Promise<{ lastCommit: string | null }> {
     assertValidBranchName(name);
     if (this.kb.isProtectedBranch(name)) {
       throw new ProtectedBranchError(name, 'deleting a protected branch');
@@ -777,28 +788,33 @@ export class GitService implements IGitService {
             `Branch "${name}" still exists on origin — refusing to auto-prune.`,
           );
         }
-      } else {
-        // Authored-or-admin delete path. The branch's author (per the
-        // `<email-localpart>/...` naming convention — see `isBranchAuthoredBy`)
-        // can always delete their own draft. Admins (per the workspace's
-        // `roles.yaml`) can additionally clean up anyone's branch, including
-        // unprefixed CLI branches like `fix/...` that have no recognisable
-        // author. We detect admin via `canWrite(_, _, 'roles.yaml')` because
-        // that predicate is the existing source of truth for `Admin`-role
-        // membership inside the access model — no separate `isAdmin()` plumbing
-        // needed.
-        // Two authorship conventions: `<localpart>/…` UI drafts, and the
-        // `suggestions/<who>-<id8>/…` namespace the propose flow files its
-        // branches under — a user resetting THEIR OWN suggestion bundle is
-        // deleting their own branch.
-        const isAuthor =
-          isBranchAuthoredBy(name, user.email) ||
-          isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
-        const isAdmin = this.accessControl
-          ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
-          : false;
-        if (!isAuthor && !isAdmin) {
-          throw new BranchAuthorshipError(name);
+      } else if (!(await this.mayDeleteBranch(workspaceId, name, user))) {
+        throw new BranchAuthorshipError(name);
+      }
+
+      // Remote delete FIRST. Skip in `onlyIfNoRemote` mode (the contract is
+      // local-only cleanup) and skip when origin has no such branch. Origin
+      // is asked, not this clone's remote-tracking ref: a branch pushed from
+      // another clone since the last fetch has no tracking ref here, and
+      // trusting the cache would delete it locally while it lives on.
+      // A refusal by the host — or a host that cannot be asked — fails the
+      // whole delete: the local branch is untouched, so nothing is
+      // half-deleted and the person can try again. Deleting locally first
+      // would leave a branch that vanished here but lives on the remote —
+      // and, unlike a refused write, a deleted branch has no later push to
+      // reconcile it.
+      let remoteTip: string | null = null;
+      if (!opts.onlyIfNoRemote) {
+        try {
+          remoteTip = await this.originBranchTip(cwd, name);
+          if (remoteTip !== null) {
+            const lease = opts.expectTip ? [`--force-with-lease=refs/heads/${name}:${opts.expectTip}`] : [];
+            await this.git(cwd, ['push', ...lease, 'origin', '--delete', name]);
+          }
+        } catch (err) {
+          const detail = sanitizeError(err);
+          log.warn(`the repository host refused to delete branch "${name}"; leaving it in place:`, { detail });
+          throw new BranchDeleteRefusedError(name, detail);
         }
       }
 
@@ -810,19 +826,91 @@ export class GitService implements IGitService {
       // Skip when no local ref exists — the picker can surface branches that
       // exist only as `refs/remotes/origin/<name>` (the user hasn't worked on
       // them locally), and "discard from origin" must still work for those.
+      let localTip: string | null = null;
       if (await this.refExists(cwd, `refs/heads/${name}`)) {
+        localTip = await this.revParseOrNull(cwd, `refs/heads/${name}`);
         await this.git(cwd, ['branch', '-D', name]);
       }
+      return { lastCommit: remoteTip ?? localTip };
+    });
+  }
 
-      // Remote delete. Skip in `onlyIfNoRemote` mode (the contract is
-      // local-only cleanup) and skip when there's no remote ref to delete.
-      // A push failure here surfaces to the caller — the local ref is
-      // already gone, and we don't try to resurrect it because rolling back
-      // a "merged-into-the-deleted-branch" local commit would be even more
-      // confusing than the half-finished state.
-      if (!opts.onlyIfNoRemote
-        && await this.refExists(cwd, `refs/remotes/origin/${name}`)) {
-        await this.git(cwd, ['push', 'origin', '--delete', name]);
+  /**
+   * The author-or-Admin rule for deleting `name`. The branch's author (per
+   * the `<email-localpart>/...` naming convention — see `isBranchAuthoredBy`)
+   * can always delete their own draft. Admins (per the workspace's
+   * `roles.yaml`) can additionally clean up anyone's branch, including
+   * unprefixed CLI branches like `fix/...` that have no recognisable author.
+   * Admin is detected via `canWrite(_, _, 'roles.yaml')` because that
+   * predicate is the existing source of truth for `Admin`-role membership
+   * inside the access model — no separate `isAdmin()` plumbing needed.
+   *
+   * Two authorship conventions: `<localpart>/…` UI drafts, and the
+   * `suggestions/<who>-<id8>/…` namespace the propose flow files its branches
+   * under — a user resetting THEIR OWN suggestion bundle is deleting their
+   * own branch.
+   */
+  async mayDeleteBranch(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
+    const isAuthor =
+      isBranchAuthoredBy(name, user.email) ||
+      isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
+    if (isAuthor) return true;
+    return this.accessControl
+      ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
+      : false;
+  }
+
+  /**
+   * Where `name` stands in this clone, read from its refs as the last fetch
+   * left them (the caller fetches first): whether it exists on origin or as a
+   * local head, its tip (origin's when it has one), and how many commits on
+   * it — on either ref — are not on `defaultBranch`.
+   *
+   * The default branch is read from origin's ref, falling back to the local
+   * head on a clone whose default was never pushed. A default that resolves
+   * on neither throws: a count against nothing would call every commit
+   * unmerged, or none.
+   */
+  async branchState(
+    workspaceId: string,
+    name: string,
+    defaultBranch: string,
+  ): Promise<{ exists: boolean; lastCommit: string | null; unmergedCommits: number }> {
+    assertValidBranchName(name);
+    assertValidBranchName(defaultBranch);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const remote = await this.revParseOrNull(cwd, `refs/remotes/origin/${name}`);
+      const local = await this.revParseOrNull(cwd, `refs/heads/${name}`);
+      if (remote === null && local === null) return { exists: false, lastCommit: null, unmergedCommits: 0 };
+      const base =
+        (await this.revParseOrNull(cwd, `refs/remotes/origin/${defaultBranch}`)) ??
+        (await this.revParseOrNull(cwd, `refs/heads/${defaultBranch}`));
+      if (base === null) {
+        throw new Error(`the default branch "${defaultBranch}" does not resolve in this clone`);
+      }
+      const tips = [remote, local].filter((sha): sha is string => sha !== null);
+      const { stdout } = await this.git(cwd, ['rev-list', '--count', ...tips, `^${base}`]);
+      return { exists: true, lastCommit: remote ?? local, unmergedCommits: Number(stdout.trim()) || 0 };
+    });
+  }
+
+  /**
+   * Whether commit `ancestor` is contained in commit `descendant`. Exit 1 is
+   * git's "no"; anything else — a commit this clone does not have — throws,
+   * so a caller deciding to delete on a yes never gets one by accident.
+   */
+  async isAncestor(workspaceId: string, ancestor: string, descendant: string): Promise<boolean> {
+    const sha = /^[0-9a-f]{4,64}$/i;
+    if (!sha.test(ancestor) || !sha.test(descendant)) throw new Error('isAncestor takes commit ids');
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      try {
+        await this.git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant]);
+        return true;
+      } catch (err) {
+        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return false;
+        throw err;
       }
     });
   }
@@ -1867,7 +1955,21 @@ export class GitService implements IGitService {
    */
   async remoteBranchExists(workspaceId: string, branch: string): Promise<boolean> {
     assertValidBranchName(branch);
-    const cwd = await this.repoDir(workspaceId);
+    return this.originHasBranch(await this.repoDir(workspaceId), branch);
+  }
+
+  /** Origin's tip of `branch`, asked of origin itself; null when it has no such branch. */
+  private async originBranchTip(cwd: string, branch: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.git(cwd, ['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${branch}`]);
+      return /^([0-9a-f]+)\s/.exec(stdout)?.[1] ?? null;
+    } catch (err) {
+      if ((err as { exitCode?: number }).exitCode === 2) return null;
+      throw err;
+    }
+  }
+
+  private async originHasBranch(cwd: string, branch: string): Promise<boolean> {
     try {
       await this.git(cwd, ['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${branch}`]);
       return true;
@@ -1962,9 +2064,10 @@ export class GitService implements IGitService {
       // commit the clone holds but origin has not seen into cherry-picks of
       // the commits it merged — the merged branch stops being a parent, so
       // "does the published head contain the target's head" answers no
-      // however many times the update runs. Only the change-request update
-      // asks for it; every other pull replays plain saves, where the two
-      // spellings produce the same history.
+      // however many times the update runs. The change-request update and
+      // every push's cooperative recovery ask for it (a merge a refused push
+      // stranded rides along with the branch's next push); with no merge
+      // among the local commits the two spellings produce the same history.
       await this.git(cwd, [
         'rebase',
         '--autostash',
@@ -2081,7 +2184,12 @@ export class GitService implements IGitService {
         }
         throw err;
       }
-      await this.rebaseOntoRemote(cwd, branch, remoteRef);
+      // `preserveMerges` here too: this sync runs on a timer, so it is the
+      // pull most likely to reach a branch while a merge a refused open or
+      // update left local is still waiting for its push. A plain rebase would
+      // flatten that merge before the push ever ran, and the branch would be
+      // "behind" its target again however many times it was updated.
+      await this.rebaseOntoRemote(cwd, branch, remoteRef, { preserveMerges: true });
       this.accessControl?.invalidate(workspaceId);
       const after = await this.revParseOrNull(cwd, 'HEAD');
       const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
@@ -2138,6 +2246,36 @@ export class GitService implements IGitService {
    */
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
     return this.mutex.run(workspaceId, async () => this.hasUnpushedCommitsAt(await this.repoDir(workspaceId)));
+  }
+
+  /**
+   * Whether this clone's HEAD already holds everything origin has on its
+   * branch: a push would then fast-forward origin to HEAD, and no cooperative
+   * pull-rebase would replay origin's commits INTO HEAD first. Asked after a
+   * fetch, about the fetched ref.
+   *
+   * The roles.yaml preservation asks this before pushing a restore it finds
+   * already committed. "HEAD's roles.yaml is the base version" is only worth
+   * publishing when origin ends up AT HEAD — a clone behind origin would have
+   * origin's divergent copy rebased into it on the way, and the push would
+   * land exactly what the restore exists to keep off the base.
+   *
+   * Exit 1 is git's "not an ancestor". Every other failure propagates — a
+   * tracking ref that does not exist, a broken repository — so a probe that
+   * cannot answer fails the guard closed, never open.
+   */
+  async headContainsOrigin(workspaceId: string): Promise<boolean> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const branch = await this.currentBranch(cwd);
+      try {
+        await this.git(cwd, ['merge-base', '--is-ancestor', `refs/remotes/origin/${branch}`, 'HEAD']);
+        return true;
+      } catch (err) {
+        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return false;
+        throw err;
+      }
+    });
   }
 
   /**

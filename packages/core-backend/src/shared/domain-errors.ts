@@ -108,21 +108,50 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
     readonly path: string,
     readonly originalDetail: string,
     readonly recoveryDetail: string,
+    /**
+     * Why the push did not land. `diverged`: the remote moved and the
+     * cooperative rebase could not reconcile. `refused`: the host turned the
+     * push away for any other reason (an outage, credentials, a dropped
+     * connection) — nothing to reconcile, the next push of the branch carries
+     * the commits. The opening clause is the same either way.
+     */
+    readonly cause: 'diverged' | 'refused' = 'diverged',
   ) {
     super(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-        `The agent will resolve this.`,
+        (cause === 'refused'
+          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
+          : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+            `The agent will resolve this.`),
       409,
-      {
-        kind: 'push-needs-resolution',
-        branch,
-        path,
-        originalDetail,
-        recoveryDetail,
-      },
+      // The two details are raw git output — stderr can quote a credentialed
+      // URL, server paths, the host's own error page. They stay on the error
+      // for the server log and never enter the payload the browser receives.
+      { kind: 'push-needs-resolution', branch, path },
     );
     this.name = 'PushNeedsAgentResolutionError';
+  }
+}
+
+/**
+ * The repository host refused to delete a branch (an outage, a protection
+ * rule, a dropped connection). Deletion pushes FIRST and deletes locally only
+ * once the host agreed, so the branch is still there — locally and remotely —
+ * and the person can try again later. Unlike a refused write there is nothing
+ * to keep "saved locally": a deleted branch has no later push to carry it.
+ *
+ * `detail` is the raw git failure, for the server log only; it never enters
+ * the message or the payload.
+ */
+export class BranchDeleteRefusedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-refused' as const;
+  constructor(readonly branchName: string, readonly detail: string) {
+    super(
+      `The repository host refused to delete "${branchName}"; it is still there. Try again later.`,
+      409,
+      { kind: 'branch-delete-refused', branchName },
+    );
+    this.name = 'BranchDeleteRefusedError';
   }
 }
 
@@ -221,8 +250,18 @@ const STRINGIFIED_ABSENT_VALUES = new Set(['undefined', 'null']);
  * nothing", which is the one case where naming the branch back is impossible.
  */
 export function assertBranchProvided(branch: unknown): asserts branch is string {
-  if (typeof branch !== 'string' || branch.length === 0) throw new BranchRequiredError();
-  if (STRINGIFIED_ABSENT_VALUES.has(branch)) throw new BranchRequiredError();
+  if (!branchProvided(branch)) throw new BranchRequiredError();
+}
+
+/**
+ * The same question as {@link assertBranchProvided}, answered rather than
+ * thrown — for a caller that must know whether the branch refusal is the one
+ * this call is going to get, without being the one to raise it. The generic
+ * argument check asks it so that refusal keeps coming first.
+ */
+export function branchProvided(branch: unknown): branch is string {
+  if (typeof branch !== 'string' || branch.length === 0) return false;
+  return !STRINGIFIED_ABSENT_VALUES.has(branch);
 }
 
 /**
@@ -242,6 +281,23 @@ export class BranchNotFoundError extends WorkflowDomainError {
       branch,
     });
     this.name = 'BranchNotFoundError';
+  }
+}
+
+/**
+ * A tool that defaults its branch was called without one, and the deployment
+ * has no default branch configured to fall back on. Not `BranchRequiredError`:
+ * the tool's schema says the branch is optional, so "you must pass one" would
+ * misdescribe the call — the caller did nothing wrong, the deployment is not
+ * set up. 503 with kind `default-branch-unset`; passing a branch works.
+ */
+export class DefaultBranchUnsetError extends WorkflowDomainError {
+  readonly kind = 'default-branch-unset' as const;
+  constructor() {
+    super('This deployment has no default branch configured: pass `branch` to name the one to use.', 503, {
+      kind: 'default-branch-unset',
+    });
+    this.name = 'DefaultBranchUnsetError';
   }
 }
 
@@ -327,6 +383,47 @@ export class WorkflowValidationError extends WorkflowDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
     this.name = 'WorkflowValidationError';
+  }
+}
+
+/**
+ * An agent's `delete_branch` refused, for a reason a person can act on. The
+ * `reason` is the discriminator a caller branches on; the message says what
+ * to do about it. Nothing was deleted.
+ *
+ * - `open-change-request` (409) — a request is open from or into the branch;
+ *   `number` names it. Withdrawing or declining it is a person's action, in
+ *   the app.
+ * - `unmerged-commits` (409) — `unmergedCommits` commits would be lost;
+ *   `discardUnmerged` is the deliberate way past it.
+ * - `saves-landing` (409) — the branch's checkout still has saves waiting to
+ *   be committed or a file held for editing. Clears itself within seconds.
+ * - `state-unconfirmed` (503) — the shared repository could not be fetched,
+ *   so the branch's current state is unknown.
+ */
+export type BranchDeleteBlockedReason =
+  | 'open-change-request'
+  | 'unmerged-commits'
+  | 'saves-landing'
+  | 'state-unconfirmed';
+
+export class BranchDeleteBlockedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-blocked' as const;
+  constructor(
+    readonly reason: BranchDeleteBlockedReason,
+    readonly branchName: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    // `extra` first: it adds detail, and can never contradict the kind,
+    // reason or branch the status and fields above were chosen for.
+    super(message, reason === 'state-unconfirmed' ? 503 : 409, {
+      ...extra,
+      kind: 'branch-delete-blocked',
+      reason,
+      branchName,
+    });
+    this.name = 'BranchDeleteBlockedError';
   }
 }
 

@@ -43,6 +43,8 @@ import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
 import { traceFiles } from '../utils/file-trace';
+import { displayFileName } from '../utils/display-file-name';
+import { useConfirm } from '../../../shared/components';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git
@@ -274,6 +276,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * workspaceId it was started with against this before touching state.
    */
   const workspaceIdRef = useRef<string | null>(workspaceId);
+  // Unsaved-work questions are asked in the app's own dialog and awaited.
+  const confirm = useConfirm();
+  // Paths whose close is waiting on that question: a second close of the same
+  // tab while it is asked must not queue the same question twice.
+  const askingClosePathsRef = useRef(new Set<string>());
   useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
   useEffect(() => { activeTabPathRef.current = activeTabPath; }, [activeTabPath]);
   useEffect(() => { fileTreeRef.current = fileTree; }, [fileTree]);
@@ -508,11 +515,31 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   const closeTab = useCallback(async (
     tab: OpenTab,
-    options?: { skipConfirm?: boolean },
+    options?: { skipConfirm?: boolean; workspaceId?: string | null },
   ): Promise<{ closed: boolean; newActivePath: string | null }> => {
+    // Pin the workspace the close was decided in. The question waits on the
+    // person; if the workspace moves to another branch meanwhile, a tab with
+    // the same path there is not the one they agreed to close.
+    const closeWorkspaceId =
+      options?.workspaceId !== undefined ? options.workspaceId : workspaceIdRef.current;
+    const notClosed = () => ({ closed: false, newActivePath: activeTabPathRef.current });
+    if (workspaceIdRef.current !== closeWorkspaceId) return notClosed();
     if (tab.isDirty && !options?.skipConfirm) {
-      const confirmed = window.confirm(UNSAVED_TAB_WARNING(basename(tab.path)));
-      if (!confirmed) return { closed: false, newActivePath: activeTabPathRef.current };
+      // The name the tab shows, so this prompt and the bulk one agree.
+      if (askingClosePathsRef.current.has(tab.path)) return notClosed();
+      askingClosePathsRef.current.add(tab.path);
+      let confirmed: boolean;
+      try {
+        ({ confirmed } = await confirm({
+          title: 'Unsaved changes',
+          message: UNSAVED_TAB_WARNING(displayFileName(tab.path, kbDirName)),
+          confirmLabel: 'Close anyway',
+          destructive: true,
+        }));
+      } finally {
+        askingClosePathsRef.current.delete(tab.path);
+      }
+      if (!confirmed || workspaceIdRef.current !== closeWorkspaceId) return notClosed();
     }
     const tabs = openTabsRef.current;
     const idx = tabs.findIndex((t) => t.path === tab.path);
@@ -527,7 +554,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       setActiveTabPath(newActivePath);
     }
     return { closed: true, newActivePath };
-  }, []);
+  }, [kbDirName, confirm]);
 
   const closeAllTabs = useCallback(() => {
     setOpenTabs([]);
@@ -694,9 +721,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   // ── Working-tree mutations ────────────────────────────────────────────────
 
-  const createFile = useCallback(async (relativePath: string, content?: string) => {
+  const createFile = useCallback(async (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => {
     if (!workspaceId) return;
-    await writeFile(workspaceId, relativePath, content ?? '');
+    await writeFile(workspaceId, relativePath, content ?? '', options);
     await refreshFileTree();
     bumpFs();
   }, [workspaceId, refreshFileTree, bumpFs]);
@@ -1232,8 +1259,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     );
     const dirty = toClose.filter((t) => t.isDirty);
     if (dirty.length > 0) {
-      const confirmed = window.confirm(UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))));
+      const { confirmed } = await confirm({
+        title: 'Unsaved changes',
+        message: UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path, kbDirName))),
+        confirmLabel: 'Close anyway',
+        destructive: true,
+      });
       if (!confirmed) return false;
+      // The question waited on the person; the workspace may have moved on.
+      if (!isCurrent()) return false;
     }
     // Optimistic tree removal. A folder delete on the server takes 2-3s
     // (N per-file commits batched into one push) — without optimism the
@@ -1276,7 +1310,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // server state. The backend's end-of-batch `fs-tree-changed` SSE
     // event triggers a refresh anyway as belt-and-suspenders. No second
     // `bumpFs()` either — the optimistic bump above already counted.
-  }, [workspaceId, refreshFileTree, bumpFs]);
+  }, [workspaceId, kbDirName, refreshFileTree, bumpFs, confirm]);
 
   const reloadTabFromDisk = useCallback(async (relativePath: string) => {
     if (!workspaceId) return;

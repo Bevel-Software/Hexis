@@ -27,6 +27,9 @@ const syncLog = logger('sync');
 const lockLog = logger('lock');
 const crLog = logger('cr');
 const mergeLog = logger('merge');
+
+/** Who the leftover cleanup deletes as. Its deletions skip the authorship check, and the log names them `system`. */
+const SYSTEM_ACTOR: AuthUser = { id: 'system', email: 'system', name: 'system' };
 import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -46,6 +49,8 @@ import type {
   ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
+  DeleteBranchPreview,
+  DeleteBranchResult,
   FileApproval,
   FileLock,
   FolderChangeRequest,
@@ -77,15 +82,20 @@ import { FileLockService } from './file-lock.service.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
-import { sanitizeError } from './sanitize-error.js';
+import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
+  BranchAuthorshipError,
+  BranchDeleteBlockedError,
+  BranchNotFoundError,
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
   OpenChangeRequestBlocksMergeError,
+  ProtectedBranchError,
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
@@ -484,9 +494,19 @@ export class WorkflowService implements IWorkflowService {
       // request has to be withdrawn or declined first. `systemCleanup` does
       // its own open-request check under this same lock, and the legacy
       // `onlyIfNoRemote` prune only fires when origin no longer has the ref.
+      // A request that proposes nothing any more is closed first, and then
+      // blocks nothing. Only for a caller the deletion would go ahead for: a
+      // refused deletion changes nothing, a closed request included — so one
+      // that fails after the close reopens what it closed.
+      let closed: number[] = [];
       if (!opts?.systemCleanup && !opts?.onlyIfNoRemote) {
-        const open = await this.openChangeRequestOn(name);
+        let open = await this.openChangeRequestOn(name);
+        if (open !== null && !this.kb.isProtectedBranch(name) && (await this.mayDelete(workspaceId, name, user))) {
+          closed = await this.closeEmptyRequestsOn(name, user.id, { workspaceId, fresh: false });
+          open = await this.openChangeRequestOn(name);
+        }
         if (open !== null) {
+          await this.reopenAfterFailedDelete(closed, name, user.id);
           // Two different situations, two different actors. A request FROM
           // this branch is the deleter's own to withdraw; a request INTO it
           // belongs to someone else, and telling the branch owner to
@@ -501,7 +521,12 @@ export class WorkflowService implements IWorkflowService {
           );
         }
       }
-      await this.deleteBranchUnlocked(workspaceId, name, user, opts);
+      try {
+        await this.deleteBranchUnlocked(workspaceId, name, user, opts);
+      } catch (err) {
+        await this.reopenAfterFailedDelete(closed, name, user.id);
+        throw err;
+      }
     });
   }
 
@@ -510,9 +535,15 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     name: string,
     user: AuthUser,
-    opts?: { onlyIfNoRemote?: boolean; systemCleanup?: boolean },
-  ): Promise<void> {
-    await this.git.deleteBranch(workspaceId, name, user, opts);
+    opts?: { onlyIfNoRemote?: boolean; systemCleanup?: boolean; expectTip?: string },
+  ): Promise<{ lastCommit: string | null }> {
+    const { lastCommit } = await this.git.deleteBranch(workspaceId, name, user, opts);
+    // One line per deletion, whoever asked: the commit is what a restore
+    // starts from, and for a deletion made in the app or by the cleanup this
+    // line is the only trace there is.
+    // By id, never by address: log lines carry no email (the release's own promise).
+    const actor = opts?.systemCleanup ? 'system' : user.id;
+    log.info(`branch deleted by ${actor}: "${name}" at ${lastCommit ?? '(no commit)'}`);
     // Retire the deleted branch's own workspace clone, best-effort. A stale
     // clone left on disk would be silently REUSED if the branch name is ever
     // recreated (the workspace bootstrap short-circuits on an existing
@@ -525,6 +556,360 @@ export class WorkflowService implements IWorkflowService {
     } catch (err) {
       log.warn(`could not retire workspace clone of deleted branch "${name}":`, { err });
     }
+    return { lastCommit };
+  }
+
+  /**
+   * Every open change request naming `branch`, at either end — the preview's
+   * list. `openChangeRequestOn` answers the first one, which is all a refusal
+   * needs.
+   */
+  private async openChangeRequestsOn(
+    branch: string,
+  ): Promise<{ number: number; end: 'source' | 'target' }[]> {
+    const rows = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(
+        and(
+          or(
+            eq(changeRequests.sourceBranch, branch),
+            eq(changeRequests.targetBranch, branch),
+          ),
+          eq(changeRequests.state, 'open'),
+        ),
+      );
+    return rows.map((row) => ({
+      number: row.number,
+      end: row.sourceBranch === branch ? ('source' as const) : ('target' as const),
+    }));
+  }
+
+  /**
+   * Whether open change request `summary` proposes nothing at this moment:
+   * its changes, recomputed now, are empty, and no save to its source branch
+   * is still landing (a save under a held lock or queued for the commit
+   * worker is on disk but not yet in the diff). Anything that cannot be
+   * determined is a no — a request is never closed on a guess.
+   *
+   * `workspaceId` is the clone to compute in (any clone will do: the diff is
+   * between origin's refs); absent, the source branch's own, as the app's
+   * lazy close always did. `fresh` says that clone was just fetched, so the
+   * refs are read as they are instead of fetched again per request.
+   */
+  private async proposesNothing(
+    summary: { number: number; branch: string; base: string },
+    opts: { workspaceId?: string; fresh?: boolean } = {},
+  ): Promise<boolean> {
+    try {
+      const wsId = opts.workspaceId ?? (await this.workspaceService.getOrCreateForBranch(summary.branch)).id;
+      const paths = await this.git.changedPathsForPr(
+        wsId,
+        summary.base,
+        summary.branch,
+        opts.fresh ? { fetch: false } : {},
+      );
+      if (paths.length > 0) return false;
+    } catch (err) {
+      crLog.warn(`empty-check for change request #${summary.number} failed — leaving it open:`, { err });
+      return false;
+    }
+    return !(await this.savesInFlight(workspaceIdForBranch(summary.branch)));
+  }
+
+  /**
+   * Close open change request `number` if it proposes nothing right now
+   * ({@link proposesNothing}), recorded as today's empty-close: closed state
+   * and closing time, guarded on `state = 'open'` so a concurrent merge or
+   * withdrawal wins. Writes the log line every such close owes. Does NOT
+   * retire the source branch — the caller decides that, and a caller holding
+   * that branch's lifecycle lock must not. Answers the request's target when
+   * this call closed it, else null.
+   */
+  private async closeIfEmpty(
+    number: number,
+    opts: { reason: string; actor: string; workspaceId?: string; fresh?: boolean },
+  ): Promise<{ base: string } | null> {
+    const summary = await this.prs.getPr(number);
+    if (!summary || summary.state !== 'open') return null;
+    if (!(await this.proposesNothing(summary, opts))) return null;
+    const now = new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({ state: 'closed', closedAt: now, updatedAt: now })
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .returning({ id: changeRequests.id });
+    if (updated.length === 0) return null;
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-rejected', number });
+    crLog.info(
+      `closed change request #${number} ("${summary.branch}" into "${summary.base}") by ${opts.actor}: ` +
+        `it proposes nothing (${opts.reason})`,
+    );
+    return { base: summary.base };
+  }
+
+  /**
+   * The deletion's close-empty move: every open request from or into
+   * `branch` that proposes nothing is closed. Best effort per request — one
+   * that cannot be judged or closed stays open, and the open-request check
+   * after this refuses on it. Never retires a branch: the caller holds
+   * `branch`'s lifecycle lock, and the deletion itself removes it. Answers
+   * the numbers it closed, so a deletion that then fails can reopen them
+   * ({@link reopenAfterFailedDelete}).
+   */
+  private async closeEmptyRequestsOn(
+    branch: string,
+    actor: string,
+    opts: { workspaceId?: string; fresh?: boolean },
+  ): Promise<number[]> {
+    const closed: number[] = [];
+    for (const cr of await this.openChangeRequestsOn(branch)) {
+      try {
+        if (await this.closeIfEmpty(cr.number, { ...opts, actor, reason: `empty when "${branch}" was deleted` })) {
+          closed.push(cr.number);
+        }
+      } catch (err) {
+        crLog.warn(`could not close empty change request #${cr.number} before deleting "${branch}":`, { err });
+      }
+    }
+    return closed;
+  }
+
+  /**
+   * Undo {@link closeEmptyRequestsOn} for a deletion that failed after it: a
+   * refused deletion changes nothing, and the requests it closed are open
+   * again. Still under the branch's lifecycle lock, so nothing can have
+   * merged, withdrawn or declined them in between; guarded on `closed` all
+   * the same. Best effort: a request that cannot be reopened is logged.
+   */
+  private async reopenAfterFailedDelete(numbers: number[], branch: string, actor: string): Promise<void> {
+    if (numbers.length === 0) return;
+    try {
+      const reopened = await this.db
+        .update(changeRequests)
+        .set({ state: 'open', closedAt: null, updatedAt: new Date() })
+        .where(and(inArray(changeRequests.number, numbers), eq(changeRequests.state, 'closed')))
+        .returning({ number: changeRequests.number });
+      for (const { number } of reopened) {
+        this.prs.invalidateDetailCache(number);
+        crLog.info(`reopened change request #${number} for ${actor}: deleting "${branch}" failed after it was closed`);
+        // The close told every tab the request was gone; announce it back,
+        // as an open does, so none keeps leaving it out.
+        const summary = await this.prs.getPr(number).catch(() => null);
+        if (summary) {
+          this.events?.emit({
+            kind: 'change-request-opened',
+            number,
+            source: summary.branch,
+            target: summary.base,
+            authorIdHash: summary.authorId ?? null,
+            title: summary.title,
+          });
+        }
+      }
+    } catch (err) {
+      crLog.warn(`could not reopen change requests ${numbers.map((n) => `#${n}`).join(', ')} after deleting "${branch}" failed:`, { err });
+    }
+  }
+
+  /** The author-or-Admin rule, as a yes/no; a rule that cannot be read is a no. */
+  private async mayDelete(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
+    try {
+      return await this.git.mayDeleteBranch(workspaceId, name, user);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The refusal for an open request that still proposes something: names it,
+   * links to it, and says who can act — its author withdraws it, an Admin can
+   * decline it.
+   */
+  private openRequestRefusal(
+    branch: string,
+    cr: { number: number; end: 'source' | 'target'; url: string },
+    visible = true,
+  ): BranchDeleteBlockedError {
+    // One the caller may not see is not named, linked or placed at an end:
+    // `get_change_request` answers it as not found, and so does this.
+    if (!visible) {
+      return new BranchDeleteBlockedError(
+        'open-change-request',
+        branch,
+        `An open change request you cannot see still proposes changes from or into "${branch}". ` +
+          `An Admin can decline it in the app; then the branch can be deleted.`,
+      );
+    }
+    return new BranchDeleteBlockedError(
+      'open-change-request',
+      branch,
+      `Change request #${cr.number} (${cr.url}) is open ${cr.end === 'source' ? 'from' : 'into'} "${branch}" and still ` +
+        `proposes changes. Its author can withdraw it, or an Admin can decline it, in the app; then the branch can be deleted.`,
+      { number: cr.number, url: cr.url },
+    );
+  }
+
+  /**
+   * The default branch's workspace, freshly fetched — where an agent's
+   * deletion and the leftover cleanup both decide and act. Never the
+   * branch's own checkout (which git refuses to delete from), and always
+   * after a strict, forced fetch: the refs are about to authorize a
+   * deletion, and a fetch that failed proves nothing about them.
+   */
+  private async freshDefaultWorkspace(): Promise<string> {
+    const ws = await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
+    await this.workspaceService.ensureRemotesFetched(ws.id, { strict: true, force: true });
+    return ws.id;
+  }
+
+  async deleteBranchChecked(
+    user: AuthUser,
+    name: string,
+    opts: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (number: number) => Promise<boolean> } = {},
+  ): Promise<DeleteBranchPreview | DeleteBranchResult> {
+    assertValidBranchName(name);
+    // The caller's view of a request, as `get_change_request` gives it: one
+    // they may not see is never named, linked or judged in an answer. Absent,
+    // every request is visible. A verdict that fails is a no.
+    const maySee = async (number: number): Promise<boolean> =>
+      opts.maySee ? opts.maySee(number).catch(() => false) : true;
+    // Under the lock `deleteBranch`, `createBranch` and `openChangeRequest`
+    // take, so nothing this answer depends on — a request being opened, the
+    // branch being recreated — can change between the checks and the delete.
+    // A preview takes it too: it is short, and it then answers a settled state.
+    return this.branchLifecycle.run(`branch:${name}`, async () => {
+      const isProtected = this.kb.isProtectedBranch(name);
+      if (isProtected && !opts.dryRun) throw new ProtectedBranchError(name, 'deleting a protected branch');
+
+      let wsId: string;
+      try {
+        wsId = await this.freshDefaultWorkspace();
+      } catch (err) {
+        log.warn(`delete_branch "${name}": could not fetch the shared repository — deleting nothing:`, { err });
+        throw new BranchDeleteBlockedError(
+          'state-unconfirmed',
+          name,
+          `Could not reach the shared repository to confirm the current state of "${name}", so nothing was deleted. Try again shortly.`,
+        );
+      }
+
+      const state = await this.git.branchState(wsId, name, this.kb.defaultBranch);
+      if (!state.exists) {
+        if (!opts.dryRun) throw new BranchNotFoundError(name);
+        return {
+          kind: 'preview',
+          branch: name,
+          exists: false,
+          canDelete: false,
+          refusals: [new BranchNotFoundError(name).message],
+          unmergedCommits: 0,
+          openChangeRequests: [],
+          lastCommit: null,
+        };
+      }
+
+      // Every refusal, in the order a deletion meets them. The preview lists
+      // them all; a deletion throws the first.
+      const refusals: Error[] = [];
+      if (isProtected) refusals.push(new ProtectedBranchError(name, 'deleting a protected branch'));
+      if (!(await this.git.mayDeleteBranch(wsId, name, user))) refusals.push(new BranchAuthorshipError(name));
+      // Every open request at either end, each judged now: one that proposes
+      // nothing is closed by the deletion and blocks nothing; one that still
+      // proposes something — or whose changes cannot be determined — blocks.
+      // A request the caller may not see is not part of a preview at all —
+      // not listed, not judged, not weighed in `canDelete` — so the preview
+      // reads the same whether one exists, and whether it is empty. A
+      // deletion still closes it or is refused on it like any other, without
+      // naming it: the rules above are the deletion's, not the caller's view.
+      const open: (DeleteBranchPreview['openChangeRequests'][number] & { visible: boolean })[] = [];
+      for (const cr of await this.openChangeRequestsOn(name)) {
+        const visible = await maySee(cr.number);
+        if (!visible && opts.dryRun) continue;
+        const summary = await this.prs.getPr(cr.number).catch(() => null);
+        const empty = summary ? await this.proposesNothing(summary, { workspaceId: wsId, fresh: true }) : false;
+        open.push({
+          ...cr,
+          url: summary?.url ?? `/change-requests/${cr.number}`,
+          proposesNothing: empty,
+          visible,
+        });
+      }
+      const blocking = open.find((cr) => !cr.proposesNothing);
+      if (blocking) refusals.push(this.openRequestRefusal(name, blocking, blocking.visible));
+      // Not coverable by `discardUnmerged`: these are a person's saves on
+      // their way into the branch, not work already on it.
+      if (await this.savesInFlight(workspaceIdForBranch(name))) {
+        refusals.push(this.savesLandingRefusal(name));
+      }
+      if (state.unmergedCommits > 0 && !opts.discardUnmerged) {
+        const n = state.unmergedCommits;
+        refusals.push(
+          new BranchDeleteBlockedError(
+            'unmerged-commits',
+            name,
+            `"${name}" holds ${n} commit${n === 1 ? '' : 's'} that ${n === 1 ? 'is' : 'are'} not on ${this.kb.defaultBranch}; ` +
+              `deleting it would lose ${n === 1 ? 'it' : 'them'}. Pass discardUnmerged: true to delete it anyway.`,
+            { unmergedCommits: n },
+          ),
+        );
+      }
+
+      if (opts.dryRun) {
+        return {
+          kind: 'preview',
+          branch: name,
+          exists: true,
+          canDelete: refusals.length === 0,
+          refusals: refusals.map((r) => r.message),
+          unmergedCommits: state.unmergedCommits,
+          openChangeRequests: open.map(({ number, end, url, proposesNothing }) => ({ number, end, url, proposesNothing })),
+          lastCommit: state.lastCommit,
+        };
+      }
+      // A refused deletion changes nothing: no request is closed either.
+      if (refusals[0]) throw refusals[0];
+
+      // The saves check above is a snapshot; a save could take its file lock
+      // since. With no lock grantable on the branch, it is made again and
+      // nothing can start landing between it and the deletion.
+      const { lastCommit } = await this.fileLocks.whileNoneAcquired(name, async () => {
+        if (await this.savesInFlight(workspaceIdForBranch(name))) throw this.savesLandingRefusal(name);
+        // Every open request proposes nothing: close them, each re-judged at
+        // the moment of closing — the last step before the deletion, so no
+        // later check can refuse after it. Nothing here takes this branch's
+        // lifecycle lock, so a request whose source IS this branch cannot make
+        // the deletion wait on itself. Should the deletion still fail (the
+        // leased push below), the requests closed here are reopened.
+        const closed = await this.closeEmptyRequestsOn(name, user.id, { workspaceId: wsId, fresh: true });
+        try {
+          const still = (await this.openChangeRequestsOn(name))[0];
+          if (still) {
+            const summary = await this.prs.getPr(still.number).catch(() => null);
+            throw this.openRequestRefusal(
+              name,
+              { ...still, url: summary?.url ?? `/change-requests/${still.number}` },
+              await maySee(still.number),
+            );
+          }
+          // Leased on the tip the checks above were made against, so a commit
+          // pushed since is refused by the host instead of deleted unseen.
+          return await this.deleteBranchUnlocked(wsId, name, user, {
+            ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
+          });
+        } catch (err) {
+          await this.reopenAfterFailedDelete(closed, name, user.id);
+          throw err;
+        }
+      });
+      return {
+        kind: 'deleted',
+        branch: name,
+        lastCommit: lastCommit ?? state.lastCommit ?? '',
+        discardedCommits: state.unmergedCommits,
+      };
+    });
   }
 
   // No `switchBranch` here on purpose. Under the per-branch workspace model,
@@ -545,7 +930,7 @@ export class WorkflowService implements IWorkflowService {
   // to discard.
 
   shareCurrentBranch(workspaceId: string, user: AuthUser): Promise<void> {
-    return this.trackedPush(workspaceId, user);
+    return this.pushWithRecovery(workspaceId, branchForWorkspaceId(workspaceId), '(share)', user);
   }
 
   refreshRemotes(workspaceId: string): Promise<void> {
@@ -695,7 +1080,7 @@ export class WorkflowService implements IWorkflowService {
       }
       const message = sanitizeError(err);
       syncLog.warn(`pull failed for branch "${branch}": ${message}`);
-      this.noteGitSyncFailed(gitId, branch, err);
+      this.noteGitSyncFailed(gitId, branch, err, undefined, 'pull');
       return { branch, outcome: 'error', error: message };
     }
     // A clean pull is proof origin is reachable and this clone rebases onto
@@ -1097,7 +1482,8 @@ export class WorkflowService implements IWorkflowService {
       });
     } else {
       lockLog.info(
-        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderName} (${result.lock.holderUserId})`,
+        // The holder by id only: log lines carry no names.
+        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderUserId}`,
       );
     }
     return result;
@@ -1183,7 +1569,8 @@ export class WorkflowService implements IWorkflowService {
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
           try {
-            await this.pullWorkspace(workspaceId);
+            // Same as `pushWithRecovery`: keep a stranded merge a merge.
+            await this.pullWorkspace(workspaceId, { preserveMerges: true });
             await this.git.push(workspaceId, user);
             recovered = true;
             this.noteGitSyncOk(workspaceId, branch);
@@ -1272,7 +1659,7 @@ export class WorkflowService implements IWorkflowService {
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
       lockLog.warn(
-        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderName} (${lock.holderUserId})` : 'no lock row'}`,
+        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderUserId}` : 'no lock row'}`,
       );
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}": not held by you (or no longer exists).`,
@@ -1444,6 +1831,12 @@ export class WorkflowService implements IWorkflowService {
      * hold the sentence pass it; otherwise it is derived below.
      */
     explicitConflict?: { paths: string[]; message: string },
+    /**
+     * Which side of the sync failed. A 403 or "Repository not found" on a
+     * pull means the credentials cannot READ the repository, and telling the
+     * operator to grant push access would send them to the wrong setting.
+     */
+    operation: 'push' | 'pull' = 'push',
   ): void {
     // A rebase conflict is a conflict whichever path ran into it. The remote
     // sync names its files on purpose; the push-recovery paths (autosave, the
@@ -1466,42 +1859,13 @@ export class WorkflowService implements IWorkflowService {
       kind: 'git-sync-failed',
       workspaceId: id,
       branch,
-      // Git stderr can quote a credentialed URL; the banner is user-facing and
-      // the string also lands in client logs, so sanitize before it leaves.
-      reason: conflict ? conflict.message : sanitizeError(err),
+      // Never the git output itself — not even sanitised: stderr quotes the
+      // host's own error text and URLs, and the banner is user-facing. A
+      // fixed sentence says what kind of failure it was; the raw text is in
+      // the server log, where the banner points whoever can act on it.
+      reason: conflict ? conflict.message : describeSyncFailure(err, operation),
       ...(conflict ? { conflictedPaths: conflict.paths } : {}),
     });
-  }
-
-  /**
-   * A bare push wrapped in the sync tracker: a failure raises the banner, a
-   * success clears it. For the workflow paths that push directly — sharing a
-   * branch, publishing a CR's source, update-from-base, the decline revert,
-   * the roles.yaml restore — rather than through `pushWithRecovery`'s
-   * cooperative ladder. Behaviour is otherwise unchanged: the error still
-   * propagates to the caller exactly as the bare push's did. Without this,
-   * those pushes could fail invisibly (no banner) and, worse, a successful
-   * share could not CLEAR a banner an earlier save had raised.
-   *
-   * The branch is derived from the workspace id (they are the same string,
-   * URL-encoding aside) so call sites cannot pass a mismatched pair.
-   */
-  private async trackedPush(
-    workspaceId: string,
-    user: AuthUser,
-    opts?: { systemAuthorized?: boolean },
-  ): Promise<void> {
-    const branch = branchForWorkspaceId(workspaceId);
-    try {
-      // Preserve the exact call shape of the bare pushes this replaces — an
-      // explicit `undefined` third argument is a different call signature to
-      // every spy that asserts on it.
-      await (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user));
-      this.noteGitSyncOk(workspaceId, branch);
-    } catch (err) {
-      this.noteGitSyncFailed(workspaceId, branch, err);
-      throw err;
-    }
   }
 
   /**
@@ -1509,6 +1873,14 @@ export class WorkflowService implements IWorkflowService {
    * cooperative pull-rebase + retry, then hand off to the agent if that
    * still fails." The full rationale lives at the call site in
    * `releaseLock`; this method is the de-duplicated body.
+   *
+   * EVERY workflow push goes through here — saves, sharing a branch, opening
+   * a request, update-from-target, the decline revert, the roles.yaml
+   * restore — so a push the host refuses answers one way everywhere: the
+   * commit stays local, the sync banner goes up, and the caller gets the
+   * 409 saved-locally sentence instead of a raw git error (which a route
+   * would turn into a 500). A later successful push of the branch carries
+   * the commits and clears the banner.
    */
   private async pushWithRecovery(
     workspaceId: string,
@@ -1517,8 +1889,12 @@ export class WorkflowService implements IWorkflowService {
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
   ): Promise<void> {
+    // No explicit `undefined` third argument when there are no options: the
+    // call shape stays the bare `push(workspaceId, user)` every caller made.
+    const push = () =>
+      opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user);
     try {
-      await this.git.push(workspaceId, user, opts);
+      await push();
       this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
       const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
@@ -1526,10 +1902,24 @@ export class WorkflowService implements IWorkflowService {
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
       let recoveryError: unknown = null;
+      // The retry push's own rejection, when the pull got that far: the
+      // divergence is cured by then, so it — not the first rejection — says
+      // whether the host is refusing.
+      let retryDetail: string | null = null;
       if (looksLikeNonFastForward) {
         try {
-          await this.pullWorkspace(workspaceId);
-          await this.git.push(workspaceId, user, opts);
+          // `preserveMerges` on every push, not only the ones that make a
+          // merge: a merge stranded by a refused open or update rides along
+          // with whatever push of the branch comes next — a save, a share —
+          // and a plain rebase would flatten it into cherry-picks. With no
+          // merge among the local commits the two spellings replay the same.
+          await this.pullWorkspace(workspaceId, { preserveMerges: true });
+          try {
+            await push();
+          } catch (retryErr) {
+            retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            throw retryErr;
+          }
           recovered = true;
           this.noteGitSyncOk(workspaceId, branch);
           log.info(
@@ -1552,12 +1942,31 @@ export class WorkflowService implements IWorkflowService {
         // When recovery RAN, its error is the current state of the world (the
         // first rejection may be a stale non-fast-forward the pull already
         // cured); when it was skipped, the first error is all there is.
-        this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? firstPushErr);
+        // A recovery that failed before its retry push failed in the PULL.
+        const failedInPull = recoveryError !== null && retryDetail === null;
+        this.noteGitSyncFailed(
+          workspaceId,
+          branch,
+          recoveryError ?? firstPushErr,
+          undefined,
+          failedInPull ? 'pull' : 'push',
+        );
         log.warn(
           `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           { detail: firstDetail },
         );
-        throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail);
+        throw new PushNeedsAgentResolutionError(
+          branch,
+          targetPath,
+          firstDetail,
+          recoveryDetail,
+          // `rejected` above also matches the host's own `[remote rejected]`
+          // (an outage, a hook): worth the cooperative try, but only a real
+          // divergence is described as one.
+          /non-fast-forward|fetch first|updates were rejected|! \[rejected\]/i.test(retryDetail ?? firstDetail)
+            ? 'diverged'
+            : 'refused',
+        );
       }
     }
   }
@@ -1877,10 +2286,24 @@ export class WorkflowService implements IWorkflowService {
       );
     }
 
-    // Push the source — `gh pr create` against an unpushed branch returns
-    // "head branch does not exist on remote". Push *after* the auto-merge
-    // so the remote sees the merge commit too.
-    await this.trackedPush(workspaceId, user);
+    // Push the source *after* the auto-merge so the remote sees the merge
+    // commit too. A push the host refuses does not undo the open: the merge
+    // is committed locally, the request is a DB row, and the next push of
+    // the branch carries the commits — so the row is still created below and
+    // the refusal (409, the saved-locally sentence, the sync banner) is
+    // answered once it exists.
+    let pushRefused: PushNeedsAgentResolutionError | null = null;
+    try {
+      await this.pushWithRecovery(
+        workspaceId,
+        branchForWorkspaceId(workspaceId),
+        '(opening a change request)',
+        user,
+      );
+    } catch (err) {
+      if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+      pushRefused = err;
+    }
 
     const workspacePath = await this.workspaceService.getWorkspacePath(workspaceId);
     const cwd = path.join(workspacePath, this.kbDirName);
@@ -1969,6 +2392,21 @@ export class WorkflowService implements IWorkflowService {
       );
     }
     this.prs.invalidateDetailCache(prNumber);
+    const opened = {
+      kind: 'change-request-opened',
+      number: prNumber,
+      source: input.sourceBranch,
+      target: input.targetBranch,
+      authorIdHash: hashEmail(user.email),
+      title: input.title,
+    } as const;
+    if (pushRefused) {
+      // The request exists; its detail reads the published refs, which the
+      // refused push never moved — answering the refusal is what the caller
+      // needs, not a detail read that may fail on a branch the host lacks.
+      this.events?.emit(opened);
+      throw pushRefused;
+    }
 
     const detail = await this.prs.getPrDetail(prNumber, {
       fresh: true,
@@ -1980,14 +2418,7 @@ export class WorkflowService implements IWorkflowService {
         `Created change request #${prNumber} but could not fetch its detail`,
       );
     }
-    this.events?.emit({
-      kind: 'change-request-opened',
-      number: prNumber,
-      source: input.sourceBranch,
-      target: input.targetBranch,
-      authorIdHash: hashEmail(user.email),
-      title: input.title,
-    });
+    this.events?.emit(opened);
     return detail;
     });
   }
@@ -2119,7 +2550,7 @@ export class WorkflowService implements IWorkflowService {
     // do. Asking git what is unpushed retries it instead.
     //
     // A failed probe falls back to the old gate rather than to "push
-    // anyway": `trackedPush` on a clone with nothing to push is a wasted
+    // anyway": a push on a clone with nothing to push is a wasted
     // round trip on every single update.
     const hasUnpushed = await this.git
       .hasUnpushedCommits(workspaceId)
@@ -2131,7 +2562,15 @@ export class WorkflowService implements IWorkflowService {
         return !outcome.alreadyUpToDate;
       });
     if (hasUnpushed) {
-      await this.trackedPush(workspaceId, user);
+      // A refusal answers 409 with the saved-locally sentence and leaves the
+      // merge applied in the clone; the probe above makes the next update
+      // (or any save on the branch) push it.
+      await this.pushWithRecovery(
+        workspaceId,
+        branchForWorkspaceId(workspaceId),
+        `(update from ${detail.base})`,
+        user,
+      );
     }
     // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
     // detail read. Everything below needs only the sha, and the detail that
@@ -2382,8 +2821,10 @@ export class WorkflowService implements IWorkflowService {
     // Best-effort freshen of the source checkout: the diff below reads origin
     // refs, but the restore commits from the working tree — a stale tree
     // would push non-fast-forward and fail loudly anyway; this just makes
-    // that rare.
-    await this.pullWorkspace(ws.id).catch(() => undefined);
+    // that rare. `preserveMerges`: the branch may carry a merge a refused open
+    // or update stranded locally, and a plain rebase would flatten it before
+    // the revert's push publishes the branch.
+    await this.pullWorkspace(ws.id, { preserveMerges: true }).catch(() => undefined);
 
     // The verb acts on the request as it is NOW — never a cached file list.
     const paths = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2416,6 +2857,10 @@ export class WorkflowService implements IWorkflowService {
     // save must not race the restore between write and commit.
     const held: string[] = [];
     let revertError: { reason: unknown } | null = null;
+    // A push the host refuses leaves the revert committed on the branch
+    // locally; it is answered (409, the saved-locally sentence) only after
+    // the locks are released and the request's caches reflect the new head.
+    let pushRefused: PushNeedsAgentResolutionError | null = null;
     try {
       for (const p of reverted) {
         const lockPath = `${this.kbDirName}/${p}`;
@@ -2440,7 +2885,12 @@ export class WorkflowService implements IWorkflowService {
           true, // skipValidator — this restores an already-validated base version
         );
       }
-      await this.trackedPush(ws.id, user);
+      try {
+        await this.pushWithRecovery(ws.id, headBranch, repoRelPath, user);
+      } catch (err) {
+        if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+        pushRefused = err;
+      }
     } catch (err) {
       revertError = { reason: err };
     }
@@ -2455,9 +2905,14 @@ export class WorkflowService implements IWorkflowService {
     if (revertError) throw revertError.reason;
     const failedRelease = released.find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failedRelease) throw failedRelease.reason;
+    this.prs.invalidateDetailCache(number);
+    // A refused push moved nothing the request is judged on. A recorded
+    // apply failure describes the published head, which is still where it
+    // was, so it stays; and the file list reads the published refs, so
+    // closing an "empty" request is decided once the push lands.
+    if (pushRefused) throw pushRefused;
     // The source head moved: the refusal described a revision that is gone.
     await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
-    this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
     if (remaining.length > 0) {
@@ -2598,7 +3053,9 @@ export class WorkflowService implements IWorkflowService {
       if (!summary || summary.state !== 'open') continue;
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
       try {
-        await this.pullWorkspace(ws.id);
+        // `preserveMerges`: a merge a refused open or update stranded on the
+        // request's branch must survive until the branch's next push.
+        await this.pullWorkspace(ws.id, { preserveMerges: true });
       } catch (err) {
         log.warn(
           `pull failed for #${summary.number} before removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
@@ -2902,33 +3359,9 @@ export class WorkflowService implements IWorkflowService {
    * Returns true when THIS call closed it.
    */
   async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
-    const summary = await this.prs.getPr(number);
-    if (!summary || summary.state !== 'open') return false;
-    let paths: string[];
-    let wsId: string;
-    try {
-      const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
-      wsId = ws.id;
-      paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
-    } catch (err) {
-      crLog.warn(`empty-check for change request #${number} failed — leaving it open:`, { err });
-      return false;
-    }
-    if (paths.length > 0) return false;
-    if (await this.savesInFlight(wsId)) return false;
-
-    // Guard on `state = 'open'` so a concurrent merge or withdraw wins the
-    // race and this becomes a no-op.
-    const now = new Date();
-    const updated = await this.db
-      .update(changeRequests)
-      .set({ state: 'closed', closedAt: now, updatedAt: now })
-      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
-      .returning({ id: changeRequests.id });
-    if (updated.length === 0) return false;
-    this.prs.invalidateDetailCache(number);
-    this.events?.emit({ kind: 'change-request-rejected', number });
-    await this.retireMergedSourceBranch(number, summary.base, user);
+    const closed = await this.closeIfEmpty(number, { reason: 'found empty', actor: user.email });
+    if (!closed) return false;
+    await this.retireMergedSourceBranch(number, closed.base, user);
     return true;
   }
 
@@ -2938,6 +3371,14 @@ export class WorkflowService implements IWorkflowService {
    * (their file is still only on disk). An answer that cannot be read is a
    * yes — the caller is about to delete the checkout.
    */
+  private savesLandingRefusal(name: string): BranchDeleteBlockedError {
+    return new BranchDeleteBlockedError(
+      'saves-landing',
+      name,
+      `"${name}" still has saves waiting to be committed or a file held for editing. Try again once they have landed.`,
+    );
+  }
+
   private async savesInFlight(wsId: string): Promise<boolean> {
     try {
       return (await this.fileLocks.hasAnyActive(wsId)) || (await this.pendingCommits.hasAnyForWorkspace(wsId));
@@ -3173,9 +3614,231 @@ export class WorkflowService implements IWorkflowService {
         }
       })
       .catch((err) => crLog.warn('on-demand deleted-branch sweep failed:', { err }))
+      // Every sweep is followed by the tidy-up, which never throws.
+      .then(() => this.tidyAfterSweep())
+      .then(() => undefined)
       .finally(() => {
         this.sweepKick = null;
       });
+  }
+
+  private tidyRound: Promise<{ closedEmpty: number; removedLeftovers: number }> | null = null;
+  private tidyStopped = false;
+
+  /**
+   * Stop the tidy-up when the graph stops: no round starts after this, and a
+   * round under way stops at its next request or branch. Then
+   * {@link drainTidy} waits for it, so it cannot fetch or delete once the
+   * pool is ended or a replacement graph owns the same checkout.
+   */
+  stopTidying(): void {
+    this.tidyStopped = true;
+  }
+
+  /** Settles once no tidy-up (nor the sweep that leads into one) is running. */
+  async drainTidy(): Promise<void> {
+    await Promise.allSettled([this.sweepKick, this.tidyRound]);
+  }
+
+  /**
+   * What follows every sweep for deleted branches — at startup, on a remote
+   * sync, after a merge and on demand: first the open requests that propose
+   * nothing are closed and their source branch removed
+   * ({@link closeEmptyOpenChangeRequests}), then the branches merged requests
+   * left behind ({@link retireLeftoverMergedBranches}, behind its own
+   * setting). In that order, because closing an empty request is what can
+   * free a branch for the second. Never throws; coalesced.
+   */
+  tidyAfterSweep(): Promise<{ closedEmpty: number; removedLeftovers: number }> {
+    if (this.tidyRound) return this.tidyRound;
+    if (this.tidyStopped) return Promise.resolve({ closedEmpty: 0, removedLeftovers: 0 });
+    this.tidyRound = (async () => {
+      const closedEmpty = await this.closeEmptyOpenChangeRequests().catch((err: unknown) => {
+        crLog.warn('background close of empty change requests failed:', { err });
+        return 0;
+      });
+      const removedLeftovers = await this.retireLeftoverMergedBranches();
+      return { closedEmpty, removedLeftovers };
+    })().finally(() => {
+      this.tidyRound = null;
+    });
+    return this.tidyRound;
+  }
+
+  /**
+   * Close every open change request that proposes nothing, and remove its
+   * source branch — what opening such a request's page in the app does
+   * (`closeEmptyChangeRequest`), done without anyone opening it. Each is
+   * judged from the default branch's workspace against origin's refs, after
+   * ONE strict fetch, so no request's branch is cloned for the question; a
+   * round whose fetch fails closes nothing. A request whose changes cannot be
+   * determined, or with a save still landing on its branch, stays open.
+   * Returns how many it closed.
+   *
+   * The source branch is removed under the same guards as any other
+   * deletion: under its lifecycle lock, only with no request open from or
+   * into it, with no save landing and no lock grantable on it at that moment,
+   * and leased on the tip the request was judged empty at — a commit pushed
+   * since is refused by the host instead of deleted unseen.
+   */
+  async closeEmptyOpenChangeRequests(): Promise<number> {
+    const open = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    if (open.length === 0) return 0;
+    let wsId: string;
+    try {
+      wsId = await this.freshDefaultWorkspace();
+    } catch (err) {
+      crLog.warn('background close of empty change requests skipped — could not fetch the shared repository:', { err });
+      return 0;
+    }
+    let closed = 0;
+    for (const { number, sourceBranch } of open) {
+      if (this.tidyStopped) break;
+      try {
+        // Read before the request is judged, so the lease below covers
+        // anything that reached the branch after the judgement.
+        const tip = this.kb.isProtectedBranch(sourceBranch)
+          ? null
+          : (await this.git.branchState(wsId, sourceBranch, this.kb.defaultBranch)).lastCommit;
+        const done = await this.closeIfEmpty(number, {
+          workspaceId: wsId,
+          fresh: true,
+          actor: 'system',
+          reason: 'empty in the background sweep',
+        });
+        if (!done) continue;
+        closed++;
+        if (tip) await this.retireEmptySourceBranch(wsId, sourceBranch, tip);
+      } catch (err) {
+        crLog.warn(`background close of change request #${number} failed — leaving it open:`, { err });
+      }
+    }
+    return closed;
+  }
+
+  /**
+   * Remove the source branch of a request the background sweep just closed
+   * as empty, from the default branch's freshly fetched workspace `wsId`.
+   * Skips quietly when another request is open from or into it or a save is
+   * landing on it; the delete is leased on `tip`. Never throws.
+   */
+  private async retireEmptySourceBranch(wsId: string, branch: string, tip: string): Promise<void> {
+    try {
+      await this.branchLifecycle.run(`branch:${branch}`, async () => {
+        if ((await this.openChangeRequestOn(branch)) !== null) return;
+        await this.fileLocks.whileNoneAcquired(branch, async () => {
+          if (await this.savesInFlight(workspaceIdForBranch(branch))) {
+            crLog.info(`kept "${branch}" after closing its empty change request: a save is still landing on it`);
+            return;
+          }
+          await this.deleteBranchUnlocked(wsId, branch, SYSTEM_ACTOR, { systemCleanup: true, expectTip: tip });
+        });
+      });
+    } catch (err) {
+      crLog.warn(`could not remove "${branch}" after closing its empty change request (non-fatal):`, { err });
+    }
+  }
+
+  /**
+   * Whether the leftover cleanup below runs — the `retireMergedBranches`
+   * deployment setting, read at every round so the Deployment page applies
+   * without a restart. Set by the composition root; on by default.
+   */
+  leftoverCleanupEnabled: () => boolean = () => true;
+
+  private leftoverRound: Promise<number> | null = null;
+
+  /**
+   * Remove the branches merged change requests left behind: sources of a
+   * merge from before the post-merge retirement existed (core-backend 0.5.0),
+   * and ones whose retirement failed. What `retireMergedSourceBranch` does
+   * after a merge, applied to every merge on record.
+   *
+   * A branch goes only when ALL hold: it is not protected; it was the source
+   * of a merged request; it has no commit that is not on the default branch;
+   * no request is open from or into it; its tip is contained in the merge
+   * commit recorded for one of those requests — a branch recreated under the
+   * same name after the merge is somebody's new draft, and a request with no
+   * recorded merge commit proves nothing; and its checkout has no saves
+   * landing and no file held. Each is decided and deleted under the branch's
+   * lifecycle lock, like the post-merge retirement.
+   *
+   * Fails SAFE, like the deleted-branch sweep it runs beside: a round whose
+   * fetch fails removes nothing, and a branch whose state cannot be read is
+   * left. The switch covers this round only; the post-merge retirement is not
+   * asked. Never throws. Coalesced, because boot, the remote sync and the
+   * on-demand sweep can all start one. Returns how many it removed.
+   */
+  retireLeftoverMergedBranches(): Promise<number> {
+    if (this.leftoverRound) return this.leftoverRound;
+    this.leftoverRound = this.retireLeftoverMergedBranchesOnce()
+      .catch((err) => {
+        log.warn('leftover branch cleanup failed:', { err });
+        return 0;
+      })
+      .finally(() => {
+        this.leftoverRound = null;
+      });
+    return this.leftoverRound;
+  }
+
+  private async retireLeftoverMergedBranchesOnce(): Promise<number> {
+    if (!this.leftoverCleanupEnabled()) return 0;
+    const merged = await this.db
+      .select({ sourceBranch: changeRequests.sourceBranch, mergedSha: changeRequests.mergedSha })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'merged'));
+    const mergeCommits = new Map<string, string[]>();
+    for (const row of merged) {
+      if (this.kb.isProtectedBranch(row.sourceBranch)) continue;
+      const shas = mergeCommits.get(row.sourceBranch) ?? [];
+      if (row.mergedSha) shas.push(row.mergedSha);
+      mergeCommits.set(row.sourceBranch, shas);
+    }
+    if (mergeCommits.size === 0) return 0;
+
+    let wsId: string;
+    try {
+      wsId = await this.freshDefaultWorkspace();
+    } catch (err) {
+      log.warn('leftover branch cleanup skipped — could not fetch the shared repository:', { err });
+      return 0;
+    }
+
+    let removed = 0;
+    for (const [branch, shas] of mergeCommits) {
+      if (this.tidyStopped) break;
+      if (shas.length === 0) continue;
+      try {
+        const done = await this.branchLifecycle.run(`branch:${branch}`, async () => {
+          const state = await this.git.branchState(wsId, branch, this.kb.defaultBranch);
+          if (!state.exists || state.lastCommit === null || state.unmergedCommits > 0) return false;
+          if ((await this.openChangeRequestOn(branch)) !== null) return false;
+          let contained = false;
+          for (const sha of shas) {
+            if (await this.git.isAncestor(wsId, state.lastCommit, sha).catch(() => false)) {
+              contained = true;
+              break;
+            }
+          }
+          if (!contained) return false;
+          const tip = state.lastCommit;
+          return this.fileLocks.whileNoneAcquired(branch, async () => {
+            if (await this.savesInFlight(workspaceIdForBranch(branch))) return false;
+            await this.deleteBranchUnlocked(wsId, branch, SYSTEM_ACTOR, { systemCleanup: true, expectTip: tip });
+            return true;
+          });
+        });
+        if (done) removed++;
+      } catch (err) {
+        log.warn(`leftover branch cleanup could not remove "${branch}":`, { err });
+      }
+    }
+    if (removed > 0) log.info(`removed ${removed} branch${removed === 1 ? '' : 'es'} left over from merged change requests`);
+    return removed;
   }
 
 
@@ -3353,6 +4016,9 @@ export class WorkflowService implements IWorkflowService {
     // AFTER the event: the applying UI is waiting on `change-request-merged`,
     // and branch retirement is git IO it must never wait behind.
     await this.retireMergedSourceBranch(number, baseBranch, user);
+    // A merge can empty OTHER open requests into the same target; the sweep's
+    // tidy-up closes those. Detached and coalesced, like every kick.
+    this.kickDeletedBranchSweep();
     return { kind: 'merged', result };
   }
 
@@ -3421,9 +4087,90 @@ export class WorkflowService implements IWorkflowService {
     }
   }
 
+  /**
+   * How long `mergeBranch` waits for the source's queued commits, and how
+   * often it asks. The worker polls every half second and a commit takes a few
+   * seconds; twenty seconds of waiting is an outage, not latency.
+   *
+   * Twenty, not thirty, because of who is waiting on THIS call: an agent over
+   * `/api/mcp` reaches the tool through `@utcp/http`, whose request timeout is
+   * a fixed 30 seconds (its call-template schema drops any `timeout` field).
+   * The wait plus the merge after it (fetch, merge, push) must fit inside
+   * that, or the agent hears "timeout of 30000ms exceeded" instead of the
+   * `pending-commits` answer this wait exists to give. Mutable for tests only.
+   */
+  mergeWaitForPendingCommits = { timeoutMs: 20_000, pollMs: 250 };
+
+  /**
+   * Wait until no commit is queued on `branch`, or the bound runs out. A
+   * commit escalated to a person ends the wait at once: nothing will land it.
+   *
+   * Polls the queue rather than draining it: the worker's own per-workspace
+   * serialization stays the only writer to the clone, and the row is deleted
+   * only after its push, so "no row" means the remote holds the commit.
+   */
+  private async awaitPendingCommits(
+    branch: string,
+  ): Promise<{ ok: true } | { ok: false; pending: number; needsAttention?: string }> {
+    const { timeoutMs, pollMs } = this.mergeWaitForPendingCommits;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const { queued, stuck, needsAttention } = await this.pendingCommits.queuedOnBranch(branch);
+      if (needsAttention !== null) return { ok: false, pending: queued + stuck, needsAttention };
+      if (queued === 0) return { ok: true };
+      if (Date.now() >= deadline) return { ok: false, pending: queued };
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
+    }
+  }
+
+  /** The one question `mergeBranch` refuses on: is a request from `source` into `target` open? */
+  private async openRequestBlockingMerge(sourceBranch: string, targetBranch: string): Promise<number | null> {
+    const [open] = await this.db
+      .select({ number: changeRequests.number })
+      .from(changeRequests)
+      .where(
+        and(
+          eq(changeRequests.sourceBranch, sourceBranch),
+          eq(changeRequests.targetBranch, targetBranch),
+          eq(changeRequests.state, 'open'),
+        ),
+      )
+      .limit(1);
+    return open ? open.number : null;
+  }
+
   async mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome> {
     if (sourceBranch === targetBranch) {
       throw new WorkflowValidationError(`\`source\` and \`target\` are both "${sourceBranch}" — name two different branches.`);
+    }
+
+    // Asked once BEFORE waiting, so a merge the open request forbids is refused
+    // at once rather than after the source's commits have landed. Not the
+    // answer that counts — that one is asked again under the locks below.
+    const openBefore = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
+    if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, openBefore);
+
+    // Writes are committed asynchronously: a write tool answers once the bytes
+    // are on disk and the pending-commits worker commits and pushes them a few
+    // seconds later. The merge below merges what the REMOTE holds of the
+    // source, so issued in those seconds it would find nothing new and land
+    // nothing. Wait for them first — OUTSIDE the lifecycle locks, which guard
+    // creating, deleting and opening requests on these branches, and must not
+    // be held for seconds of waiting on a queue.
+    const settled = await this.awaitPendingCommits(sourceBranch);
+    if (!settled.ok) {
+      const message = settled.needsAttention
+        ? `A commit queued on "${sourceBranch}" failed and needs a person: ${settled.needsAttention} ` +
+          `Nothing was merged. Tell the user; merge again once it has been resolved.`
+        : `${settled.pending} write(s) on "${sourceBranch}" are still being committed. ` +
+          `Nothing was merged. Retry the merge shortly.`;
+      return {
+        kind: 'pending-commits',
+        branch: sourceBranch,
+        pending: settled.pending,
+        ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
+        message,
+      };
     }
 
     // Under the lifecycle lock of BOTH branches, the same protocol
@@ -3439,18 +4186,8 @@ export class WorkflowService implements IWorkflowService {
       // A person merges a change request. Only the request's OWN direction is
       // blocked: the target merged into the source is how a draft under review
       // stays current, and that must keep working while the request is open.
-      const [open] = await this.db
-        .select({ number: changeRequests.number })
-        .from(changeRequests)
-        .where(
-          and(
-            eq(changeRequests.sourceBranch, sourceBranch),
-            eq(changeRequests.targetBranch, targetBranch),
-            eq(changeRequests.state, 'open'),
-          ),
-        )
-        .limit(1);
-      if (open) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open.number);
+      const open = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
+      if (open !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open);
 
       // The merge runs in the target's own workspace, like a change request's.
       const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
@@ -3530,6 +4267,12 @@ export class WorkflowService implements IWorkflowService {
         return { kind: 'conflicts-need-resolution', conflictedPaths: result.paths };
       }
       await this.pullMergeTarget(targetBranch, user);
+      // No merge commit: the target already held everything on the source, and
+      // `sha` is its unchanged tip. Reported as such — a `merged` that applied
+      // nothing is what sent agents on as if their write had landed.
+      if (result.mergeCommit === null) return { kind: 'nothing-to-merge', sha: result.sha };
+      // What landed on the target may have emptied open requests into it.
+      this.kickDeletedBranchSweep();
       return { kind: 'merged', sha: result.sha };
     });
   }
@@ -3812,8 +4555,9 @@ export class WorkflowService implements IWorkflowService {
         // sweep those unrelated edits into our "preserve roles.yaml" commit under the
         // wrong author/message. Feature branch → the protected-branch gate doesn't
         // fire, so this commits cleanly. Then publish so the merge sees the
-        // neutralised source. A non-fast-forward push (the source advanced under us)
-        // throws → RolesYamlPreservationError → the merge aborts, fail-closed.
+        // neutralised source. A push that still fails after the cooperative
+        // pull-rebase throws PushNeedsAgentResolutionError → the merge aborts,
+        // fail-closed, with the restore kept locally for the next push.
         const committed = await this.git.commitFile(
           ws.id,
           user,
@@ -3829,12 +4573,29 @@ export class WorkflowService implements IWorkflowService {
         // with origin/<head>), then origin/<head> STILL carries the divergent
         // roles.yaml and the merge would land it. Treat that as a hard failure —
         // returning false here would fail OPEN. Fail closed instead.
-        if (!committed) {
+        //
+        // One shape of "nothing to commit" is not out of sync: a restore an
+        // earlier merge attempt committed, whose push the host refused. The
+        // clone's HEAD already carries the base version — that is why there
+        // was nothing new to commit — and only the push is owed. Without this,
+        // the retry the refusal promises could never succeed: every attempt
+        // would find the file already restored and stop here, and the merge
+        // would stay refused until some unrelated save pushed the branch.
+        //
+        // The question is NOT "does the clone hold unpushed commits" — any
+        // queued save answers yes. It is whether HEAD already holds all of
+        // origin/<head>, so that the push fast-forwards origin to a head whose
+        // roles.yaml is the base version. A clone BEHIND origin would have
+        // origin's divergent copy rebased into HEAD by the cooperative pull on
+        // the way to the push, and the merge would land it: that clone is the
+        // out-of-sync one this guard refuses. A probe that cannot answer
+        // throws, and the guard fails closed with it.
+        if (!committed && !(await this.git.headContainsOrigin(ws.id))) {
           throw new Error(
             'roles.yaml restore produced no commit while origin still diverges from base — source workspace out of sync; refusing to merge',
           );
         }
-        await this.trackedPush(ws.id, user);
+        await this.pushWithRecovery(ws.id, headBranch, ROLES_YAML, user);
         this.accessControl.invalidate(ws.id);
         return true;
       } finally {
@@ -3843,6 +4604,12 @@ export class WorkflowService implements IWorkflowService {
         await this.fileLocks.release(ws.id, headBranch, rolesLockPath, user);
       }
     } catch (err) {
+      // A refused push: the restore is committed on the source locally and the
+      // merge does not run (origin still carries the divergent roles.yaml).
+      // Answer it like every other refused push — 409, the saved-locally
+      // sentence, the banner already raised — so the merge can be retried
+      // once the host accepts the push.
+      if (err instanceof PushNeedsAgentResolutionError) throw err;
       const detail = err instanceof Error ? err.message : String(err);
       // Log the raw git/push detail server-side; the thrown error keeps it OFF
       // the client-facing 502 message (see RolesYamlPreservationError).

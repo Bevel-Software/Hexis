@@ -129,7 +129,7 @@ describe('useAutoPullUpdates', () => {
     await waitFor(() => expect(result.current.status).toBe('idle'));
   });
 
-  it('exposes failed state with sanitized reason when automatic pull fails', async () => {
+  it('exposes failed state with a plain-words reason when automatic pull fails', async () => {
     const pull = vi.fn(async () => {
       throw new Error(
         'fatal: could not resolve host https://ghp_supersecrettoken1234567890abcdef@example.com/org/repo in /Users/alice/work/bevel token=ghp_supersecrettoken1234567890abcdef',
@@ -142,7 +142,12 @@ describe('useAutoPullUpdates', () => {
 
     await waitFor(() => expect(result.current.status).toBe('failed'));
     expect(result.current.branch).toBe('current-company-state');
-    expect(result.current.reason).toContain('[url]');
+    // The reason is what the kind of failure means to a reader, not the
+    // error's own text scrubbed: nothing of the error reaches it at all.
+    expect(result.current.reason).toBe(
+      'Your git host couldn’t be reached, or refused this deployment. Check the connection and the repository access.',
+    );
+    expect(result.current.reason).not.toMatch(/fatal|resolve host|\[url\]/);
     expect(result.current.reason).not.toContain('https://');
     expect(result.current.reason).not.toContain('/Users/alice/work/bevel');
     expect(result.current.reason).not.toContain('ghp_supersecrettoken');

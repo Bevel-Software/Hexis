@@ -15,6 +15,7 @@ import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { WorkspaceService } from '../workspace.service.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
 
 const stubCreatorAccess: ICreatorAccess = {
   planForCreate: async () => null,
@@ -46,6 +47,8 @@ interface Harness {
   repoDir: string;
   /** Exposed so a test can assert the PATH the route handed the service. */
   deleteFileMock: ReturnType<typeof vi.fn>;
+  /** Exposed so a test can make the write gate inside it refuse. */
+  acquireLockMock: ReturnType<typeof vi.fn>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -125,6 +128,7 @@ async function makeHarness(): Promise<Harness> {
     workspaceDir,
     repoDir: path.join(workspaceDir, KB),
     deleteFileMock: workspaceServiceMock.deleteFile as unknown as ReturnType<typeof vi.fn>,
+    acquireLockMock: workflowServiceMock.acquireLock as unknown as ReturnType<typeof vi.fn>,
   };
 }
 
@@ -215,6 +219,104 @@ describe('DELETE /workspace/:id/file — one file identity', () => {
     } finally {
       await closeServer(h.server);
       await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The root's `access.md` and `roles.yaml` govern the whole repository, so the
+ * app's delete route refuses them — with the sentence `delete_file` and the
+ * explorer use — before a lock is taken. A nested `access.md` is a file like
+ * any other here: the lock gate decides whether the caller may write it.
+ */
+describe('DELETE /workspace/:id/file — the repository\'s own files', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) {
+      await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
+    h = null;
+  });
+
+  const del = (base: string, p: string) =>
+    fetch(`${base}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+
+  it.each(['access.md', 'roles.yaml'])('refuses the root %s with one sentence and leaves it', async (name) => {
+    h = await makeHarness();
+    await fs.mkdir(h.repoDir, { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, name), 'x', 'utf-8');
+
+    const res = await del(h.baseUrl, name);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: `${name} is the repository's own file and cannot be deleted.` });
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(await exists(path.join(h.repoDir, name))).toBe(true);
+  });
+
+  it('deletes a nested access.md like any file, and a nested roles.yaml too', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/access.md'), '---\nread: Admin\n---\n', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/roles.yaml'), 'content', 'utf-8');
+    // Not emptied by these deletes, so no placeholder needs keeping.
+    await fs.writeFile(path.join(h.repoDir, 'Team/notes.md'), 'n', 'utf-8');
+
+    for (const p of ['Team/access.md', 'Team/roles.yaml']) {
+      const res = await del(h.baseUrl, p);
+      expect(res.status).toBe(200);
+      expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/${p}`);
+      expect(await exists(path.join(h.repoDir, p))).toBe(false);
+    }
+  });
+
+  it('refuses a nested access.md with the ordinary write refusal when the caller may not write it', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/access.md'), '---\nwrite: Admin\n---\n', 'utf-8');
+    // The write gate lives inside `acquireLock`; it refuses as it does for any file.
+    const refusal = new AccessDeniedError({ path: 'Team/access.md', eligibleRoles: ['Admin'], eligibleUsers: [] });
+    h.acquireLockMock.mockRejectedValueOnce(refusal);
+
+    const res = await del(h.baseUrl, 'Team/access.md');
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(refusal.message);
+    expect(body.error).not.toContain('platform file');
+    expect(body.error).not.toContain("repository's own file");
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(await exists(path.join(h.repoDir, 'Team/access.md'))).toBe(true);
+  });
+
+  it('refuses a reserved top-level folder as delete_folder does, and leaves what it holds', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'KnowledgeBase/Product'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'KnowledgeBase/Product/Plan.md'), 'p', 'utf-8');
+
+    const res = await del(h.baseUrl, `${KB}/KnowledgeBase`);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'KnowledgeBase/ is a platform folder and cannot be moved or deleted.' });
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(await exists(path.join(h.repoDir, 'KnowledgeBase/Product/Plan.md'))).toBe(true);
+  });
+
+  it.each([KB, `${KB}/`])('refuses the repository root as a folder (%j) and leaves its own files', async (p) => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'access.md'), 'x', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'roles.yaml'), 'x', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/notes.md'), 'n', 'utf-8');
+
+    const res = await del(h.baseUrl, p);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'The repository root is a platform folder and cannot be moved or deleted.' });
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    for (const f of ['access.md', 'roles.yaml', 'Team/notes.md']) {
+      expect(await exists(path.join(h.repoDir, f))).toBe(true);
     }
   });
 });

@@ -10,6 +10,8 @@ import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
+import { isBranchDeleteConfirmSkipped, skipBranchDeleteConfirm } from '../state/branch-delete-confirm';
+import { useConfirm } from '../../../shared/components';
 import { parseGitError, type GitErrorInfo } from '../services/error-messages';
 import { useAuth } from '../../auth/state/auth.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -143,10 +145,16 @@ export function BranchSwitcher() {
   // descendant of `ref`. The click-outside handler needs this second ref to
   // tell a click inside the panel from a click away from it.
   const panelRef = useRef<HTMLDivElement>(null);
+  const confirm = useConfirm();
+  // True while the delete question is open. The dialog sits outside both refs,
+  // so without this its own clicks would read as "outside" and close the list
+  // — taking a failed deletion's error with it.
+  const askingRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
+      if (askingRef.current) return;
       const target = e.target as Node;
       // The panel is portaled out of `ref`, so a click inside it would
       // otherwise read as "outside" and close the menu on the first mousedown.
@@ -214,11 +222,27 @@ export function BranchSwitcher() {
     // confirm needed), or (2) it's a draft authored by the current user
     // who wants to discard it. Case 2 is destructive for the whole team
     // (the remote ref goes away for everyone), so confirm explicitly.
-    if (hasRemote) {
-      const ok = window.confirm(
-        `Delete shared draft "${name}"? This removes it from the remote for everyone.`,
-      );
-      if (!ok) return;
+    //
+    // Asked in the app's own dialog: the browser's can be silenced by the
+    // browser, and a silenced one answered "no" to every delete without a
+    // word. "Don't ask again" really skips the question afterwards — per
+    // person, in this browser, until turned back on in the profile menu.
+    if (hasRemote && !isBranchDeleteConfirmSkipped(user?.email)) {
+      askingRef.current = true;
+      let answer;
+      try {
+        answer = await confirm({
+          title: 'Delete shared draft',
+          message: `Delete shared draft "${name}"? This removes it from the remote for everyone.`,
+          confirmLabel: 'Delete',
+          destructive: true,
+          offerDontAskAgain: true,
+        });
+      } finally {
+        askingRef.current = false;
+      }
+      if (!answer.confirmed) return;
+      if (answer.dontAskAgain) skipBranchDeleteConfirm(user?.email);
     }
     try {
       await git.deleteBranch(name);

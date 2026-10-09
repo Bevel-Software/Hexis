@@ -215,13 +215,57 @@ export type MergeChangeRequestOutcome =
   | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
 
 /**
- * What a direct branch-to-branch merge (`mergeBranch`) did: landed as `sha`
- * on the target (the target's own tip when it already contained the source),
- * or stopped on conflicts, nothing written.
+ * What a direct branch-to-branch merge (`mergeBranch`) did:
+ *
+ *  - `merged`                    — a merge commit `sha` was made and published
+ *                                  on the target.
+ *  - `nothing-to-merge`          — the target already contained the source;
+ *                                  `sha` is the target's unchanged tip.
+ *  - `conflicts-need-resolution` — stopped on conflicts, nothing written.
+ *  - `pending-commits`           — writes on the source are still being
+ *                                  committed (the merge waited for them and
+ *                                  they did not land in time), or one of them
+ *                                  failed and `needsAttention` carries the
+ *                                  worker's message. Nothing was merged.
  */
 export type MergeBranchOutcome =
   | { kind: 'merged'; sha: string }
-  | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
+  | { kind: 'nothing-to-merge'; sha: string }
+  | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] }
+  | { kind: 'pending-commits'; branch: string; pending: number; needsAttention?: string; message: string };
+
+/**
+ * What deleting a branch would do, as an agent's `delete_branch` preview
+ * (`dryRun`) reports it. It reserves nothing: every check runs again when the
+ * deletion is asked for.
+ *
+ * - `exists`             — the branch is on the shared repository (or on the server).
+ * - `canDelete`          — a deletion asked for now, by this caller, would go
+ *                          through; `refusals` says why not when it would not.
+ * - `unmergedCommits`    — commits on the branch that are not on the default branch.
+ * - `openChangeRequests` — open change requests from (`source`) or into (`target`) it,
+ *                          with their link; one that `proposesNothing` would be
+ *                          closed by the deletion and blocks nothing.
+ * - `lastCommit`         — the branch's tip; null when it does not exist.
+ */
+export interface DeleteBranchPreview {
+  kind: 'preview';
+  branch: string;
+  exists: boolean;
+  canDelete: boolean;
+  refusals: string[];
+  unmergedCommits: number;
+  openChangeRequests: { number: number; end: 'source' | 'target'; url: string; proposesNothing: boolean }[];
+  lastCommit: string | null;
+}
+
+/** A completed deletion: the tip it had, so it can be restored, and how many commits `discardUnmerged` threw away. */
+export interface DeleteBranchResult {
+  kind: 'deleted';
+  branch: string;
+  lastCommit: string;
+  discardedCommits: number;
+}
 
 /**
  * What a remote sync did to one branch's clone. One entry per branch in the

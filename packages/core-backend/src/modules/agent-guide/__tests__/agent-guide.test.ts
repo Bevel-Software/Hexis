@@ -299,6 +299,18 @@ describe('what the guide tells an agent', () => {
     expect(prose).toContain('add people to existing roles, and use a GROUP for a task- or team-scoped set of people');
   });
 
+  it('describes delete_branch where it says what an agent does with branches', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### An agent proposes and syncs; a person merges');
+    const prose = text.replace(/\s+/g, ' ');
+    expect(prose).toContain('`delete_branch`');
+    expect(prose).toContain('Only its author');
+    expect(prose).toContain('`dryRun: true`');
+    expect(prose).toContain('`discardUnmerged: true`');
+    expect(prose).toContain('that proposes nothing is closed by the delete');
+    expect(prose).toContain('its author can withdraw it, or an Admin can decline it, in the app');
+    expect(prose).toContain('`lastCommit`');
+  });
+
   it('documents giving a role to a group, with an example that parses as a valid roles.yaml', async () => {
     const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### Giving a role to a group');
     const prose = text.replace(/\s+/g, ' ');
@@ -324,5 +336,51 @@ describe('what the guide tells an agent', () => {
     expect(mergeGroupsIntoRoles(parsed.index, groups, 'groups.yaml')).toEqual([]);
     expect(parsed.index.byEmail.get('pat@example.com')?.has('reviewer')).toBe(true);
     expect(parsed.index.byEmail.get('pat@example.com')?.has('role/admin')).toBe(false);
+  });
+});
+
+/**
+ * The HTML views section: what an agent writing a live page is told about the
+ * frame. Its link rules are pinned against the renderer by core-frontend's
+ * `htmlViewsGuide.test.ts`, which reads the same file; what is pinned here is
+ * that it is served like every other section and that a distribution may
+ * reshape it.
+ */
+describe('the HTML views section', () => {
+  it('is served on its own, inside the whole guide, titled "HTML views"', async () => {
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    const html = sections.find((s) => s.id === 'html-views')!;
+    expect(html.title).toBe('HTML views');
+    expect(html.body).not.toContain('{{');
+    expect(await composeAgentGuide(DEFAULT_KB_LAYOUT)).toContain(html.body);
+    // After the tool manuals, before the conventions.
+    const ids = sections.map((s) => s.id);
+    expect(ids.indexOf('html-views')).toBe(ids.indexOf('tool-manuals') + 1);
+  });
+
+  it('describes the frame, the two members core puts on window.bevel, and a fragment that scrolls the page', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    expect(text).toContain('**No network.**');
+    expect(text).toContain('**Inline scripts and styles only.**');
+    expect(text).toContain('**Scripts run as ES modules**');
+    expect(text).toContain('**No browser storage.**');
+    expect(text).toContain('**No host navigation.**');
+    expect(text).toContain('`window.bevel.openNode(href)`');
+    expect(text).toContain('`window.bevel.navigate(href)`');
+    expect(text).toContain('A distribution may add data members of its own to `window.bevel`');
+    expect(text).toContain('**A bare fragment scrolls the page.**');
+    // Rendered for the deployment's layout like every other section.
+    const docs = section(await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }), '## HTML views');
+    expect(docs).toContain('/workspace/main/Docs/Alice.md');
+  });
+
+  it('lets a distribution replace the section or drop it', async () => {
+    const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === 'html-views' ? { id: s.id, body: '## HTML views\n\nOurs, graph-aware.\n' } : s)),
+    );
+    expect(section(replaced, '## HTML views').trim()).toBe('Ours, graph-aware.');
+    const dropped = await agentGuideSections(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== 'html-views'));
+    expect(dropped.map((s) => s.id)).not.toContain('html-views');
+    expect(joinGuideSections(dropped)).not.toContain('## HTML views');
   });
 });

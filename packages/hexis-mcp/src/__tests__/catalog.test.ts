@@ -202,8 +202,9 @@ describe('listedTools', () => {
     expect(flattened.map((t) => t.mcpName)).toEqual(['localbox_read_file', 'localbox_read_file']);
     const survivors = listedTools(flattened).filter((t) => t.name === 'localbox_read_file');
     expect(survivors).toHaveLength(1);
-    // Remote-first discovery order is what makes the workspace copy the winner.
-    expect(survivors[0]!.description).toBe('the workspace copy');
+    // Remote-first discovery order is what makes the workspace copy the winner
+    // (behind the call example every listed description now opens with).
+    expect(survivors[0]!.description).toBe('Call: hexis.localbox_read_file({})\n\nthe workspace copy');
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('localbox_read_file (duplicate)'));
   });
 

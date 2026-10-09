@@ -20,6 +20,7 @@ import type {
   OAuthTokenRevocationRequest,
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
+import type { AgentConnectedEvent } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { agentConnections, oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/schema.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
@@ -57,6 +58,12 @@ export interface BevelOAuthProviderDeps {
   publicFrontendUrl: string;
   /** Access-token plaintext prefix, e.g. `bevel-mcp_`. */
   tokenPrefix: string;
+  /**
+   * Where the FIRST use of an agent connection is announced to its owner
+   * (`agent-connected`, see {@link BevelOAuthProvider.noteConnectionUse}).
+   * Optional: without it the stamp is written and nobody is told.
+   */
+  events?: { emit(event: AgentConnectedEvent): void };
 }
 
 /**
@@ -511,11 +518,42 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     const last = this.connectionTouchedAt.get(connectionId);
     if (last !== undefined && now - last < CONNECTION_TOUCH_INTERVAL_MS) return;
     this.connectionTouchedAt.set(connectionId, now);
-    this.deps.db
+    this.stampConnectionUse(connectionId, new Date(now)).catch((err) =>
+      log.warn('touch connection lastUsedAt failed:', { err }),
+    );
+  }
+
+  /**
+   * The stamp itself, and the one thing it tells: a connection stamped for
+   * the FIRST time is an agent that has just reached the platform — the
+   * `initialize` every client sends on connecting — which is what the
+   * onboarding waits for, so its owner is told (`agent-connected`) for
+   * exactly that stamp and never again.
+   *
+   * The first stamp is CLAIMED in one statement (`… where last_used_at is
+   * null … returning`): of two requests racing it — a parallel
+   * `initialize` and `tools/list`, or two replicas — the database hands the
+   * row to exactly one, and only that one announces. The loser, and every
+   * later use, stamps the ordinary way. Both sit behind the throttle above,
+   * so the hot path pays nothing for them.
+   */
+  private async stampConnectionUse(connectionId: string, at: Date): Promise<void> {
+    const [first] = await this.deps.db
       .update(agentConnections)
-      .set({ lastUsedAt: new Date(now) })
-      .where(eq(agentConnections.id, connectionId))
-      .then(undefined, (err) => log.warn('touch connection lastUsedAt failed:', { err }));
+      .set({ lastUsedAt: at })
+      .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.lastUsedAt)))
+      .returning({ userId: agentConnections.userId, client: agentConnections.clientName });
+    if (first) {
+      this.deps.events?.emit({
+        kind: 'agent-connected',
+        forUserId: first.userId,
+        client: first.client ?? 'Unnamed agent',
+        agentKind: 'agent',
+        at: at.toISOString(),
+      });
+      return;
+    }
+    await this.deps.db.update(agentConnections).set({ lastUsedAt: at }).where(eq(agentConnections.id, connectionId));
   }
 
   /**

@@ -276,6 +276,71 @@ describe('ExternalApiKeyService', () => {
       expect(warn).toHaveBeenCalled();
       warn.mockRestore();
     });
+
+    /**
+     * A key's FIRST use is an agent arriving — what the onboarding waits for
+     * — so the owner is told once the stamp has landed, and once only. The
+     * first stamp is a CLAIM (`… where last_used_at is null … returning`):
+     * the request the database hands the row to announces, a racing one
+     * loses the claim, stamps the ordinary way and says nothing, and a key
+     * stamped before is touched without a word.
+     */
+    it("announces a key's first use to its owner once the claim has landed, and never otherwise", async () => {
+      const row = { tokenId: 'tok-1', label: 'Laptop', lastUsedAt: null, userId: 'user-7', email: 'a@x.io', name: 'Alice', avatarUrl: null };
+      const events = { emit: vi.fn() };
+      // The claim's answer is held back, to pin that the announcement waits for it.
+      let claimed!: (rows: { id: string }[]) => void;
+      const claim = new Promise<{ id: string }[]>((resolve) => (claimed = resolve));
+      const first = makeFakeDb([[row], claim]);
+      await new ExternalApiKeyService(first.db, 'bevel_', {}, events).verifyAndLoadUser('bevel_abc');
+      await flushMicrotasks();
+      expect(first.calls.update).toHaveLength(1);
+      expect(first.calls.set[0][0]).toHaveProperty('lastUsedAt');
+      expect(renderSql(first.calls.where[1][0]).sql).toMatch(/"api_tokens"."id" = \$1 and "api_tokens"."last_used_at" is null/);
+      expect(events.emit).not.toHaveBeenCalled();
+      claimed([{ id: 'tok-1' }]);
+      await flushMicrotasks();
+      expect(events.emit).toHaveBeenCalledTimes(1);
+      expect(events.emit).toHaveBeenCalledWith({
+        kind: 'agent-connected',
+        forUserId: 'user-7',
+        client: 'Laptop',
+        agentKind: 'key',
+        at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      });
+
+      // A racing request lost the claim: the ordinary stamp, and no announcement.
+      const lost = makeFakeDb([[row], [], undefined]);
+      const lostEvents = { emit: vi.fn() };
+      await new ExternalApiKeyService(lost.db, 'bevel_', {}, lostEvents).verifyAndLoadUser('bevel_abc');
+      await flushMicrotasks();
+      expect(lost.calls.update).toHaveLength(2);
+      expect(lostEvents.emit).not.toHaveBeenCalled();
+
+      // A key stamped before: touched, and nobody is told.
+      const again = makeFakeDb([[{ ...row, lastUsedAt: new Date('2026-10-07T12:00:00Z') }], undefined]);
+      const laterEvents = { emit: vi.fn() };
+      await new ExternalApiKeyService(again.db, 'bevel_', {}, laterEvents).verifyAndLoadUser('bevel_abc');
+      await flushMicrotasks();
+      expect(again.calls.update).toHaveLength(1);
+      expect(laterEvents.emit).not.toHaveBeenCalled();
+    });
+
+    it('announces nothing when the first stamp could not be written', async () => {
+      const row = { tokenId: 'tok-1', label: 'Laptop', lastUsedAt: null, userId: 'user-7', email: 'a@x.io', name: 'Alice', avatarUrl: null };
+      let fail!: (err: Error) => void;
+      const claim = new Promise<{ id: string }[]>((_resolve, reject) => (fail = reject));
+      const { db } = makeFakeDb([[row], claim]);
+      const events = { emit: vi.fn() };
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const user = await new ExternalApiKeyService(db, 'bevel_', {}, events).verifyAndLoadUser('bevel_abc');
+      expect(user?.id).toBe('user-7');
+      fail(new Error('connection lost'));
+      await flushMicrotasks();
+      expect(events.emit).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+    });
   });
 
   describe('listForUser', () => {

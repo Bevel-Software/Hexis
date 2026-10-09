@@ -13,9 +13,13 @@ import {
   canonicalRelativePath,
   folderPlaceholderPath,
   isPlatformFile,
+  isPlatformFolder,
   isPlatformRestoreShape,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   platformFileCreationRefusal,
   platformFileRefusal,
+  platformFolderRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
@@ -39,6 +43,7 @@ import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
+import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
 
 /**
  * One file identity from one request field, or `null` when the caller sent
@@ -571,8 +576,11 @@ export function createWorkspaceRoutes(
     res: express.Response,
     workspaceId: string,
     relativePath: string,
+    // A caller that has already resolved the user hands it over, so one
+    // request is not looked up twice.
+    resolvedUser?: { email: string },
   ): Promise<boolean> {
-    const user = await requireUser(req, res);
+    const user = resolvedUser ?? (await requireUser(req, res));
     if (!user) return false;
     let allowed: boolean;
     try {
@@ -852,27 +860,15 @@ export function createWorkspaceRoutes(
         // its own weak ETag and answers a matching If-None-Match with a 304.
         res.setHeader('ETag', `"${at.blobId}"`);
       }
-      const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
-      const mimeTypes: Record<string, string> = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.webp': 'image/webp',
-        '.svg': 'image/svg+xml',
-        '.bmp': 'image/bmp',
-        '.ico': 'image/x-icon',
-        '.pdf': 'application/pdf',
-        '.docx':
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        '.xlsx':
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      };
+      // The type from the extension, the one table the embed's raw route
+      // serves from as well (`file-readers/raw-mime.ts`).
+      const ext = rawExtensionOf(filePath);
+      const inlineMime = rawMimeFor(filePath);
       // SVG is active web content (it can carry <script>), and it is active in
       // BOTH directions: a saved-to-disk SVG re-opened later runs its scripts
       // under the file:// origin, so a download is forced to octet-stream.
-      const downloadMime = ext === '.svg' ? 'application/octet-stream' : (mimeTypes[ext] || 'application/octet-stream');
-      res.setHeader('Content-Type', wantsDownload ? downloadMime : (mimeTypes[ext] || 'application/octet-stream'));
+      const downloadMime = ext === '.svg' ? OCTET_STREAM : inlineMime;
+      res.setHeader('Content-Type', wantsDownload ? downloadMime : inlineMime);
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -978,9 +974,33 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'download=1 is required for folder zip downloads' });
       return;
     }
-    if (!(await requireDownloadPermission(req, res, id, folderPath))) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    if (!(await requireDownloadPermission(req, res, id, folderPath, user))) return;
+    // `download` on the folder lets the caller ASK for the zip. What goes in
+    // it is judged file by file, through the two gates the per-file route
+    // runs in the same order: a file the caller may not read is left out, and
+    // so is one they may read but not download. Nothing in the answer names a
+    // left-out file; the count below covers only files the caller could
+    // already see in the tree, so it discloses nothing the tree does not.
+    let withheld = 0;
+    const include = async (paths: string[]): Promise<ReadonlySet<string>> => {
+      const readable = await accessControl.canReadBatch(id, user.email, paths);
+      const visible = paths.filter((p) => readable.get(p) === true);
+      const downloadable = await accessControl.canDownloadBatch(id, user.email, visible);
+      const kept = new Set(visible.filter((p) => downloadable.get(p) === true));
+      withheld = visible.length - kept.size;
+      return kept;
+    };
     try {
-      const buffer = await workspaceService.createFolderZip(id, folderPath);
+      const buffer = await workspaceService.createFolderZip(id, folderPath, include);
+      res.setHeader('X-Withheld-Files', String(withheld));
+      // One caller's archive: which files it holds, and the count beside it,
+      // are that caller's verdicts. `private` keeps a shared cache from
+      // handing it to the next caller; `no-store` because, unlike the single
+      // file, nothing here can be revalidated (no ETag), so a copy is never
+      // worth keeping.
+      res.setHeader('Cache-Control', 'private, no-store');
       // `|| 'folder'` covers the edge case where `folderPath` itself was
       // a single bare slash (`/`) that survived the trim — the service
       // would still reject it as path traversal, but the basename
@@ -999,7 +1019,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      if (error instanceof PathTraversalError) {
+      // A traversal refusal (`PathTraversalError`), or the access tree failing
+      // to load while the entries were judged (`AccessConfigError`): both are
+      // domain errors carrying their own status and payload, the same ones
+      // the single-file gate answers with.
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -1098,6 +1122,16 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
+        // A platform folder — the repository root, whose sweep would take the
+        // root's `access.md` and `roles.yaml` with it, or one of the reserved
+        // top-level folders that hold a whole section of the knowledge base —
+        // is refused here as `delete_folder` refuses it, by the same rule.
+        const trimmedFolder = filePath.replace(/\/+$/, '');
+        const folderRel = trimmedFolder === kbDirName ? '' : toKbRelative(trimmedFolder, kbDirName);
+        if (folderRel !== null && isPlatformFolder(folderRel, kb.layout)) {
+          res.status(409).json({ error: platformFolderRefusal(folderRel) });
+          return;
+        }
         const branch = branchForWorkspaceId(id);
         // In the folder's turn: keeping a folder under this one (a file delete
         // racing this one) waits until the sweep is done, and then finds the
@@ -1164,6 +1198,14 @@ export function createWorkspaceRoutes(
           eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
         }
         res.json({ status: 'deleted', count: filesInDir.length });
+        return;
+      }
+      // The root's `access.md` and `roles.yaml` govern the whole repository:
+      // nobody deletes them, here or through the agent tools. A nested
+      // `access.md` is deleted like any file its caller may write.
+      const rel = toKbRelative(filePath, kbDirName);
+      if (rel !== null && isRepositoryOwnFile(rel, kb.layout)) {
+        res.status(409).json({ error: repositoryOwnFileDeleteRefusal(rel) });
         return;
       }
       await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));

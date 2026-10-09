@@ -59,6 +59,13 @@ export class GitHubAppConnection implements GitHubAppRepository {
   private renewing: Promise<void> | null = null;
   /** The last renewal failed: how many in a row have, and until when GitHub is not asked again. */
   private failed: { times: number; until: number } | null = null;
+  /**
+   * The settings that were empty the last time no token could be asked for,
+   * so the log says so ONCE per state and not before every git call. A
+   * deployment in this state used to run for hours with every push failing
+   * and nothing in the log naming the cause.
+   */
+  private saidUnaskable: string | null = null;
 
   constructor(private readonly opts: GitHubAppConnectionOptions) {
     this.client = opts.client ?? new GitHubAppClient();
@@ -138,20 +145,47 @@ export class GitHubAppConnection implements GitHubAppRepository {
    * `asked` is for an admin waiting on the answer itself (the setup screen
    * listing repositories, proving a connection): GitHub is asked whatever
    * is remembered, and the failure is thrown.
+   *
+   * `refused` is the git runner reporting that the host threw out the token
+   * in hand. However much time the clock gives it, that token is dead: it is
+   * dropped first, so nothing presents it again, and GitHub is asked for
+   * another the way `asked` asks — now, and with the failure thrown. A
+   * renewal that fails leaves NO token, which is what tells the runner not
+   * to run the command again with the one the host just refused.
    */
-  async prepare(opts: { asked?: boolean } = {}): Promise<void> {
+  async prepare(opts: { asked?: boolean; refused?: boolean } = {}): Promise<void> {
     const credentials = this.credentials();
     const installationId = this.installationId();
-    if (!credentials || !installationId) return;
+    if (!credentials || !installationId) {
+      // Said once per state: every git call lands here while it lasts.
+      const empty = ['githubAppId', 'githubAppSlug', 'githubAppPrivateKey', 'githubAppClientId', 'githubAppClientSecret', 'githubInstallationId']
+        .filter((key) => !this.opts.read(key))
+        .join(', ');
+      if (this.saidUnaskable !== empty) {
+        this.saidUnaskable = empty;
+        this.log().error(
+          `no installation token can be asked for while these settings are empty: ${empty}. ` +
+            'Every git call to the repository host runs without a credential until they are set.',
+        );
+      }
+      return;
+    }
+    this.saidUnaskable = null;
+    if (opts.refused) {
+      // The host's verdict outranks the clock: what it refused is not
+      // presented again, by anyone, whatever a renewal in flight brings.
+      this.held = null;
+    }
+    const insist = Boolean(opts.asked || opts.refused);
     const held = this.held?.for === this.holder() ? this.held : null;
     const good = held !== null && held.expiresAt > this.now();
     if (good && held.expiresAt - this.now() > RENEW_AHEAD_MS) return;
-    if (!opts.asked && this.failed && this.now() < this.failed.until) return;
+    if (!insist && this.failed && this.now() < this.failed.until) return;
 
     this.renewing ??= this.renew(credentials, installationId).finally(() => {
       this.renewing = null;
     });
-    if (good && !opts.asked) {
+    if (good && !insist) {
       // Not waited on, so not thrown to anyone: the renewal has logged it.
       this.renewing.catch(() => undefined);
       return;

@@ -27,6 +27,28 @@ export function statusOf(err: unknown): number | null {
   return typeof status === 'number' ? status : null;
 }
 
+/**
+ * A read that never reached the file: opening the BRANCH failed, so nothing
+ * was said about the path. Kept apart from the file read's own errors because
+ * the two share a status and mean opposite things — a 404 from the file read
+ * says "this branch has no such file", which a request that removes the file
+ * is exactly expected to answer; a 404 from the branch says the branch itself
+ * is gone, which says nothing about the file at all. `status` is the cause's,
+ * so a refusal to open the branch still reads as a refusal.
+ */
+export class BranchUnavailableError extends Error {
+  readonly branch: string;
+  readonly cause: unknown;
+  readonly status: number | null;
+  constructor(branch: string, cause: unknown) {
+    super(`the branch ${branch} couldn't be opened (${failureReason(cause)})`);
+    this.name = 'BranchUnavailableError';
+    this.branch = branch;
+    this.cause = cause;
+    this.status = statusOf(cause);
+  }
+}
+
 /** A read the server refused because the caller may not see the path. */
 export function isDenial(err: unknown): boolean {
   return statusOf(err) === 403;

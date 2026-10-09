@@ -109,3 +109,69 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
     await expect(new PendingCommitsService(db).markNeedsAttentionInWorkspace('main', 'whatever')).resolves.toBe(0);
   });
 });
+
+/**
+ * What `mergeBranch` waits on: the commits still between a branch's saved
+ * files and its remote. `pending` and `running` both count — a row the worker
+ * holds is not pushed yet — and a `needs_attention` row is reported with its
+ * message, because nothing will land it without a person.
+ */
+describe('PendingCommitsService.queuedOnBranch', () => {
+  function selectDb(rows: Array<{ status: string; lastError: string | null }>) {
+    const orderBy = vi.fn(async () => rows);
+    const where = vi.fn(() => ({ orderBy }));
+    const db = { select: vi.fn(() => ({ from: () => ({ where }) })) } as unknown as Database;
+    return { db, where, orderBy };
+  }
+
+  it('counts pending and running rows, and reports no attention when none is stuck', async () => {
+    const { db, where } = selectDb([
+      { status: 'pending', lastError: null },
+      { status: 'running', lastError: null },
+    ]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 2,
+      stuck: 0,
+      needsAttention: null,
+    });
+    // Keyed on the branch column.
+    const sql = new PgDialect().sqlToQuery((where.mock.calls[0] as unknown as [SQL])[0]);
+    expect(sql.sql).toMatch(/"branch" = \$1/);
+    expect(sql.params).toEqual(['alice/draft']);
+  });
+
+  it('reports the oldest needs_attention row\'s message alongside the count', async () => {
+    const { db, orderBy } = selectDb([
+      { status: 'pending', lastError: null },
+      { status: 'needs_attention', lastError: 'push rejected' },
+      { status: 'needs_attention', lastError: 'later' },
+    ]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 1,
+      stuck: 2,
+      needsAttention: 'push rejected',
+    });
+    // "Oldest" is the query's order, so every call reports the same message.
+    const dialect = new PgDialect();
+    const order = (orderBy.mock.calls[0] as unknown as SQL[]).map((o) => dialect.sqlToQuery(o).sql);
+    expect(order).toEqual(['"pending_commits"."queued_at" asc', '"pending_commits"."id" asc']);
+  });
+
+  it('falls back to a message when a stuck row has an empty error, so it is never read as retryable', async () => {
+    const { db } = selectDb([{ status: 'needs_attention', lastError: '' }]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 0,
+      stuck: 1,
+      needsAttention: 'A queued commit on this branch failed and needs a person.',
+    });
+  });
+
+  it('answers nothing queued for a quiet branch', async () => {
+    const { db } = selectDb([]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('quiet')).resolves.toEqual({
+      queued: 0,
+      stuck: 0,
+      needsAttention: null,
+    });
+  });
+});

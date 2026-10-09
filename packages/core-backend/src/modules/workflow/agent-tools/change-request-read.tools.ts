@@ -133,14 +133,6 @@ export function registerChangeRequestReadTools(
     router.post(path.slice('/api'.length), toolAuth, toolHandler(spec.handler, { write: false }));
   };
 
-  /**
-   * A clone to resolve access verdicts in. All clones track the same origin and
-   * every verdict here is read at `origin/<base>`, so any existing one answers
-   * identically — reusing one avoids cloning a branch just to read a ref.
-   */
-  const repoGlobalWorkspaceId = async (ctx: ToolContext): Promise<string> =>
-    (await ctx.workspaceService.findAnyWorkspaceId()) ?? kb.defaultWorkspaceId();
-
   /** A change-request number as the tools accept it. */
   const numberArg = (args: Record<string, unknown>): number => {
     const n = args.number;
@@ -153,119 +145,7 @@ export function registerChangeRequestReadTools(
     return n;
   };
 
-  /**
-   * Read verdicts for `paths` at `origin/<base>`, as a membership set of what
-   * the caller MAY read. A null answer (the ref or its `roles.yaml` does not
-   * resolve) withholds everything, which is the same reading the app's
-   * fork-point route gives it.
-   */
-  const readablePaths = async (
-    ctx: ToolContext,
-    workspaceId: string,
-    base: string,
-    paths: string[],
-  ): Promise<Set<string>> => {
-    if (paths.length === 0) return new Set();
-    const verdicts = await accessControl.canReadBatchAtRef(
-      workspaceId,
-      `origin/${base}`,
-      ctx.user.email,
-      [...new Set(paths)],
-    );
-    if (!verdicts) return new Set();
-    return new Set([...verdicts].filter(([, allowed]) => allowed).map(([p]) => p));
-  };
-
-  /**
-   * The detail of request `number` with the access filter applied, or a 404 —
-   * the one place the four by-number tools get their data, so they cannot
-   * drift on who may see what.
-   */
-  interface ScopedDetail {
-    detail: ChangeRequestDetail;
-    /**
-     * Whether the caller may read one path of this request — the raw per-path
-     * verdict, as the access tree gives it at `origin/<base>`.
-     */
-    mayRead: (path: string) => boolean;
-    /**
-     * Whether this request may NAME `path` to the caller — `mayRead`, minus
-     * every name a withheld file goes by. The ONE verdict the tools below ask
-     * about a path, so none of them can decide it a second way.
-     *
-     * The two differ on exactly one shape, and it is the shape that leaks: a
-     * file moved out of a folder the caller may not read is readable under
-     * its NEW name, yet `fileIsReadable` withholds it whole (its diff shows the
-     * old path's content). Anything keyed on that new path — an approval, a
-     * comment anchored to it — would otherwise say the request touches a file
-     * the file tool refuses to list, under a name it refuses to print.
-     */
-    mayShow: (path: string) => boolean;
-    /** The request's files the caller may read, in the request's own order. */
-    readableFiles: ChangeRequestDetail['files'];
-    /**
-     * Every name the withheld files go by — for filtering the gate blockers and
-     * for deciding `mayShow`. NEVER answered: use `withheldFileCount` to report
-     * them.
-     */
-    withheldFilePaths: string[];
-    /** How many files are withheld. One per file, whatever its move names. */
-    withheldFileCount: number;
-    viewerIsAuthor: boolean;
-  }
-
-  const scopedDetail = async (
-    ctx: ToolContext,
-    number: number,
-    opts: { patches: boolean },
-  ): Promise<ScopedDetail> => {
-    const workspaceId = await repoGlobalWorkspaceId(ctx);
-    const detail = await ctx.workflowService.getChangeRequestDetail(number, {
-      workspaceId,
-      viewerEmail: ctx.user.email,
-      patches: opts.patches,
-    });
-    if (!detail) throw notFound(number);
-    const viewerIsAuthor = isAuthor(detail, ctx.user.email);
-    // Comment paths join the batch: a comment may name a file the request no
-    // longer changes, and without a verdict of its own it would be withheld
-    // from a caller who can read it perfectly well.
-    const commentPaths = detail.comments.map((c) => c.path).filter((p): p is string => !!p);
-    // BOTH names of every file: a move is judged on its old path as well as
-    // its new one, because the diff of a move shows what was at the old one.
-    const readable = await readablePaths(ctx, workspaceId, detail.base, [
-      ...detail.files.flatMap(pathsOf),
-      ...commentPaths,
-    ]);
-    const mayRead = (path: string) => readable.has(path);
-    const readableFiles = detail.files.filter((f) => fileIsReadable(f, mayRead));
-    if (!maySeeChangeRequest({ readableFiles: readableFiles.length, isAuthor: viewerIsAuthor })) {
-      throw notFound(number);
-    }
-    // Every name a withheld file goes by, so a gate warning quoting either
-    // spelling is caught by the blocker filter — and so `mayShow` catches
-    // whichever spelling an approval or a comment happens to use.
-    const withheldFilePaths = detail.files
-      .filter((f) => !fileIsReadable(f, mayRead))
-      .flatMap(pathsOf);
-    const withheldNames = new Set(withheldFilePaths);
-    return {
-      detail,
-      mayRead,
-      mayShow: (path: string) => mayRead(path) && !withheldNames.has(path),
-      readableFiles,
-      withheldFilePaths,
-      withheldFileCount: detail.files.length - readableFiles.length,
-      viewerIsAuthor,
-    };
-  };
-
-  /**
-   * The same answer for a number that was never issued and for one the caller
-   * may not see — requirement 7. Says nothing a probe could tell apart.
-   */
-  const notFound = (number: number): ToolError =>
-    new ToolError(`Change request #${number} not found.`, 404);
+  const { repoGlobalWorkspaceId, readablePaths, scopedDetail } = changeRequestScope(accessControl, kb);
 
   /**
    * The changed files of a SUMMARY, as the pairs a read gate decides over.
@@ -374,7 +254,18 @@ export function registerChangeRequestReadTools(
       required: ['changeRequests', ...pagingRequired],
     },
     handler: async (args, ctx: ToolContext) => {
-      const state = args.state === 'closed' || args.state === 'all' ? args.state : 'open';
+      // The answer spells a merged request `state: merged`, so an agent that
+      // copies that word back into the filter is asking for the applied
+      // ones. Quietly answering the open ones instead reads as "there are no
+      // merged requests" — refuse, and name the filter's own vocabulary.
+      const state = args.state === undefined ? 'open' : args.state;
+      if (state !== 'open' && state !== 'closed' && state !== 'all') {
+        throw new ToolError(
+          `Unknown \`state\` ${JSON.stringify(state)}. Use \`open\` (the default), \`closed\` ` +
+            '(applied and declined alike) or `all`; the answer then says `merged` or `closed` for each.',
+          400,
+        );
+      }
       const head = typeof args.head === 'string' ? args.head : undefined;
       const base = typeof args.base === 'string' ? args.base : undefined;
       const author = typeof args.author === 'string' ? args.author : undefined;
@@ -722,3 +613,147 @@ export function registerChangeRequestReadTools(
   });
 }
 
+/**
+ * The detail of request `number` with the access filter applied, or a 404 —
+ * the one place the four by-number tools get their data, so they cannot
+ * drift on who may see what.
+ */
+export interface ScopedDetail {
+  detail: ChangeRequestDetail;
+  /**
+   * Whether the caller may read one path of this request — the raw per-path
+   * verdict, as the access tree gives it at `origin/<base>`.
+   */
+  mayRead: (path: string) => boolean;
+  /**
+   * Whether this request may NAME `path` to the caller — `mayRead`, minus
+   * every name a withheld file goes by. The ONE verdict the tools below ask
+   * about a path, so none of them can decide it a second way.
+   *
+   * The two differ on exactly one shape, and it is the shape that leaks: a
+   * file moved out of a folder the caller may not read is readable under
+   * its NEW name, yet `fileIsReadable` withholds it whole (its diff shows the
+   * old path's content). Anything keyed on that new path — an approval, a
+   * comment anchored to it — would otherwise say the request touches a file
+   * the file tool refuses to list, under a name it refuses to print.
+   */
+  mayShow: (path: string) => boolean;
+  /** The request's files the caller may read, in the request's own order. */
+  readableFiles: ChangeRequestDetail['files'];
+  /**
+   * Every name the withheld files go by — for filtering the gate blockers and
+   * for deciding `mayShow`. NEVER answered: use `withheldFileCount` to report
+   * them.
+   */
+  withheldFilePaths: string[];
+  /** How many files are withheld. One per file, whatever its move names. */
+  withheldFileCount: number;
+  viewerIsAuthor: boolean;
+}
+
+/**
+ * The access scope of one change request, as every by-number read tool sees
+ * it — and as `delete_branch` does, so a deletion's preview or refusal never
+ * names a request `get_change_request` answers as not found.
+ */
+export function changeRequestScope(
+  accessControl: Pick<IAccessControl, 'canReadBatchAtRef'>,
+  kb: Pick<KbContext, 'defaultWorkspaceId'>,
+) {
+  /**
+   * A clone to resolve access verdicts in. All clones track the same origin and
+   * every verdict here is read at `origin/<base>`, so any existing one answers
+   * identically — reusing one avoids cloning a branch just to read a ref.
+   */
+  const repoGlobalWorkspaceId = async (ctx: ToolContext): Promise<string> =>
+    (await ctx.workspaceService.findAnyWorkspaceId()) ?? kb.defaultWorkspaceId();
+
+  /**
+   * Read verdicts for `paths` at `origin/<base>`, as a membership set of what
+   * the caller MAY read. A null answer (the ref or its `roles.yaml` does not
+   * resolve) withholds everything, which is the same reading the app's
+   * fork-point route gives it.
+   */
+  const readablePaths = async (
+    ctx: ToolContext,
+    workspaceId: string,
+    base: string,
+    paths: string[],
+  ): Promise<Set<string>> => {
+    if (paths.length === 0) return new Set();
+    const verdicts = await accessControl.canReadBatchAtRef(
+      workspaceId,
+      `origin/${base}`,
+      ctx.user.email,
+      [...new Set(paths)],
+    );
+    if (!verdicts) return new Set();
+    return new Set([...verdicts].filter(([, allowed]) => allowed).map(([p]) => p));
+  };
+
+  const scopedDetail = async (
+    ctx: ToolContext,
+    number: number,
+    opts: { patches: boolean },
+  ): Promise<ScopedDetail> => {
+    const workspaceId = await repoGlobalWorkspaceId(ctx);
+    const detail = await ctx.workflowService.getChangeRequestDetail(number, {
+      workspaceId,
+      viewerEmail: ctx.user.email,
+      patches: opts.patches,
+    });
+    if (!detail) throw notFound(number);
+    const viewerIsAuthor = isAuthor(detail, ctx.user.email);
+    // Comment paths join the batch: a comment may name a file the request no
+    // longer changes, and without a verdict of its own it would be withheld
+    // from a caller who can read it perfectly well.
+    const commentPaths = detail.comments.map((c) => c.path).filter((p): p is string => !!p);
+    // BOTH names of every file: a move is judged on its old path as well as
+    // its new one, because the diff of a move shows what was at the old one.
+    const readable = await readablePaths(ctx, workspaceId, detail.base, [
+      ...detail.files.flatMap(pathsOf),
+      ...commentPaths,
+    ]);
+    const mayRead = (path: string) => readable.has(path);
+    const readableFiles = detail.files.filter((f) => fileIsReadable(f, mayRead));
+    if (!maySeeChangeRequest({ readableFiles: readableFiles.length, isAuthor: viewerIsAuthor })) {
+      throw notFound(number);
+    }
+    // Every name a withheld file goes by, so a gate warning quoting either
+    // spelling is caught by the blocker filter — and so `mayShow` catches
+    // whichever spelling an approval or a comment happens to use.
+    const withheldFilePaths = detail.files
+      .filter((f) => !fileIsReadable(f, mayRead))
+      .flatMap(pathsOf);
+    const withheldNames = new Set(withheldFilePaths);
+    return {
+      detail,
+      mayRead,
+      mayShow: (path: string) => mayRead(path) && !withheldNames.has(path),
+      readableFiles,
+      withheldFilePaths,
+      withheldFileCount: detail.files.length - readableFiles.length,
+      viewerIsAuthor,
+    };
+  };
+
+  /**
+   * The same answer for a number that was never issued and for one the caller
+   * may not see — requirement 7. Says nothing a probe could tell apart.
+   */
+  const notFound = (number: number): ToolError =>
+    new ToolError(`Change request #${number} not found.`, 404);
+
+  /** Whether the caller may see request `number` at all: what `scopedDetail` answers 404 for, as a no. */
+  const maySee = async (ctx: ToolContext, number: number): Promise<boolean> => {
+    try {
+      await scopedDetail(ctx, number, { patches: false });
+      return true;
+    } catch (err) {
+      if (err instanceof ToolError && err.status === 404) return false;
+      throw err;
+    }
+  };
+
+  return { repoGlobalWorkspaceId, readablePaths, scopedDetail, notFound, maySee };
+}

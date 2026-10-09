@@ -15,9 +15,11 @@ import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
+import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
@@ -27,13 +29,16 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
+import { compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
+import { routeToolSchemas } from '../../tool-helpers/route-tool-schemas.js';
+import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -316,7 +321,9 @@ const postRaw = (url: string, body: unknown = {}) =>
  * POST a well-formed call. Every KB tool requires `branch` — a call that names
  * none is refused at the mount with 400 `branch-required` — so this names one
  * unless the test already did. A test ABOUT the missing input uses `postRaw`,
- * so the thing under test is never papered over by the helper.
+ * so the thing under test is never papered over by the helper. So does
+ * `start_session`, which declares no arguments at all and forbids extras: its
+ * route refuses a `branch` as an argument it does not have.
  */
 const post = (url: string, body: unknown = {}) =>
   postRaw(
@@ -328,6 +335,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   /* fresh per test via start() */
+  guideText = 'THE PLATFORM GUIDE\n';
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -966,6 +974,8 @@ describe('write modes and per-path outcomes', () => {
     for (const res of [
       await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'x', mode: 'replace' }),
       await writeFiles(base, { files: [{ path: `${KB_DIR}/a.md`, content: 'x' }], mode: 'replace' }),
+      // An empty batch is no way round it: the mode is judged before the batch is.
+      await writeFiles(base, { files: [], mode: 'bogus' }),
     ]) {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; code: string };
@@ -1120,6 +1130,15 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
     // Sliced like any content.
     expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it('answers with the platform\'s composed guide, HTML views section and all', async () => {
+    guideText = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const { content } = await read(base, 'AGENTS.md');
+    expect(content).toBe(guideText);
+    expect(content).toContain('## HTML views');
+    expect(content).toContain('**A bare fragment scrolls the page.**');
   });
 
   it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
@@ -1936,6 +1955,52 @@ describe('office documents and PDFs', () => {
     expect(external.find((t) => t.name === 'start_session')!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
   });
 
+  /**
+   * The call example at the top of every description is generated from the
+   * tool's input schema, and the same schema is what the argument check reads.
+   * If the two could disagree, the platform would publish an example its own
+   * check refuses — so every declared tool is called with its own example here.
+   */
+  it('every declared tool can be called with its own generated example', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    // The whole family this harness declares, the four the scenarios name included.
+    for (const name of ['read_file', 'write_file', 'list_files', 'grep']) {
+      expect(tools.some((t) => t.name === name), name).toBe(true);
+    }
+    expect(tools.length).toBeGreaterThan(12);
+    for (const def of tools) {
+      const compiled = compileCheck(def.inputs);
+      expect(compiled.checkable, `${def.name}: ${compiled.checkable ? '' : compiled.reason}`).toBe(true);
+      // Narrowed by hand: the assertion above already failed the test if not.
+      if (!compiled.checkable) throw new Error(compiled.reason);
+      expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
+      // And the FLAT schema, which is what the tool's own route checks the
+      // call against: the two must agree, or a call the example produced would
+      // be refused one layer in.
+      const flat = routeToolSchemas(def.name)?.flat;
+      expect(flat, def.name).toBeDefined();
+      const flatCheck = compileCheck(flat);
+      expect(flatCheck.checkable, `${def.name} (flat): ${flatCheck.checkable ? '' : flatCheck.reason}`).toBe(true);
+      if (!flatCheck.checkable) throw new Error(flatCheck.reason);
+      expect(flatCheck.check(exampleArguments(flat)), `${def.name} (flat)`).toEqual([]);
+    }
+  });
+
+  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const def of tools) {
+      // Measured as a CLIENT receives it: the call line, the purpose prefix at
+      // its own cap (the four knowledge-base tools carry one), and the
+      // description — the three things that ride one tool's entry.
+      const received = clientVisibleLength(def);
+      expect(received, `${def.name} is ${received} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
+        TOOL_DESCRIPTION_CAP,
+      );
+    }
+  });
+
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
     const PNG = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -2201,6 +2266,15 @@ describe('start_session', () => {
     // `UuidSessionSink`, because "did fifty first calls collide?" is a question
     // only the real minting can answer.
     sink?: ISessionSink,
+    // The default branch's workspace directory, for the tests about the
+    // `firstRun` note. Without one the workspace service is a bare stand-in
+    // the note's check cannot use, which is what every other test here wants:
+    // the call answers with the id alone.
+    defaultWorkspaceDir?: string,
+    // The starter pack the knowledge base was filled from, for the note.
+    starterPacks?: FirstRunStarterSource,
+    // Who may read what: everything, unless a test about the note's gate says otherwise.
+    access: IAccessControl = allowAll,
   ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
@@ -2209,7 +2283,12 @@ describe('start_session', () => {
       scope: auth.scope,
       source: auth.source,
       abortSignal: signal,
-      workspaceService: {} as never,
+      workspaceService: (defaultWorkspaceDir
+        ? {
+            hasBootstrappedWorkspace: async () => true,
+            getWorkspacePath: async () => defaultWorkspaceDir,
+          }
+        : {}) as never,
       workflowService: {} as never,
       events: {} as never,
       getFilesystem: async () => ({}) as never,
@@ -2232,10 +2311,17 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), access, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined /* downloads */,
+      starterPacks,
+      new NodeFs(),
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -2251,13 +2337,13 @@ describe('start_session', () => {
 
   it('returns the sink-minted id as sessionId', async () => {
     const base = await startSessionApp();
-    const res = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+    const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
     expect(res.sessionId).toBe('thread-xyz');
   });
 
   it('mints the session for the authenticated user', async () => {
     const base = await startSessionApp();
-    await post(`${base}/api/agent/tools/start_session`);
+    await postRaw(`${base}/api/agent/tools/start_session`);
     expect(created).toHaveLength(1);
     expect(created[0].userId).toBe('user-42');
     expect(created[0].startedAt).toBeInstanceOf(Date);
@@ -2268,7 +2354,7 @@ describe('start_session', () => {
     // loopback token resolves to source 'external' at the verifier (see
     // tool-auth), so it is admitted here like any external agent.
     const base = await startSessionApp('internal');
-    const res = await post(`${base}/api/agent/tools/start_session`);
+    const res = await postRaw(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
   });
@@ -2292,7 +2378,7 @@ describe('start_session', () => {
     it('answers every one of them with a session id of its own', async () => {
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const responses = await Promise.all(Array.from({ length: 50 }, () => postRaw(`${base}/api/agent/tools/start_session`)));
       const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
 
       expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
@@ -2325,13 +2411,13 @@ describe('start_session', () => {
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       let failed: Awaited<ReturnType<typeof post>>;
       try {
-        failed = await post(`${base}/api/agent/tools/start_session`);
+        failed = await postRaw(`${base}/api/agent/tools/start_session`);
       } finally {
         errorLog.mockRestore();
       }
       expect(failed.status).toBeGreaterThanOrEqual(500);
 
-      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retried = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
       expect(retried.sessionId).toBe('session-2');
       expect(calls).toBe(2);
     });
@@ -2343,8 +2429,8 @@ describe('start_session', () => {
       // to other tools, and the spare is simply never mentioned again.
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
-      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
 
       expect(retry.sessionId).not.toBe(first.sessionId);
       expect(first.sessionId).toBeTruthy();
@@ -2372,6 +2458,141 @@ describe('start_session', () => {
     expect(description).toMatch(/retry/i);
     expect(description).toMatch(/created nothing/i);
     expect(description).toMatch(/harmless/i);
+    // And that the answer may carry a note to act on, so an agent reading
+    // only the catalog knows the field is not noise.
+    expect(description).toContain('`firstRun`');
+  });
+
+  /**
+   * "The agent is the onboarding guide": on a knowledge base nobody has
+   * written in yet, the first call of a conversation says so, and the note
+   * stops on its own once a page exists.
+   */
+  describe('the firstRun note', () => {
+    let wsDir = '';
+    const knowledge = () => join(wsDir, KB_DIR, 'KnowledgeBase');
+
+    beforeEach(async () => {
+      wsDir = await mkdtemp(join(tmpdir(), 'bevel-first-run-'));
+      await mkdir(knowledge(), { recursive: true });
+      await writeFile(join(knowledge(), STARTER_GUIDE_FILE), '# How to get started\n');
+    });
+
+    afterEach(async () => {
+      await rm(wsDir, { recursive: true, force: true });
+    });
+
+    const startSession = async () => {
+      const base = await startSessionApp('external', undefined, wsDir);
+      // `postRaw`: the tool takes no arguments, and `post` adds a branch.
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+    };
+
+    it('is there while the knowledge folder holds only the starter guide', async () => {
+      // Folder placeholders and access rules are not pages either.
+      await mkdir(join(knowledge(), 'Empty'), { recursive: true });
+      await writeFile(join(knowledge(), 'Empty', '.gitkeep'), '');
+      await writeFile(join(knowledge(), 'access.md'), '# Access\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
+    });
+
+    it('is gone once another page exists beside the starter guide', async () => {
+      await writeFile(join(knowledge(), 'Glossary.md'), '# Glossary\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it('is gone once another page exists in a folder', async () => {
+      await mkdir(join(knowledge(), 'Company'), { recursive: true });
+      await writeFile(join(knowledge(), 'Company', 'About.md'), '# About us\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it("after a starter pack, stays while the pack's pages are untouched and names its suggestions", async () => {
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n');
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers', 'Pricing'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const base = await startSessionApp('external', undefined, wsDir, starter);
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(first.firstRun).toBe(
+        firstRunNote(`${KB_DIR}/KnowledgeBase`, { name: 'Sales', suggestedPages: ['Customers', 'Pricing'] }),
+      );
+
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n\nAcme.\n');
+      const second = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(second).not.toHaveProperty('firstRun');
+    });
+
+    /**
+     * The note is a read: it says what the knowledge folder holds. A caller
+     * who may not read the folder gets the id alone, and a pack page the
+     * caller may not read is judged as anybody's page, so the note never
+     * tells them it is still a placeholder.
+     */
+    it('is withheld from a caller who may not read the knowledge folder', async () => {
+      const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
+
+    it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
+      await mkdir(join(knowledge(), 'Leadership'), { recursive: true });
+      await writeFile(join(knowledge(), 'Leadership', 'Plan.md'), '# Plan\n');
+      const planClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Plan.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, planClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+    });
+
+    it('says nothing of a pack whose page the caller may not read, in the checkout or gone from it', async () => {
+      // Absent from the checkout, so the folder reads as new — and the note
+      // would still name the pack and its suggestions.
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const pageClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Customers.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
+
+    it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {
+      await rm(wsDir, { recursive: true, force: true });
+
+      const res = await startSession();
+
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
   });
 });
 
@@ -2945,6 +3166,108 @@ describe('preflight for moves and deletes', () => {
   });
 
   describe('move_file', () => {
+    describe('rewrites links', () => {
+      /** A node at Sales/deal.md, linked from a page beside it, a read-only page, and a page the caller cannot read. */
+      async function linked(): Promise<string> {
+        const base = await seeded();
+        await fs.writeFile(KB('NodeTypes/Deal.md'), '# Deal\n');
+        await fs.writeFile(KB('Sales/deal.md'), '---\nnodeType: "[Deal](../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../HR/policy.md).\n');
+        await fs.writeFile(KB('Sales/index.md'), `[d](deal.md "Deal") [r](/${KB_DIR}/Sales/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`);
+        await fs.writeFile(KB('Locked/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Secret/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Sales/transcripts/01.md'), '[d](../deal.md)\n');
+        return base;
+      }
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
+
+      it('by default: links in and out are rewritten, the dry run answering the plan the move carries out', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.status).toBe(200);
+        expect(dry.body.links).toEqual({
+          filesEdited: 2,
+          linksRewritten: 4,
+          edits: [
+            { path: KB('Sales/2026/deal.md'), from: '../NodeTypes/Deal.md', to: '../../NodeTypes/Deal.md' },
+            { path: KB('Sales/2026/deal.md'), from: '../HR/policy.md', to: '../../HR/policy.md' },
+            { path: KB('Sales/index.md'), from: 'deal.md', to: '2026/deal.md' },
+            { path: KB('Sales/index.md'), from: `/${KB_DIR}/Sales/deal.md#terms`, to: `/${KB_DIR}/Sales/2026/deal.md#terms` },
+          ],
+          notRewritten: [{ path: KB('Locked/refs.md'), reason: 'no write access', links: ['../Sales/deal.md'] }],
+          unsearched: 'Links in files you cannot read were not searched, and may still point at the old path.',
+        });
+        // Nothing about the unreadable page leaks.
+        expect(JSON.stringify(dry.body)).not.toContain('Secret');
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(200);
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toEqual(dry.body.links);
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toBe(
+          '---\nnodeType: "[Deal](../../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../../HR/policy.md).\n',
+        );
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toBe(
+          `[d](2026/deal.md "Deal") [r](/${KB_DIR}/Sales/2026/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`,
+        );
+        // The read-only page, the unreadable page and the transcript keep the old path.
+        expect(await fs.readFile(KB('Locked/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Secret/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Sales/transcripts/01.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('`rewriteLinks: false` moves exactly as before: no link touched, no `links` block', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true, rewriteLinks: false });
+        expect(dry.body.links).toBeUndefined();
+        const run = await call(base, 'move_file', { ...args, rewriteLinks: false });
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toBeUndefined();
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toContain('../NodeTypes/Deal.md');
+      });
+
+      it('the pages the answer names reach the read hook, the edited ones the write hook, and a page merely searched neither', async () => {
+        const base = await linked();
+        const reads: string[] = [];
+        const writes: string[] = [];
+        hooks.onAgentRead(async (op) => {
+          reads.push(op.wsPath ?? '');
+        });
+        hooks.onPreWrite(async (op) => {
+          writes.push(op.wsPath ?? '');
+        });
+        expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+        // `Locked/refs.md` is named (left for want of write access, its links
+        // listed), so the read hook hears of it; the unreadable page and the
+        // transcript are never named, so it never hears of them.
+        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+        expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+      });
+
+      it('a move that would edit more than 200 files is refused, and nothing changes', async () => {
+        const base = await seeded();
+        for (let i = 0; i < 201; i++) await fs.writeFile(KB(`Sales/pages/p${i}.md`), '[d](../deal.md)\n');
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.body).toMatchObject({ allowed: false });
+        expect(dry.body.reason).toMatch(/201 files.*rewriteLinks: false/s);
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(400);
+        expect(JSON.stringify(run.body)).toContain('rewriteLinks: false');
+        expect(await exists(args.src)).toBe(true);
+        expect(await fs.readFile(KB('Sales/pages/p0.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('the description states the default, the opt-out, and that prose and code are not changed', async () => {
+        await start();
+        const def = (await toolRegistry.listInternal()).find((t) => t.name === 'move_file');
+        const description = typeof def?.description === 'string' ? def.description : '';
+        expect(description).toMatch(/rewritten by default/);
+        expect(description).toContain('`rewriteLinks: false`');
+        expect(description).toMatch(/plain prose or code are never changed/);
+      });
+    });
+
     it('a same-access move: the dry run changes nothing, the real call runs without confirm', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
@@ -3302,6 +3625,80 @@ describe('preflight for moves and deletes', () => {
       const run = await call(base, 'delete_file', { path: KB('Sales/deal.md') });
       expect(run.status).toBe(403);
       expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
+    });
+
+    // A nested access.md is deleted the way a person deletes it in the app:
+    // by whoever may write it, through the same one-file delete (the locking
+    // filesystem's, which commits and pushes as the caller) as any file.
+    it('a nested access.md is deleted by a caller who may write it, like any file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/access.md'), '---\nread: Admin\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Sales/access.md') })).body).toMatchObject({
+        managed: true, movable: false, deletable: true,
+      });
+      const deleted: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string) => { deleted.push(p); return deleteFile(p); };
+
+      const run = await call(base, 'delete_file', { path: KB('Sales/access.md') });
+
+      expect(run.status).toBe(200);
+      expect(run.body).toEqual({ path: KB('Sales/access.md'), deleted: true });
+      expect(deleted).toEqual([KB('Sales/access.md')]);
+      expect(await exists(KB('Sales/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a nested access.md the caller may not write is the ordinary write refusal, and stays', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Locked/access.md'), '---\nread: everyone\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Locked/access.md') })).body).toMatchObject({
+        managed: true, deletable: false,
+      });
+
+      const run = await call(base, 'delete_file', { path: KB('Locked/access.md') });
+
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/access.md'), canPropose: true });
+      expect(JSON.stringify(run.body)).not.toContain('platform file');
+      expect(await exists(KB('Locked/access.md'))).toBe(true);
+    });
+
+    it('the root access.md and roles.yaml are the repository\'s own: refused for everyone, and they stay', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      for (const name of ['access.md', 'roles.yaml']) {
+        // The caller here may write and own everything: the refusal is not about who asks.
+        expect((await call(base, 'file_stat', { path: KB(name) })).body).toMatchObject({
+          managed: true, movable: false, deletable: false,
+          access: { read: true, write: true, download: true, owner: true },
+        });
+        const run = await call(base, 'delete_file', { path: KB(name) });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(`${name} is the repository's own file and cannot be deleted.`);
+        expect(await exists(KB(name))).toBe(true);
+      }
+    });
+
+    it('a nested roles.yaml is content, and .bevelignore stays refused as before', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      expect((await call(base, 'delete_file', { path: KB('Sales/roles.yaml') })).status).toBe(200);
+      const ignore = await call(base, 'delete_file', { path: KB('Sales/.bevelignore') });
+      expect(ignore.status).toBe(400);
+      expect(ignore.body.error).toBe('.bevelignore is a platform file and cannot be deleted through the agent tools.');
+      expect((await call(base, 'file_stat', { path: KB('Sales/.bevelignore') })).body).toMatchObject({ deletable: false });
+    });
+
+    it('delete_folder still refuses the repository root, which keeps its access.md', async () => {
+      const base = await seeded();
+      for (const args of [{ dryRun: true }, { confirm: true }]) {
+        const run = await call(base, 'delete_folder', { path: KB_DIR, ...args });
+        expect(run.body.allowed === false || run.status === 400).toBe(true);
+        expect(JSON.stringify(run.body)).toContain('The repository root is a platform folder and cannot be moved or deleted.');
+      }
+      expect(await exists(KB('access.md'))).toBe(true);
     });
   });
 

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir } from '../assets.js';
+import { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir, defaultStarterPacksDir, mcpAppDir } from '../assets.js';
 
 /**
  * Every asset folder this package reads at run time has to reach the places
@@ -17,18 +17,30 @@ import { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir } from '../asset
  * any tool on the deployment failed, and every agent surface with it
  * (2026-10-06). A folder named here and missing from either list fails this
  * test instead.
+ *
+ * `mcp-app/` was the same omission one release later — caught here rather
+ * than on a deployment. It holds the `ui://` view `resources/read` serves, so
+ * an image without it answered `tools/list` with no view on `open_page` and
+ * `resources/list` with nothing, and the page-in-chat quietly degraded to
+ * text on every real build.
  */
 const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 const repoRoot = path.resolve(packageRoot, '..', '..');
 
 /** The folders assets.ts locates, as names under the package root. */
-const ASSET_DIRS = [coreMigrationsDir(), defaultKbTemplateDir(), agentGuideDir()].map((dir) =>
+const ASSET_DIRS = [
+  coreMigrationsDir(),
+  defaultKbTemplateDir(),
+  agentGuideDir(),
+  mcpAppDir(),
+  defaultStarterPacksDir(),
+].map((dir) =>
   path.basename(dir),
 );
 
 describe('the asset folders this package reads at run time', () => {
-  it('are the three assets.ts names', () => {
-    expect(ASSET_DIRS.sort()).toEqual(['agent-guide', 'kb-template', 'migrations']);
+  it('are the four assets.ts names', () => {
+    expect(ASSET_DIRS.sort()).toEqual(['agent-guide', 'kb-template', 'mcp-app', 'migrations', 'starter-packs']);
   });
 
   it('exist in the source tree', () => {

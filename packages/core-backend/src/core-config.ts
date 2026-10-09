@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultKbTemplateDir } from './assets.js';
+import { defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
@@ -103,11 +103,13 @@ export interface TenantConfig {
   readonly gitUsername: string;
   readonly gitToken: string;
   readonly kbTemplateDir: string;
+  readonly starterPacksDir: string;
   readonly updateCheckEnabled: boolean;
   readonly loginPasswordEnabled: boolean;
   readonly allowedEmailDomains: string[];
   readonly secretsEncKey: string;
   readonly internalTokenSecret: string;
+  readonly embedSharedSecret: string;
   readonly trustProxy: string;
   readonly gitTimeoutMs: number;
   readonly publicBackendUrl: string;
@@ -277,6 +279,14 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    */
   readonly kbTemplateDir: string;
   /**
+   * Filesystem path to the starter packs a new knowledge base's admin may
+   * pick from (the `starter-packs/` folder shipped inside this package — see
+   * `defaultStarterPacksDir()`): one folder per team, each a `pack.yaml` with
+   * the pages and the plugin it adds. A distribution offers its own with
+   * `STARTER_PACKS_DIR`; a folder holding no valid pack offers none.
+   */
+  readonly starterPacksDir: string;
+  /**
    * In-app update check. When true (default), `GET /api/update-check` lazily
    * asks api.github.com for the newest Hexis release — only when an admin's
    * browser asks, cached for hours, never on a timer — so admins see a quiet
@@ -337,6 +347,17 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    * independently of user sessions.
    */
   readonly internalTokenSecret: string;
+  /**
+   * The shared secret the Atlassian connector presents to \`POST
+   * /api/embed/token\` (\`EMBED_SHARED_SECRET\`). Unset on a deployment that
+   * has no connector pointed at it, which 404s that one route — the embed
+   * surface itself needs no secret, because the MCP App mints through the
+   * authenticated MCP session instead.
+   *
+   * There is deliberately NO framing setting beside it: any site may frame
+   * the embed page (see the embed module), so there is no allowlist to keep.
+   */
+  readonly embedSharedSecret: string;
   /**
    * Express `trust proxy` setting, from `TRUST_PROXY`: the number of reverse
    * proxy hops in front of this backend (e.g. `1`), or an address/CIDR list
@@ -477,6 +498,7 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     // Default: the `kb-template/` folder shipped inside this package (works
     // both from src/ and compiled dist/ — see assets.ts).
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
+    this.starterPacksDir = process.env.STARTER_PACKS_DIR || defaultStarterPacksDir();
     this.updateCheckEnabled =
       (process.env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
@@ -503,6 +525,7 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     // key never gets past this line.
     assertKeyDecodesTo32Bytes(this.secretsEncKey, secretsKeySource);
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
+    this.embedSharedSecret = (process.env.EMBED_SHARED_SECRET || '').trim();
     // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
     // deployment" — one proxy hop, and the public origin IS that domain. The
     // three values below therefore default from it, so `DOMAIN=x.example.com`

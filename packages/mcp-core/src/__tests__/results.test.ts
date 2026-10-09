@@ -53,6 +53,31 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure(Object.create(null))).toBe('(indescribable tool failure)');
   });
 
+  /**
+   * A service's edge answers a refused request with its own HTML page. That
+   * page used to reach the agent whole, in place of a reason.
+   */
+  it('cuts a non-JSON body to the status, the host and its first 200 characters', () => {
+    const page = `<!DOCTYPE html>\n<html>\n  <head><title>403 Forbidden</title></head>\n  <body>${'pad '.repeat(500)}THE-END</body>\n</html>`;
+    const described = describeToolFailure({
+      message: `HTTP 403 calling tool 'search': ${page}`,
+      response: { status: 403, data: page, config: { url: 'https://api.example.com/rest/search?q=x' } },
+    });
+    expect(described.startsWith('403 from api.example.com: <!DOCTYPE html> <html>')).toBe(true);
+    expect(described).not.toContain('THE-END');
+    expect(described.length).toBeLessThanOrEqual('403 from api.example.com: '.length + 200);
+  });
+
+  it('keeps a JSON body as it is, however long — that text is the service\'s own reason', () => {
+    const data = JSON.stringify({ error: 'x'.repeat(400) });
+    expect(describeToolFailure({ response: { status: 400, data } })).toBe(data);
+  });
+
+  it('cuts a non-JSON body even when nothing says where it came from', () => {
+    const described = describeToolFailure({ response: { data: `<html>${'y'.repeat(900)}</html>` } });
+    expect(described.length).toBeLessThanOrEqual(200);
+  });
+
   it('never throws when reading the body itself throws', () => {
     // A getter on `response` — the outermost read, which used to run outside
     // the guard, so a hostile thrown value escaped this function and turned a
@@ -772,5 +797,48 @@ describe('results that answer differently the second time they are read', () => 
     const res = toCallToolResult([{ type: 'image', data: 'BASE64PAYLOAD', mimeType: 'image/png' }, 42]);
     expect(res.content[0]).toEqual({ type: 'image', data: 'BASE64PAYLOAD', mimeType: 'image/png' });
     expect(res.content[1]).toEqual({ type: 'text', text: '42' });
+  });
+});
+
+/**
+ * A tool with an MCP App view: the VIEW reads the result's fields from
+ * `structuredContent` — it has nowhere else to read them — while the model
+ * keeps reading the text. Off for every other tool.
+ */
+describe('toCallToolResult with structured content', () => {
+  const value = { path: 'Data/Thing.md', embedUrl: 'https://hexis.example/embed?token=t' };
+
+  it('answers an object as structured content too, when asked', () => {
+    const result = toCallToolResult(value, { structured: true });
+    expect(result.structuredContent).toEqual(value);
+    expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(value) }]);
+  });
+
+  it('adds none by default', () => {
+    expect(toCallToolResult(value)).not.toHaveProperty('structuredContent');
+  });
+
+  it.each([
+    ['a string', 'plain text'],
+    ['an array', [1, 2]],
+    ['null', null],
+  ])('adds none for %s, which is not an object', (_label, v) => {
+    expect(toCallToolResult(v, { structured: true })).not.toHaveProperty('structuredContent');
+  });
+
+  it('attaches the JSON-safe reading, so a value the serializer would choke on completes', () => {
+    const cyclic: Record<string, unknown> = { path: 'a.md' };
+    cyclic.self = cyclic;
+    const result = toCallToolResult(cyclic, { structured: true });
+    expect(result.content[0]).toMatchObject({ type: 'text' });
+    // Whatever the text made of the cycle, the structured copy is plain JSON
+    // of it — never the original object with its cycle.
+    expect(JSON.stringify(result.structuredContent ?? null)).toBe(
+      JSON.stringify(JSON.parse((result.content[0] as { text: string }).text)),
+    );
+    expect(() => JSON.stringify(result)).not.toThrow();
+
+    const big = { n: 10n } as unknown as Record<string, unknown>;
+    expect(() => JSON.stringify(toCallToolResult(big, { structured: true }))).not.toThrow();
   });
 });

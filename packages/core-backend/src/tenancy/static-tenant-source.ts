@@ -3,7 +3,7 @@ import path from 'node:path';
 import { resolveDatabaseUrl, type TenantConfig } from '../core-config.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from '../modules/database/connection.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from '../modules/workflow/git/node-git-runner.js';
-import { defaultKbTemplateDir } from '../assets.js';
+import { defaultKbTemplateDir, defaultStarterPacksDir } from '../assets.js';
 import { DEFAULT_GIT_USERNAME } from '../shared/git.contract.js';
 import { deriveTenantSecrets } from './tenant-secrets.js';
 import { loopbackTenantBaseUrl } from './tenant-host.js';
@@ -22,6 +22,7 @@ export interface TenantHostSettings {
   /** Each tenant's workspaces live under `<workspacesRoot>/<slug>`; its backups, spills and caches beside them. */
   readonly workspacesRoot: string;
   readonly kbTemplateDir: string;
+  readonly starterPacksDir: string;
   readonly gitTimeoutMs: number;
   readonly updateCheckEnabled: boolean;
   /** See `tenant-secrets.ts`. */
@@ -169,6 +170,11 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     jwtSecret: secrets.jwtSecret,
     secretsEncKey: secrets.secretsEncKey,
     internalTokenSecret: secrets.internalTokenSecret,
+    // No shared-secret mint on a tenant of a host: the Atlassian connector
+    // is pointed at a deployment, not at one knowledge base inside a host,
+    // and a secret derived per tenant would be a credential nobody issued.
+    // The MCP App needs none of it — it mints through the MCP session.
+    embedSharedSecret: '',
     adminEmail,
     adminPassword,
     loginPasswordEnabled,
@@ -182,6 +188,7 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     gitUsername,
     gitToken: (record.gitToken ?? '').trim(),
     kbTemplateDir: settings.kbTemplateDir,
+    starterPacksDir: settings.starterPacksDir,
     updateCheckEnabled: settings.updateCheckEnabled,
     allowedEmailDomains,
     trustProxy: settings.trustProxy,
@@ -261,7 +268,7 @@ const MAX_TIMER_MS = 2_147_483_647;
  * The host's settings from the environment: the same variables a
  * single-tenant deployment reads for these facts (`DATABASE_URL` and the
  * `POSTGRES_*` parts, `PORT`, `TRUST_PROXY`, `WORKSPACES_ROOT`,
- * `KB_TEMPLATE_DIR`, `GIT_TIMEOUT_MS`, …), plus the three that only a host
+ * `KB_TEMPLATE_DIR`, `STARTER_PACKS_DIR`, `GIT_TIMEOUT_MS`, …), plus the three that only a host
  * has: `TENANTS_FILE`, `TENANT_MASTER_KEY` and `TENANT_IDLE_MINUTES`.
  */
 export function tenantHostEnv(env: NodeJS.ProcessEnv = process.env): TenantHostEnv {
@@ -286,6 +293,7 @@ export function tenantHostEnv(env: NodeJS.ProcessEnv = process.env): TenantHostE
     trustProxy: (env.TRUST_PROXY || (domain ? '1' : '')).trim(),
     workspacesRoot,
     kbTemplateDir: env.KB_TEMPLATE_DIR || defaultKbTemplateDir(),
+    starterPacksDir: env.STARTER_PACKS_DIR || defaultStarterPacksDir(),
     gitTimeoutMs:
       Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS ? gitTimeout : DEFAULT_GIT_TIMEOUT_MS,
     updateCheckEnabled: (env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false',

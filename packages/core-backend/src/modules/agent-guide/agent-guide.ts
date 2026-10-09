@@ -80,6 +80,13 @@ export type AgentGuideReader = () => Promise<string>;
 export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
 
 /**
+ * What to do on a knowledge base nobody has written in yet: the section the
+ * `firstRun` note `start_session` answers with points at (see
+ * workspace/first-run.ts, which names it by this constant).
+ */
+export const NEW_KNOWLEDGE_BASE_SECTION_ID = 'new-knowledge-base';
+
+/**
  * Core's sections, in reading order. Every id but the shared-rules one names
  * a file in the package's `agent-guide/` folder.
  */
@@ -91,8 +98,10 @@ export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
   'access-control',
   'skills',
   'tool-manuals',
+  'html-views',
   'conventions',
   'finding-things',
+  NEW_KNOWLEDGE_BASE_SECTION_ID,
 ]);
 
 /**

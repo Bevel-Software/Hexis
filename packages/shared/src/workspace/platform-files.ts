@@ -159,6 +159,27 @@ export function isRootPlatformFile(repoRelativePath: string, layout: KbLayout): 
 }
 
 /**
+ * The platform files that govern the WHOLE repository: the root's `access.md`,
+ * which every folder without its own falls back to, and `roles.yaml`, which
+ * says what the roles are. Deleting either leaves the repository ungoverned,
+ * so no surface deletes them — not the agent tools, not the app. A nested
+ * `access.md` is not among them: it narrows its own folder, and whoever may
+ * write it may delete it, which hands the folder back to its parent's rules.
+ * `.bevelignore` is not among them either; its delete rules are untouched.
+ */
+const REPOSITORY_OWN_FILES: ReadonlySet<string> = new Set(['access.md', 'roles.yaml']);
+
+/** Whether `repoRelativePath` is one of the files no surface deletes (see above). Exact spelling. */
+export function isRepositoryOwnFile(repoRelativePath: string, layout: KbLayout): boolean {
+  return isRootPlatformFile(repoRelativePath, layout) && REPOSITORY_OWN_FILES.has(normalize(repoRelativePath));
+}
+
+/** The one sentence every surface refuses a delete of the repository's own file with. */
+export function repositoryOwnFileDeleteRefusal(pathOrName: string): string {
+  return `${baseName(pathOrName)} is the repository's own file and cannot be deleted.`;
+}
+
+/**
  * The place a misplaced platform file is allowed to be put back, when
  * `repoRelativeDestination` names one, and null when it does not.
  *

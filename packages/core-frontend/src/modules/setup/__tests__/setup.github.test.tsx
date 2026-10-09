@@ -97,8 +97,8 @@ afterEach(() => {
 describe('SetupScreen: the GitHub tab', () => {
   it('is offered second, between the repository the deployment keeps and an address', () => {
     show();
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Managed for you', 'GitHub', 'Address and token']);
-    expect(screen.getByRole('tab', { name: 'Managed for you' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Hexis takes care of it', 'GitHub', 'Address and token']);
+    expect(screen.getByRole('tab', { name: 'Hexis takes care of it' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('is not drawn by a deployment that cannot connect to GitHub', () => {
@@ -342,7 +342,7 @@ describe('saving a repository on GitHub', () => {
     const picker = await screen.findByRole('combobox', { name: 'Repository' });
     await waitFor(() => expect(picker).toBeEnabled());
     await userEvent.selectOptions(picker, 'acme/kb');
-    await userEvent.click(screen.getByRole('tab', { name: 'Managed for you' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'Hexis takes care of it' }));
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ gitMode: 'managed' }));
   });
@@ -352,7 +352,7 @@ describe('saving a repository on GitHub', () => {
     api.saveSettings.mockRejectedValue(new SettingsProblems({ githubRepository: refusal }));
     show({ mode: 'github-app', stored: 'acme/gone', variant: 'settings' });
     await screen.findByRole('combobox', { name: 'Repository' });
-    await userEvent.click(screen.getByRole('tab', { name: 'Managed for you' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'Hexis takes care of it' }));
     await userEvent.click(screen.getByRole('tab', { name: 'GitHub' }));
     await save();
     expect(await screen.findByText(refusal)).toBeInTheDocument();
@@ -411,6 +411,6 @@ describe('coming back from GitHub', () => {
   it('opens where it always does on a deployment that does not offer GitHub', () => {
     standAt('?github=connected');
     show({ modes: ['managed', 'token'] });
-    expect(screen.getByRole('tab', { name: 'Managed for you' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Hexis takes care of it' })).toHaveAttribute('aria-selected', 'true');
   });
 });
