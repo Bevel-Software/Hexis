@@ -1481,7 +1481,8 @@ export class WorkflowService implements IWorkflowService {
       });
     } else {
       lockLog.info(
-        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderName} (${result.lock.holderUserId})`,
+        // The holder by id only: log lines carry no names.
+        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderUserId}`,
       );
     }
     return result;
@@ -1657,7 +1658,7 @@ export class WorkflowService implements IWorkflowService {
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
       lockLog.warn(
-        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderName} (${lock.holderUserId})` : 'no lock row'}`,
+        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderUserId}` : 'no lock row'}`,
       );
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}": not held by you (or no longer exists).`,
