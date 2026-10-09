@@ -16,6 +16,12 @@ export interface KnowledgeWriteTarget {
   folder: string | null;
   settled: boolean;
   /**
+   * Whether `folder` was asked for the workspace, branch and page on screen
+   * now. Mid-switch the last answer stays up, so nothing flickers, but it may
+   * name the page or branch just left: a create asks again first.
+   */
+  current: boolean;
+  /**
    * Ask again now, past the debounce, and resolve with the new answer — what
    * a refused write does, since the refusal says the last answer is stale.
    */
@@ -60,7 +66,12 @@ export async function findKnowledgeWriteTarget(
   // Asked in the order requirement 1 picks in, so the first page carries the
   // two folders that win outright, and no path is asked about twice.
   const ordered = [knowledgeRoot, ...(openFolder && openFolder !== knowledgeRoot ? [openFolder] : [])];
-  for (const folder of folders) if (!ordered.includes(folder)) ordered.push(folder);
+  const seen = new Set(ordered);
+  for (const folder of folders) {
+    if (seen.has(folder)) continue;
+    seen.add(folder);
+    ordered.push(folder);
+  }
   const toRepo = (path: string) => path.slice(kbDirName.length + 1);
   for (let start = 0; start < ordered.length; start += ACCESS_BATCH_LIMIT) {
     const page = ordered.slice(start, start + ACCESS_BATCH_LIMIT);
@@ -72,10 +83,13 @@ export async function findKnowledgeWriteTarget(
 }
 
 /**
- * {@link KnowledgeWriteTarget} for the workspace on screen. Asked once on
- * mount and again (debounced) whenever the file tree or the page on screen
- * changes — which is how a folder an admin shares later brings New page
- * without a reload — and on demand through `recheck`.
+ * {@link KnowledgeWriteTarget} for the workspace on screen. Asked once the
+ * file tree is there — before it, only the top of Knowledge could be asked
+ * about, and someone who may write only a folder below would see New page
+ * arrive late — and again whenever the tree or the page on screen changes:
+ * at once for a workspace or branch not yet asked about, debounced after
+ * that. That is how a folder an admin shares later brings New page without
+ * a reload. `recheck` asks on demand.
  *
  * A request that fails settles with no folder: New page is hidden until a
  * later check succeeds, rather than offered where it can only be refused.
@@ -83,11 +97,12 @@ export async function findKnowledgeWriteTarget(
  * off it flickers on every tree refresh.
  */
 export function useKnowledgeWriteTarget(knowledgeRoot: string | null): KnowledgeWriteTarget {
-  const { workspaceId, kbDirName, openFilePath } = useWorkspace();
+  const { workspaceId, workspaceBranch, kbDirName, openFilePath } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
-  const [answer, setAnswer] = useState<{ folder: string | null; settled: boolean }>({
+  const [answer, setAnswer] = useState<{ folder: string | null; settled: boolean; askedFor: string | null }>({
     folder: null,
     settled: false,
+    askedFor: null,
   });
 
   const openFolder =
@@ -98,6 +113,9 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
     () => (knowledgeRoot ? knowledgeFoldersInOrder(findEntryByPath(tree, knowledgeRoot)) : []),
     [tree, knowledgeRoot],
   );
+  // What an answer was asked about; an answer about anything else is out of date.
+  const workspaceKey = `${workspaceId}\n${workspaceBranch}\n${knowledgeRoot}`;
+  const askingFor = `${workspaceKey}\n${openFolder}`;
 
   // Only the latest question's answer lands: a slow reply to an older tree
   // must not overwrite a newer one.
@@ -111,21 +129,27 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
     } catch {
       folder = null;
     }
-    if (n === asked.current) setAnswer({ folder, settled: true });
+    if (n === asked.current) setAnswer({ folder, settled: true, askedFor: askingFor });
     return folder;
-  }, [workspaceId, kbDirName, knowledgeRoot, openFolder, folders]);
+  }, [workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor]);
 
-  const answeredOnce = useRef(false);
+  const askedWorkspace = useRef<string | null>(null);
+  const hasTree = tree !== null;
   useEffect(() => {
-    if (!workspaceId || !kbDirName || !knowledgeRoot) return;
-    if (!answeredOnce.current) {
-      answeredOnce.current = true;
+    if (!workspaceId || !kbDirName || !knowledgeRoot || !hasTree) return;
+    if (askedWorkspace.current !== workspaceKey) {
+      askedWorkspace.current = workspaceKey;
       void ask();
       return;
     }
     const timer = setTimeout(() => void ask(), WRITE_TARGET_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [ask, workspaceId, kbDirName, knowledgeRoot]);
+  }, [ask, workspaceId, kbDirName, knowledgeRoot, hasTree, workspaceKey]);
 
-  return { folder: answer.folder, settled: answer.settled, recheck: ask };
+  return {
+    folder: answer.folder,
+    settled: answer.settled,
+    current: answer.settled && answer.askedFor === askingFor,
+    recheck: ask,
+  };
 }

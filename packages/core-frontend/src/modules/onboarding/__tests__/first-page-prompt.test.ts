@@ -137,4 +137,28 @@ describe('the first-page request in a folder', () => {
       'Using our Hexis knowledge base, fill in the Customers page. Save it in Knowledge/Sales.',
     );
   });
+
+  it('points a built-in pack’s "page in Knowledge" at the folder, naming one place', () => {
+    const sales =
+      "Using our Hexis knowledge base, fill in the Customers page in Knowledge for our sales team: who buys from us. Ask me for anything you don't know, then save it.";
+    const out = firstPagePromptInFolder(sales, 'Sales');
+    expect(out).toBe(sales.replace('page in Knowledge for', 'page in Knowledge/Sales for'));
+    expect(out).not.toContain('Save it in');
+  });
+
+  it('matches "in Knowledge" in any case, keeping the request’s own casing', () => {
+    expect(firstPagePromptInFolder('Write a page IN KNOWLEDGE about us.', 'Sales')).toBe(
+      'Write a page IN KNOWLEDGE/Sales about us.',
+    );
+    expect(firstPagePromptInFolder('Write a page in knowledge.', 'Sales')).toBe('Write a page in knowledge/Sales.');
+  });
+
+  it('does not mistake "knowledge base" or a name starting with Knowledge for the folder', () => {
+    expect(firstPagePromptInFolder('Write a page in Knowledge Management.', 'Sales')).toBe(
+      'Write a page in Knowledge Management. Save it in Knowledge/Sales.',
+    );
+    expect(firstPagePromptInFolder('Look in knowledge base, then write it in Knowledge.', 'Sales')).toBe(
+      'Look in knowledge base, then write it in Knowledge/Sales.',
+    );
+  });
 });

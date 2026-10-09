@@ -20,23 +20,38 @@ export function firstPagePromptFor(pack: { firstPagePrompt: string } | null | un
   return pack?.firstPagePrompt.trim() || FIRST_PAGE_PROMPT;
 }
 
-/** The words of the generic request that say where the page goes. */
-const IN_KNOWLEDGE = 'write a page in Knowledge';
+/**
+ * Where a request names the Knowledge folder as the place to write: "in
+ * Knowledge", any case — the generic request's "write a page in Knowledge"
+ * and every built-in pack's "fill in the … page in Knowledge". Not a path
+ * already ("in Knowledge/Sales").
+ */
+const IN_KNOWLEDGE = /\bin knowledge\b(?!\/)/gi;
+
+/**
+ * What may follow "in Knowledge" when it is not the folder: "knowledge
+ * base", or a name that only starts with it ("Knowledge Management").
+ * Case-sensitive on purpose — " about our company" is the folder.
+ */
+const NOT_THE_FOLDER = /^ (?:base\b|[A-Z])/;
 
 /**
  * The request pointed at `folder` — the path below the Knowledge folder New
  * page would write in (`Sales`, `Sales/Team`) — so an agent writing as the
  * person tries where they may write rather than the top, where they may not.
- * No folder (the top of Knowledge) leaves the request as it is. A starter
- * pack's own request need not say "write a page in Knowledge", so where it
- * does not, the place is added as a sentence of its own.
+ * No folder (the top of Knowledge) leaves the request as it is. The request's
+ * own "in Knowledge" becomes "in Knowledge/<folder>", in the request's own
+ * casing, so it names one place; one that never says where the page goes
+ * gets the place as a sentence of its own.
  */
 export function firstPagePromptInFolder(prompt: string, folder: string | null): string {
   if (!folder) return prompt;
-  const place = `Knowledge/${folder}`;
-  return prompt.includes(IN_KNOWLEDGE)
-    ? prompt.replace(IN_KNOWLEDGE, `write a page in ${place}`)
-    : `${prompt} Save it in ${place}.`;
+  for (const match of prompt.matchAll(IN_KNOWLEDGE)) {
+    const end = match.index + match[0].length;
+    if (NOT_THE_FOLDER.test(prompt.slice(end))) continue;
+    return `${prompt.slice(0, end)}/${folder}${prompt.slice(end)}`;
+  }
+  return `${prompt} Save it in Knowledge/${folder}.`;
 }
 
 /** A new Claude chat with `prompt` typed into it (claude.ai's `q` parameter prefills; the person still sends). */

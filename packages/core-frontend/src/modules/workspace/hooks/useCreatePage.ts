@@ -119,6 +119,7 @@ export function useCreatePage(): CreatePage {
   const {
     folder: pageFolder,
     settled: pageFolderSettled,
+    current: pageFolderCurrent,
     recheck,
   } = useKnowledgeWriteTarget(kbDirName !== null ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null);
 
@@ -126,7 +127,9 @@ export function useCreatePage(): CreatePage {
     if (!knowledgeRoot || !pageFolderSettled) {
       throw new Error('Couldn’t create the page: the workspace is still loading.');
     }
-    let folder = pageFolder;
+    // An answer from before a switch of branch or page may name a folder
+    // other than where the person is looking: ask again before writing.
+    let folder = pageFolderCurrent ? pageFolder : await recheck();
     // One fresh check after a refusal: access changed since the last answer.
     let rechecked = false;
     while (folder) {
@@ -161,7 +164,7 @@ export function useCreatePage(): CreatePage {
     }
     // Nowhere left to write: the fresh answer has hidden New page, which says it.
     return null;
-  }, [knowledgeRoot, pageFolder, pageFolderSettled, recheck, tree, createFile, openWorkspacePath]);
+  }, [knowledgeRoot, pageFolder, pageFolderSettled, pageFolderCurrent, recheck, tree, createFile, openWorkspacePath]);
 
   return { knowledgeRoot, createPage, pageFolder, pageFolderSettled };
 }

@@ -613,6 +613,47 @@ describe('GetStartedColumn: where New page writes', () => {
     expect(screen.getByText('1 of 5')).toBeInTheDocument();
   });
 
+  it('shows the step with the list for someone who may write only a folder below, asking once the tree is in', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales/Team']);
+    const { rerender } = await mount({ files: null });
+    expect(access.batch).not.toHaveBeenCalled();
+    rerender(columnUi({ files: FOLDERS_TREE }));
+    // No debounce to wait out: the first answer for this workspace is asked at once.
+    await settle();
+    expect(row(STEP)).not.toBeNull();
+    expect(access.batch).toHaveBeenCalledTimes(1);
+    expect(access.batch.mock.calls[0]![1]).toContain('KnowledgeBase/Sales/Team');
+  });
+
+  it('asks again before writing when the page on screen changed since the last answer', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    const { rerender } = await mount({ createFile, files: FOLDERS_TREE, openFilePath: `${SALES}/Leads.md` });
+    // Straight to Support and New page, inside the debounce: the answer on hand is Sales's.
+    rerender(columnUi({ createFile, files: FOLDERS_TREE, openFilePath: `${SUPPORT}/FAQ.md` }));
+    await userEvent.click(newPage());
+    await waitFor(() => expect(createFile).toHaveBeenCalled());
+    expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+    expect(createFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again before writing after a switch of branch, not writing where the last branch allowed', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales']);
+    const createFile = vi.fn(async () => {});
+    const { rerender } = await mount({ createFile, files: FOLDERS_TREE });
+    access.writable = new Set(['KnowledgeBase/Support']);
+    let answer!: (a: { results: Record<string, boolean> }) => void;
+    const real = access.batch.getMockImplementation()!;
+    // The new branch's first answer is slow; New page waits for it rather than using Sales.
+    access.batch.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    rerender(columnUi({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' }));
+    await userEvent.click(newPage());
+    await act(async () => answer(await real('ws', ['KnowledgeBase', 'KnowledgeBase/Support'])));
+    await waitFor(() => expect(createFile).toHaveBeenCalled());
+    expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+    expect(createFile).toHaveBeenCalledTimes(1);
+  });
+
   it('a refused write asks again and moves to the next folder they may write, with no permission text', async () => {
     access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
     const createFile = vi.fn(async (path: string) => {
@@ -1183,7 +1224,10 @@ describe('GetStartedColumn: the file tree', () => {
   it('stays hidden until the tree has loaded', async () => {
     const { rerender } = await mount({ files: null });
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+    // Nothing is asked about where a page may go before the tree says what is there.
+    expect(access.batch).not.toHaveBeenCalled();
     rerender(columnUi({}));
+    await settle();
     expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
     expect(row('Read “How to get started”')).not.toBeNull();
   });
