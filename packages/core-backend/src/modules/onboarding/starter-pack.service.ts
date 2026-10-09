@@ -27,10 +27,15 @@
  * the write landed. A write that fails releases the claim, so the question
  * is asked again. A claim nobody released within `CLAIM_TTL_MS` was left by
  * a process that died mid-write (a write takes seconds) and is taken over,
- * so one crash never strands the question. The answer itself
- * (`starterPack`) is recorded once the pack is there; should that last step
- * fail, the pack is added all the same — said in the log, answered as the
- * success it is — and the pages close the question from then on.
+ * so one crash never strands the question. A CLAIM IS CHECKED, NOT TRUSTED:
+ * a holder that outlived its claim — a clone that took minutes — may find it
+ * taken over and the question answered meanwhile, so right before the one
+ * effect, with every lock held and nothing written, the holder checks that
+ * the claim is still its own and nothing is answered (`fence`), and the
+ * answer is recorded only where none is. The answer itself (`starterPack`)
+ * is recorded once the pack is there; should that last step fail, the pack
+ * is added all the same — said in the log, answered as the success it is —
+ * and the pages close the question from then on.
  *
  * The pack's plugin is RUN BY the admin who applied it, the way a plugin made
  * with "Create a plugin" is run by its creator: its `access.md` names them
@@ -203,8 +208,13 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
         }
         pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.disk, this.deps.packsDir)).find((p) => p.id === id) ?? null);
         if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
-        if (pack) added = await this.apply(user, pack);
-        else await this.deps.settings.record({ [STARTER_PACK_SETTING]: id }, user.id);
+        if (pack) added = await this.apply(user, pack, claim);
+        else {
+          // The skip is the effect itself: fenced the same way, and recorded
+          // only where nothing is answered.
+          await this.fence(claim);
+          if (!(await this.deps.settings.recordIfAbsent(STARTER_PACK_SETTING, id, user.id))) throw alreadyChosen();
+        }
       } catch (err) {
         // Refused, or nothing landed: the claim goes, and the question is
         // open again (or answered, as the refusal said).
@@ -213,12 +223,19 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       }
       if (pack) {
         // The answer, kept once the pack is there (or committed and waiting
-        // on its push). Should this fail now, the pack IS added: said in the
-        // log, answered as the success it is, and the pages close the
-        // question from here on (`knowledgeIsNew`).
-        await this.deps.settings.record({ [STARTER_PACK_SETTING]: id }, user.id).catch((err: unknown) => {
-          log.error(`starter pack "${id}" was added, but the choice could not be recorded`, { err });
-        });
+        // on its push) — and only where none is: an answer another replica
+        // recorded in the moment since the fence is theirs to keep. Should
+        // this fail now, the pack IS added: said in the log, answered as the
+        // success it is, and the pages close the question from here on
+        // (`knowledgeIsNew`).
+        await this.deps.settings
+          .recordIfAbsent(STARTER_PACK_SETTING, id, user.id)
+          .then((recorded) => {
+            if (!recorded) log.error(`starter pack "${id}" was added, but another answer was recorded meanwhile`);
+          })
+          .catch((err: unknown) => {
+            log.error(`starter pack "${id}" was added, but the choice could not be recorded`, { err });
+          });
       }
       await this.release(claim);
       if (!pack) return { id, name: null, pages: 0, skills: 0, summary: '' };
@@ -271,6 +288,23 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
     // try at an empty row before saying a choice is in progress.
     if (await settings.recordIfAbsent(STARTER_PACK_CLAIM_SETTING, value, user.id)) return value;
     throw beingAdded();
+  }
+
+  /**
+   * THE FENCE before the one effect: that `claim` is still this call's, and
+   * that nothing has been answered. A claim is a promise with a deadline —
+   * one that expired while its holder was still at work (a clone that took
+   * minutes) is taken over, and the new holder may answer `none` — so the
+   * holder's own word that it holds the claim is checked against the
+   * database at the last moment, with every lock held and nothing written.
+   * Refused: nothing lands, and the claim, now a successor's, is left to
+   * them.
+   */
+  private async fence(claim: string): Promise<void> {
+    if ((await this.deps.settings.reload(STARTER_PACK_CLAIM_SETTING)) !== claim) {
+      throw new StarterPackError('Another admin took this choice over while it was in progress; nothing was added. Try again.', 409);
+    }
+    if ((await this.recordedChoice()) !== null) throw alreadyChosen();
   }
 
   /**
@@ -359,8 +393,12 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
     }
   }
 
-  /** Write the pack's absent files to the default branch as one commit; resolve to the paths written. */
-  private async apply(user: AuthUser, pack: StarterPack): Promise<string[]> {
+  /**
+   * Write the pack's absent files to the default branch as one commit;
+   * resolve to the paths written. `claim` is this call's, checked at the
+   * last moment (see `fence`).
+   */
+  private async apply(user: AuthUser, pack: StarterPack, claim: string): Promise<string[]> {
     const { kb, workspaceService, workflow, disk } = this.deps;
     const branch = kb.defaultBranch;
     const ws = await workspaceService.getOrCreateForBranch(branch);
@@ -377,8 +415,11 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       let written: string[] = [];
       try {
         await fsys.writeFiles(writes, commitSubjectOf(pack), [], async (candidates) => {
-          // Judged with every lock held: only what is STILL absent lands, so
-          // a page someone made a moment ago is never replaced.
+          // With every lock held and nothing written yet: first that this
+          // call may still add anything at all (a check that throws refuses
+          // the whole batch untouched), then only what is STILL absent, so a
+          // page someone made a moment ago is never replaced.
+          await this.fence(claim);
           const absent: (typeof candidates)[number][] = [];
           for (const w of candidates) {
             if (!(await disk.exists(path.join(basePath, ...w.path.split('/'))))) absent.push(w);

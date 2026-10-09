@@ -204,7 +204,10 @@ describe('choosing a pack', () => {
     expect(settings.recordIfAbsent.mock.invocationCallOrder[0]!).toBeLessThan(
       workflow.commitChanges.mock.invocationCallOrder[0]!,
     );
-    expect(settings.record.mock.invocationCallOrder[0]!).toBeGreaterThan(workflow.commitChanges.mock.invocationCallOrder[0]!);
+    // The answer is recorded after the commit, and only where none is.
+    const answered = settings.recordIfAbsent.mock.calls.findIndex(([key]) => key === 'starterPack');
+    expect(settings.recordIfAbsent.mock.invocationCallOrder[answered]!).toBeGreaterThan(workflow.commitChanges.mock.invocationCallOrder[0]!);
+    expect(settings.record).not.toHaveBeenCalled();
     expect(store.starterPackClaim).toBeUndefined();
 
     expect(applied).toEqual({ id: 'sales', name: 'Sales', pages: 2, skills: 2, summary: 'Added 2 pages and 2 skills for Sales.' });
@@ -401,25 +404,73 @@ describe('choosing a pack', () => {
       return held;
     });
     await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
-    expect(settings.recordIfAbsent).toHaveBeenCalledTimes(2);
+    // The refused first try, the one at the empty row — and the answer itself.
+    expect(settings.recordIfAbsent.mock.calls.map(([key]) => key)).toEqual(['starterPackClaim', 'starterPackClaim', 'starterPack']);
     expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
     expect(store.starterPack).toBe('sales');
   });
 
   it('releases only its own claim: one taken over after it expired is left to its new holder', async () => {
     const store: Record<string, string> = {};
-    const { svc, settings, workflow } = harness({ store });
-    workflow.commitChanges.mockRejectedValueOnce(new Error('disk full'));
-    // While this write was failing, its claim expired and another replica took it over.
-    settings.recordIfAbsent.mockImplementationOnce(async (key: string, value: string) => {
-      store[key] = value;
-      queueMicrotask(() => {
-        store[key] = `u-other ${Date.now()}`;
-      });
-      return true;
+    const { svc, workflow } = harness({ store });
+    // While this write was failing — past the fence, in the commit — its
+    // claim expired and another replica took it over.
+    workflow.commitChanges.mockImplementationOnce(async () => {
+      store.starterPackClaim = `u-other ${Date.now()}`;
+      throw new Error('disk full');
     });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('disk full');
     expect(store.starterPackClaim).toMatch(/^u-other /);
+  });
+
+  it('checks its claim at the last moment: one taken over mid-write adds nothing, and leaves the answer the new holder gave', async () => {
+    const store: Record<string, string> = {};
+    const { svc, settings, workflow } = harness({ store });
+    // The clone took longer than the claim lives; another replica took the
+    // claim over and answered `none` while this one was taking its locks.
+    workflow.acquireLock.mockImplementationOnce(async () => {
+      store.starterPackClaim = 'u-other 1';
+      store.starterPack = 'none';
+      return { acquired: true, lock: { holderName: 'x' } };
+    });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(store.starterPack).toBe('none');
+    expect(store.starterPackClaim).toBe('u-other 1');
+    // Asked the database with the locks held, not before them.
+    const fenced = settings.reload.mock.invocationCallOrder.filter((_, i) => settings.reload.mock.calls[i]![0] === 'starterPackClaim');
+    expect(Math.max(...fenced)).toBeGreaterThan(workflow.acquireLock.mock.invocationCallOrder[0]!);
+  });
+
+  it('records a skip only where nothing is answered: an answer that landed meanwhile stands', async () => {
+    const store: Record<string, string> = {};
+    const { svc, settings } = harness({ store });
+    // Between this call's check and its record, another replica's pack landed and was recorded.
+    let planted = false;
+    settings.reload.mockImplementation(async (key: string) => {
+      const held = store[key] ?? '';
+      if (key === 'starterPack' && !planted) {
+        planted = true;
+        store.starterPack = 'sales';
+      }
+      return held;
+    });
+    await expect(svc.choose(ADMIN, 'none')).rejects.toMatchObject({ status: 409 });
+    expect(store.starterPack).toBe('sales');
+    expect(settings.record).not.toHaveBeenCalled();
+  });
+
+  it('never writes its answer over another: a pack added as another replica answered keeps that answer', async () => {
+    const store: Record<string, string> = {};
+    const { svc, workflow } = harness({ store });
+    // The commit landed; in the moment before the record, another replica answered.
+    workflow.commitChanges.mockImplementationOnce(async () => {
+      store.starterPack = 'none';
+      return { sha: 'abc' };
+    });
+    await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
+    expect(store.starterPack).toBe('none');
+    expect(store.starterPackClaim).toBeUndefined();
   });
 
   it('waits for a plugin creation of the same name, on the lock creations take', async () => {
@@ -455,7 +506,12 @@ describe('choosing a pack', () => {
 
   it('adds the pack even when recording the choice fails afterwards: the pages close the question', async () => {
     const { svc, store, workflow, settings } = harness();
-    settings.record.mockRejectedValueOnce(new Error('database unreachable'));
+    settings.recordIfAbsent.mockImplementation(async (key: string, value: string) => {
+      if (key === 'starterPack') throw new Error('database unreachable');
+      if (key in store) return false;
+      store[key] = value;
+      return true;
+    });
     await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales', pages: 2 });
     expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
     expect(store.starterPack).toBeUndefined();
