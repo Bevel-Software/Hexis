@@ -35,6 +35,14 @@ export function openPageViewUri(text: string): string {
 /** The view's file inside the packaged `mcp-app/` folder. */
 const OPEN_PAGE_VIEW_FILE = 'page.html';
 
+/** The MCP App views a deployment serves — the port the MCP endpoint, the manifest route and the catalog revision consume. */
+export interface IMcpAppService {
+  /** The manifest: which tools carry a view, and the views themselves. */
+  manifest(): Promise<McpAppManifest>;
+  /** One view by its `ui://` address, or null when this deployment serves none at it. */
+  resource(uri: string): Promise<McpAppResource | null>;
+}
+
 /**
  * The deployment's MCP Apps, built once per process: which tools carry a
  * view, and the views themselves with the sandbox metadata the host needs.
@@ -43,7 +51,7 @@ const OPEN_PAGE_VIEW_FILE = 'page.html';
  * under a running process, and `resources/read` is on the handshake path of
  * every connection that renders a page.
  */
-export class McpAppService {
+export class McpAppService implements IMcpAppService {
   private cached: Promise<McpAppManifest> | null = null;
 
   constructor(

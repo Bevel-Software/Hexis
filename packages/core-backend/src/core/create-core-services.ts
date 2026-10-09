@@ -19,7 +19,7 @@ import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
 import { EmbedService } from '../modules/embed/embed.service.js';
-import { McpAppService } from '../modules/embed/mcp-app.js';
+import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
 import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
@@ -358,7 +358,7 @@ export interface CoreServices {
    */
   embedService: EmbedService;
   /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
-  mcpAppService: McpAppService;
+  mcpAppService: IMcpAppService;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;

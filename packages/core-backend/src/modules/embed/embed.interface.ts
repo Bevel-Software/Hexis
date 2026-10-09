@@ -1,3 +1,5 @@
+import type { AuthUser } from '@bevel-software/platform-shared';
+
 /**
  * WHO an embed token was minted for.
  *
@@ -100,6 +102,24 @@ export interface EmbedLinkedAccount {
  * needs no change when the embed moves into Hexis.
  */
 export type EmbedNodeIdResolver = (nodeId: string) => Promise<string | null>;
+
+/**
+ * What the embed service needs of the workspace: the clone of a branch, and
+ * four verbs on one file of it. A port rather than the workspace service
+ * itself, so a deployment (or a test) hands in whatever answers these.
+ */
+export interface EmbedWorkspacePort {
+  getOrCreateForBranch(branch: string): Promise<{ id: string }>;
+  isFile(workspaceId: string, wsPath: string): Promise<boolean>;
+  readFileBinary(workspaceId: string, wsPath: string): Promise<Buffer>;
+  writeFile(workspaceId: string, wsPath: string, content: string): Promise<void>;
+}
+
+/** What the embed service needs of authentication: a user by id, and the email-domain rule. */
+export interface EmbedAuthPort {
+  getUserById(userId: string): Promise<AuthUser | null>;
+  isEmailDomainAllowed(email: string): boolean;
+}
 
 /**
  * Mints and consumes embed tokens that let a host — an MCP App's sandbox, an

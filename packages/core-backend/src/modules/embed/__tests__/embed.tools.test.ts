@@ -114,7 +114,9 @@ describe('open_page: the listing', () => {
     const def = (await registry.listExternal()).find((t) => t.name === OPEN_PAGE_TOOL)!;
     const body = (def.inputs as { properties: { body: { properties: Record<string, unknown>; required: string[] } } })
       .properties.body;
-    expect(Object.keys(body.properties).sort()).toEqual(['heading', 'path']);
+    // `sessionId` as `read_file` takes it: the read is `read_file`'s own, and
+    // a deployment whose read hook wants the session must be able to get it.
+    expect(Object.keys(body.properties).sort()).toEqual(['heading', 'path', 'sessionId']);
     expect(body.required).toEqual(['path']);
     // The embedded view is editable, and an editable embed targets the
     // default branch only — so there is nothing for a caller to choose.

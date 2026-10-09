@@ -3104,21 +3104,25 @@ export function registerWorkspaceTools(
           // disk: a page replaced by a link since the listing is refused there
           // instead of read through to wherever the link points.
           readText: async (p) => String(await fs.readFile(p, { encoding: 'utf8' })),
-          // Asked only once a page is known to be edited — the hooks hear of
-          // no page merely searched — so a read refusal arrives after the
-          // read; the plan then treats the page as unreadable and never names it.
-          hookRefusal: async (lockAt, path) => {
-            const why = (err: unknown) => `refused: ${err instanceof Error ? err.message : String(err)}`;
+          // The read hook, for every page the answer would NAME — an edited
+          // one, one left with its links listed — and for no page merely
+          // searched: naming is the disclosure, and the hook's refusal makes
+          // the page one the caller cannot read, covered by the one sentence.
+          readRefused: async (path) => {
             try {
-              await notifyAgentRead(agentAccessGate, ctx, branch, lockAt);
-            } catch (err) {
-              return { reason: why(err), read: true };
+              await notifyAgentRead(agentAccessGate, ctx, branch, path);
+              return false;
+            } catch {
+              return true;
             }
+          },
+          // The write hook, for a page the move would edit, at its post-move path.
+          writeRefusal: async (_lockAt, path) => {
             try {
               await assertAgentWriteAllowed(agentAccessGate, ctx, branch, path);
               return null;
             } catch (err) {
-              return { reason: why(err), read: false };
+              return `refused: ${err instanceof Error ? err.message : String(err)}`;
             }
           },
         })
