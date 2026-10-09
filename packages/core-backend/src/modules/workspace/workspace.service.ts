@@ -1563,8 +1563,10 @@ export class WorkspaceService implements IWorkspaceService {
    *
    * The `.bevelignore` rules are those in force at the folder, its ancestors'
    * included, as the explorer's walk from the root has them: a folder an
-   * ancestor's rule hides holds no files. The walk stops once it has found
-   * more than `maxFiles` files; the caller refuses such a request.
+   * ancestor's rule hides holds no files. The whole folder is walked, as the
+   * explorer walks it: a cap here would be a cap on files the caller may not
+   * read as much as on the ones they may, and the limit a request is held to
+   * is the caller's own count, judged after the read verdicts.
    *
    * A path that reaches its target through a link, or names the git folder,
    * is refused as the reads refuse it; a path with nothing at it is
@@ -1573,7 +1575,6 @@ export class WorkspaceService implements IWorkspaceService {
   async downloadCandidatesAt(
     workspaceId: string,
     wsPath: string,
-    maxFiles: number,
   ): Promise<{ kind: 'missing' } | { kind: 'file' | 'folder'; files: { path: string; bytes: number }[] }> {
     const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
@@ -1594,7 +1595,7 @@ export class WorkspaceService implements IWorkspaceService {
     const files: { path: string; bytes: number }[] = [];
     const rules = await ignoreRulesAbove(path.join(workspaceDir, this.kbDirName), inRepo);
     if (!rules) return { kind: 'folder', files };
-    await this.disk.walk(absolutePath, { ...explorerWalk(), ignore: rules, until: () => files.length > maxFiles }, [
+    await this.disk.walk(absolutePath, { ...explorerWalk(), ignore: rules }, [
       {
         async onFile(dir, name) {
           const size = (await fs.lstat(path.join(absolutePath, dir, name))).size;

@@ -65,6 +65,8 @@ const FILES: Record<string, string | Buffer> = {
   // Ana may read here, and download nothing.
   'Readable/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\n',
   'Readable/Top.md': '# top\n',
+  // A folder Ana may read (the rule above) whose one file she may not: the explorer keeps it, empty.
+  'Readable/Deep/Secret.md': '---\nread:\n  - deny Ana <ana@x.io>\n---\n# deep secret\n',
   // A folder whose rules deny Ana `download`, holding a file whose own
   // frontmatter grants it: the file alone may go out, the folder's zip not.
   // A folder Ana may read (no rule of its own) whose one file she may not: for her it holds no files.
@@ -282,12 +284,14 @@ describe('request_file_download: every file judged on its own', () => {
       { path: `${KB}/Shared/Nowhere`, reason: NOT_FOUND },
     ]);
     expect(JSON.stringify(missing.body)).not.toContain('Plan');
-    // A folder holding nothing the caller may read is one the explorer hides
-    // outright, so it is `not found`; a folder with nothing in it at all,
-    // which the explorer shows, "holds no files".
-    const veiled = await request(h.base, [`${KB}/Veiled`, `${KB}/Pictures/sub`]);
+    // As the explorer shows them: a folder the caller may not read with
+    // nothing readable beneath it is dropped, so it is `not found`; a folder
+    // they may read stays even when every file in it is kept from them, and
+    // "holds no files", exactly as a folder with nothing in it at all.
+    const veiled = await request(h.base, [`${KB}/Veiled`, `${KB}/Readable/Deep`, `${KB}/Pictures/sub`]);
     expect([...veiled.body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
       { path: `${KB}/Pictures/sub`, reason: 'the folder holds no files' },
+      { path: `${KB}/Readable/Deep`, reason: 'the folder holds no files' },
       { path: `${KB}/Veiled`, reason: NOT_FOUND },
     ]);
     expect(JSON.stringify(veiled.body)).not.toContain('Secret');

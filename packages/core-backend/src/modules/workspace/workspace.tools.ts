@@ -3934,7 +3934,7 @@ export function registerWorkspaceTools(
         kbDirName,
         maxBytes: ZIP_DOWNLOAD_MAX_BYTES,
         maxFiles: DOWNLOAD_MAX_FILES,
-        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
+        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p),
         canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
         canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
         // The folder-level gate the app's zip route applies, before the files.
