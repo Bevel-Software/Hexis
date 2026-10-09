@@ -1368,6 +1368,36 @@ describe('FileViewer: proposing a change without write access', () => {
     );
   });
 
+  // A change pulled from the git host bumps `remoteRevision`, which remounts
+  // an editor onto the tab's merged buffer — but a proposal's buffer is
+  // seeded from the proposal, and a remount put that old seed back over the
+  // keystrokes Send still held.
+  it('keeps the proposal being typed when a change is pulled onto the branch', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' plus a second thought');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'official, updated', savedContent: 'official, updated', outcome: 'discarded' });
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('first proposed paragraph plus a second thought');
+  });
+
   it('closes without sending when nothing was typed over the open proposal', async () => {
     denyWrite();
     myCrsMock.mockResolvedValue([
@@ -1927,6 +1957,8 @@ describe('FileViewer: the file changed on the branch while you were editing', ()
       ),
     ).toBeInTheDocument();
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Upstream first line. Mine.');
+    // Unsaved, not a clean buffer that happens to hold the merged text.
+    expect(screen.getByText('Unsaved')).toBeInTheDocument();
   });
 
   it('says the edits were discarded when they could not be merged, and shows the new content', async () => {

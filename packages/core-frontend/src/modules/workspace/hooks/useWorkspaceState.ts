@@ -275,6 +275,25 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * A path leaves the set when its tab closes or the file is read again.
    */
   const deletedPathsRef = useRef<Set<string>>(new Set());
+  /**
+   * Reads in flight that decide whether an open tab's file still exists (a
+   * `file-changed` refetch, a tree refresh's check), by path, each settling
+   * to whether the file is gone (a 404). The tab is marked deleted only when
+   * the read settles; `saveFile` waits on it first, so an editor unmounting
+   * meanwhile (a tab switch, the tab closing) cannot write the file back in
+   * the window between the delete and the read that learns of it.
+   */
+  const existenceChecksRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const trackExistenceCheck = useCallback((path: string, read: Promise<unknown>) => {
+    const gone = read.then(
+      () => false,
+      (err: unknown) => err instanceof WorkspaceApiError && err.status === 404,
+    );
+    existenceChecksRef.current.set(path, gone);
+    void gone.then(() => {
+      if (existenceChecksRef.current.get(path) === gone) existenceChecksRef.current.delete(path);
+    });
+  }, []);
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
@@ -456,7 +475,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         for (const tab of openTabsRef.current) {
           if (present.has(tab.path) || tab.deletedBy || isPendingDelete(tab.path)) continue;
           const readFrom = workspaceId;
-          readFile(readFrom, tab.path).catch((err) => {
+          const read = readFile(readFrom, tab.path);
+          trackExistenceCheck(tab.path, read);
+          read.catch((err) => {
             if (workspaceIdRef.current !== readFrom) return;
             if (err instanceof WorkspaceApiError && err.status === 404) markTabDeleted(tab.path, null);
           });
@@ -467,7 +488,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       console.error('Failed to refresh file tree:', err);
       return null;
     }
-  }, [workspaceId, isPendingDelete, markTabDeleted]);
+  }, [workspaceId, isPendingDelete, markTabDeleted, trackExistenceCheck]);
 
   // ── Tab CRUD ──────────────────────────────────────────────────────────────
 
@@ -1371,6 +1392,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     if (!isCurrent()) return;
     pendingDeletePathsRef.current.delete(relativePath);
+    // Before the tabs go: closing them unmounts the editor, whose lock
+    // cleanup writes its buffer back through `saveFile` — which, unguarded,
+    // re-created the file this delete just removed. The set drops each path
+    // once its tab has closed.
+    for (const t of openTabsRef.current) {
+      if (t.path === relativePath || t.path.startsWith(prefix)) deletedPathsRef.current.add(t.path);
+    }
     // Close tabs only after the server confirmed — keeps tab content +
     // cursor position intact on the rollback path. Read the strip as it is
     // NOW: tabs may have opened or closed while the delete ran.
@@ -1457,6 +1485,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // which re-created the deleted file and wiped the notice. The edits stay
     // on the tab, offered to copy; nothing writes them back unasked.
     if (deletedPathsRef.current.has(relativePath)) {
+      throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
+    }
+    // A read deciding whether the file still exists is in flight: its answer
+    // first, so a 404 it is about to deliver refuses this write too.
+    // Its own answer, not the guard set: the tab may have closed meanwhile.
+    const existenceCheck = existenceChecksRef.current.get(relativePath);
+    if (existenceCheck && (await existenceCheck)) {
       throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     }
     await writeFile(workspaceId, relativePath, content);
@@ -1731,6 +1766,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     pendingUploadsRef.current = new Map();
     pendingDeletePathsRef.current = new Set();
     deletedPathsRef.current = new Set();
+    existenceChecksRef.current = new Map();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingUploads(new Map());
     // The banners go with them. An upload still routing when the user
@@ -1772,7 +1808,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // freshly-fetched disk bytes (which may include the agent's
       // write) would silently end their review.
       if (matchingTab.pendingFileContent !== null) return;
-      readFile(subscribedWorkspaceId, event.path)
+      const read = readFile(subscribedWorkspaceId, event.path);
+      trackExistenceCheck(event.path, read);
+      read
         .then((content) => {
           if (workspaceIdRef.current === subscribedWorkspaceId) {
             // The file is there: writing it is no longer re-creating it.
@@ -1913,7 +1951,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       offFsTreeChanged();
       offLockReleased();
     };
-  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted]);
+  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted, trackExistenceCheck]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act, waitFor, screen, within, fireEvent } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import { renderHook, render, act, waitFor, screen, within, fireEvent } from '@testing-library/react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import { ConfirmProvider } from '../../../../shared/components';
 
@@ -124,6 +124,8 @@ const tabAt = (result: Hook, path: string) => result.current.openTabs.find((t) =
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 
 beforeEach(() => {
+  // Call history is per test: `not.toHaveBeenCalled` must see only its own.
+  vi.clearAllMocks();
   disk = new Map([
     ['KB/Keep.md', 'keep'],
     ['KB/Gone.md', 'gone'],
@@ -262,6 +264,83 @@ describe('deleteEntry: the delete says where the page lands', () => {
 
     expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Keep.md']);
     expect(result.current.openTabs.some((t) => t.deletedBy)).toBe(false);
+  });
+});
+
+/**
+ * The hook with an editor for its active tab whose unmount writes the buffer
+ * back through `saveFile`, as the file lock's cleanup does.
+ */
+function mountWithEditor() {
+  const hook: { current: ReturnType<typeof useWorkspaceState> } = { current: null! };
+  function Editor({ path, content, save }: { path: string; content: string; save: (p: string, c: string) => Promise<void> }) {
+    const latest = useRef(content);
+    latest.current = content;
+    useEffect(() => () => { void save(path, latest.current).catch(() => {}); }, [path, save]);
+    return null;
+  }
+  function Harness() {
+    hook.current = useWorkspaceState();
+    const tab = hook.current.activeTab;
+    return tab ? <Editor key={tab.path} path={tab.path} content={tab.content ?? ''} save={hook.current.saveFile} /> : null;
+  }
+  render(
+    <EventBusContext.Provider value={bus}>
+      <ConfirmProvider><Harness /></ConfirmProvider>
+    </EventBusContext.Provider>,
+  );
+  return hook;
+}
+
+describe('the editor writing back as its tab closes', () => {
+  it('cannot re-create a file our own delete just removed', async () => {
+    const result = mountWithEditor();
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
+    await open(result as Hook, 'KB/Keep.md', 'KB/Gone.md');
+    apiMocks.writeFile.mockClear();
+
+    await act(async () => { await result.current.deleteEntry('KB/Gone.md'); });
+    await settle();
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalledWith('ws-1', 'KB/Gone.md', expect.anything());
+    expect(disk.has('KB/Gone.md')).toBe(false);
+    expect(result.current.activeTab?.path).toBe('KB/Keep.md');
+  });
+
+  it('waits for a read deciding whether the file exists, and is refused when it is gone', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    // The refetch is slow; the save (a tab switch unmounting the editor)
+    // lands before it answers.
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      answer = () => reject(new WorkspaceApiError(404, 'Not found'));
+    }));
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+    await act(async () => {
+      answer();
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it('a read that finds the file lets the waiting save through', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited'); });
+
+    expect(disk.get('KB/Draft.md')).toBe('edited');
   });
 });
 

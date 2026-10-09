@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation, useNavigationType } from 'react-router-dom';
-import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
 import {
   KNOWLEDGE_UPLOAD_TARGET,
@@ -4218,6 +4218,24 @@ describe('FileExplorer: deleting the file on screen', () => {
     await deleteFromMenu('Gone.md');
 
     await waitFor(() => expect(screen.getByTestId('location-pathname').textContent).toBe('/workspace/main'));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('lands on Skills & Tools, not Knowledge home, when the last Library item open is deleted', async () => {
+    // A Library item's canonical URL is a workspace URL too; Knowledge home
+    // would switch the person to the other surface.
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: null }));
+    // On the default branch, whichever this suite left configured: it is the Library's.
+    renderExplorer({
+      fileTree: TREE,
+      deleteEntry,
+      initialEntries: [`/workspace/${DEFAULT_BRANCH}/${kbPath('Plugins/GTM/web-search.tool')}`],
+      openFilePath: 'Gone.md',
+    });
+
+    await deleteFromMenu('Gone.md');
+
+    await waitFor(() => expect(screen.getByTestId('location-pathname').textContent).toBe('/skills-and-tools'));
     expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
   });
 

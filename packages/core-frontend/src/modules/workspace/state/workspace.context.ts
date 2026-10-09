@@ -369,8 +369,9 @@ export interface WorkspaceContextValue {
    * when the server refused or failed it; in both cases no tab closes. On
    * success it says whether the active tab was closed and which tab is
    * active now, so the caller can move the address (see
-   * {@link DeleteEntryResult}). Resolves nothing when the workspace moved to
-   * another branch meanwhile.
+   * {@link DeleteEntryResult}). A branch change while the unsaved-tabs
+   * question is open resolves `false` (nothing was deleted); a branch change
+   * while the server request runs resolves nothing.
    */
   deleteEntry: (relativePath: string) => Promise<DeleteEntryResult | false | void>;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;

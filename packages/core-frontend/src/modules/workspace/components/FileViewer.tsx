@@ -1214,7 +1214,11 @@ export function FileViewer() {
       // trigger a remount that would discard their typing —
       // savedContent stays stable through an edit until the save
       // commits, then advances once.
-      key={editMode || proposeMode ? `${openFilePath}|edit|${remoteRevision}` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
+      // A change pulled from the git host remounts the editor onto the merged
+      // buffer (`remoteRevision`) — but not a proposal in progress: its
+      // buffer is seeded from the proposal, not the tab, and a remount would
+      // put the old seed back over the keystrokes Send still holds.
+      key={editMode || proposeMode ? `${openFilePath}|edit|${proposeMode && proposeSeed !== null ? 'proposal' : remoteRevision}` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
       // In propose mode with an open proposal, the buffer AND the dirty
       // baseline are the PROPOSED text (the seed) — the editor continues the
       // pending change, and "dirty" means "differs from what I already

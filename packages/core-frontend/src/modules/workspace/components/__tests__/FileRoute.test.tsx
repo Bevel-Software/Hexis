@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
@@ -1246,5 +1246,52 @@ describe('FileRoute: a file deleted by someone else', () => {
 
     await waitFor(() => expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${KEEP}`));
     await waitFor(() => expect(screen.queryByText(/Opening/)).not.toBeInTheDocument());
+    // Keep itself, not a blank or error page that also lacks "Opening".
+    expect(await screen.findByText('keep body')).toBeInTheDocument();
+  });
+
+  it('does not show a deletion on the branch being left as one on the branch being opened', async () => {
+    // A switch to `other` in flight: the URL names it, the workspace and its
+    // status are still on main, whose active tab is the deleted one.
+    const workspace = makeWorkspace({
+      openTabs: [deletedTab()],
+      activeTab: deletedTab(),
+      workspaceBranch: 'main',
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+    });
+    renderAt(`/workspace/other/${PATH}`, { workspace, git: makeGit({ status: makeStatus('main') }) });
+    await settle();
+
+    expect(screen.queryByText('This file was deleted')).not.toBeInTheDocument();
+  });
+
+  it("an id URL for the deleted file still finds its tab and shows the notice, not \"File not found\"", async () => {
+    // Seen once while the file existed: the id resolved to its path.
+    routesMock.fetchNodeWorkspacePath.mockResolvedValueOnce(PATH);
+    const live = makeTab({ path: PATH, content: '# Draft' });
+    renderAt('/workspace/main/draft_page', {
+      workspace: makeWorkspace({
+        openTabs: [live],
+        activeTab: live,
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+      }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+    await settle();
+    cleanup();
+
+    // Deleted since: the id resolves to nothing, but the tab is still open.
+    routesMock.fetchNodeWorkspacePath.mockResolvedValue(null);
+    renderAt('/workspace/main/draft_page', {
+      workspace: makeWorkspace({
+        openTabs: [deletedTab()],
+        activeTab: deletedTab(),
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+      }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.queryByText('File not found')).not.toBeInTheDocument();
   });
 });

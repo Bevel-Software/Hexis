@@ -27,6 +27,16 @@ type SyncError =
   | null;
 
 /**
+ * Every id → path this app has learned, keyed by branch and id. A deleted
+ * file's id no longer resolves, so returning to its id URL (Back, or a switch
+ * to its tab) loaded the id token as a path and said "File not found" over a
+ * tab that holds the deleted notice. The path it last had finds that tab —
+ * and, with no tab, still fails as missing, by name. Module-level so it
+ * outlives a remount of the page (Knowledge home and back).
+ */
+const knownIdPaths = new Map<string, string>();
+
+/**
  * `canonicalize` (default on): replace a path URL with the node's id URL once
  * the file is open. OFF when this route is rendered inside the Library frame
  * (`WorkspaceItemRoute`): an id URL (`/workspace/<branch>/<id>`) is not a
@@ -116,7 +126,10 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     if (!branchFromUrl) return;
     let cancelled = false;
     (async () => {
-      const path = await fetchNodeWorkspacePath(branchFromUrl, segment);
+      const resolved = await fetchNodeWorkspacePath(branchFromUrl, segment);
+      const key = `${branchFromUrl}/${segment}`;
+      if (resolved) knownIdPaths.set(key, resolved);
+      const path = resolved ?? knownIdPaths.get(key) ?? null;
       if (!cancelled) setIdResolved({ seg: segment, branch: branchFromUrl, path });
     })();
     return () => {
@@ -142,6 +155,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     let cancelled = false;
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
+      if (nodeId) knownIdPaths.set(`${branchFromUrl}/${nodeId}`, segment);
       if (!cancelled && nodeId) {
         navigate(kbNodeUrl(branchFromUrl, nodeId) + location.hash, { replace: true, state: routerStateRef.current });
       }
@@ -532,7 +546,10 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
    * a background tab whose bytes were dropped has nothing to load either.
    */
   const deletedTab =
-    !error && workspace.activeTab?.deletedBy && workspace.activeTab.path === pathFromUrl
+    !error &&
+    currentBranch === branchFromUrl &&
+    workspaceBranch === branchFromUrl &&
+    workspace.activeTab?.deletedBy && workspace.activeTab.path === pathFromUrl
       ? workspace.activeTab
       : null;
 

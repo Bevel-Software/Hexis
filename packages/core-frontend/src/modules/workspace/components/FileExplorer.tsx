@@ -65,6 +65,7 @@ import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { CR_FILE_PARAM, CR_PARAM, branchFromPathname, kbFileUrl, useFileNav } from '../routing/kb-routes';
+import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-paths';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
@@ -647,9 +648,15 @@ function ContextMenu({
         // on the tab that is left or on Knowledge home, replacing the entry
         // so Back never returns to a file that is gone. The file page trusts
         // only the address, so without this it waited on the deleted file
-        // for good. Only on a Knowledge page — elsewhere nothing is on screen.
+        // for good. Only on a workspace page — elsewhere nothing is on screen.
+        // A Library item's page has no Knowledge home behind it: with no tab
+        // left it lands on Skills & Tools, the surface the person was on.
         if (result?.closedActive && branchOnScreen !== null) {
-          navigate(kbFileUrl(branchOnScreen, result.newActivePath ?? undefined), { replace: true });
+          const landing =
+            result.newActivePath === null && isLibraryLocation(location.pathname)
+              ? LIBRARY_ROOT
+              : kbFileUrl(branchOnScreen, result.newActivePath ?? undefined);
+          navigate(landing, { replace: true });
         }
         return true;
       } catch (err) {
