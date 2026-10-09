@@ -30,9 +30,10 @@
  * so one crash never strands the question. A CLAIM IS CHECKED, NOT TRUSTED:
  * a holder that outlived its claim — a clone that took minutes — may find it
  * taken over and the question answered meanwhile, so right before the one
- * effect, with every lock held and nothing written, the holder checks that
- * the claim is still its own and nothing is answered (`fence`), and the
- * answer is recorded only where none is. The answer itself (`starterPack`)
+ * effect, with every lock held and nothing written, the holder renews the
+ * claim where it still reads as its own — one statement that proves it and
+ * gives the effect a whole `CLAIM_TTL_MS` of its own — and checks that
+ * nothing is answered (`fence`); the answer is recorded only where none is. The answer itself (`starterPack`)
  * is recorded once the pack is there; should that last step fail, the pack
  * is added all the same — said in the log, answered as the success it is —
  * and the pages close the question from then on.
@@ -195,7 +196,8 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       throw new StarterPackError('Only an admin can add starter pages.', 403);
     }
     return this.choosing.run('starter-pack', async () => {
-      const claim = await this.claim(user);
+      /** This call's claim — renewed by the fence, so its value moves. */
+      const lease = { claim: await this.claim(user) };
       let pack: StarterPack | null = null;
       let added: string[] = [];
       try {
@@ -208,17 +210,17 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
         }
         pack = id === NO_STARTER_PACK ? null : ((await loadStarterPacks(this.deps.disk, this.deps.packsDir)).find((p) => p.id === id) ?? null);
         if (id !== NO_STARTER_PACK && !pack) throw new StarterPackError(`There is no starter pack "${id}".`, 404);
-        if (pack) added = await this.apply(user, pack, claim);
+        if (pack) added = await this.apply(user, pack, lease);
         else {
           // The skip is the effect itself: fenced the same way, and recorded
           // only where nothing is answered.
-          await this.fence(claim);
+          await this.fence(lease, user);
           if (!(await this.deps.settings.recordIfAbsent(STARTER_PACK_SETTING, id, user.id))) throw alreadyChosen();
         }
       } catch (err) {
         // Refused, or nothing landed: the claim goes, and the question is
         // open again (or answered, as the refusal said).
-        await this.release(claim);
+        await this.release(lease.claim);
         throw err;
       }
       if (pack) {
@@ -237,7 +239,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
             log.error(`starter pack "${id}" was added, but the choice could not be recorded`, { err });
           });
       }
-      await this.release(claim);
+      await this.release(lease.claim);
       if (!pack) return { id, name: null, pages: 0, skills: 0, summary: '' };
       const pages = added.filter((p) => this.isPage(p)).length;
       const skills = added.filter((p) => path.posix.basename(p) === 'SKILL.md').length;
@@ -291,19 +293,26 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
   }
 
   /**
-   * THE FENCE before the one effect: that `claim` is still this call's, and
-   * that nothing has been answered. A claim is a promise with a deadline —
-   * one that expired while its holder was still at work (a clone that took
-   * minutes) is taken over, and the new holder may answer `none` — so the
-   * holder's own word that it holds the claim is checked against the
+   * THE FENCE before the one effect: that the claim is still this call's,
+   * and that nothing has been answered. A claim is a promise with a deadline
+   * — one that expired while its holder was still at work (a clone that
+   * took minutes) is taken over, and the new holder may answer `none` — so
+   * the holder's own word that it holds the claim is checked against the
    * database at the last moment, with every lock held and nothing written.
-   * Refused: nothing lands, and the claim, now a successor's, is left to
-   * them.
+   *
+   * Checked by RENEWING it, in one statement: the claim is replaced with a
+   * fresh one of this call's only where it still reads as this call's
+   * (`swapIfValue`), which both proves the claim and dates it anew, so the
+   * effect that follows has a whole `CLAIM_TTL_MS` before anyone may take
+   * the claim over — a commit takes seconds. Refused: nothing lands, and the
+   * claim, now a successor's, is left to them.
    */
-  private async fence(claim: string): Promise<void> {
-    if ((await this.deps.settings.reload(STARTER_PACK_CLAIM_SETTING)) !== claim) {
+  private async fence(lease: { claim: string }, user: AuthUser): Promise<void> {
+    const renewed = `${user.id} ${Date.now()}`;
+    if (!(await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, lease.claim, renewed, user.id))) {
       throw new StarterPackError('Another admin took this choice over while it was in progress; nothing was added. Try again.', 409);
     }
+    lease.claim = renewed;
     if ((await this.recordedChoice()) !== null) throw alreadyChosen();
   }
 
@@ -395,10 +404,10 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
 
   /**
    * Write the pack's absent files to the default branch as one commit;
-   * resolve to the paths written. `claim` is this call's, checked at the
-   * last moment (see `fence`).
+   * resolve to the paths written. `lease` is this call's claim, checked and
+   * renewed at the last moment (see `fence`).
    */
-  private async apply(user: AuthUser, pack: StarterPack, claim: string): Promise<string[]> {
+  private async apply(user: AuthUser, pack: StarterPack, lease: { claim: string }): Promise<string[]> {
     const { kb, workspaceService, workflow, disk } = this.deps;
     const branch = kb.defaultBranch;
     const ws = await workspaceService.getOrCreateForBranch(branch);
@@ -419,7 +428,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
           // call may still add anything at all (a check that throws refuses
           // the whole batch untouched), then only what is STILL absent, so a
           // page someone made a moment ago is never replaced.
-          await this.fence(claim);
+          await this.fence(lease, user);
           const absent: (typeof candidates)[number][] = [];
           for (const w of candidates) {
             if (!(await disk.exists(path.join(basePath, ...w.path.split('/'))))) absent.push(w);

@@ -437,26 +437,58 @@ describe('choosing a pack', () => {
     expect(workflow.commitChanges).not.toHaveBeenCalled();
     expect(store.starterPack).toBe('none');
     expect(store.starterPackClaim).toBe('u-other 1');
-    // Asked the database with the locks held, not before them.
-    const fenced = settings.reload.mock.invocationCallOrder.filter((_, i) => settings.reload.mock.calls[i]![0] === 'starterPackClaim');
-    expect(Math.max(...fenced)).toBeGreaterThan(workflow.acquireLock.mock.invocationCallOrder[0]!);
+    // Asked the database with the locks held, not before them: the renewal
+    // of its own claim, refused because the claim is no longer its own.
+    const renewals = settings.swapIfValue.mock.calls
+      .map(([key, expected, next], i) => ({ key, expected, next, at: settings.swapIfValue.mock.invocationCallOrder[i]! }))
+      .filter((c) => c.key === 'starterPackClaim' && c.next !== null);
+    expect(renewals).toHaveLength(1);
+    expect(renewals[0]!.expected).toMatch(/^u-admin /);
+    expect(renewals[0]!.at).toBeGreaterThan(workflow.acquireLock.mock.invocationCallOrder[0]!);
+  });
+
+  it('renews its claim as it checks it, so the commit that follows has the whole lease to itself', async () => {
+    const store: Record<string, string> = {};
+    const { svc, settings, workflow } = harness({ store });
+    let claimed = '';
+    settings.recordIfAbsent.mockImplementationOnce(async (key: string, value: string) => {
+      store[key] = value;
+      claimed = value;
+      return true;
+    });
+    // The work before the commit takes a moment, so a renewal is dated later than the claim.
+    workflow.acquireLock.mockImplementationOnce(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return { acquired: true, lock: { holderName: 'x' } };
+    });
+    let claimAtCommit = '';
+    workflow.commitChanges.mockImplementationOnce(async () => {
+      claimAtCommit = store.starterPackClaim!;
+      return { sha: 'abc' };
+    });
+    await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
+    const dated = (claim: string) => Number(claim.split(' ').pop());
+    expect(claimAtCommit.startsWith(`${ADMIN.id} `)).toBe(true);
+    expect(dated(claimAtCommit)).toBeGreaterThan(dated(claimed));
+    // Released by its renewed value, so the row is gone.
+    expect(store.starterPackClaim).toBeUndefined();
   });
 
   it('records a skip only where nothing is answered: an answer that landed meanwhile stands', async () => {
     const store: Record<string, string> = {};
     const { svc, settings } = harness({ store });
-    // Between this call's check and its record, another replica's pack landed and was recorded.
-    let planted = false;
+    // Between the fence's read of the answer — the second — and this call's
+    // record, another replica's pack landed and was recorded.
+    let reads = 0;
     settings.reload.mockImplementation(async (key: string) => {
       const held = store[key] ?? '';
-      if (key === 'starterPack' && !planted) {
-        planted = true;
-        store.starterPack = 'sales';
-      }
+      if (key === 'starterPack' && ++reads === 2) store.starterPack = 'sales';
       return held;
     });
     await expect(svc.choose(ADMIN, 'none')).rejects.toMatchObject({ status: 409 });
     expect(store.starterPack).toBe('sales');
+    // The fence passed; it was the insert-if-absent that found the answer.
+    expect(settings.recordIfAbsent).toHaveBeenCalledWith('starterPack', 'none', ADMIN.id);
     expect(settings.record).not.toHaveBeenCalled();
   });
 
