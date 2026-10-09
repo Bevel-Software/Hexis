@@ -59,7 +59,7 @@ function parseDomainList(raw: string): string[] {
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
-import { AgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
@@ -238,7 +238,7 @@ export interface CoreServices {
   /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
-  agentDownloadStore: AgentDownloadStore;
+  agentDownloadStore: IAgentDownloadStore;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
    * session cookie — none when it carries none that verifies — so the
