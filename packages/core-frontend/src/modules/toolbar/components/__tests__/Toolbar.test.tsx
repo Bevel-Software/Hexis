@@ -28,6 +28,7 @@ import {
   type AdminMenuItem,
   type ToolbarItemDef,
 } from '../../../../core/registry';
+import { GIT_MENU_ITEMS } from '../../../git';
 
 const stubAdminMenuItems: AdminMenuItem[] = [
   {
@@ -48,9 +49,19 @@ const stubAdminMenuItems: AdminMenuItem[] = [
     section: 'admin',
     order: 90,
     label: 'Stub admin row',
-    onSelect: ({ closeMenu }) => closeMenu(),
+    onSelect: ({ closeMenu, user }) => {
+      stubAdminRowSelectedBy.push(user.email);
+      closeMenu();
+    },
+  },
+  {
+    id: 'stub-hidden-row',
+    order: 20,
+    label: 'Stub hidden row',
+    isShown: (user) => user.email !== 'user@example.com',
   },
 ];
+const stubAdminRowSelectedBy: string[] = [];
 
 /** Exposes the router's current pathname so menu navigation can be asserted. */
 function LocationProbe() {
@@ -166,7 +177,9 @@ function renderToolbar(overrides?: {
                     >
                       <AppRegistryContext.Provider
                         value={makeRegistry({
-                          adminMenuItems: stubAdminMenuItems,
+                          // As `withCoreModuleContributions` composes it: git's own
+                          // rows ahead of the registry's.
+                          adminMenuItems: [...GIT_MENU_ITEMS, ...stubAdminMenuItems],
                           toolbarItems: overrides?.toolbarItems ?? [],
                         })}
                       >
@@ -448,6 +461,37 @@ describe('Toolbar', () => {
       expect(logout).toHaveBeenCalledTimes(1);
     });
 
+    // The way back from the branch delete's "Don't ask again": there exactly
+    // while THIS person's question is off in this browser.
+    describe('Ask before deleting branches', () => {
+      const KEY = 'hexis.skipBranchDeleteConfirm:user@example.com';
+      afterEach(() => localStorage.clear());
+
+      it('is not offered while the question is on', async () => {
+        renderToolbar();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+
+      it("is not offered for someone else's choice", async () => {
+        localStorage.setItem('hexis.skipBranchDeleteConfirm:someone@example.com', '1');
+        renderToolbar();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+
+      it('is offered while the question is off, and turns it back on', async () => {
+        localStorage.setItem(KEY, '1');
+        renderToolbar();
+        await openMenu();
+        await userEvent.click(row('Ask before deleting branches'));
+        expect(localStorage.getItem(KEY)).toBeNull();
+        expect(panelGone()).toBeNull();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+    });
+
     // Nothing in the menu means anything without a person, and the trigger is
     // that person — so signed out there is no button at all.
     it('renders nothing when there is no signed-in user', () => {
@@ -491,6 +535,17 @@ describe('Toolbar', () => {
       expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
       expect(row('Stub extension')).toBeInTheDocument();
+    });
+
+    // A row decides for itself whether it is offered, and its action learns
+    // who is signed in — how git's "Ask before deleting branches" is built.
+    it('leaves out a row that is not shown to this person, and tells a row who selected it', async () => {
+      stubAdminRowSelectedBy.length = 0;
+      renderToolbar({ isAdmin: true });
+      await openMenu();
+      expect(noRow('Stub hidden row')).toBeNull();
+      await userEvent.click(row('Stub admin row'));
+      expect(stubAdminRowSelectedBy).toEqual(['user@example.com']);
     });
 
     // Core rows all NAVIGATE — the settings surfaces are standalone routed
