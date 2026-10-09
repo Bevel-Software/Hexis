@@ -80,7 +80,7 @@ function providerDeps(db: Database) {
   };
 }
 
-function makeProvider(queue: any[] = []) {
+function makeProvider(queue: unknown[] = []) {
   const { db, captured } = makeFakeDb(queue);
   const provider = new BevelOAuthProvider(providerDeps(db));
   return { provider, captured, db };
