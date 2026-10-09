@@ -38,6 +38,13 @@
  * editor alike. Nothing new is ever written under it, so once the last such
  * row has expired or been released the extra spelling matches nothing.
  *
+ * This covers rows LEFT by the previous version, not rows it is still
+ * writing: a previous-version process never looks at a canonical row, so no
+ * check here could make the two contend while both run. They never do — one
+ * server process owns the workspaces directory (see `branchLifecycle` in the
+ * workflow service; this service's deletion gate is in-process for the same
+ * reason), and an upgrade stops the old process before the new one starts.
+ *
  * There is no transition handling for rows written under a raw spelling
  * before this landed: such a row is now unreachable by name and expires on
  * its own TTL. For one deploy an in-flight edit's lock can linger up to the
