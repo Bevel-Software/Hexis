@@ -126,7 +126,9 @@ export function argumentsRefusal(
   // caller reads. Every mismatch line opens with the argument it is about.
   const mismatches = check
     .check(args)
-    .filter((line) => !schemas.refusesItself.has(/^"([^".]+)"/.exec(line)?.[1] ?? ''));
+    // The whole quoted name: an argument may carry a dot of its own, and a
+    // nested line (`"body.path"`) names nothing in `refusesItself` anyway.
+    .filter((line) => !schemas.refusesItself.has(/^"([^"]+)"/.exec(line)?.[1] ?? ''));
   // The shape first, when that is what went wrong: the lines below (every
   // required argument missing) are its symptoms, not the mistake.
   if (cameAsQuery) mismatches.unshift(ARGS_UNDER_BODY_LINE);

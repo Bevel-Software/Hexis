@@ -86,7 +86,7 @@ export function describeSyncFailure(err: unknown, operation: 'push' | 'pull' = '
   // `Permission denied (publickey…)` is ssh refusing the KEY — a rejected
   // credential, not a missing permission.
   if (
-    /authentication failed|could not read username|invalid username or (?:password|token)|invalid credentials|returned error: 401|permission denied \(publickey/i.test(
+    /authentication failed|could not read username|invalid username or (?:password|token)|invalid credentials|\b401\b|permission denied \(publickey/i.test(
       raw,
     )
   ) {
