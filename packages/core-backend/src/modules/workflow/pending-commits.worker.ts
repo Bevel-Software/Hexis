@@ -23,10 +23,20 @@
  * stalled push parked every other user's save behind it.
  */
 
+import { createHash } from 'node:crypto';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('pending-commits');
+
+/**
+ * The commit author's synthetic user id: a digest of the address, so the id
+ * is stable for one person and carries nothing a reader can turn back into
+ * the address. It stands in log lines (`user=<id>`) where a real id would.
+ */
+function authorIdOf(email: string): string {
+  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 24);
+}
 import type {
   PendingCommit,
   PendingCommitsService,
@@ -342,8 +352,11 @@ export class PendingCommitsWorker {
       // The worker doesn't have a real `users.id` for the commit author —
       // commit attribution flows through `git commit --author="Name <email>"`,
       // not through any FK. Drop a synthetic id so the AuthUser shape is
-      // satisfied without hitting the users table.
-      id: `pending-commit-author:${row.authorEmail}`,
+      // satisfied without hitting the users table. OPAQUE, like a real id:
+      // the push path logs `user=<id>` when a push or its recovery fails,
+      // and log lines carry no email addresses — so the id is a digest of
+      // the address, stable per person and nothing a reader can turn back.
+      id: `pending-commit-author:${authorIdOf(row.authorEmail)}`,
       email: row.authorEmail,
       name: row.authorName,
     };
@@ -467,7 +480,7 @@ function strayPathNotice(row: PendingCommit, error: string, corrected: string): 
     `Branch:    ${row.branch}`,
     `Path:      ${row.path}`,
     `Use instead: ${corrected}`,
-    `Original author: ${row.authorEmail}`,
+    `Queue row: ${row.id} (names the author; log lines carry no email addresses)`,
     `Queued at: ${row.queuedAt.toISOString()}`,
     `Error: ${error}`,
     '',
@@ -491,7 +504,7 @@ function terminalFailureNotice(row: PendingCommit, error: string): string {
     `Workspace: ${row.workspaceId}`,
     `Branch:    ${row.branch}`,
     `Path:      ${row.path}`,
-    `Original author: ${row.authorEmail}`,
+    `Queue row: ${row.id} (names the author; log lines carry no email addresses)`,
     `Queued at: ${row.queuedAt.toISOString()} (${elapsed} ago)`,
     `Last error: ${error}`,
     '',
