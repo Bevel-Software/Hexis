@@ -48,7 +48,7 @@ import { fileLocks } from '../database/schema.js';
 import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/platform-shared';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
-import { canonicalWorkspaceId } from './pending-commits.service.js';
+import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
 /**
  * Lock lifetime without a heartbeat. The client is expected to heartbeat

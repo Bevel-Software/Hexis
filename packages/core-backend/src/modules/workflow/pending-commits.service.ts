@@ -41,6 +41,7 @@ const log = logger('pending-commits');
 import type { Database } from '../database/connection.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import { pendingCommits } from '../database/schema.js';
+import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
 /**
  * Transient-failure budget per recovery cycle. After this many consecutive
@@ -80,29 +81,9 @@ export const N_RECOVERY = 3;
  */
 export const BACKOFF_MS = [1_000, 5_000, 30_000];
 
-/**
- * Canonicalize a workspace id so an enqueued row and the worker's claim always
- * key on the SAME string.
- *
- * The id reaches `enqueue` via a route `:id` path param, which Express
- * URL-decodes — so a slashed feature branch arrives as `alice/feature`. But the
- * worker claims per `WorkspaceService.knownWorkspaces()`, whose ids are
- * `encodeURIComponent(branch)` → `alice%2Ffeature`. Those strings differ, so
- * `WHERE workspace_id = …` never matched and the row was never drained —
- * silently stranding every human save on a feature branch (protected branches
- * have no `/`, so encoded == decoded and they were unaffected).
- *
- * `encodeURIComponent(decodeURIComponent(id))` is idempotent and collapses both
- * forms to the encoded id `knownWorkspaces()` uses. A malformed `%` sequence
- * (which `decodeURIComponent` would throw on) is left untouched.
- */
-export function canonicalWorkspaceId(id: string): string {
-  try {
-    return encodeURIComponent(decodeURIComponent(id));
-  } catch {
-    return id;
-  }
-}
+// Lives in `shared/workspace-id.ts`, beside the encoding it canonicalises to;
+// re-exported for this module's existing importers.
+export { canonicalWorkspaceId };
 
 export interface PendingCommit {
   id: string;
