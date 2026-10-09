@@ -785,6 +785,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const idx = prev.findIndex((t) => t.path === path);
       if (idx < 0) return prev;
       if (prev[idx].isDirty === dirty) return prev;
+      // A tab someone else deleted keeps its unsaved edits until Close: the
+      // viewer that held them unmounts when the notice replaces it, and its
+      // cleanup reports "not dirty" — which hid the edits and Copy edits.
+      if (!dirty && (prev[idx].deletedBy || deletedPathsRef.current.has(path))) return prev;
       const next = prev.slice();
       next[idx] = { ...next[idx], isDirty: dirty };
       return next;

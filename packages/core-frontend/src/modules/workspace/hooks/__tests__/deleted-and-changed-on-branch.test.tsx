@@ -384,6 +384,40 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.\n\nA paragraph I added.');
   });
 
+  // The viewer's unmount, as it runs when the notice replaces it: it reports
+  // "not dirty" (FileViewer's cleanup) and its lock cleanup writes the buffer
+  // back. Neither may reach the deleted tab — the notice shows the edits only
+  // while the tab is dirty (Local Testing attempt 2, mock screen 08).
+  it("keeps the deleted tab's unsaved edits through the viewer's unmount", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const edited = '# Draft\n\nA page to delete.\n\nA paragraph I added and had not saved yet.';
+    await typeInto(result, edited);
+
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await act(async () => {
+      result.current.setHasUnsavedFileChanges?.(false);
+      await result.current.saveFile('KB/Draft.md', edited).catch(() => {});
+    });
+
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe(edited);
+    expect(result.current.hasUnsavedFileChanges).toBe(true);
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it('clears the dirty flag as before on a tab nobody deleted', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+
+    await act(async () => { result.current.setHasUnsavedFileChanges?.(false); });
+
+    expect(result.current.activeTab?.isDirty).toBe(false);
+  });
+
   it('refuses the write the moment the delete is learned, before the marked tab renders', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
