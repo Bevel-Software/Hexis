@@ -54,3 +54,58 @@ describe('FileLockService coordinates on one workspace id', () => {
     await expect(locks.hasAnyActive('main')).resolves.toBe(true);
   });
 });
+
+describe('FileLockService honours a lock held across the upgrade, under the decoded id', () => {
+  let fake: FakeLockDb;
+  let locks: FileLockService;
+
+  /** A row as the service wrote it before workspace ids were canonicalised. */
+  const legacyRow = (expiresInMs: number) => {
+    const now = Date.now();
+    return {
+      workspaceId: DECODED,
+      branch: BRANCH,
+      path: PATH,
+      holderUserId: ALICE.id,
+      holderName: ALICE.name,
+      mode: 'edit',
+      acquiredAt: new Date(now - 1_000),
+      lastHeartbeatAt: new Date(now - 1_000),
+      expiresAt: new Date(now + expiresInMs),
+    };
+  };
+
+  beforeEach(() => {
+    fake = makeFakeLockDb();
+    locks = new FileLockService(fake.db);
+  });
+
+  it.each([
+    ['encoded', ENCODED],
+    ['decoded', DECODED],
+  ])('a live one is seen asked with the %s id, refuses another editor, and can be heartbeat and released', async (_how, askedAs) => {
+    fake.seed(legacyRow(30_000));
+    await expect(locks.hasAnyActive(askedAs)).resolves.toBe(true);
+    await expect(locks.get(askedAs, BRANCH, PATH)).resolves.toMatchObject({ holderUserId: ALICE.id });
+    await expect(locks.acquire(askedAs, BRANCH, PATH, BOB)).resolves.toMatchObject({
+      acquired: false,
+      lock: { holderUserId: ALICE.id },
+    });
+    // No second row was written beside it.
+    expect(fake.rows().map((r) => r.workspaceId)).toEqual([DECODED]);
+    const beat = await locks.heartbeat(askedAs, BRANCH, PATH, ALICE);
+    expect(new Date(beat.expiresAt).getTime()).toBeGreaterThan(Date.now() + 30_000);
+    await locks.release(askedAs, BRANCH, PATH, ALICE);
+    expect(fake.rows()).toEqual([]);
+    await expect(locks.hasAnyActive(askedAs)).resolves.toBe(false);
+  });
+
+  it('an expired one holds nothing: it is swept, and the file is free under the canonical id', async () => {
+    fake.seed(legacyRow(-1_000));
+    await expect(locks.hasAnyActive(ENCODED)).resolves.toBe(false);
+    await expect(locks.get(ENCODED, BRANCH, PATH)).resolves.toBeNull();
+    expect(fake.rows()).toEqual([]);
+    await expect(locks.acquire(ENCODED, BRANCH, PATH, BOB)).resolves.toMatchObject({ acquired: true });
+    expect(fake.rows().map((r) => r.workspaceId)).toEqual([ENCODED]);
+  });
+});
