@@ -10,7 +10,14 @@ import { TeamRoute } from '../components/TeamRoute';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
 import { ConnectToolsPage } from '../../secrets-vault/components/ConnectToolsPage';
-import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForLibraryItem, urlForSkillFile } from './library-paths';
+import {
+  CONNECT_TOOLS_SEGMENT,
+  decodePluginSegment,
+  LIBRARY_ROOT,
+  pathForPlugin,
+  urlForLibraryItem,
+  urlForSkillFile,
+} from './library-paths';
 
 /**
  * The Skills & Tools surface — everything under `/skills-and-tools/*`.
@@ -58,7 +65,7 @@ export function LibraryRoutes() {
                 its modes live here, agent-connect (`?oauth=`) included; the
                 shell's `/connect` redirects here for every link the server
                 hands out. */}
-            <Route path="connect" element={<ConnectToolsPage />} />
+            <Route path={CONNECT_TOOLS_SEGMENT} element={<ConnectToolsPage />} />
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 

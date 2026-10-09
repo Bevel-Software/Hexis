@@ -301,8 +301,10 @@ export function ConnectToolsPage() {
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
 
+  // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
+  // scroller, so the header scrolls with the list rather than pinning.
   return (
-    <div className="flex h-full flex-col bg-canvas text-ink">
+    <div className="flex flex-col bg-canvas text-ink">
       <header className="flex shrink-0 items-center gap-3 border-b border-line px-8 py-4">
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
         {/* Quiet, like the refetch a save triggers. A loud one drops the page
@@ -321,7 +323,7 @@ export function ConnectToolsPage() {
         </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-8 py-6">
+      <div className="px-8 py-6">
         <div className="max-w-2xl">
           {agentMode && (
             <Surface tone="surface" radius="xl" elevation="card" padded className="mb-4">

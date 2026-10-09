@@ -485,9 +485,22 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
         name: 'Skip this tool (removes your saved keys and sign-ins for it)',
       }),
     ).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: 'Finish & return to your agent' }));
+    const finish = await screen.findByRole('button', { name: 'Finish & return to your agent' });
 
-    await waitFor(() => expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state'));
+    // jsdom does not navigate, so hold the address in a plain object for the
+    // click: what Finish writes to it is where the browser would have gone.
+    const realLocation = window.location;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...realLocation, href: realLocation.href },
+    });
+    try {
+      fireEvent.click(finish);
+      await waitFor(() => expect(window.location.href).toBe('/agent-callback?code=abc'));
+    } finally {
+      Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
+    }
+    expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state');
     expect(connectMock.getMcpOAuthRequest).toHaveBeenCalledWith('signed-state');
   });
 });

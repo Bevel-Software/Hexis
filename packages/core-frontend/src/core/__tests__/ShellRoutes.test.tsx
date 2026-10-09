@@ -182,7 +182,7 @@ describe('ShellRoutes — /connect', () => {
     ['/connect?from=agent', '/skills-and-tools/connect?from=agent'],
   ])('sends %s to %s inside Skills & Tools', (from, to) => {
     renderConnect(from);
-    expect(screen.getByTestId('address')).toHaveTextContent(to);
+    expect(screen.getByTestId('address').textContent).toBe(to);
     expect(screen.getByTestId('skills-surface')).toBeInTheDocument();
   });
 
