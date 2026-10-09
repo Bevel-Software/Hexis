@@ -65,6 +65,10 @@ const FILES: Record<string, string | Buffer> = {
   // Ana may read here, and download nothing.
   'Readable/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\n',
   'Readable/Top.md': '# top\n',
+  // A folder whose rules deny Ana `download`, holding a file whose own
+  // frontmatter grants it: the file alone may go out, the folder's zip not.
+  'Gated/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\ndownload:\n  - deny Ana <ana@x.io>\n',
+  'Gated/Open.md': '---\ndownload:\n  - Ana <ana@x.io>\n---\n# open inside a gated folder\n',
   'Pictures/access.md': '---\n---\ndownload:\n  - Ana <ana@x.io>\n',
   'Pictures/logo.png': PNG,
   'Pictures/sub/.gitkeep': '',
@@ -518,6 +522,22 @@ describe('a download link answers once', () => {
   });
 });
 
+describe('a folder is gated as a folder', () => {
+  it("refuses a folder's zip when the folder denies download, though a file inside grants it; the file alone goes out", async () => {
+    const h = await start();
+    const folder = await request(h.base, [`${KB}/Gated`]);
+    expect(folder.status).toBe(200);
+    expect(folder.body.folders).toEqual([]);
+    expect(folder.body.files).toEqual([]);
+    expect(folder.body.refused).toEqual([{ path: `${KB}/Gated`, reason: DOWNLOAD_PERMISSION_REQUIRED }]);
+
+    const file = await request(h.base, [`${KB}/Gated/Open.md`]);
+    expect(file.status).toBe(200);
+    expect(file.body.files.map((f) => f.path)).toEqual([`${KB}/Gated/Open.md`]);
+    h.store.stopSweeping();
+  });
+});
+
 describe('limits', () => {
   it('refuses the whole request over 500 MB, naming the total and the limit, before reading a byte', async () => {
     const h = await start();
@@ -645,7 +665,12 @@ describe('limits', () => {
     for (const url of [...first.files.map((f) => f.downloadUrl), first.folders[0]!.downloadUrl]) {
       await (await fetchLink(h.base, url)).arrayBuffer();
     }
-    await new Promise((r) => setTimeout(r, 20));
+    // Wait for the request to drop (the response's close runs `finish`),
+    // not a fixed number of milliseconds.
+    const deadline = Date.now() + 5000;
+    while (h.store.openRequestsOf(ANA.id) > 9 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect((await request(h.base, [`${KB}/Shared/Open.md`])).status).toBe(200);
     h.store.stopSweeping();
   });
