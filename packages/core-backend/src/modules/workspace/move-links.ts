@@ -139,12 +139,15 @@ export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPla
     const newPath = mapPath(oldPath) ?? oldPath;
     // The sidebar moves and deletes without this tool's locks, so a page can
     // go between the listing and this read. A page gone has no links to fix;
-    // one that cannot be opened is one more the search did not cover.
+    // one that cannot be opened is one more the search did not cover. Gone is
+    // the disk's own definition of absence: ENOENT, and ENOTDIR for a page
+    // whose folder became a file in the meantime.
     let text: string;
     try {
       text = await input.readText(oldPath);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') unsearched = true;
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') unsearched = true;
       continue;
     }
     // A file that stays put is only touched by a link that names the moved

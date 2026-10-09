@@ -338,8 +338,10 @@ export class AgentDownloadStore implements IAgentDownloadStore {
     // place until now is given back, so the request is counted once.
     this.releaseReservation(user.id);
     // AFTER the records exist: the first sweep runs at once and would
-    // otherwise take this request's directory for an orphan.
-    this.startSweeping();
+    // otherwise take this request's directory for an orphan. And never once
+    // the store is stopped: a request finishing after shutdown's
+    // `stopSweeping` must not re-arm the sweeper that was stopped for good.
+    if (!this.stopped) this.startSweeping();
     return {
       downloadUrls: minted.map((m) => this.downloadUrlFor(m.token)),
       expiresAt: new Date(expiresAt).toISOString(),
