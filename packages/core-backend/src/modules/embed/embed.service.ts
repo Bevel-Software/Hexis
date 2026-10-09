@@ -426,7 +426,10 @@ export class EmbedService implements IEmbedService {
     // One proposal at a time per file on this branch: two from the same
     // person landing together would otherwise write over each other before
     // either commit staged the file, and one would commit the other's text.
-    await this.proposing(`${branch}\u0000${wsPath}`, async () => {
+    // The workspace service's own per-path turn is that queue — the one the
+    // app's file routes take around a write whose decision spans more than
+    // one call — and the write inside takes the same turn, re-entrantly.
+    await this.workspaceService.withPathTurn(workspace.id, wsPath, async () => {
       await this.workspaceService.writeFile(workspace.id, wsPath, content);
       // Scoped to the one path this proposal is about: the suggestions branch
       // is shared by everything this person has proposed, and a bare commit
@@ -562,21 +565,6 @@ export class EmbedService implements IEmbedService {
     } catch (err) {
       if (err instanceof EmbedNodeNotFoundError) return false;
       throw err;
-    }
-  }
-
-  /** In-flight proposal write-and-commit sequences, by branch and path — see `propose`. */
-  private readonly proposals = new Map<string, Promise<unknown>>();
-
-  /** Run `work` after every proposal already running for the same `key`. */
-  private async proposing<T>(key: string, work: () => Promise<T>): Promise<T> {
-    const before = this.proposals.get(key) ?? Promise.resolve();
-    const mine = before.catch(() => undefined).then(work);
-    this.proposals.set(key, mine);
-    try {
-      return await mine;
-    } finally {
-      if (this.proposals.get(key) === mine) this.proposals.delete(key);
     }
   }
 
