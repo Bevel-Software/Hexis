@@ -20,6 +20,25 @@ export function firstPagePromptFor(pack: { firstPagePrompt: string } | null | un
   return pack?.firstPagePrompt.trim() || FIRST_PAGE_PROMPT;
 }
 
+/** The words of the generic request that say where the page goes. */
+const IN_KNOWLEDGE = 'write a page in Knowledge';
+
+/**
+ * The request pointed at `folder` — the path below the Knowledge folder New
+ * page would write in (`Sales`, `Sales/Team`) — so an agent writing as the
+ * person tries where they may write rather than the top, where they may not.
+ * No folder (the top of Knowledge) leaves the request as it is. A starter
+ * pack's own request need not say "write a page in Knowledge", so where it
+ * does not, the place is added as a sentence of its own.
+ */
+export function firstPagePromptInFolder(prompt: string, folder: string | null): string {
+  if (!folder) return prompt;
+  const place = `Knowledge/${folder}`;
+  return prompt.includes(IN_KNOWLEDGE)
+    ? prompt.replace(IN_KNOWLEDGE, `write a page in ${place}`)
+    : `${prompt} Save it in ${place}.`;
+}
+
 /** A new Claude chat with `prompt` typed into it (claude.ai's `q` parameter prefills; the person still sends). */
 export function claudePromptUrl(prompt: string): string {
   return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;

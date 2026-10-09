@@ -23,6 +23,7 @@ import { SearchPalette } from '../../toolbar/components/SearchPalette';
 import { COMMAND_MENU_SHORTCUT_LABEL } from '../../toolbar/commands/command-menu';
 import { AGENT_RECHECK_MS } from '../state/agent-connection';
 import { notePluginCreated } from '../../library/state/plugins-revision';
+import { WRITE_TARGET_DEBOUNCE_MS } from '../../workspace/hooks/useKnowledgeWriteTarget';
 
 /**
  * The "Get set up" column: every tick is derived from state the app already
@@ -41,6 +42,22 @@ const { listAccountsMock, listPluginsMock, openWorkspacePathMock, fetchAgentConn
   }));
 
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
+
+/**
+ * The repo-relative folders the person may write, as the batch access
+ * endpoint answers them. The top of Knowledge by default — what an admin
+ * may, and what every test before this ticket assumed.
+ */
+const { access } = vi.hoisted(() => ({
+  access: {
+    writable: new Set<string>(),
+    batch: vi.fn<(workspaceId: string, paths: string[]) => Promise<{ results: Record<string, boolean> }>>(),
+  },
+}));
+vi.mock('../../access/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../access/api')>()),
+  fetchFileAccessBatch: access.batch,
+}));
 vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
 const { fetchStarterPacksMock } = vi.hoisted(() => ({
   fetchStarterPacksMock: vi.fn<() => Promise<StarterPacksAnswer>>(),
@@ -223,9 +240,31 @@ function columnUi({
   return ui;
 }
 
-function mount(options: MountOptions = {}) {
+/**
+ * Mount the column and let the question of where New page may write answer
+ * (the list waits for it, so nothing is on screen before it does).
+ */
+async function mount(options: MountOptions = {}) {
   const ui = columnUi(options);
-  return { ...render(ui), ui };
+  const rendered = render(ui);
+  await settle();
+  return { ...rendered, ui };
+}
+
+/** Let pending requests answer: one macrotask runs every queued microtask. */
+async function settle() {
+  await act(async () => {
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+    else await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+/** Wait past the write check's debounce, so a tree change has been asked about. */
+async function settleRecheck() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, WRITE_TARGET_DEBOUNCE_MS + 20));
+  });
+  await settle();
 }
 
 /** The checklist row titled `title`, or null when the column does not list it. */
@@ -258,6 +297,10 @@ beforeEach(() => {
   openWorkspacePathMock.mockReset();
   fetchAgentConnectionMock.mockReset().mockResolvedValue({ connected: false });
   authFetchMock.mockClear();
+  access.writable = new Set(['KnowledgeBase']);
+  access.batch.mockReset().mockImplementation(async (_ws, paths) => ({
+    results: Object.fromEntries(paths.map((p) => [p, access.writable.has(p)])),
+  }));
 });
 
 /** Calls to the onboarding write — the one `markDone` makes. */
@@ -265,8 +308,8 @@ const doneWrites = () =>
   authFetchMock.mock.calls.filter((c) => (c as unknown[])[0] === '/api/auth/onboarding-done').length;
 
 describe('GetStartedColumn: what a member sees', () => {
-  it('lists the five member steps, hides the admin-only ones, and asks the server nothing', () => {
-    mount();
+  it('lists the five member steps, hides the admin-only ones, and asks the server nothing', async () => {
+    await mount();
     expect(screen.getByText('1 of 5')).toBeInTheDocument();
     expect(row('Create your workspace')).not.toBeNull();
     expect(row('Connect your agent')).not.toBeNull();
@@ -280,43 +323,43 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(listPluginsMock).not.toHaveBeenCalled();
   });
 
-  it('ticks "Connect your agent" from the server onboarding flag', () => {
-    mount({ onboardingDone: true });
+  it('ticks "Connect your agent" from the server onboarding flag', async () => {
+    await mount({ onboardingDone: true });
     expect(isDone('Connect your agent')).toBe(true);
     expect(isDone('Create your workspace')).toBe(true);
     expect(screen.getByText('2 of 5')).toBeInTheDocument();
   });
 
   it('sends "Connect" to the welcome page', async () => {
-    mount();
+    await mount();
     await userEvent.click(within(row('Connect your agent')!).getByRole('button', { name: 'Connect' }));
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
   });
 
   it('opens the starter guide and ticks it', async () => {
-    mount();
+    await mount();
     expect(isDone('Read “How to get started”')).toBe(false);
     await userEvent.click(within(row('Read “How to get started”')!).getByRole('button', { name: 'Open it' }));
     expect(openWorkspacePathMock).toHaveBeenCalledWith(GUIDE);
     expect(isDone('Read “How to get started”')).toBe(true);
   });
 
-  it('ticks the guide when it is opened by any route, and remembers it', () => {
-    const { unmount } = mount({ openFilePath: GUIDE });
+  it('ticks the guide when it is opened by any route, and remembers it', async () => {
+    const { unmount } = await mount({ openFilePath: GUIDE });
     expect(isDone('Read “How to get started”')).toBe(true);
     unmount();
-    mount();
+    await mount();
     expect(isDone('Read “How to get started”')).toBe(true);
   });
 
-  it('leaves the guide step out when the knowledge base has no such page', () => {
-    mount({ files: [`${KB}/KnowledgeBase/.gitkeep`] });
+  it('leaves the guide step out when the knowledge base has no such page', async () => {
+    await mount({ files: [`${KB}/KnowledgeBase/.gitkeep`] });
     expect(row('Read “How to get started”')).toBeNull();
     expect(screen.getByText('1 of 4')).toBeInTheDocument();
   });
 
   it('ticks "Write your first page" only for content other than the starter page', async () => {
-    const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/access.md`] });
+    const { unmount } = await mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/access.md`] });
     await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
     expect(isDone('Write your first page')).toBe(false);
     expect(
@@ -325,14 +368,14 @@ describe('GetStartedColumn: what a member sees', () => {
       ),
     ).toBeInTheDocument();
     unmount();
-    mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Product/Roadmap.md`] });
+    await mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Product/Roadmap.md`] });
     // Ticked once the starter-pack answer is in (none chosen here).
     await waitFor(() => expect(isDone('Write your first page')).toBe(true));
   });
 
   it('"New page" creates Untitled.md in the Knowledge folder and opens it for editing', async () => {
     const createFile = vi.fn(async () => {});
-    mount({ createFile });
+    await mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
     expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, { edit: true });
@@ -343,7 +386,7 @@ describe('GetStartedColumn: what a member sees', () => {
     // Any page would already tick the step and hide the button, so what holds
     // the name here is an (otherwise empty) folder called `Untitled.md` and
     // `Untitled 2.md` — a name the tree has is taken, whatever it is.
-    mount({
+    await mount({
       createFile,
       files: [
         ...STARTER_TREE,
@@ -367,7 +410,7 @@ describe('GetStartedColumn: what a member sees', () => {
     const createFile = vi.fn(async (path: string) => {
       if (taken.has(path)) throw new WorkspaceApiError(409, `"${path}" already exists.`);
     });
-    mount({ createFile });
+    await mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
     await waitFor(() =>
       expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, { edit: true }),
@@ -384,7 +427,7 @@ describe('GetStartedColumn: what a member sees', () => {
     const createFile = vi.fn(async (path: string) => {
       throw new WorkspaceApiError(409, `"${path}" already exists.`);
     });
-    mount({ createFile });
+    await mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
     expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
       `Couldn’t create the page: "${KB}/KnowledgeBase/Untitled 5.md" already exists.`,
@@ -398,7 +441,7 @@ describe('GetStartedColumn: what a member sees', () => {
   // that gap would land on the old branch and open on the new one, nowhere.
   it('"New page" creates nothing while the workspace on screen is not the branch the URL names', async () => {
     const createFile = vi.fn(async () => {});
-    mount({ createFile, route: '/workspace/alice%2Fdraft' });
+    await mount({ createFile, route: '/workspace/alice%2Fdraft' });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
     expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
       'Couldn’t create the page: the workspace is still loading.',
@@ -407,16 +450,19 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(openWorkspacePathMock).not.toHaveBeenCalled();
   });
 
-  it('"New page" does not retry a refusal that is not about the name', async () => {
+  // A protected branch's gate refuses with 403 too; the fresh access check
+  // still says the folder may be written, so the refusal is said as it was.
+  it('"New page" does not retry a refusal that is not about the name or the folder', async () => {
     const createFile = vi.fn(async () => {
-      throw new WorkspaceApiError(403, 'You don’t have permission to write to "KnowledgeBase/Untitled.md".');
+      throw new WorkspaceApiError(403, 'Branch "main" is protected — writing is not allowed.');
     });
-    mount({ createFile });
+    await mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
     expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
-      'You don’t have permission',
+      'Couldn’t create the page: Branch "main" is protected — writing is not allowed.',
     );
     expect(createFile).toHaveBeenCalledTimes(1);
+    expect(access.batch).toHaveBeenCalledTimes(2);
   });
 
   it('"New page" says "Creating…" while it works, and says why it failed on the step', async () => {
@@ -427,7 +473,7 @@ describe('GetStartedColumn: what a member sees', () => {
           refuse = reject;
         }),
     );
-    mount({ createFile });
+    await mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
     expect(within(row('Write your first page')!).getByRole('button', { name: 'Creating…' })).toBeDisabled();
 
@@ -444,6 +490,213 @@ describe('GetStartedColumn: what a member sees', () => {
 });
 
 /**
+ * New page writes where the person may write: the top of Knowledge when they
+ * may (admins), else the folder of the page on screen, else the first folder
+ * they may write in file tree order — and someone who may write nowhere is
+ * not shown the step at all.
+ */
+describe('GetStartedColumn: where New page writes', () => {
+  const SALES = `${KB}/KnowledgeBase/Sales`;
+  const SUPPORT = `${KB}/KnowledgeBase/Support`;
+  const PRODUCT = `${KB}/KnowledgeBase/Product`;
+  const FOLDERS_TREE = [
+    ...STARTER_TREE,
+    `${PRODUCT}/.gitkeep`,
+    `${SALES}/.gitkeep`,
+    `${SALES}/Team/.gitkeep`,
+    `${SUPPORT}/.gitkeep`,
+  ];
+  const STEP = 'Write your first page';
+  const newPage = () => within(row(STEP)!).getByRole('button', { name: 'New page' });
+
+  it('leaves the step out for someone who may write no Knowledge folder, and counts without it', async () => {
+    access.writable = new Set();
+    await mount({ files: FOLDERS_TREE });
+    expect(row(STEP)).toBeNull();
+    // Workspace, agent, guide, command menu: one fewer than with the step.
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
+    expect(row('Connect your agent')).not.toBeNull();
+  });
+
+  it('completes the list without the step', async () => {
+    access.writable = new Set();
+    window.localStorage.setItem('bevel.onboarding.commandMenuOpened.juan@bevel.software', '1');
+    await mount({ onboardingDone: true, openFilePath: GUIDE });
+    expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
+  });
+
+  it('shows nothing until it knows, so the step never appears and then vanishes', async () => {
+    let answer!: (a: { results: Record<string, boolean> }) => void;
+    access.batch.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    const seen: boolean[] = [];
+    const observer = new MutationObserver(() => seen.push(screen.queryByText(STEP) !== null));
+    observer.observe(document.body, { childList: true, subtree: true });
+    await mount({ files: FOLDERS_TREE });
+    expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+    await act(async () => answer({ results: {} }));
+    await settle();
+    observer.disconnect();
+    expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
+    expect(row(STEP)).toBeNull();
+    expect(seen).not.toContain(true);
+  });
+
+  it('hides the step while the check fails, for an admin too', async () => {
+    access.batch.mockRejectedValue(new Error('HTTP 500'));
+    await mount({ admin: true });
+    await screen.findByRole('complementary', { name: 'Get set up' });
+    expect(row(STEP)).toBeNull();
+  });
+
+  it('creates the page at the top of Knowledge for an admin, even with a page open in another folder they may write', async () => {
+    access.writable = new Set(['KnowledgeBase', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    await mount({ admin: true, createFile, files: FOLDERS_TREE, openFilePath: `${SUPPORT}/FAQ.md` });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+    expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, { edit: true });
+  });
+
+  it('otherwise uses the first folder they may write, in file tree order', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE });
+    // The step reads as today, wording and all.
+    expect(within(row(STEP)!).getByText('Start one here, or drop files into the file tree.')).toBeInTheDocument();
+    expect(within(row(STEP)!).getByText('Connect your agent and it can write pages for you.')).toBeInTheDocument();
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${SALES}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+    expect(openWorkspacePathMock).toHaveBeenCalledWith(`${SALES}/Untitled.md`, { edit: true });
+    // One question for the lot: the top, then every folder in tree order.
+    expect(access.batch.mock.calls[0]![1]).toEqual([
+      'KnowledgeBase',
+      'KnowledgeBase/Product',
+      'KnowledgeBase/Sales',
+      'KnowledgeBase/Sales/Team',
+      'KnowledgeBase/Support',
+    ]);
+  });
+
+  it('prefers the folder of the page on screen when they may write it', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE, openFilePath: `${SUPPORT}/FAQ.md` });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+  });
+
+  it('passes over the folder on screen when they may not write it', async () => {
+    access.writable = new Set(['KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE, openFilePath: `${PRODUCT}/Roadmap.md` });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+  });
+
+  it('finds a folder nested inside one they may only read', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales/Team']);
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${SALES}/Team/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+  });
+
+  it('brings the step once a folder shared later shows in the tree, without a remount', async () => {
+    access.writable = new Set();
+    const { rerender } = await mount();
+    expect(row(STEP)).toBeNull();
+    // An admin shares Sales: the tree now shows it, and it may be written.
+    access.writable = new Set(['KnowledgeBase/Sales']);
+    rerender(columnUi({ files: [...STARTER_TREE, `${SALES}/.gitkeep`] }));
+    await settleRecheck();
+    expect(row(STEP)).not.toBeNull();
+    expect(screen.getByText('1 of 5')).toBeInTheDocument();
+  });
+
+  it('a refused write asks again and moves to the next folder they may write, with no permission text', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async (path: string) => {
+      if (path.startsWith(`${SALES}/`)) {
+        // Sales was taken away since the check.
+        access.writable = new Set(['KnowledgeBase/Support']);
+        throw new WorkspaceApiError(
+          403,
+          'You don\'t have permission to write to "KnowledgeBase/Sales/Untitled.md". Eligible: Admin.',
+        );
+      }
+    });
+    await mount({ createFile, files: FOLDERS_TREE });
+    await userEvent.click(newPage());
+    await waitFor(() =>
+      expect(openWorkspacePathMock).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, { edit: true }),
+    );
+    expect(createFile.mock.calls.map((c) => c[0])).toEqual([`${SALES}/Untitled.md`, `${SUPPORT}/Untitled.md`]);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Eligible|permission/)).not.toBeInTheDocument();
+  });
+
+  it('a refused write with nowhere left removes the step, with no permission text', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales']);
+    const createFile = vi.fn(async () => {
+      access.writable = new Set();
+      throw new WorkspaceApiError(
+        403,
+        'You don\'t have permission to write to "KnowledgeBase/Sales/Untitled.md". Eligible: Admin.',
+      );
+    });
+    await mount({ createFile, files: FOLDERS_TREE });
+    await userEvent.click(newPage());
+    await waitFor(() => expect(row(STEP)).toBeNull());
+    expect(createFile).toHaveBeenCalledTimes(1);
+    expect(openWorkspacePathMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Eligible|permission/)).not.toBeInTheDocument();
+  });
+
+  it('names the folder in the agent’s request when the page goes below the top of Knowledge', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales']);
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
+    await mount({ files: FOLDERS_TREE });
+    const ask = await within(row(STEP)!).findByRole('link', { name: 'Ask Claude to write it' });
+    const inSales = FIRST_PAGE_PROMPT.replace('write a page in Knowledge', 'write a page in Knowledge/Sales');
+    expect(inSales).toContain('write a page in Knowledge/Sales about our company');
+    expect(ask).toHaveAttribute('href', claudePromptUrl(inSales));
+  });
+
+  it('leaves an admin’s request as it was', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
+    await mount({ admin: true, files: FOLDERS_TREE });
+    const ask = await within(row(STEP)!).findByRole('link', { name: 'Ask Claude to write it' });
+    expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
+  });
+
+  it('offers no New page in the command menu, and C does nothing, when there is nowhere to write', async () => {
+    access.writable = new Set();
+    const createFile = vi.fn(async () => {});
+    const user = userEvent.setup();
+    const { rerender } = await mount({ withPalette: true, createFile, files: STARTER_TREE });
+    await user.keyboard('c');
+    expect(createFile).not.toHaveBeenCalled();
+    await user.keyboard('{Control>}k{/Control}');
+    expect(screen.queryByRole('option', { name: /^New page/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Connect your agent' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+
+    // A folder shared later brings the command, and its key, too.
+    access.writable = new Set(['KnowledgeBase/Sales']);
+    rerender(columnUi({ withPalette: true, createFile, files: [...STARTER_TREE, `${SALES}/.gitkeep`] }));
+    await settleRecheck();
+    await user.keyboard('{Control>}k{/Control}');
+    expect(screen.getByRole('option', { name: /^New page/ })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    await user.keyboard('c');
+    await waitFor(() =>
+      expect(createFile).toHaveBeenCalledWith(`${SALES}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true }),
+    );
+  });
+});
+
+/**
  * The agent-connection answer, asked once: it ticks "Connect your agent" for
  * someone who connected without ever opening the welcome page (and concludes
  * the onboarding for them), and it is what puts the one-click prompt on
@@ -452,7 +705,7 @@ describe('GetStartedColumn: what a member sees', () => {
 describe('GetStartedColumn: a connected agent', () => {
   it('ticks "Connect your agent" from the endpoint, and concludes the onboarding once', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
-    mount();
+    await mount();
     await waitFor(() => expect(isDone('Connect your agent')).toBe(true));
     expect(doneWrites()).toBe(1);
     await act(async () => {});
@@ -462,7 +715,7 @@ describe('GetStartedColumn: a connected agent', () => {
   it('asks once, not on a timer', async () => {
     vi.useFakeTimers();
     try {
-      mount();
+      await mount();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(30_000);
       });
@@ -482,7 +735,7 @@ describe('GetStartedColumn: a connected agent', () => {
   it('asks again when you come back to the tab, at most once in a while', async () => {
     vi.useFakeTimers();
     try {
-      mount();
+      await mount();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
@@ -511,7 +764,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
   it('does not conclude again for an account the server already concluded', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
-    mount({ onboardingDone: true });
+    await mount({ onboardingDone: true });
     await waitFor(() => expect(row('Write your first page')).not.toBeNull());
     await act(async () => {});
     expect(doneWrites()).toBe(0);
@@ -519,13 +772,13 @@ describe('GetStartedColumn: a connected agent', () => {
 
   it('asks nothing once the column was closed', async () => {
     window.localStorage.setItem('bevel.onboarding.setupDismissed.juan@bevel.software', '1');
-    mount();
+    await mount();
     await act(async () => {});
     expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
   });
 
   it('keeps the one-click prompt out of "Write your first page" until an agent is connected', async () => {
-    mount();
+    await mount();
     await act(async () => {});
     const page = row('Write your first page')!;
     expect(within(page).queryByRole('link', { name: 'Ask Claude to write it' })).not.toBeInTheDocument();
@@ -537,7 +790,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
   it('offers "Ask Claude to write it" first once connected, keeping New page beside it', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
-    mount();
+    await mount();
     const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
     expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
     expect(ask).toHaveAttribute('target', '_blank');
@@ -570,7 +823,7 @@ describe('GetStartedColumn: a connected agent', () => {
     it("asks the agent with the pack's prompt", async () => {
       fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
       fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
-      mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
+      await mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
       const page = row('Write your first page')!;
       await waitFor(() =>
         expect(within(page).getByRole('link', { name: 'Ask Claude to write it' })).toHaveAttribute(
@@ -587,7 +840,7 @@ describe('GetStartedColumn: a connected agent', () => {
     it("leaves the step open while the pack's pages are untouched, and ticks it once one is filled in", async () => {
       fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
       const files = [...STARTER_TREE, ...SALES_PAGES];
-      const { rerender } = mount({ files });
+      const { rerender } = await mount({ files });
       await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalledTimes(1));
       expect(isDone('Write your first page')).toBe(false);
 
@@ -602,7 +855,7 @@ describe('GetStartedColumn: a connected agent', () => {
     it('keeps the generic prompt when the team skipped', async () => {
       fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
       fetchStarterPacksMock.mockResolvedValue({ offered: false, chosen: 'none', packs: [], chosenPack: null });
-      mount();
+      await mount();
       const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
       await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
       expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
@@ -611,7 +864,7 @@ describe('GetStartedColumn: a connected agent', () => {
     it('does not tick the step before the answer is in: untouched pack pages are not a first page', async () => {
       let answer!: (a: StarterPacksAnswer) => void;
       fetchStarterPacksMock.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
-      mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
+      await mount({ files: [...STARTER_TREE, ...SALES_PAGES] });
       await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
       expect(isDone('Write your first page')).toBe(false);
       answer(chosen(SALES_PAGES));
@@ -622,7 +875,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
     it('reads the tree alone on a draft branch, where the default branch’s placeholders do not apply', async () => {
       fetchStarterPacksMock.mockResolvedValue(chosen(SALES_PAGES));
-      mount({ files: [...STARTER_TREE, ...SALES_PAGES], workspaceBranch: 'alice/draft' });
+      await mount({ files: [...STARTER_TREE, ...SALES_PAGES], workspaceBranch: 'alice/draft' });
       await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
       await waitFor(() => expect(isDone('Write your first page')).toBe(true));
     });
@@ -631,7 +884,7 @@ describe('GetStartedColumn: a connected agent', () => {
       const resolvers: ((a: StarterPacksAnswer) => void)[] = [];
       fetchStarterPacksMock.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
       const files = [...STARTER_TREE, ...SALES_PAGES];
-      const { rerender } = mount({ files });
+      const { rerender } = await mount({ files });
       await waitFor(() => expect(resolvers).toHaveLength(1));
       resolvers[0]!(chosen(SALES_PAGES));
       await waitFor(() => expect(isDone('Write your first page')).toBe(false));
@@ -651,7 +904,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
   it('leads with "Ask ChatGPT to write it" for a ChatGPT connection, Claude quiet beside Copy prompt', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT', kind: 'agent' });
-    mount();
+    await mount();
     const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask ChatGPT to write it' });
     expect(ask).toHaveAttribute('href', chatGptPromptUrl(FIRST_PAGE_PROMPT));
     const page = row('Write your first page')!;
@@ -670,7 +923,7 @@ describe('GetStartedColumn: a connected agent', () => {
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     try {
-      mount();
+      await mount();
       const copy = await within(row('Write your first page')!).findByRole('button', { name: 'Copy prompt' });
       const page = row('Write your first page')!;
       expect(within(page).getByText('Paste it into Claude Code.')).toBeInTheDocument();
@@ -691,7 +944,7 @@ describe('GetStartedColumn: a connected agent', () => {
     // A key's label is free text: "ChatGPT CLI" names the key, not an app
     // that a chatgpt.com link would reach.
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'ChatGPT CLI', kind: 'key' });
-    mount();
+    await mount();
     const page = await waitFor(() => {
       const r = row('Write your first page')!;
       within(r).getByRole('button', { name: 'Copy prompt' });
@@ -703,7 +956,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
   it('says "your agent" when the connection has no name to offer', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Unnamed agent', kind: 'agent' });
-    mount();
+    await mount();
     expect(await within(row('Write your first page')!).findByText('Paste it into your agent.')).toBeInTheDocument();
   });
 
@@ -713,7 +966,7 @@ describe('GetStartedColumn: a connected agent', () => {
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     try {
-      mount();
+      await mount();
       const copy = await within(row('Write your first page')!).findByRole('button', { name: 'Copy prompt' });
       await userEvent.click(copy);
       expect(writeText).toHaveBeenCalledWith(FIRST_PAGE_PROMPT);
@@ -726,7 +979,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
   it('ticks the page step by itself when the agent’s page lands, whoever wrote it', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
-    mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/About us.md`] });
+    await mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/About us.md`] });
     await waitFor(() => expect(isDone('Connect your agent')).toBe(true));
     expect(isDone('Write your first page')).toBe(true);
     expect(screen.queryByRole('link', { name: 'Ask Claude to write it' })).not.toBeInTheDocument();
@@ -735,7 +988,7 @@ describe('GetStartedColumn: a connected agent', () => {
 
 describe('GetStartedColumn: what an admin sees', () => {
   it('lists all eight steps, storage already done', async () => {
-    mount({ admin: true });
+    await mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(screen.getByText('2 of 8')).toBeInTheDocument();
     expect(isDone('Choose where your knowledge lives')).toBe(true);
@@ -745,13 +998,13 @@ describe('GetStartedColumn: what an admin sees', () => {
 
   it('ticks the plugin step for a team plugin, not a personal shelf', async () => {
     listPluginsMock.mockResolvedValue([plugin('Plugins/personal-juan')]);
-    const { unmount } = mount({ admin: true });
+    const { unmount } = await mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(isDone('Create a plugin for your team')).toBe(false);
     unmount();
 
     listPluginsMock.mockResolvedValue([plugin('Plugins/GTM')]);
-    mount({ admin: true });
+    await mount({ admin: true });
     await waitFor(() => expect(isDone('Create a plugin for your team')).toBe(true));
   });
 
@@ -760,13 +1013,13 @@ describe('GetStartedColumn: what an admin sees', () => {
       account('juan@bevel.software'),
       account('recovery-bot@bevel.local', { isSystem: true }),
     ]);
-    const { unmount } = mount({ admin: true });
+    const { unmount } = await mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(isDone('Invite your team')).toBe(false);
     unmount();
 
     listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('ana@bevel.software')]);
-    mount({ admin: true });
+    await mount({ admin: true });
     await waitFor(() => expect(isDone('Invite your team')).toBe(true));
   });
 
@@ -775,7 +1028,7 @@ describe('GetStartedColumn: what an admin sees', () => {
       account('juan@bevel.software'),
       account('ana@bevel.software', { deactivatedAt: '2026-09-01T00:00:00Z' }),
     ]);
-    mount({ admin: true });
+    await mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(isDone('Invite your team')).toBe(false);
   });
@@ -785,7 +1038,7 @@ describe('GetStartedColumn: what an admin sees', () => {
    * creates a plugin — not on every move between Library pages.
    */
   it('asks for plugins again on entering Skills & Tools and on a plugin created, not on every Library page', async () => {
-    mount({ admin: true });
+    await mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(listPluginsMock).toHaveBeenCalledTimes(1);
 
@@ -807,7 +1060,7 @@ describe('GetStartedColumn: what an admin sees', () => {
   });
 
   it('opens the invite dialog from the invite step', async () => {
-    mount({ admin: true });
+    await mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
     await userEvent.click(within(row('Invite your team')!).getByRole('button', { name: 'Invite people' }));
     expect(screen.getByRole('dialog', { name: 'Invite your team' })).toBeInTheDocument();
@@ -835,7 +1088,7 @@ describe('GetStartedColumn: all done', () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
     const everythingBut = { admin: true, onboardingDone: true, openFilePath: GUIDE };
     // One step short, the settled column shows the seven it has...
-    const { rerender } = mount(everythingBut);
+    const { rerender } = await mount(everythingBut);
     expect(await screen.findByText('7 of 8')).toBeInTheDocument();
     expect(complete()).toBeNull();
     // ...and the page landing in the tree finishes it.
@@ -851,7 +1104,7 @@ describe('GetStartedColumn: all done', () => {
 
   it('celebrates a list finished elsewhere on arrival, and does not mention a team to a member', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude', kind: 'agent' });
-    mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
+    await mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
     expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
     expect(screen.getByText('Your agent can read and write your knowledge base.')).toBeInTheDocument();
     expect(screen.queryByText(/your team/)).not.toBeInTheDocument();
@@ -862,21 +1115,21 @@ describe('GetStartedColumn: all done', () => {
    * agent ever calling in (the pill's ×), so the line does not claim one.
    */
   it('claims no agent when none has connected', async () => {
-    mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
+    await mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
     expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
     expect(screen.getByText('Your knowledge base is ready.')).toBeInTheDocument();
     expect(screen.queryByText(/Your agent can/)).not.toBeInTheDocument();
   });
 
   it('Close retires the column for good, and remembers it per account', async () => {
-    const { unmount } = mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
+    const { unmount } = await mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
     await userEvent.click(await screen.findByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
     expect(window.localStorage.getItem('bevel.onboarding.setupCompleteClosed.juan@bevel.software')).toBe('1');
     unmount();
     // Not shown again — not even if a step comes undone later.
     fetchAgentConnectionMock.mockClear();
-    mount({ onboardingDone: true, openFilePath: GUIDE });
+    await mount({ onboardingDone: true, openFilePath: GUIDE });
     await act(async () => {});
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
     expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
@@ -891,7 +1144,7 @@ describe('GetStartedColumn: the command menu', () => {
   const STEP = `Find or do anything with ${COMMAND_MENU_SHORTCUT_LABEL}`;
 
   it('is a step for everyone, named with this platform’s keys', async () => {
-    mount();
+    await mount();
     expect(row(STEP)).not.toBeNull();
     expect(isDone(STEP)).toBe(false);
     expect(
@@ -901,7 +1154,7 @@ describe('GetStartedColumn: the command menu', () => {
 
   it('"Try it" opens the command menu, and that ticks the step', async () => {
     const user = userEvent.setup();
-    mount({ withPalette: true });
+    await mount({ withPalette: true });
     await user.click(within(row(STEP)!).getByRole('button', { name: 'Try it' }));
     expect(screen.getByRole('combobox', { name: 'Search or run a command' })).toHaveFocus();
     await user.keyboard('{Escape}');
@@ -910,13 +1163,13 @@ describe('GetStartedColumn: the command menu', () => {
 
   it('ticks when the menu is opened any other way, and remembers it per account', async () => {
     const user = userEvent.setup();
-    const { unmount } = mount({ withPalette: true });
+    const { unmount } = await mount({ withPalette: true });
     await user.keyboard('{Control>}k{/Control}');
     expect(screen.getByRole('combobox', { name: 'Search or run a command' })).toBeInTheDocument();
     expect(isDone(STEP)).toBe(true);
     expect(window.localStorage.getItem('bevel.onboarding.commandMenuOpened.juan@bevel.software')).toBe('1');
     unmount();
-    mount();
+    await mount();
     expect(isDone(STEP)).toBe(true);
   });
 });
@@ -927,8 +1180,8 @@ describe('GetStartedColumn: the command menu', () => {
  * than showing a shorter, falsely open one.
  */
 describe('GetStartedColumn: the file tree', () => {
-  it('stays hidden until the tree has loaded', () => {
-    const { rerender } = mount({ files: null });
+  it('stays hidden until the tree has loaded', async () => {
+    const { rerender } = await mount({ files: null });
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
     rerender(columnUi({}));
     expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
@@ -936,23 +1189,23 @@ describe('GetStartedColumn: the file tree', () => {
   });
 
   it('skips exactly `access.md`, the name the platform reserves — not another spelling', async () => {
-    const { unmount } = mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/access.md`] });
+    const { unmount } = await mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/access.md`] });
     await waitFor(() => expect(fetchStarterPacksMock).toHaveBeenCalled());
     expect(isDone('Write your first page')).toBe(false);
     unmount();
-    mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/Access.md`] });
+    await mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Sales/Access.md`] });
     await waitFor(() => expect(isDone('Write your first page')).toBe(true));
   });
 });
 
 describe('GetStartedColumn: getting out of the way', () => {
   it('stays dismissed once closed, across remounts', async () => {
-    const { unmount } = mount();
+    const { unmount } = await mount();
     await userEvent.click(screen.getByRole('button', { name: 'Dismiss Get set up' }));
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
     expect(window.localStorage.getItem('bevel.onboarding.setupDismissed.juan@bevel.software')).toBe('1');
     unmount();
-    mount();
+    await mount();
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
   });
 
@@ -960,8 +1213,8 @@ describe('GetStartedColumn: getting out of the way', () => {
    * The notes are per browser, so a tab already open hears another tab's
    * close through `storage` — not at its next reload.
    */
-  it('goes when another tab closes it', () => {
-    mount();
+  it('goes when another tab closes it', async () => {
+    await mount();
     expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
     const key = 'bevel.onboarding.setupDismissed.juan@bevel.software';
     window.localStorage.setItem(key, '1');
@@ -971,8 +1224,8 @@ describe('GetStartedColumn: getting out of the way', () => {
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
   });
 
-  it('ticks the guide when another tab opened it', () => {
-    mount();
+  it('ticks the guide when another tab opened it', async () => {
+    await mount();
     expect(isDone('Read “How to get started”')).toBe(false);
     const key = 'bevel.onboarding.readGuide.juan@bevel.software';
     window.localStorage.setItem(key, '1');
@@ -982,20 +1235,20 @@ describe('GetStartedColumn: getting out of the way', () => {
     expect(isDone('Read “How to get started”')).toBe(true);
   });
 
-  it('is not shown on the welcome page', () => {
-    mount({ route: WELCOME_PATH });
+  it('is not shown on the welcome page', async () => {
+    await mount({ route: WELCOME_PATH });
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
   });
 
-  it('is shown in an ordinary laptop window', () => {
+  it('is shown in an ordinary laptop window', async () => {
     setViewportWidth(1000);
-    mount();
+    await mount();
     expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
   });
 
-  it('is not shown at or below 900px, where the sidebar turns into a drawer', () => {
+  it('is not shown at or below 900px, where the sidebar turns into a drawer', async () => {
     setViewportWidth(900);
-    mount();
+    await mount();
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
   });
 });

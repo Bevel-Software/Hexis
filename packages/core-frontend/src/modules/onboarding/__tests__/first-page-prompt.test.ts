@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
+import {
+  FIRST_PAGE_PROMPT,
+  chatGptPromptUrl,
+  claudePromptUrl,
+  firstPagePromptFor,
+  firstPagePromptInFolder,
+  firstPageRoute,
+} from '../first-page-prompt';
 
 /**
  * The first-page prompt links: the prompt must arrive in the chat exactly as
@@ -105,5 +112,29 @@ describe('firstPagePromptFor', () => {
   it('is the generic request without a pack, or with one that has none to give', () => {
     expect(firstPagePromptFor(null)).toBe(FIRST_PAGE_PROMPT);
     expect(firstPagePromptFor({ firstPagePrompt: '  ' })).toBe(FIRST_PAGE_PROMPT);
+  });
+});
+
+/**
+ * The request, pointed at the folder New page would write in when that is
+ * below the top of Knowledge: an agent writing as the person must try where
+ * they may write.
+ */
+describe('the first-page request in a folder', () => {
+  it('names the folder in the generic request', () => {
+    expect(firstPagePromptInFolder(FIRST_PAGE_PROMPT, 'Sales')).toBe(
+      "Using our Hexis knowledge base, write a page in Knowledge/Sales about our company: what we do, who we work with, and our main products. Ask me for anything you don't know, then save it.",
+    );
+    expect(firstPagePromptInFolder(FIRST_PAGE_PROMPT, 'Sales/Team')).toContain('write a page in Knowledge/Sales/Team about');
+  });
+
+  it('leaves the request as it is at the top of Knowledge', () => {
+    expect(firstPagePromptInFolder(FIRST_PAGE_PROMPT, null)).toBe(FIRST_PAGE_PROMPT);
+  });
+
+  it('adds the place to a starter pack’s request that does not say it', () => {
+    expect(firstPagePromptInFolder('Using our Hexis knowledge base, fill in the Customers page.', 'Sales')).toBe(
+      'Using our Hexis knowledge base, fill in the Customers page. Save it in Knowledge/Sales.',
+    );
   });
 });
