@@ -502,11 +502,11 @@ export class WorkflowService implements IWorkflowService {
       if (!opts?.systemCleanup && !opts?.onlyIfNoRemote) {
         let open = await this.openChangeRequestOn(name);
         if (open !== null && !this.kb.isProtectedBranch(name) && (await this.mayDelete(workspaceId, name, user))) {
-          closed = await this.closeEmptyRequestsOn(name, user.email, { workspaceId, fresh: false });
+          closed = await this.closeEmptyRequestsOn(name, user.id, { workspaceId, fresh: false });
           open = await this.openChangeRequestOn(name);
         }
         if (open !== null) {
-          await this.reopenAfterFailedDelete(closed, name, user.email);
+          await this.reopenAfterFailedDelete(closed, name, user.id);
           // Two different situations, two different actors. A request FROM
           // this branch is the deleter's own to withdraw; a request INTO it
           // belongs to someone else, and telling the branch owner to
@@ -524,7 +524,7 @@ export class WorkflowService implements IWorkflowService {
       try {
         await this.deleteBranchUnlocked(workspaceId, name, user, opts);
       } catch (err) {
-        await this.reopenAfterFailedDelete(closed, name, user.email);
+        await this.reopenAfterFailedDelete(closed, name, user.id);
         throw err;
       }
     });
@@ -541,7 +541,8 @@ export class WorkflowService implements IWorkflowService {
     // One line per deletion, whoever asked: the commit is what a restore
     // starts from, and for a deletion made in the app or by the cleanup this
     // line is the only trace there is.
-    const actor = opts?.systemCleanup ? 'system' : user.email;
+    // By id: log lines carry no email addresses.
+    const actor = opts?.systemCleanup ? 'system' : user.id;
     log.info(`branch deleted by ${actor}: "${name}" at ${lastCommit ?? '(no commit)'}`);
     // Retire the deleted branch's own workspace clone, best-effort. A stale
     // clone left on disk would be silently REUSED if the branch name is ever
@@ -627,6 +628,7 @@ export class WorkflowService implements IWorkflowService {
    */
   private async closeIfEmpty(
     number: number,
+    // `actor` is a user id or `system`, never an address: it goes into a log line.
     opts: { reason: string; actor: string; workspaceId?: string; fresh?: boolean },
   ): Promise<{ base: string } | null> {
     const summary = await this.prs.getPr(number);
@@ -881,7 +883,7 @@ export class WorkflowService implements IWorkflowService {
         // lifecycle lock, so a request whose source IS this branch cannot make
         // the deletion wait on itself. Should the deletion still fail (the
         // leased push below), the requests closed here are reopened.
-        const closed = await this.closeEmptyRequestsOn(name, user.email, { workspaceId: wsId, fresh: true });
+        const closed = await this.closeEmptyRequestsOn(name, user.id, { workspaceId: wsId, fresh: true });
         try {
           const still = (await this.openChangeRequestsOn(name))[0];
           if (still) {
@@ -898,7 +900,7 @@ export class WorkflowService implements IWorkflowService {
             ...(state.lastCommit ? { expectTip: state.lastCommit } : {}),
           });
         } catch (err) {
-          await this.reopenAfterFailedDelete(closed, name, user.email);
+          await this.reopenAfterFailedDelete(closed, name, user.id);
           throw err;
         }
       });
@@ -3358,7 +3360,7 @@ export class WorkflowService implements IWorkflowService {
    * Returns true when THIS call closed it.
    */
   async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
-    const closed = await this.closeIfEmpty(number, { reason: 'found empty', actor: user.email });
+    const closed = await this.closeIfEmpty(number, { reason: 'found empty', actor: user.id });
     if (!closed) return false;
     await this.retireMergedSourceBranch(number, closed.base, user);
     return true;

@@ -466,8 +466,8 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     // One log line per close, naming the request, its branches and why.
     const closeLines = lines.filter((l) => l.includes('closed change request #'));
     expect(closeLines).toEqual([
-      '[cr] closed change request #21 ("ali/sync" into "target-company-state") by ana@example.com: it proposes nothing (empty when "ali/sync" was deleted)',
-      '[cr] closed change request #22 ("ali/feature" into "ali/sync") by ana@example.com: it proposes nothing (empty when "ali/sync" was deleted)',
+      '[cr] closed change request #21 ("ali/sync" into "target-company-state") by u-ana: it proposes nothing (empty when "ali/sync" was deleted)',
+      '[cr] closed change request #22 ("ali/feature" into "ali/sync") by u-ana: it proposes nothing (empty when "ali/sync" was deleted)',
     ]);
   });
 
@@ -562,6 +562,30 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     await expect(h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ali/sync', ADMIN)).rejects.toThrow(/stale info/);
     expect(reopens.sort()).toEqual([21, 22]);
     expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
+  });
+
+  it('names the person by id, never by email address, on the close, reopen and deletion lines', async () => {
+    // Log lines carry no email addresses: who acted is the user's id.
+    const rows = [open(21, 'ali/sync', DEFAULT)];
+    const h = harness({
+      rows,
+      branches: { 'ali/sync': clean('s1'), 'ali/old-draft': clean('a1') },
+      changes: { 'ali/sync': [] },
+      deleteFails: ['ali/sync'],
+    });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      await expect(h.svc.deleteBranchChecked(ADMIN, 'ali/sync')).rejects.toThrow(/stale info/);
+      await h.svc.deleteBranchChecked(ADMIN, 'ali/old-draft');
+    } finally {
+      spy.mockRestore();
+    }
+    const pick = (needle: string) => lines.filter((l) => l.includes(needle));
+    expect(pick('closed change request #21')).toEqual([expect.stringContaining(' by u-ana: ')]);
+    expect(pick('reopened change request #21')).toEqual([expect.stringContaining(' for u-ana: ')]);
+    expect(pick('branch deleted by')).toEqual(['[workflow] branch deleted by u-ana: "ali/old-draft" at a1']);
+    for (const line of lines) expect(line).not.toContain('@');
   });
 
   it('a request the caller may not see is not in the preview at all, and is refused on without its number or link', async () => {
@@ -817,8 +841,8 @@ describe('retireLeftoverMergedBranches — the server removes what merged change
     const deletions = lines.filter((l) => l.includes('branch deleted by'));
     expect(deletions).toEqual([
       '[workflow] branch deleted by system: "ali/sync-0709" at t3',
-      '[workflow] branch deleted by ana@example.com: "ali/old-draft" at a1',
-      '[workflow] branch deleted by ana@example.com: "ana/mine" at n1',
+      '[workflow] branch deleted by u-ana: "ali/old-draft" at a1',
+      '[workflow] branch deleted by u-ana: "ana/mine" at n1',
     ]);
   });
 
