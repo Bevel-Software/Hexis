@@ -642,13 +642,21 @@ describe('GetStartedColumn: where New page writes', () => {
     const createFile = vi.fn(async () => {});
     const { rerender } = await mount({ createFile, files: FOLDERS_TREE });
     access.writable = new Set(['KnowledgeBase/Support']);
-    let answer!: (a: { results: Record<string, boolean> }) => void;
+    // Every answer for the new branch — the switch's own check and the one
+    // New page asks before writing — is held until the test lets it through.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
     const real = access.batch.getMockImplementation()!;
-    // The new branch's first answer is slow; New page waits for it rather than using Sales.
-    access.batch.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    access.batch.mockImplementation(async (ws, paths) => {
+      await gate;
+      return real(ws, paths);
+    });
     rerender(columnUi({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' }));
     await userEvent.click(newPage());
-    await act(async () => answer(await real('ws', ['KnowledgeBase', 'KnowledgeBase/Support'])));
+    await settle();
+    // The answer on hand still says Sales, but it was for the other branch: nothing is written yet.
+    expect(createFile).not.toHaveBeenCalled();
+    await act(async () => release());
     await waitFor(() => expect(createFile).toHaveBeenCalled());
     expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(createFile).toHaveBeenCalledTimes(1);
