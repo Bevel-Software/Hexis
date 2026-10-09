@@ -106,6 +106,9 @@ function build(opts: Opts = {}) {
     // No live lock: a save takes it. The contention rules themselves are
     // exercised against the real lock in embed.service.lock.test.ts.
     getLock: vi.fn(async () => null),
+    // The suggestions branch is created here, under the workflow's own
+    // branch-lifecycle lock, never straight through git.
+    createBranch: opts.createBranch ?? vi.fn(async () => ({})),
     acquireLock: vi.fn(async () => ({
       acquired: opts.acquired ?? true,
       lock: { holderName: opts.holderName ?? 'Bob' },
@@ -117,7 +120,6 @@ function build(opts: Opts = {}) {
     openChangeRequest: opts.openChangeRequest ?? vi.fn(async () => ({ number: 42 })),
   };
   const gitService = {
-    createBranch: opts.createBranch ?? vi.fn(async () => ({})),
     // Origin has no suggestions branch yet unless a test says otherwise.
     remoteBranchExists: vi.fn(async () => opts.remoteBranchExists ?? false),
   };
@@ -554,12 +556,12 @@ describe('EmbedService: saving as a writer', () => {
 
 describe('EmbedService: proposing as a non-writer', () => {
   it('commits to the viewer OWN suggestions branch and opens a change request', async () => {
-    const { service, workspaceService, workflowService, gitService } = build({ canWrite: false });
+    const { service, workspaceService, workflowService } = build({ canWrite: false });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     const result = await service.propose(token, 'proposed text');
 
     const branch = 'suggestions/alice-u-1/knowledge';
-    expect(gitService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
+    expect(workflowService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
     expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(branch), WS, 'proposed text');
     // The write and its commit run inside the workspace service's own
     // per-path turn — the queue every other write surface takes — so two
@@ -666,13 +668,13 @@ describe('EmbedService: proposing as a non-writer', () => {
     // The same PNG-under-a-markdown-name the save test uses: a proposal is a
     // commit of text, and must not commit text over bytes a Save refuses.
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
-    const { service, workspaceService, workflowService, gitService } = build({
+    const { service, workspaceService, workflowService } = build({
       canWrite: false,
       files: { [WS]: png },
     });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, '# replaced')).rejects.toThrow(EmbedAccessError);
-    expect(gitService.createBranch).not.toHaveBeenCalled();
+    expect(workflowService.createBranch).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
     expect(workflowService.commitChanges).not.toHaveBeenCalled();
     expect(workflowService.openChangeRequest).not.toHaveBeenCalled();
@@ -723,13 +725,13 @@ describe('EmbedService: the roles.yaml write gate', () => {
   });
 
   it('refuses to propose a roles.yaml that would not parse, before any branch is made', async () => {
-    const { service, workspaceService, workflowService, gitService } = build({
+    const { service, workspaceService, workflowService } = build({
       canWrite: false,
       files: { [ROLES]: VALID },
     });
     const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
     await expect(service.propose(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
-    expect(gitService.createBranch).not.toHaveBeenCalled();
+    expect(workflowService.createBranch).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
     expect(workflowService.commitChanges).not.toHaveBeenCalled();
   });

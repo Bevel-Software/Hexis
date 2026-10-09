@@ -81,7 +81,7 @@ function build() {
       isActive: async () => true,
     } as never,
     workflowService as never,
-    { createBranch: async () => ({}) } as never,
+    { remoteBranchExists: async () => false } as never,
     { getUserId: async () => null } as never,
     createFileReaderRegistry(noDocExtract()),
     makeRolesYamlWriteValidator(KB),

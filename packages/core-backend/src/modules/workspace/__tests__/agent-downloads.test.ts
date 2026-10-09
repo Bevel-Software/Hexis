@@ -69,7 +69,8 @@ const FILES: Record<string, string | Buffer> = {
   'Readable/Deep/Secret.md': '---\nread:\n  - deny Ana <ana@x.io>\n---\n# deep secret\n',
   // A folder whose rules deny Ana `download`, holding a file whose own
   // frontmatter grants it: the file alone may go out, the folder's zip not.
-  // A folder Ana may read (no rule of its own) whose one file she may not: for her it holds no files.
+  // A folder nobody granted Ana (read is default-deny, and no rule reaches it) whose one
+  // file she may not read either: the explorer drops it, so for her it is not there.
   'Veiled/Secret.md': '---\nread:\n  - deny Ana <ana@x.io>\n---\n# secret\n',
   'Gated/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\ndownload:\n  - deny Ana <ana@x.io>\n',
   'Gated/Open.md': '---\ndownload:\n  - Ana <ana@x.io>\n---\n# open inside a gated folder\n',
