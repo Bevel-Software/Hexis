@@ -109,6 +109,16 @@ export const validateHttpsRemote = (value: string): string | null => {
 /**
  * The core catalogue. Order is the order the setup screen renders them in.
  */
+/**
+ * What the `retireMergedBranches` value in effect means: on, unless it says
+ * off. The page saves only `true` or `false`; the environment variable is
+ * typed by a person, so `0`, `off` and `no` (any case) mean off too, and
+ * anything else — unset included — leaves the cleanup on.
+ */
+export function retireMergedBranchesOn(raw: string): boolean {
+  return !/^(false|0|off|no)$/i.test(raw.trim());
+}
+
 export const CORE_SETTINGS: SettingDef[] = [
   {
     /**
@@ -287,6 +297,23 @@ export const CORE_SETTINGS: SettingDef[] = [
     envVar: 'PROTECTED_BRANCHES',
     section: 'knowledge-base',
     restartToApply: true,
+  },
+
+  {
+    /**
+     * Whether the server removes, on its own, the branches merged change
+     * requests left behind (`WorkflowService.retireLeftoverMergedBranches`).
+     * On unless set to `false`; a blanked field puts the default back. Read
+     * at every round, so it applies without a restart. It covers that cleanup
+     * only: the removal of a branch when its change request is merged does
+     * not ask it.
+     */
+    key: 'retireMergedBranches',
+    envVar: 'RETIRE_MERGED_BRANCHES',
+    section: 'knowledge-base',
+    blankMeansDefault: true,
+    unsetMeans: 'true',
+    validate: (v) => (v === 'true' || v === 'false' ? null : 'Either true or false.'),
   },
 
   {

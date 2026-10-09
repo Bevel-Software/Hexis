@@ -387,6 +387,47 @@ export class WorkflowValidationError extends WorkflowDomainError {
 }
 
 /**
+ * An agent's `delete_branch` refused, for a reason a person can act on. The
+ * `reason` is the discriminator a caller branches on; the message says what
+ * to do about it. Nothing was deleted.
+ *
+ * - `open-change-request` (409) — a request is open from or into the branch;
+ *   `number` names it. Withdrawing or declining it is a person's action, in
+ *   the app.
+ * - `unmerged-commits` (409) — `unmergedCommits` commits would be lost;
+ *   `discardUnmerged` is the deliberate way past it.
+ * - `saves-landing` (409) — the branch's checkout still has saves waiting to
+ *   be committed or a file held for editing. Clears itself within seconds.
+ * - `state-unconfirmed` (503) — the shared repository could not be fetched,
+ *   so the branch's current state is unknown.
+ */
+export type BranchDeleteBlockedReason =
+  | 'open-change-request'
+  | 'unmerged-commits'
+  | 'saves-landing'
+  | 'state-unconfirmed';
+
+export class BranchDeleteBlockedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-blocked' as const;
+  constructor(
+    readonly reason: BranchDeleteBlockedReason,
+    readonly branchName: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    // `extra` first: it adds detail, and can never contradict the kind,
+    // reason or branch the status and fields above were chosen for.
+    super(message, reason === 'state-unconfirmed' ? 503 : 409, {
+      ...extra,
+      kind: 'branch-delete-blocked',
+      reason,
+      branchName,
+    });
+    this.name = 'BranchDeleteBlockedError';
+  }
+}
+
+/**
  * The commit an applied change request records is in the clone but is NOT
  * that request's own merge commit — no second parent (not a merge), no first
  * parent (a root commit), or a message that does not name the request. A

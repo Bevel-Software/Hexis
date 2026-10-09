@@ -107,13 +107,16 @@ export interface IGitService {
    * has the ref (the safety property the flag has always provided).
    * Protected branches and the currently-checked-out branch are always
    * rejected.
+   *
+   * Answers the tip the branch had (origin's when it had one), or null when
+   * there was none — what a restore of the branch would start from.
    */
   deleteBranch(
     workspaceId: string,
     name: string,
     user: AuthUser,
     opts?: { onlyIfNoRemote?: boolean },
-  ): Promise<void>;
+  ): Promise<{ lastCommit: string | null }>;
   // `forkCurrentToDraft` removed: under the per-branch workspace model each
   // branch is its own workspace by construction, so the "carry uncommitted
   // edits onto a new draft" escape hatch can't fire. Use `createBranch` +

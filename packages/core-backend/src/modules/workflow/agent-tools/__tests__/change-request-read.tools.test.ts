@@ -638,6 +638,19 @@ describe('get_change_request', () => {
     expect(absent.json.error).toBe('Change request #99 not found.');
   });
 
+  // An OPEN request that proposes nothing, before the background sweep has
+  // closed it: still "not found" to an agent that is not its author. Closing
+  // empty requests changed nothing about what agents may see.
+  it('answers not found for an open request with no files to an agent that is not its author', async () => {
+    const base = await start();
+    details.set(12, detail({ state: 'open', files: [], approvals: [] }));
+    const { status, json } = await call(base, 'get_change_request', { number: 12 });
+    expect(status).toBe(404);
+    expect(json.error).toBe('Change request #12 not found.');
+    callerEmail = AUTHOR;
+    expect((await call(base, 'get_change_request', { number: 12 })).status).toBe(200);
+  });
+
   it('answers not found when the access tree at the target cannot be resolved', async () => {
     const base = await start();
     readable = null;

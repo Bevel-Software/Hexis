@@ -30,7 +30,7 @@ import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
-import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -916,6 +916,9 @@ export async function createCoreServices(
     // it reach every hook point.
     workflowHooks,
   );
+  // The leftover-branch cleanup asks the Deployment page at every round, so
+  // switching it off there applies without a restart.
+  workflowService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
