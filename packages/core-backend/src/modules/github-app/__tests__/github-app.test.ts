@@ -397,6 +397,33 @@ describe('GitHubAppConnection: the token git presents', () => {
   });
 
   /**
+   * The git runner reporting that the host threw the token out. The clock
+   * may still give it fifty minutes: the host's verdict wins, the token is
+   * dropped, and GitHub is asked for another at once — past the backoff a
+   * recent failure would otherwise impose. When GitHub will not replace it,
+   * NO token remains: that is what keeps the runner from offering the
+   * refused one again.
+   */
+  it('replaces a token the host refused, with time to spare or not, and drops it when GitHub will not', async () => {
+    const world: Parameters<typeof github>[0] = {};
+    const { connection, hub, clock } = connected(world);
+    await connection.prepare();
+    expect(connection.token()).toBe('installation-token-1');
+    clock.now += 5 * 60_000;
+    await connection.prepare({ refused: true });
+    expect(connection.token()).toBe('installation-token-2');
+    expect(hub.tokensIssued()).toBe(2);
+
+    // Inside a remembered failure's backoff, the refusal still asks.
+    world.down = true;
+    await expect(connection.prepare({ refused: true })).rejects.toThrow();
+    expect(connection.token()).toBeNull();
+    world.down = false;
+    await expect(connection.prepare({ refused: true })).resolves.toBeUndefined();
+    expect(connection.token()).toBe('installation-token-3');
+  });
+
+  /**
    * A deployment whose app settings are incomplete used to run every git
    * call without a credential and say nothing about it — for hours, with
    * every push failing. It says so now: once per state, not before every

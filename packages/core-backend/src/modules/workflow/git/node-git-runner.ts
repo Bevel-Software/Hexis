@@ -165,7 +165,8 @@ interface CommandFailure extends Error {
  * missing git — a string `code`, which is how callers tell "git never ran"
  * from "git said no"), and cuts off a child whose output passes `maxBuffer`.
  */
-function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number }): {
+/** `shown` is what a failure message names — the caller's arguments, without the runner's own `-c` pairs. */
+function spawnGit(args: string[], shown: string[], options: SpawnOptions & { maxBuffer: number }): {
   promise: Promise<Captured>;
   child: ChildProcess;
 } {
@@ -213,7 +214,7 @@ function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number })
         resolve({ stdout, stderr });
         return;
       }
-      const error: CommandFailure = new Error(`Command failed: git ${args.join(' ')}\n${stderr.toString()}`);
+      const error: CommandFailure = new Error(`Command failed: git ${shown.join(' ')}\n${stderr.toString()}`);
       error.code = code ?? undefined;
       error.signal = signal;
       error.stdout = stdout;
@@ -294,24 +295,31 @@ export class NodeGitRunner implements IGitRunner {
       return await this.attempt(cwd, args, opts);
     } catch (err) {
       if (!isCredentialRefusal(err)) throw err;
+      // A credential the CALLER laid over the provider's (the setup probe
+      // checking a token it was given) is the caller's to judge: nothing
+      // here can replace it, so the refusal is the answer.
+      if (opts.env?.[GIT_TOKEN_ENV] !== undefined) throw err;
       // Refused a credential: the token in hand was dead, or there was none
-      // to hand over. Insist on a fresh one — past whatever the provider
-      // remembers about a recent failure — and run the command once more,
-      // with the helper riding the call. One retry: a second refusal with a
-      // token GitHub just issued is the host's answer, not a stale state.
+      // to hand over. Tell the provider so — it drops what the host refused
+      // and asks for another, past whatever it remembers about a recent
+      // failure — and run the command once more ONLY with a credential that
+      // is not the one just refused. The same token again would only be
+      // refused again, and a renewal that failed leaves none.
       const subcommand = subcommandOf(args);
-      const renewal = await this.credentials.prepare?.({ asked: true }).then(
+      const refused = this.credentials.token();
+      const renewal = await this.credentials.prepare?.({ refused: true }).then(
         () => null,
         (e: unknown) => (e instanceof Error ? e.message : String(e)),
       );
-      if (!this.credentials.token()) {
+      const renewed = this.credentials.token();
+      if (!renewed || renewed === refused) {
         log.warn(
-          `git ${subcommand} was refused a credential, and no token could be had to run it again` +
-            (renewal ? `: ${redactGitToken(renewal, null)}` : ''),
+          `git ${subcommand} was refused a credential, and no other token could be had to run it again` +
+            (renewal ? `: ${redactGitToken(renewal, refused)}` : ''),
         );
         throw err;
       }
-      log.warn(`git ${subcommand} was refused a credential; running it again with a renewed token`);
+      log.warn(`git ${subcommand} was refused a credential; the token was renewed and the command runs again`);
       return await this.attempt(cwd, args, opts);
     }
   }
@@ -322,7 +330,9 @@ export class NodeGitRunner implements IGitRunner {
     let timedOut = false;
 
     try {
-      const { promise: pending, child } = spawnGit([...this.helperArgs(), ...args], {
+      // The helper rides the invocation, not the error text: a failure
+      // message names the command the caller asked for.
+      const { promise: pending, child } = spawnGit([...this.helperArgs(), ...args], args, {
         cwd,
         env: this.childEnv(opts.env),
         maxBuffer: MAX_OUTPUT_BYTES,

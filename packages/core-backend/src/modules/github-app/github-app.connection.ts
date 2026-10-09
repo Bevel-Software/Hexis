@@ -145,8 +145,15 @@ export class GitHubAppConnection implements GitHubAppRepository {
    * `asked` is for an admin waiting on the answer itself (the setup screen
    * listing repositories, proving a connection): GitHub is asked whatever
    * is remembered, and the failure is thrown.
+   *
+   * `refused` is the git runner reporting that the host threw out the token
+   * in hand. However much time the clock gives it, that token is dead: it is
+   * dropped first, so nothing presents it again, and GitHub is asked for
+   * another the way `asked` asks — now, and with the failure thrown. A
+   * renewal that fails leaves NO token, which is what tells the runner not
+   * to run the command again with the one the host just refused.
    */
-  async prepare(opts: { asked?: boolean } = {}): Promise<void> {
+  async prepare(opts: { asked?: boolean; refused?: boolean } = {}): Promise<void> {
     const credentials = this.credentials();
     const installationId = this.installationId();
     if (!credentials || !installationId) {
@@ -164,15 +171,21 @@ export class GitHubAppConnection implements GitHubAppRepository {
       return;
     }
     this.saidUnaskable = null;
+    if (opts.refused) {
+      // The host's verdict outranks the clock: what it refused is not
+      // presented again, by anyone, whatever a renewal in flight brings.
+      this.held = null;
+    }
+    const insist = Boolean(opts.asked || opts.refused);
     const held = this.held?.for === this.holder() ? this.held : null;
     const good = held !== null && held.expiresAt > this.now();
     if (good && held.expiresAt - this.now() > RENEW_AHEAD_MS) return;
-    if (!opts.asked && this.failed && this.now() < this.failed.until) return;
+    if (!insist && this.failed && this.now() < this.failed.until) return;
 
     this.renewing ??= this.renew(credentials, installationId).finally(() => {
       this.renewing = null;
     });
-    if (good && !opts.asked) {
+    if (good && !insist) {
       // Not waited on, so not thrown to anyone: the renewal has logged it.
       this.renewing.catch(() => undefined);
       return;
