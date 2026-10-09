@@ -115,10 +115,20 @@ function placeholder(schema: Dict, depth: number): unknown {
   // A value that must be null is shown as `null`: `"..."` would be a call the
   // check refuses.
   if (type === 'null') return null;
+  // A string long enough for its `minLength`: `"..."` fails a schema that
+  // wants more. (A `pattern` is not synthesised — a placeholder cannot be
+  // made to match an arbitrary expression — so the example stays `"..."`.)
+  if (type === 'string') return stringPlaceholder(schema);
   // No declared type is shown as a string placeholder: the overwhelming
   // majority of such arguments are strings, and a `"..."` reads as "put a
   // value here" in a way `null` does not.
   return '...';
+}
+
+/** `"..."`, padded with dots to the schema's `minLength` (capped: a bound is a bound, not a size). */
+function stringPlaceholder(schema: Dict): string {
+  const minLength = typeof schema.minLength === 'number' && Number.isFinite(schema.minLength) ? schema.minLength : 0;
+  return '.'.repeat(Math.min(64, Math.max(3, Math.ceil(minLength))));
 }
 
 /**
@@ -401,8 +411,12 @@ export function compileCheck(inputs: unknown, depth = 1): CompiledCheck {
     ) {
       mismatches.push(BODY_AT_TOP_LEVEL_LINE);
     }
+    // Own properties only, here and below: `constructor` or `toString` read
+    // through the prototype would otherwise count as given — or be checked
+    // as a value the caller never sent.
+    const given = (name: string): boolean => Object.prototype.hasOwnProperty.call(args, name);
     for (const name of required) {
-      if (args[name] === undefined) mismatches.push(`"${name}" is required, and was not given.`);
+      if (!given(name)) mismatches.push(`"${name}" is required, and was not given.`);
     }
     if (closed) {
       for (const key of keys) {
@@ -412,6 +426,7 @@ export function compileCheck(inputs: unknown, depth = 1): CompiledCheck {
       }
     }
     for (const [name, raw] of Object.entries(properties)) {
+      if (!given(name)) continue;
       const value = args[name];
       if (value === undefined) continue;
       const prop = isDict(raw) ? raw : {};
@@ -608,8 +623,11 @@ export function patternMayBacktrack(source: string): boolean {
  * rather than refused.
  */
 const patterns = new Map<string, RegExp | null>();
+/** How many compiled patterns are kept: past this the cache starts over, so a process listing ever-new schemas does not grow without bound. */
+const PATTERN_CACHE_MAX = 512;
 function compiledPattern(source: string): RegExp | null {
   if (!patterns.has(source)) {
+    if (patterns.size >= PATTERN_CACHE_MAX) patterns.clear();
     let re: RegExp | null = null;
     if (patternMayBacktrack(source)) {
       patterns.set(source, null);
