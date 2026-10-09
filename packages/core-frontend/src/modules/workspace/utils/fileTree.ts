@@ -185,7 +185,8 @@ function walkKnowledge(
   return pages.slice(0, limit);
 }
 
-function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
+/** The entry at exactly `relativePath` (a file or a folder), or null when the tree has none. */
+export function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
   if (!tree) return null;
   if (tree.relativePath === relativePath) return tree;
   if (tree.children) {

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   checkoutRoot,
+  findEntryByPath,
   knowledgeFiles,
   mergePendingIntoTree,
   omitPathFromTree,
@@ -67,6 +68,34 @@ describe('subtreeHasVisibleEntries', () => {
  * per folder: a Skills tree emptied by the read rules says "nothing shared",
  * a Skills tree that is simply empty beside a withheld Knowledge does not.
  */
+/** The one exact-path lookup the workspace and the Get set up column share. */
+describe('findEntryByPath', () => {
+  const page: FileTreeEntry = { name: 'note.md', relativePath: 'knowledge-base/KnowledgeBase/note.md', type: 'file' };
+  const folder: FileTreeEntry = {
+    name: 'KnowledgeBase',
+    relativePath: 'knowledge-base/KnowledgeBase',
+    type: 'directory',
+    children: [page],
+  };
+  const tree: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [{ name: 'knowledge-base', relativePath: 'knowledge-base', type: 'directory', children: [folder] }],
+  };
+
+  it('finds a folder and a file at their exact paths', () => {
+    expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase')).toBe(folder);
+    expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase/note.md')).toBe(page);
+  });
+
+  it('answers null for a path the tree does not have, a prefix of a name included, and for no tree', () => {
+    expect(findEntryByPath(tree, 'knowledge-base/Knowledge')).toBeNull();
+    expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase/other.md')).toBeNull();
+    expect(findEntryByPath(null, 'knowledge-base')).toBeNull();
+  });
+});
+
 describe('subtreeWithheld', () => {
   const kb: FileTreeEntry = {
     name: '.',

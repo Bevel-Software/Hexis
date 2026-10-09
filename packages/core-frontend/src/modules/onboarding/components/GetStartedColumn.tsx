@@ -22,6 +22,7 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { useFileNav } from '../../workspace/routing/kb-routes';
 import { useCreatePage } from '../../workspace/hooks/useCreatePage';
+import { findEntryByPath, pathExistsInTree } from '../../workspace/utils/fileTree';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
 import { chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
@@ -79,18 +80,6 @@ function hasOwnContent(
     return true;
   }
   return false;
-}
-
-function findEntry(tree: FileTreeEntry | null, path: string): FileTreeEntry | null {
-  if (!tree) return null;
-  if (tree.relativePath === path) return tree;
-  for (const child of tree.children ?? []) {
-    if (path === child.relativePath || path.startsWith(`${child.relativePath}/`)) {
-      const found = findEntry(child, path);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 /** A plugin for a team, not somebody's personal shelf. */
@@ -234,7 +223,7 @@ export function GetStartedColumn() {
 
   const knowledgeRoot = kbDirName ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
   const guidePath = knowledgeRoot ? `${knowledgeRoot}/${GUIDE_FILE}` : null;
-  const guideExists = guidePath !== null && findEntry(tree, guidePath) !== null;
+  const guideExists = guidePath !== null && pathExistsInTree(tree, guidePath);
 
   /**
    * The starter pack the team chose, if any: its first-page request replaces
@@ -343,7 +332,7 @@ export function GetStartedColumn() {
       knowledgeRoot !== null &&
       guidePath !== null &&
       starter.settled &&
-      hasOwnContent(findEntry(tree, knowledgeRoot), guidePath, placeholders),
+      hasOwnContent(findEntryByPath(tree, knowledgeRoot), guidePath, placeholders),
     ...(agent.connected
       ? {
           hint: 'Have your agent write it, or start one here.',
