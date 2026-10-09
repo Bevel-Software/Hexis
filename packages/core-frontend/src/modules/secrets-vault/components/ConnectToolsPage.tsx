@@ -85,6 +85,10 @@ export function ConnectToolsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A sign-in's refusal, carried back in the fragment. Its own state, like
+  // `notice`, because the first load answers moments later and a successful
+  // load clears `error` — which used to wipe this before anyone saw it.
+  const [returnError, setReturnError] = useState<string | null>(null);
   // Agent-connect mode: the signed authorization state + who is asking.
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
@@ -183,7 +187,7 @@ export function ConnectToolsPage() {
     // "Signed in", not "Connected": the sign-in landing here proves a token was
     // issued, not that a call with it will succeed.
     if (params.has('authorized')) setNotice('Signed in. You can go back to your agent and try again.');
-    else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
+    else if (params.has('error')) setReturnError(params.get('error') || 'Authorization failed.');
     if (params.has('authorized') || params.has('error')) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
       // Whichever way the round-trip went, a provider has just had its say
@@ -349,6 +353,11 @@ export function ConnectToolsPage() {
           {error && (
             <Banner role="alert" tone="danger" className="mb-3">
               {error}
+            </Banner>
+          )}
+          {returnError && (
+            <Banner role="alert" tone="danger" className="mb-3">
+              {returnError}
             </Banner>
           )}
           {notice && (

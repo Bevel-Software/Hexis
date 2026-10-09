@@ -446,13 +446,32 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
   it('shows a sign-in that came back to it', async () => {
     window.history.replaceState(null, '', '/skills-and-tools/connect?from=agent#authorized=1');
     renderPage();
+    await screen.findByLabelText('API_KEY value');
     expect(
-      await screen.findByText('Signed in. You can go back to your agent and try again.'),
+      screen.getByText('Signed in. You can go back to your agent and try again.'),
     ).toBeInTheDocument();
     // The fragment is consumed; the address and its query stay.
     expect(window.location.pathname + window.location.search + window.location.hash).toBe(
       '/skills-and-tools/connect?from=agent',
     );
+  });
+
+  // The page's first load answers right after the fragment is read, and a
+  // successful load clears the page's error — which used to wipe a refusal
+  // before anyone saw it. Waiting for the list proves the load has landed.
+  it('shows a refused sign-in that came back to it, after the list has loaded', async () => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect#error=The%20provider%20said%20no.');
+    renderPage();
+    await screen.findByLabelText('API_KEY value');
+    expect(screen.getByRole('alert')).toHaveTextContent('The provider said no.');
+    expect(window.location.hash).toBe('');
+  });
+
+  it('says the sign-in failed when the refusal carries no reason', async () => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect#error=');
+    renderPage();
+    await screen.findByLabelText('API_KEY value');
+    expect(screen.getByRole('alert')).toHaveTextContent('Authorization failed.');
   });
 
   it('keeps agent-connect mode: the per-tool include/skip control, and Finish back to the agent', async () => {
