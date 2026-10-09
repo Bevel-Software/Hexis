@@ -35,10 +35,15 @@ const log = logger('embed');
 
 /**
  * Token lifetime — long enough for a view left open in a chat, short enough
- * that a token copied out of a transcript stops working on its own. Two hours
- * is what the embed has always used.
+ * that a token copied out of a transcript stops working on its own. The
+ * token rides in `open_page`'s result, so it sits in the chat transcript, and
+ * whoever holds it reads and edits that one file as the token's user until
+ * it expires. One hour (Razvan, 2026-10-09; the embed used two before): a
+ * page left open in a chat is still covered, and the window is halved. A
+ * view older than that shows the expired sentence and the agent opens the
+ * page again.
  */
-export const EMBED_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+export const EMBED_TOKEN_TTL_SECONDS = 60 * 60;
 
 /** What the embed's config needs from the deployment's. */
 export interface EmbedConfig {
@@ -177,8 +182,10 @@ export class EmbedService implements IEmbedService {
       repoRelative = ref.repoRelative;
     }
     // Existence at mint time, so a dead reference fails where the caller can
-    // still say something about it rather than inside a rendered iframe.
-    await this.readFileBytes(repoRelative);
+    // still say something about it rather than inside a rendered iframe. A
+    // stat, not a read: a deck or a workbook can be hundreds of megabytes,
+    // and the view fetches its bytes later, from `/raw`, if at all.
+    await this.assertExists(repoRelative);
     const claims: EmbedClaims = {
       scope: 'embed',
       kind: subject.kind,
@@ -239,9 +246,24 @@ export class EmbedService implements IEmbedService {
     const bytes = await this.readFileBytes(claims.repoRelative);
     const result = await reader.read(bytes, claims.repoRelative);
     // A refusal IS the file's honest textual answer (unreadable binary under
-    // an extension the fallback reader took), and the app shows it as text.
-    const content = result.kind === 'text' ? result.text : result.kind === 'refusal' ? result.message : '';
-    return { ...base, content };
+    // an extension the fallback reader took), and the app shows it as text —
+    // but it is not the file's text, so the view neither claims it is nor
+    // offers to save over the bytes it stands for. `save` holds the same line.
+    const isText = result.kind === 'text';
+    const content = isText ? result.text : result.kind === 'refusal' ? result.message : '';
+    return { ...base, content, contentIsText: isText, canWrite: canWrite && isText };
+  }
+
+  /**
+   * Refuse to write text over a file whose bytes are not text: the reader
+   * that would show it answers a refusal, not the content, and a save would
+   * replace a binary with the viewer's draft.
+   */
+  private async assertTextEditable(repoRelative: string): Promise<void> {
+    const reader = this.readers.readerFor(repoRelative);
+    if (!reader.textEditable) throw new EmbedAccessError('This file is not editable as text');
+    const result = await reader.read(await this.readFileBytes(repoRelative), repoRelative);
+    if (result.kind !== 'text') throw new EmbedAccessError('This file is not editable as text');
   }
 
   async readBytes(token: string, path?: string): Promise<{ bytes: Buffer; path: string }> {
@@ -309,7 +331,8 @@ export class EmbedService implements IEmbedService {
   }
 
   async save(token: string, content: string): Promise<void> {
-    const { user, wsPath } = await this.requireEditor(token);
+    const { claims, user, wsPath } = await this.requireEditor(token);
+    await this.assertTextEditable(claims.repoRelative);
     const workspaceId = this.defaultWorkspaceId();
     // Bytes reach the disk ONLY under a lock this viewer holds. ASK who holds
     // it rather than acquiring again: `acquire` is strict and refuses a live
@@ -509,15 +532,23 @@ export class EmbedService implements IEmbedService {
     return { linked: true, user, canRead, canWrite };
   }
 
-  /** Read a file's bytes from the default branch's workspace. */
-  /** Whether `repoRelative` is a file on the default branch. */
+  /** Whether `repoRelative` is a file on the default branch — a stat, never a read. */
   private async fileExists(repoRelative: string): Promise<boolean> {
     try {
-      await this.readFileBytes(repoRelative);
+      await this.assertExists(repoRelative);
       return true;
     } catch (err) {
       if (err instanceof EmbedNodeNotFoundError) return false;
       throw err;
+    }
+  }
+
+  /** The typed 404 of {@link readFileBytes}, for a reference, without reading a byte. */
+  private async assertExists(repoRelative: string): Promise<void> {
+    const workspaceId = this.defaultWorkspaceId();
+    await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
+    if (!(await this.workspaceService.isFile(workspaceId, this.wsPathFor(repoRelative)))) {
+      throw new EmbedNodeNotFoundError(`${repoRelative} doesn't exist on ${this.kb.defaultBranch}`);
     }
   }
 
@@ -553,7 +584,7 @@ export class EmbedService implements IEmbedService {
       throw new EmbedTokenError();
     }
     // A token minted by the release BEFORE the subject was generalised keyed
-    // the identity on `accountId` alone. Those live two hours, so an upgrade
+    // the identity on `accountId` alone. Those were minted for two hours, so an upgrade
     // would otherwise expire every open Atlassian panel on the spot; reading
     // the old spelling costs one branch and keeps them working.
     if (typeof c.accountId === 'string' && c.accountId) {

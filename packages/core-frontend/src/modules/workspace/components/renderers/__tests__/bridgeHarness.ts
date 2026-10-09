@@ -13,20 +13,29 @@ export interface BridgeRun {
   /**
    * Click an `<a>` whose written href is `href`; answers whether the default
    * was cancelled. `alreadyPrevented` is a click a handler of the page's own
-   * cancelled before it bubbled up to the bridge.
+   * cancelled before it bubbled up to the bridge. `noAnchor` is a click on
+   * something that is not inside an `<a>` at all — a button, a div — which
+   * the bridge must leave alone.
    */
-  click: (href: string, opts?: { alreadyPrevented?: boolean }) => { prevented: boolean };
+  click: (href: string, opts?: { alreadyPrevented?: boolean; noAnchor?: boolean }) => { prevented: boolean };
   /** `window.bevel` as the page's own scripts see it. */
   bevel: Record<string, unknown>;
   /** Messages posted to the parent. */
   posted: unknown[];
   /** Ids (or names) of the elements scrolled into view, in order. */
   scrolled: string[];
+  /** The tag of each element scrolled into view, beside `scrolled`: `A`, `INPUT`, `DIV`. */
+  scrolledTags: string[];
   /** How many times the page was scrolled to its top. */
   scrolledToTop: () => number;
 }
 
-export function runBridge(page: { ids?: string[]; names?: string[] } = {}): BridgeRun {
+/**
+ * `ids` are elements with that id; `names` are `<a name="…">` anchors;
+ * `namedControls` are `<input name="…">` fields, which a fragment must NOT
+ * scroll to — the standard's fallback is the named anchor alone.
+ */
+export function runBridge(page: { ids?: string[]; names?: string[]; namedControls?: string[] } = {}): BridgeRun {
   // No lib sources: a vm script cannot parse an `export`. The bridge is
   // appended after the lib either way.
   const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
@@ -36,17 +45,30 @@ export function runBridge(page: { ids?: string[]; names?: string[] } = {}): Brid
   const handlers: ((e: ClickEvent) => void)[] = [];
   const posted: unknown[] = [];
   const scrolled: string[] = [];
+  const scrolledTags: string[] = [];
   let toTop = 0;
-  const element = (key: string) => ({ scrollIntoView: () => scrolled.push(key) });
+  const element = (key: string, tagName = 'DIV') => ({
+    tagName,
+    scrollIntoView: () => {
+      scrolled.push(key);
+      scrolledTags.push(tagName);
+    },
+  });
   const ids = new Set(page.ids ?? []);
   const names = new Set(page.names ?? []);
+  const controls = new Set(page.namedControls ?? []);
   const ctx: Record<string, unknown> = {
     document: {
       addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
         if (type === 'click') handlers.push(fn);
       },
       getElementById: (id: string) => (ids.has(id) ? element(id) : null),
-      getElementsByName: (name: string) => (names.has(name) ? [element(name)] : []),
+      // In document order a control comes first here, so a fallback that
+      // took "the first named element" would scroll the wrong thing.
+      getElementsByName: (name: string) => [
+        ...(controls.has(name) ? [element(name, 'INPUT')] : []),
+        ...(names.has(name) ? [element(name, 'A')] : []),
+      ],
     },
     parent: { postMessage: (msg: unknown) => posted.push(msg) },
     scrollTo: () => {
@@ -60,7 +82,7 @@ export function runBridge(page: { ids?: string[]; names?: string[] } = {}): Brid
   return {
     click: (href: string, opts = {}) => {
       let prevented = opts.alreadyPrevented ?? false;
-      const anchor = { getAttribute: () => href };
+      const anchor = opts.noAnchor ? null : { getAttribute: () => href };
       handlers[0]({
         target: { closest: () => anchor },
         defaultPrevented: prevented,
@@ -71,6 +93,7 @@ export function runBridge(page: { ids?: string[]; names?: string[] } = {}): Brid
     bevel: ctx.bevel as Record<string, unknown>,
     posted,
     scrolled,
+    scrolledTags,
     scrolledToTop: () => toTop,
   };
 }

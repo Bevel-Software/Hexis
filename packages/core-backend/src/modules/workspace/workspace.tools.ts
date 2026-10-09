@@ -70,7 +70,7 @@ import {
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { planMoveLinks } from './move-links.js';
-import { MoveLockedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
@@ -3100,7 +3100,10 @@ export function registerWorkspaceTools(
             paths,
           ),
           writeBlocked: (paths) => writeBlocked(branch, ctx, paths),
-          readText: (p) => nodeFs.readFile(join(root, p), 'utf8'),
+          // Through the guarded filesystem the tools read with, never the raw
+          // disk: a page replaced by a link since the listing is refused there
+          // instead of read through to wherever the link points.
+          readText: async (p) => String(await fs.readFile(p, { encoding: 'utf8' })),
           // Asked only once a page is known to be edited — the hooks hear of
           // no page merely searched — so a read refusal arrives after the
           // read; the plan then treats the page as unreadable and never names it.
@@ -3163,7 +3166,7 @@ export function registerWorkspaceTools(
         const edits = linkPlan.edits.map((e) => ({ path: e.path, lockAt: e.lockAt, content: e.content }));
         const check = async () => {
           for (const e of linkPlan.edits) {
-            const now = await nodeFs.readFile(join(root, e.lockAt), 'utf8').catch(() => null);
+            const now = await fs.readFile(e.lockAt, { encoding: 'utf8' }).then(String, () => null);
             if (now !== e.original) {
               throw new ToolError(`"${e.lockAt}" changed while the move was being planned, so nothing was moved. Run the move again.`, 409);
             }
@@ -3182,7 +3185,7 @@ export function registerWorkspaceTools(
             for (const e of edits) await fs.writeFile(e.path, e.content);
           }
         } catch (err) {
-          if (err instanceof MoveLockedError) throw new ToolError(err.message, 409);
+          if (err instanceof MoveLockedError || err instanceof MoveRacedError) throw new ToolError(err.message, 409);
           throw err;
         }
       }

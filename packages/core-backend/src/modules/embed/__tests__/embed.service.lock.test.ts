@@ -38,6 +38,7 @@ function build() {
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: encodeURIComponent(branch), kbDirName: KB })),
     readFileBinary: vi.fn(async () => Buffer.from('# Thing\n', 'utf8')),
+    isFile: vi.fn(async () => true),
     writeFile: vi.fn(async () => undefined),
   };
   // The lock verbs go straight to the real service; release drops the row as

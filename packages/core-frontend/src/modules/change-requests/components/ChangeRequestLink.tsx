@@ -68,8 +68,11 @@ function OpenRequest({ number }: { number: number }) {
       },
       (err: unknown) => {
         if (cancelled) return;
-        // Not there, or not for this viewer: the same sentence for both, so
-        // the address never says which.
+        // Not there. A 403 takes the same path for a deployment whose summary
+        // route is viewer-scoped; core's is not — every member sees the
+        // request list, and the FILES behind a request are what access rules
+        // gate, in the detail the dialog then reads — so the same sentence
+        // serves both and the address never says which.
         const hidden = err instanceof GitApiError && (err.status === 404 || err.status === 403);
         setLookup(
           hidden

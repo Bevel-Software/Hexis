@@ -13,6 +13,7 @@ import {
   canonicalRelativePath,
   folderPlaceholderPath,
   isPlatformFile,
+  isPlatformFolder,
   isPlatformRestoreShape,
   isRepositoryOwnFile,
   repositoryOwnFileDeleteRefusal,
@@ -1029,10 +1030,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      // A traversal refusal, or the access tree failing to load while the
-      // entries were judged (`AccessConfigError`): each carries its own status
-      // and payload, the same ones the single-file gate answers with.
-      if (error instanceof PathTraversalError || error instanceof WorkflowDomainError) {
+      // A traversal refusal (`PathTraversalError`), or the access tree failing
+      // to load while the entries were judged (`AccessConfigError`): both are
+      // domain errors carrying their own status and payload, the same ones
+      // the single-file gate answers with.
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -1131,11 +1133,14 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        // The repository root is the one folder whose sweep would take the
-        // root's `access.md` and `roles.yaml` with it — refused, as
-        // delete_folder refuses it. Every other folder holds neither.
-        if (filePath.replace(/\/+$/, '') === kbDirName) {
-          res.status(409).json({ error: platformFolderRefusal('') });
+        // A platform folder — the repository root, whose sweep would take the
+        // root's `access.md` and `roles.yaml` with it, or one of the reserved
+        // top-level folders that hold a whole section of the knowledge base —
+        // is refused here as `delete_folder` refuses it, by the same rule.
+        const trimmedFolder = filePath.replace(/\/+$/, '');
+        const folderRel = trimmedFolder === kbDirName ? '' : toKbRelative(trimmedFolder, kbDirName);
+        if (folderRel !== null && isPlatformFolder(folderRel, kb.layout)) {
+          res.status(409).json({ error: platformFolderRefusal(folderRel) });
           return;
         }
         const branch = branchForWorkspaceId(id);

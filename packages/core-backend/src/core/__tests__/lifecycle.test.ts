@@ -453,6 +453,14 @@ describe('stopCore', () => {
             order.push('startupRetry.stop');
           },
         },
+        workflowService: {
+          stopTidying() {
+            order.push('workflowService.stopTidying');
+          },
+          async drainTidy() {
+            order.push('workflowService.drainTidy');
+          },
+        },
         db: {
           $client: {
             async end() {
@@ -473,8 +481,10 @@ describe('stopCore', () => {
       'backgroundJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'startupRetry.stop',
+      'workflowService.stopTidying',
       'backgroundJobs.drain',
       'agentUploadStore.drainSweep',
+      'workflowService.drainTidy',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -515,8 +525,10 @@ describe('stopCore', () => {
     expect(g.order).toEqual([
       'backgroundJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
+      'workflowService.stopTidying',
       'backgroundJobs.drain',
       'agentUploadStore.drainSweep',
+      'workflowService.drainTidy',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -530,8 +542,10 @@ describe('stopCore', () => {
       'backgroundJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'startupRetry.stop',
+      'workflowService.stopTidying',
       'backgroundJobs.drain',
       'agentUploadStore.drainSweep',
+      'workflowService.drainTidy',
       'db.end',
     ]);
   });

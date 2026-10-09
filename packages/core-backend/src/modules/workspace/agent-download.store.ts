@@ -141,6 +141,12 @@ export class AgentDownloadStore {
   private readonly building = new Map<string, Promise<unknown>>();
   /** Per user, slots held by calls still waiting, building or writing — counted as open. */
   private readonly reserved = new Map<string, number>();
+  /**
+   * Request ids whose bytes are being written right now: named in no map yet,
+   * and not the sweep's to reclaim. Entered before the first write and left
+   * once the request is recorded or its directory removed.
+   */
+  private readonly writing = new Set<string>();
   /** The users whose turn the current async context is running in — see {@link withRequestSlot}. */
   private readonly inTurn = new AsyncLocalStorage<ReadonlySet<string>>();
   private readonly root: string;
@@ -245,6 +251,10 @@ export class AgentDownloadStore {
     const requestId = `download-${Date.now()}-${randomBytes(8).toString('hex')}`;
     const dir = path.join(this.root, requestId);
     const minted: { key: string; token: string; record: ArtifactRecord }[] = [];
+    // Reserved BEFORE the first filesystem await: a sweep running while a slow
+    // disk takes these writes would otherwise find a directory no request
+    // names and, past the age bound, reclaim it under the write.
+    this.writing.add(requestId);
     try {
       await fs.mkdir(dir, { recursive: true });
       for (let i = 0; i < items.length; i++) {
@@ -265,7 +275,11 @@ export class AgentDownloadStore {
         });
       }
     } catch (err) {
-      await this.removeDir(requestId);
+      try {
+        await this.removeDir(requestId);
+      } finally {
+        this.writing.delete(requestId);
+      }
       throw err;
     }
     // The TTL runs from the moment the links exist, not from when the build
@@ -277,6 +291,7 @@ export class AgentDownloadStore {
       request.pending.add(key);
     }
     this.requests.set(requestId, request);
+    this.writing.delete(requestId);
     // AFTER the records exist: the first sweep runs at once and would
     // otherwise take this request's directory for an orphan.
     this.startSweeping();
@@ -369,7 +384,7 @@ export class AgentDownloadStore {
     const live = new Set(this.requests.keys());
     for (const name of names) {
       if (this.stopped) return;
-      if (live.has(name)) continue;
+      if (live.has(name) || this.writing.has(name)) continue;
       if (await this.outlivedEveryLink(name, now)) await this.removeDir(name);
     }
   }

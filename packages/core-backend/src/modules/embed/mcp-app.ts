@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -11,8 +12,25 @@ import { OPEN_PAGE_TOOL } from './embed.tools.js';
 
 const log = logger('embed');
 
-/** The `ui://` URI of the one view this deployment serves. */
-export const OPEN_PAGE_VIEW_URI = 'ui://hexis/page.html';
+/**
+ * The `ui://` URI of the one view this deployment serves, NAMED BY ITS
+ * CONTENT: `ui://hexis/page-<hash>.html`, the hash being the view's own
+ * bytes.
+ *
+ * A host caches a view by its URI, and a changed view under an unchanged
+ * URI is served stale until the host happens to refetch — which is what
+ * Claude did after the view was rewritten (#391): it kept rendering the
+ * view it had cached, the one that goes blank. With the content in the
+ * name, every change to the view is a new URI, so no host can keep serving
+ * the old one. The prefix is stable so a reader can still tell what the
+ * resource is.
+ */
+export const OPEN_PAGE_VIEW_URI_PREFIX = 'ui://hexis/page-';
+
+/** The URI the view with these bytes is served under. */
+export function openPageViewUri(text: string): string {
+  return `${OPEN_PAGE_VIEW_URI_PREFIX}${createHash('sha256').update(text).digest('hex').slice(0, 12)}.html`;
+}
 
 /** The view's file inside the packaged `mcp-app/` folder. */
 const OPEN_PAGE_VIEW_FILE = 'page.html';
@@ -65,11 +83,12 @@ export class McpAppService {
       return { tools: {}, resources: [] };
     }
     const origin = originOf(this.config.publicFrontendUrl);
+    const uri = openPageViewUri(text);
     return {
-      tools: { [OPEN_PAGE_TOOL]: { resourceUri: OPEN_PAGE_VIEW_URI } },
+      tools: { [OPEN_PAGE_TOOL]: { resourceUri: uri } },
       resources: [
         {
-          uri: OPEN_PAGE_VIEW_URI,
+          uri,
           name: 'knowledge-base-page',
           title: 'Knowledge base page',
           description:
@@ -119,7 +138,10 @@ export class McpAppService {
  */
 export function originOf(url: string): string | null {
   try {
-    return new URL(url).origin;
+    const origin = new URL(url).origin;
+    // An address that parses but has no web origin (`file:`, `data:`) is
+    // serialised as the literal "null" — not an origin a host's CSP can name.
+    return origin === 'null' ? null : origin;
   } catch {
     return null;
   }

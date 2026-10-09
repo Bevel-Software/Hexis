@@ -190,7 +190,7 @@ function makeGit(): GitService {
     listBranches: vi.fn(),
     createBranch: vi.fn(),
     switchBranch: vi.fn(),
-    deleteBranch: vi.fn(),
+    deleteBranch: vi.fn(async () => ({ lastCommit: null })),
     forkCurrentToDraft: vi.fn(),
     discardChanges: vi.fn(),
     commit: vi.fn(),
@@ -537,8 +537,8 @@ describe('WorkflowService — file lock delegation', () => {
     let releaseFirst!: () => void;
     const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     vi.mocked(git.deleteBranch)
-      .mockImplementationOnce(async () => { order.push('first:start'); await gate; order.push('first:end'); })
-      .mockImplementationOnce(async () => { order.push('second'); });
+      .mockImplementationOnce(async () => { order.push('first:start'); await gate; order.push('first:end'); return { lastCommit: null }; })
+      .mockImplementationOnce(async () => { order.push('second'); return { lastCommit: null }; });
     const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
     const first = svc.deleteBranch('w1', 'feat/x', makeUser());
     const second = svc.deleteBranch('w1', 'feat/x', makeUser());

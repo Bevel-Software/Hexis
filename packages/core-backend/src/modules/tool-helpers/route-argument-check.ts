@@ -82,7 +82,9 @@ function argumentsCameAsQuery(flat: unknown, query: unknown, args: Record<string
   const names = new Set(declaredNames(flat));
   // An argument the body DOES carry was not misplaced, whatever else the URL
   // holds: only one that reached the route by the query string alone was.
-  return sent.some((name) => names.has(name) && args[name] === undefined);
+  // An OWN property of the body: `?toString=` would otherwise read as carried
+  // by an empty `{}` through its prototype, and the tool would run without it.
+  return sent.some((name) => names.has(name) && !Object.prototype.hasOwnProperty.call(args, name));
 }
 
 /**

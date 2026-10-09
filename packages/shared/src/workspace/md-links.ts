@@ -100,8 +100,12 @@ function maskMarkdownCode(text: string): string {
           i += 2;
           continue;
         }
+        // The escaped character is literal text: it can neither open a
+        // backtick run nor start a tag, so it is carried along unprocessed,
+        // as `scanInline` steps over every escape.
         chars[i] = c;
-        i += 1;
+        if (i + 1 < to) chars[i + 1] = text[i + 1];
+        i += 2;
         continue;
       }
       if (c === '`') {
@@ -137,12 +141,11 @@ function maskMarkdownCode(text: string): string {
  */
 export function scanMarkdownHtmlLinks(text: string): string[] {
   const out: string[] = [];
-  // A tag ends at the first `>` outside a quoted attribute value.
-  const tag = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s+(?:"[^"]*"|'[^']*'|[^<>"'])*)?>/g;
   const masked = maskMarkdownCode(text);
+  const tag = new RegExp(HTML_TAG_RE.source, 'g');
   for (let m = tag.exec(masked); m !== null; m = tag.exec(masked)) {
     // The span located on the mask, the attributes read from the page itself.
-    out.push(...scanHtmlLinks(text.slice(m.index, m.index + m[0].length)));
+    out.push(...attributeLinks(text.slice(m.index, m.index + m[0].length)));
   }
   return out;
 }
@@ -218,8 +221,13 @@ function scanBody(text: string, from: number, sink: BodySink): void {
     const nl = text.indexOf('\n', lineStart);
     const lineEnd = nl === -1 ? text.length : nl;
     const line = text.slice(lineStart, lineEnd).replace(/\r$/, '');
-    const blank = line.trim() === '';
-    const indent = indentOf(line);
+    // Indentation is counted past the blockquote markers, so `>     code`
+    // is an indented block inside the quote, as CommonMark reads it — and a
+    // bare `>` is the quote's blank line.
+    const quoted = /^(?:[ \t]*>[ \t]?)+/.exec(line)?.[0] ?? '';
+    const inner = line.slice(quoted.length);
+    const blank = inner.trim() === '';
+    const indent = indentOf(inner);
     if (fence) {
       const prefix = /^(?:[ \t]*>[ \t]?)*[ \t]*/.exec(line)![0];
       const run = line.slice(prefix.length).match(/^(`+|~+)[ \t]*$/);
@@ -237,7 +245,7 @@ function scanBody(text: string, from: number, sink: BodySink): void {
       indentedCode = false;
       // A line back at the margin after a blank line has left the list.
       if (listIndent !== null && prevBlank && indent < listIndent) listIndent = null;
-      const item: RegExpExecArray | null = indent < (listIndent ?? 0) + 4 ? LIST_ITEM_RE.exec(line) : null;
+      const item: RegExpExecArray | null = indent < (listIndent ?? 0) + 4 ? LIST_ITEM_RE.exec(inner) : null;
       const fenceOpen = line.match(FENCE_OPEN_RE);
       // Four columns in, a fence line is code or a paragraph's continuation.
       const open = fenceOpen && fenceIndent(fenceOpen[1], listIndent) <= 3 ? fenceOpen : null;
@@ -442,8 +450,29 @@ function parseInlineDestination(
  */
 export function scanHtmlLinks(text: string): string[] {
   const out: string[] = [];
-  const re = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
-  for (let m = re.exec(text); m !== null; m = re.exec(text)) out.push(m[1] ?? m[2] ?? m[3]);
+  for (let m = HTML_TAG_RE.exec(text); m !== null; m = HTML_TAG_RE.exec(text)) out.push(...attributeLinks(m[0]));
+  return out;
+}
+
+/** An opening tag: its end is the first `>` outside a quoted attribute value. */
+const HTML_TAG_RE = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s+(?:"[^"]*"|'[^']*'|[^<>"'])*)?>/g;
+
+/**
+ * The `href` and `src` values of ONE tag, read attribute by attribute: the
+ * name has to be exactly that (a `data-href` is not a link), and a value that
+ * happens to contain `href=` is a value, not an attribute.
+ */
+function attributeLinks(tag: string): string[] {
+  const out: string[] = [];
+  const nameEnd = tag.search(/[\s/>]/);
+  const attrs = nameEnd < 0 ? '' : tag.slice(nameEnd, -1);
+  const re = /([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  for (let m = re.exec(attrs); m !== null; m = re.exec(attrs)) {
+    const name = m[1].toLowerCase();
+    if ((name === 'href' || name === 'src') && m[2] !== undefined) out.push(m[2]);
+    else if ((name === 'href' || name === 'src') && m[3] !== undefined) out.push(m[3]);
+    else if ((name === 'href' || name === 'src') && m[4] !== undefined) out.push(m[4]);
+  }
   return out;
 }
 

@@ -134,7 +134,7 @@ describe('routes answer a push the host refused with 409 and the saved-locally s
     expect(res.status).toBe(409);
     expect(res.json.error).toBe(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        'the repository host refused the push. The next save on this branch shares it.',
+        'the repository host refused the push; the next save on this branch will try sharing it again.',
     );
     expect(res.json).toMatchObject({ kind: 'push-needs-resolution', branch });
     expect(res.json).not.toHaveProperty('originalDetail');

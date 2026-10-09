@@ -387,10 +387,16 @@ describe('list_change_requests', () => {
     const base = await start();
     // `merged` is what the ANSWER says for an applied request, so it is the
     // word an agent is most likely to feed back in; a typo is refused too.
+    // The route's argument check answers first — the schema pins `state` to
+    // its three values — and names them in its refusal; the handler's own
+    // check beneath it is the floor for a caller that reaches it another way.
     for (const state of ['merged', 'applied', 'OPEN', '', 7, null]) {
       calls = [];
       const { status, json } = await call(base, 'list_change_requests', { state });
       expect(status, JSON.stringify(state)).toBe(400);
+      expect((json as { kind?: string }).kind, JSON.stringify(state)).toBe('arguments-do-not-match');
+      // The three values are named either in the mismatch line (a wrong
+      // string) or in the interface the refusal carries (a wrong type).
       expect(JSON.stringify(json), JSON.stringify(state)).toMatch(/open.*closed.*all/);
       expect(calls, JSON.stringify(state)).toEqual([]);
     }
@@ -630,6 +636,19 @@ describe('get_change_request', () => {
     const absent = await call(base, 'get_change_request', { number: 99 });
     expect(absent.status).toBe(404);
     expect(absent.json.error).toBe('Change request #99 not found.');
+  });
+
+  // An OPEN request that proposes nothing, before the background sweep has
+  // closed it: still "not found" to an agent that is not its author. Closing
+  // empty requests changed nothing about what agents may see.
+  it('answers not found for an open request with no files to an agent that is not its author', async () => {
+    const base = await start();
+    details.set(12, detail({ state: 'open', files: [], approvals: [] }));
+    const { status, json } = await call(base, 'get_change_request', { number: 12 });
+    expect(status).toBe(404);
+    expect(json.error).toBe('Change request #12 not found.');
+    callerEmail = AUTHOR;
+    expect((await call(base, 'get_change_request', { number: 12 })).status).toBe(200);
   });
 
   it('answers not found when the access tree at the target cannot be resolved', async () => {

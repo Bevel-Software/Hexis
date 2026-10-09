@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { CommunicationProtocol } from '@utcp/sdk';
 
 /**
@@ -26,9 +27,12 @@ import { CommunicationProtocol } from '@utcp/sdk';
  * The `body_field` a GET template is given. Deliberately not a name any schema
  * would declare: the leading `__` and the markers make it unreachable from a
  * generated call example or a described interface, so no agent is ever told to
- * send it.
+ * send it. The tail is drawn once per process, so a manual cannot write the
+ * name into its own template and have an argument of that name sent as the
+ * body after all: the name it would have to guess does not exist until the
+ * server starts.
  */
-export const NO_BODY_FIELD = '__utcp_get_sends_no_body__';
+export const NO_BODY_FIELD = `__utcp_get_sends_no_body_${randomUUID().replace(/-/g, '')}__`;
 
 /** Marks a protocol instance as already decorated, so installing twice is free. */
 const GUARDED = Symbol.for('bevel.mcp-core.getHasNoBody');

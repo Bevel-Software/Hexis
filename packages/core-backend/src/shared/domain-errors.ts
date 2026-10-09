@@ -120,7 +120,7 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
     super(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
         (cause === 'refused'
-          ? `the repository host refused the push. The next save on this branch shares it.`
+          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
           : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
             `The agent will resolve this.`),
       409,
@@ -383,6 +383,47 @@ export class WorkflowValidationError extends WorkflowDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
     this.name = 'WorkflowValidationError';
+  }
+}
+
+/**
+ * An agent's `delete_branch` refused, for a reason a person can act on. The
+ * `reason` is the discriminator a caller branches on; the message says what
+ * to do about it. Nothing was deleted.
+ *
+ * - `open-change-request` (409) — a request is open from or into the branch;
+ *   `number` names it. Withdrawing or declining it is a person's action, in
+ *   the app.
+ * - `unmerged-commits` (409) — `unmergedCommits` commits would be lost;
+ *   `discardUnmerged` is the deliberate way past it.
+ * - `saves-landing` (409) — the branch's checkout still has saves waiting to
+ *   be committed or a file held for editing. Clears itself within seconds.
+ * - `state-unconfirmed` (503) — the shared repository could not be fetched,
+ *   so the branch's current state is unknown.
+ */
+export type BranchDeleteBlockedReason =
+  | 'open-change-request'
+  | 'unmerged-commits'
+  | 'saves-landing'
+  | 'state-unconfirmed';
+
+export class BranchDeleteBlockedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-blocked' as const;
+  constructor(
+    readonly reason: BranchDeleteBlockedReason,
+    readonly branchName: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    // `extra` first: it adds detail, and can never contradict the kind,
+    // reason or branch the status and fields above were chosen for.
+    super(message, reason === 'state-unconfirmed' ? 503 : 409, {
+      ...extra,
+      kind: 'branch-delete-blocked',
+      reason,
+      branchName,
+    });
+    this.name = 'BranchDeleteBlockedError';
   }
 }
 

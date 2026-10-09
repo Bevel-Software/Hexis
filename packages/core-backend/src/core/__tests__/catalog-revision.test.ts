@@ -47,6 +47,14 @@ describe('catalogRevision', () => {
     );
   });
 
+  it('moves when an MCP App view changes by a byte, and not when the same view is read again', () => {
+    const view = { uri: 'ui://hexis/page.html', text: '<html>v1</html>' };
+    const base = catalogRevision([manualLine('serper')], [skill()], [view]);
+    expect(catalogRevision([manualLine('serper')], [skill()], [{ ...view }])).toBe(base);
+    expect(catalogRevision([manualLine('serper')], [skill()], [{ ...view, text: '<html>v2</html>' }])).not.toBe(base);
+    expect(catalogRevision([manualLine('serper')], [skill()], [])).not.toBe(base);
+  });
+
   describe('a manual added, changed or removed', () => {
     const base = catalogRevision([manualLine('serper')], []);
 

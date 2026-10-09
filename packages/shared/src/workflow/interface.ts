@@ -33,6 +33,8 @@ import type {
   ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
+  DeleteBranchPreview,
+  DeleteBranchResult,
   FileApproval,
   FileLock,
   FolderChangeRequest,
@@ -76,6 +78,28 @@ export interface IWorkflowService {
     user: AuthUser,
     opts?: { onlyIfNoRemote?: boolean },
   ): Promise<void>;
+  /**
+   * An agent's `delete_branch`: the app's author-or-Admin rule, plus the
+   * guards an agent needs and a person in the branch switcher does not.
+   * Refuses a protected branch, a name that is not a branch, a branch an open
+   * change request that still proposes something (or whose changes cannot be
+   * determined) comes from or goes into, a branch whose checkout still has
+   * saves landing or a file held, and — unless `discardUnmerged` — one holding
+   * commits that are not on the default branch. Open requests that propose
+   * nothing block nothing: they are closed only once every other check has
+   * passed, just before the branch is removed — never by a preview or a
+   * refused deletion. Fetches first, strictly: when the shared repository
+   * cannot be reached it refuses. Runs from the default branch's workspace,
+   * whichever workspace the caller is in. `dryRun` reports what a deletion
+   * would do and changes nothing. `maySee` is the caller's view of change
+   * requests: one it answers no for is left out of the preview and refused on
+   * without its number or link. Absent, every request is visible.
+   */
+  deleteBranchChecked(
+    user: AuthUser,
+    name: string,
+    opts?: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (number: number) => Promise<boolean> },
+  ): Promise<DeleteBranchPreview | DeleteBranchResult>;
   // `switchBranch` removed: under the per-branch workspace model the active
   // branch is the workspace's identity. Switching branches is a workspace
   // selection (`WorkspaceService.getOrCreateForBranch`), not an operation

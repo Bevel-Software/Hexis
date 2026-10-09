@@ -30,7 +30,7 @@ import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
-import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -713,6 +713,13 @@ export async function createCoreServices(
   // upload root — outside every workspace, for the same reason — until their
   // one-time link is fetched or expires.
   const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  // An upload root that is itself named `agent-downloads` would make the two
+  // stores one directory, each sweeping the other's files.
+  if (agentDownloadsRoot === path.resolve(config.agentUploadsRoot)) {
+    throw new Error(
+      'AGENT_UPLOADS_ROOT must not be a directory named `agent-downloads`: that name, beside it, is the agent download root.',
+    );
+  }
   await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
     name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
     why:
@@ -909,6 +916,9 @@ export async function createCoreServices(
     // it reach every hook point.
     workflowHooks,
   );
+  // The leftover-branch cleanup asks the Deployment page at every round, so
+  // switching it off there applies without a restart.
+  workflowService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it

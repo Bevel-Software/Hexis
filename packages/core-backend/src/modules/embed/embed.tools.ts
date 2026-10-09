@@ -7,6 +7,7 @@ import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ReadForTool } from '../workspace/workspace.tools.js';
 import type { IEmbedService } from './embed.interface.js';
+import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
 export const OPEN_PAGE_TOOL = 'open_page';
@@ -122,6 +123,9 @@ export function registerEmbedTools(
   router.post(
     `/agent/tools/${OPEN_PAGE_TOOL}`,
     toolAuth,
+    // Registered external-only above; the route holds the same line, so an
+    // in-process agent that guessed the endpoint is refused here too.
+    requireExternalSource,
     toolHandler(async (args, ctx: ToolContext) => {
       const raw = typeof args.path === 'string' ? args.path.trim() : '';
       if (!raw) throw new ToolError('`path` is required.', 400);
@@ -174,7 +178,7 @@ export function toRepoRelative(path: string, kbDirName: string): string | null {
   // path is about to become part of a signed token, and a token is the one
   // place a bad path would outlive the request that sent it.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(rel)) return null;
+  if (/[\x00-\x1f\x7f]/.test(rel)) return null;
   if (!rel.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..')) return null;
   return rel;
 }

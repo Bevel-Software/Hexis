@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * The MCP App view the backend serves as `ui://hexis/page.html`, RUN — not
+ * The MCP App view the backend serves as `ui://hexis/page-<hash>.html`, RUN — not
  * grepped. It lives in core-backend's packaged `mcp-app/` folder, and this
  * package is the one with a DOM to run it in.
  *
@@ -205,6 +205,34 @@ describe('the MCP App view', () => {
     bundleScript()!.dispatchEvent(new Event('load'));
     expect(getComputedStyle(root()).display).toBe('block');
     expect(getComputedStyle(notice()).display).toBe('none');
+  });
+
+  /**
+   * A host starts an app view a few lines tall and grows it only when the
+   * view asks. The page scrolls inside the view, so the ask is a reading
+   * height, sent once the page is on screen — a notice needs no room.
+   */
+  it('asks the host for a reading height once the page is on screen, and not before', async () => {
+    const sizeRequests = () =>
+      host.postMessage.mock.calls
+        .map((c) => c[0] as { method?: string; params?: { height?: unknown } })
+        .filter((m) => m.method === 'ui/notifications/size-changed');
+    fromHost(pageResult());
+    await settled();
+    expect(sizeRequests()).toHaveLength(0);
+    bundleScript()!.dispatchEvent(new Event('load'));
+    // The one height the view asks for, pinned: a document pane's reading
+    // height, and the number the changeset documents.
+    expect(sizeRequests()).toEqual([
+      { jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height: 640 } },
+    ]);
+  });
+
+  it('asks for no room when there is only a sentence to show', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    fromHost(pageResult());
+    await settled();
+    expect(sentMethods()).not.toContain('ui/notifications/size-changed');
   });
 
   it.each([

@@ -86,7 +86,7 @@ export function describeSyncFailure(err: unknown, operation: 'push' | 'pull' = '
   // `Permission denied (publickey…)` is ssh refusing the KEY — a rejected
   // credential, not a missing permission.
   if (
-    /authentication failed|could not read username|invalid username or password|returned error: 401|permission denied \(publickey/i.test(
+    /authentication failed|could not read username|invalid username or (?:password|token)|invalid credentials|returned error: 401|permission denied \(publickey/i.test(
       raw,
     )
   ) {
@@ -98,7 +98,8 @@ export function describeSyncFailure(err: unknown, operation: 'push' | 'pull' = '
   // credential is the wrong fix; granting it access is the right one. Only
   // the host's phrasing counts: a bare "Permission denied" is the server's
   // own filesystem, handled below.
-  if (/permission to \S+ denied|returned error: 403|write access .* not granted|repository not found/i.test(raw)) {
+  // `repository … not found` across the quoted URL git puts between the words.
+  if (/permission to \S+ denied|returned error: 403|write access .* not granted|repository\b.*\bnot found/i.test(raw)) {
     return operation === 'pull'
       ? "The repository host did not give this server's credentials access to this repository."
       : "The repository host did not give this server's credentials permission to push here.";
@@ -106,7 +107,7 @@ export function describeSyncFailure(err: unknown, operation: 'push' | 'pull' = '
   if (/permission denied|insufficient permission/i.test(raw)) {
     return "This server could not write to its own copy of the repository.";
   }
-  if (/could not resolve host|failed to connect|couldn't connect|connection (refused|timed out|reset)|network is unreachable|operation timed out/i.test(raw)) {
+  if (/could not resolve host|failed to connect|couldn't connect|connection (refused|timed out|reset)|network is unreachable|\btimed out\b|ETIMEDOUT/i.test(raw)) {
     return 'The repository host could not be reached.';
   }
   if (/non-fast-forward|fetch first|updates were rejected/i.test(raw)) {

@@ -143,7 +143,10 @@ export async function proposeEmbed(token: string, content: string): Promise<Embe
 
 /** Link the token's outside account to the signed-in user (the link page). */
 export async function linkEmbedAccount(token: string, bearer: string | null): Promise<void> {
-  const res = await fetch('/api/embed/link', {
+  // Addressed like every other embed route, so a deployment served under a
+  // path prefix keeps it; the session cookie rides along because this one
+  // call acts AS the signed-in user (see the link page).
+  const res = await fetch(`${embedApiBase()}/api/embed/link`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',

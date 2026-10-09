@@ -365,6 +365,47 @@ describe('SetupScreen', () => {
    * putting the stored value back changes nothing — the save must not be held
    * behind a repository test for an edit that no longer exists.
    */
+  /**
+   * The leftover-branch cleanup is an on/off setting: a checkbox, ticked while
+   * unset (the server's default is on), saved as `true` / `false`.
+   */
+  it('settings mode: the leftover-branch cleanup is a checkbox, on by default, saved as false when cleared', async () => {
+    const stored = [
+      ...SETTINGS.map((s) =>
+        s.key === 'kbRepoUrl'
+          ? { ...s, source: 'stored' as const, value: 'https://example.com/kb.git', configured: true }
+          : s.key === 'defaultBranch' || s.key === 'protectedBranches'
+            ? { ...s, source: 'stored' as const, value: 'main', configured: true }
+            : s,
+      ),
+      {
+        key: 'retireMergedBranches',
+        envVar: 'RETIRE_MERGED_BRANCHES',
+        section: KB,
+        source: 'unset' as const,
+        value: '',
+        configured: false,
+        secret: false,
+        restartToApply: false,
+      },
+    ];
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" />);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: stored });
+
+    // It sits under Advanced, closed by default: opened first, as a person would.
+    const advanced = screen.getByText(/^Advanced/, { selector: 'summary' });
+    await userEvent.click(advanced);
+    expect(advanced.closest('details')).toHaveAttribute('open');
+    const box = screen.getByRole('checkbox', { name: 'Remove branches left over from merged change requests' });
+    expect(box).toBeChecked();
+    await userEvent.click(box);
+    expect(box).not.toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ retireMergedBranches: 'false' }));
+  });
+
   it('settings mode: a field restored to its stored value does not gate the save', async () => {
     const stored = SETTINGS.map((s) =>
       s.key === 'kbRepoUrl'

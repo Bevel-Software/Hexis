@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
@@ -60,6 +60,8 @@ function build(opts: Opts = {}) {
       }
       return Buffer.isBuffer(found) ? found : Buffer.from(found, 'utf8');
     }),
+    // The mint's existence check: a stat, never a read.
+    isFile: vi.fn(async (_id: string, wsPath: string) => files[wsPath] !== undefined),
     writeFile: vi.fn(async () => undefined),
   };
   const accessControl = {
@@ -122,6 +124,18 @@ describe('EmbedService: minting', () => {
       sub: USER.id,
       repoRelative: REPO,
     });
+  });
+
+  /**
+   * The token rides in the tool result and so in the chat transcript;
+   * whoever holds it acts on that one file as its user until it expires.
+   * One hour (Razvan, 2026-10-09), down from the two the embed used before.
+   */
+  it('mints a token that lives one hour', async () => {
+    const { service } = build();
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
+    expect(exp - iat).toBe(60 * 60);
   });
 
   it('mints for an outside account — the connector path, unchanged', async () => {
@@ -460,6 +474,19 @@ describe('EmbedService: saving as a writer', () => {
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.acquireLock(token)).rejects.toThrow(EmbedAccessError);
     await expect(service.save(token, 'x')).rejects.toThrow(EmbedAccessError);
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses to save text over bytes that are not text, and says so in the load', async () => {
+    // A PNG under a markdown name: the fallback reader is text-editable, but
+    // what it answers for these bytes is a refusal, not the file's text.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const { service, workspaceService } = build({ files: { [WS]: png } });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    const view = await service.loadFile(token);
+    expect(view.contentIsText).toBe(false);
+    expect(view.canWrite).toBe(false);
+    await expect(service.save(token, '# replaced')).rejects.toThrow(EmbedAccessError);
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
   });
 
