@@ -10,6 +10,7 @@ import { GitService } from '../../workflow/git/git.service.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { LockingFilesystem, MoveLockedError, MoveRacedError, MoveUndoError } from '../locking-filesystem.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 
 /**
  * `LockingFilesystem.moveWithEdits` — `move_file` with link rewriting: the
@@ -194,6 +195,28 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(discarded).toContain(`${KB}/Projects/A`);
     expect(discarded).toContain(`${KB}/Topics/Deep/A/One.md`);
     expect(discarded).toContain(`${KB}/Index.md`);
+  });
+
+  it('a commit that landed but could not be pushed enqueues the committed paths only; the folder locks go back untouched', async () => {
+    // The real commit lands; only its push is refused.
+    const commit = (workflow.commitChanges as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockImplementation(async (...args: unknown[]) => {
+      await commit(...args);
+      throw new PushNeedsAgentResolutionError('feature-test', `${KB}/Index.md`, 'refused', '(not attempted)', 'refused');
+    });
+    await expect(
+      fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
+    ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    const enqueued = released(workflow.releaseLock);
+    const untouched = released(workflow.releaseLockUntouched);
+    // Every file the commit named is enqueued…
+    for (const p of [`${KB}/Index.md`, `${KB}/Projects/A/One.md`, `${KB}/Topics/Deep/A/One.md`, `${KB}/Topics/Deep/A/pic.png`]) {
+      expect(enqueued).toContain(p);
+    }
+    // …and the folder locks, which name nothing committed, are not.
+    expect(enqueued).not.toContain(`${KB}/Projects/A`);
+    expect(enqueued).not.toContain(`${KB}/Topics/Deep/A`);
+    expect(untouched).toEqual([`${KB}/Projects/A`, `${KB}/Topics/Deep/A`]);
   });
 
   it('locks every file of a moved folder at its old and its new path', async () => {
