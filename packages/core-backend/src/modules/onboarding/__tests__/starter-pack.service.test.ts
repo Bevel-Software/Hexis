@@ -474,6 +474,21 @@ describe('choosing a pack', () => {
     expect(store.starterPackClaim).toBeUndefined();
   });
 
+  it('releases a renewal whose outcome it never learned: the row is not left closed until it expires', async () => {
+    const store: Record<string, string> = {};
+    const { svc, settings, workflow } = harness({ store });
+    // The renewal reached the database and landed, but its answer did not come back.
+    settings.swapIfValue.mockImplementationOnce(async (key: string, expected: string, next: string | null) => {
+      if (store[key] === expected && next !== null) store[key] = next;
+      throw new Error('connection reset');
+    });
+    await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('connection reset');
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(store.starterPackClaim).toBeUndefined();
+    // Open again at once, not in ten minutes.
+    await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
+  });
+
   it('records a skip only where nothing is answered: an answer that landed meanwhile stands', async () => {
     const store: Record<string, string> = {};
     const { svc, settings } = harness({ store });

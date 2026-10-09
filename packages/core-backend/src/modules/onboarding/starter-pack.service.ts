@@ -196,8 +196,12 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       throw new StarterPackError('Only an admin can add starter pages.', 403);
     }
     return this.choosing.run('starter-pack', async () => {
-      /** This call's claim — renewed by the fence, so its value moves. */
-      const lease = { claim: await this.claim(user) };
+      /**
+       * Every value this call has written as its claim, newest first: the one
+       * taken, and each renewal the fence wrote — or may have written, since a
+       * renewal whose outcome is unknown is still this call's to release.
+       */
+      const lease: Lease = { claims: [await this.claim(user)] };
       let pack: StarterPack | null = null;
       let added: string[] = [];
       try {
@@ -220,7 +224,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       } catch (err) {
         // Refused, or nothing landed: the claim goes, and the question is
         // open again (or answered, as the refusal said).
-        await this.release(lease.claim);
+        await this.release(lease);
         throw err;
       }
       if (pack) {
@@ -239,7 +243,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
             log.error(`starter pack "${id}" was added, but the choice could not be recorded`, { err });
           });
       }
-      await this.release(lease.claim);
+      await this.release(lease);
       if (!pack) return { id, name: null, pages: 0, skills: 0, summary: '' };
       const pages = added.filter((p) => this.isPage(p)).length;
       const skills = added.filter((p) => path.posix.basename(p) === 'SKILL.md').length;
@@ -306,25 +310,37 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
    * effect that follows has a whole `CLAIM_TTL_MS` before anyone may take
    * the claim over — a commit takes seconds. Refused: nothing lands, and the
    * claim, now a successor's, is left to them.
+   *
+   * The renewal joins the lease BEFORE it is written: a write whose outcome
+   * is unknown (the statement reached the database, its answer did not) may
+   * have landed, and a claim this call may have written is this call's to
+   * release, or the question would stand closed until it expired.
    */
-  private async fence(lease: { claim: string }, user: AuthUser): Promise<void> {
+  private async fence(lease: Lease, user: AuthUser): Promise<void> {
+    const held = lease.claims[0]!;
     const renewed = `${user.id} ${Date.now()}`;
-    if (!(await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, lease.claim, renewed, user.id))) {
+    lease.claims.unshift(renewed);
+    if (!(await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, held, renewed, user.id))) {
       throw new StarterPackError('Another admin took this choice over while it was in progress; nothing was added. Try again.', 409);
     }
-    lease.claim = renewed;
     if ((await this.recordedChoice()) !== null) throw alreadyChosen();
   }
 
   /**
    * Release one's OWN claim — never a successor's: a claim taken over after
-   * it expired is somebody else's now, and a late release must leave it. One
-   * that cannot be released expires on its own.
+   * it expired is somebody else's now, and a late release must leave it.
+   * Whichever of the values this call wrote the row holds is released;
+   * each other value is simply not there. One that cannot be released
+   * expires on its own.
    */
-  private async release(claim: string): Promise<void> {
-    await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, claim, null, null).catch((err: unknown) => {
-      log.error('the starter-pack claim could not be released; it expires on its own', { err });
-    });
+  private async release(lease: Lease): Promise<void> {
+    for (const claim of lease.claims) {
+      const released = await this.deps.settings.swapIfValue(STARTER_PACK_CLAIM_SETTING, claim, null, null).catch((err: unknown) => {
+        log.error('the starter-pack claim could not be released; it expires on its own', { err });
+        return false;
+      });
+      if (released) return;
+    }
   }
 
   /**
@@ -407,7 +423,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
    * resolve to the paths written. `lease` is this call's claim, checked and
    * renewed at the last moment (see `fence`).
    */
-  private async apply(user: AuthUser, pack: StarterPack, lease: { claim: string }): Promise<string[]> {
+  private async apply(user: AuthUser, pack: StarterPack, lease: Lease): Promise<string[]> {
     const { kb, workspaceService, workflow, disk } = this.deps;
     const branch = kb.defaultBranch;
     const ws = await workspaceService.getOrCreateForBranch(branch);
@@ -520,6 +536,11 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
     }
     return writes;
   }
+}
+
+/** One call's claim over time: every value it wrote as the claim, newest first (see `fence`, `release`). */
+interface Lease {
+  claims: string[];
 }
 
 function alreadyChosen(): StarterPackError {
