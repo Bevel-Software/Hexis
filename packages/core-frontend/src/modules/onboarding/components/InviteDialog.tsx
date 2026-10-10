@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, Eye, EyeOff, KeyRound, RotateCw } from 'lucide-react';
+import { MIN_PASSWORD_LENGTH } from '@bevel-software/platform-shared';
 import { Badge, Banner, Button, Dialog, TextField, type BadgeTone } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useAppRegistry } from '../../../core/registry';
@@ -20,9 +21,6 @@ import {
   type InviteOutcome,
   type InviteRole,
 } from '../invite-emails';
-
-/** The platform's shortest accepted password (the server's `MIN_PASSWORD_LENGTH`). */
-const MIN_PASSWORD_LENGTH = 8;
 
 /** "1 person" / "3 people" — the one plural this dialog needs. */
 function people(n: number): string {

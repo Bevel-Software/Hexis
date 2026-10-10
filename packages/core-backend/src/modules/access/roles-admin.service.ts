@@ -344,44 +344,15 @@ export class RolesAdminService {
   }
 
   /**
-   * The addresses the app treats as an Admin, each once: the Admin role's
-   * direct members, the members of every group assigned to it (expanded from
-   * the active group source, as the resolver expands them), and the
-   * deployment admins from the server configuration. Nothing else — no other
-   * role, no group name, no reference — because this backs a read any
-   * signed-in person may make (who to ask for an invite), unlike the roster.
-   *
-   * A roles.yaml that does not parse makes nobody an Admin in the resolver
-   * except the deployment admins, so that is all this answers then — "parse"
-   * judged by the resolver's own parser (`validateRolesYaml`), which is
-   * stricter than the editing model's: a file the resolver rejects must not
-   * name anyone here.
+   * The addresses the app treats as an Admin, each once — the resolver's own
+   * membership answer ({@link IAccessControl.adminEmails}), so who this names
+   * and who the admin gates admit cannot drift apart. Nothing else about
+   * roles: this backs a read any signed-in person may make (who to ask for an
+   * invite), unlike the roster.
    */
   async getAdminEmails(): Promise<string[]> {
     const workspaceId = await this.ensureWorkspace();
-    const emails = new Set(this.fixedAdminEmails);
-    let members: string[] = [];
-    try {
-      const rolesText = await this.readRolesYaml(workspaceId);
-      if (this.accessControl.validateRolesYaml(rolesText).ok) {
-        const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === ADMIN_CANONICAL);
-        members = role?.members ?? [];
-      }
-    } catch (err) {
-      if (!(err instanceof RolesEditError)) throw err;
-    }
-    const groupRefs = members.filter(isGroupRefMember);
-    if (groupRefs.length > 0) {
-      const { groups } = await loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f));
-      for (const ref of groupRefs) {
-        for (const email of groups.get(canonicalRoleName(ref.slice(GROUP_REF_PREFIX.length)))?.emails ?? []) {
-          emails.add(canonicalEmail(email));
-        }
-      }
-    }
-    for (const member of members) if (!isGroupRefMember(member)) emails.add(canonicalEmail(member));
-    emails.delete('');
-    return [...emails];
+    return this.accessControl.adminEmails(workspaceId);
   }
 
   /**

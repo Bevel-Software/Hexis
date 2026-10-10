@@ -295,6 +295,30 @@ describe('AuthService.createAccount / changePassword', () => {
     const set = captured.set[0] as { passwordHash: string };
     expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
   });
+
+  // The system-account guard sits on EVERY password write, not only the
+  // invite's starting password: a bot holding a hash could sign in.
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'createAccount refuses a password for the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([]);
+      await expect(
+        new AuthService(db, makeConfig()).createAccount(email, undefined, 'brand-new-pass'),
+      ).rejects.toThrow('System accounts cannot be given a password');
+      expect(db.insert).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'changePassword refuses the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([[{ ...ROW, email, passwordHash: null }]]);
+      await expect(
+        new AuthService(db, makeConfig()).changePassword('user-1', undefined, 'first-password'),
+      ).rejects.toThrow('System accounts cannot be given a password');
+      expect(db.update).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('AuthService.createAccountWithStartingPassword — an invite never replaces a password', () => {

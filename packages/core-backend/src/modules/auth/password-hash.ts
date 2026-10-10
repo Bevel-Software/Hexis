@@ -16,8 +16,9 @@ const SCRYPT_P = 1;
 const KEY_LEN = 32;
 const SALT_LEN = 16;
 
-/** Guard rail surfaced by the routes as a 400 — not a silent truncation. */
-export const MIN_PASSWORD_LENGTH = 8;
+/** Guard rail surfaced by the routes as a 400 — not a silent truncation. The
+ *  policy itself is platform-shared so every password form reads the same one. */
+export { MIN_PASSWORD_LENGTH } from '@bevel-software/platform-shared';
 
 function scryptAsync(
   password: string,

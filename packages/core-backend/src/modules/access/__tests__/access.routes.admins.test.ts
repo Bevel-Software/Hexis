@@ -6,7 +6,8 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-import type { IAccessControl } from '../access-control.interface.js';
+import { AccessControlService } from '../access-control.service.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
@@ -14,7 +15,6 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { parseRolesYaml } from '../../access-model/access-grammar.js';
 
 /**
  * `GET /api/access/admins`: who the admins are, for anyone signed in. It
@@ -47,6 +47,7 @@ const tmpDirs: string[] = [];
 async function makeHarness(
   opts: {
     roles?: string;
+    groups?: string;
     signedIn?: boolean;
     deploymentAdmins?: string[];
     accounts?: { email: string; name?: string; deactivatedAt?: Date | null }[];
@@ -57,24 +58,17 @@ async function makeHarness(
   const repoDir = path.join(workspaceDir, KB);
   await fs.mkdir(repoDir, { recursive: true });
   await fs.writeFile(path.join(repoDir, 'roles.yaml'), opts.roles ?? ROLES, 'utf-8');
-  await fs.writeFile(path.join(repoDir, 'groups.yaml'), GROUPS, 'utf-8');
+  await fs.writeFile(path.join(repoDir, 'groups.yaml'), opts.groups ?? GROUPS, 'utf-8');
 
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async () => ({})),
     getWorkspacePath: vi.fn(async () => workspaceDir),
     readFile: vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(workspaceDir, wsRel), 'utf-8')),
   } as unknown as WorkspaceService;
-  // Nobody here may read the roster: the admins read must not depend on it.
-  const accessControl = {
-    canWrite: vi.fn(async () => false),
-    eligibleWriters: vi.fn(async () => ({ roles: ['Admin'], users: [] })),
-    invalidate: vi.fn(),
-    // The resolver's own parser, as the real service runs it.
-    validateRolesYaml: vi.fn((text: string) => {
-      const parsed = parseRolesYaml(text);
-      return parsed.ok ? { ok: true } : { ok: false, errors: parsed.errors };
-    }),
-  } as unknown as IAccessControl;
+  // The real resolver: the admins read is its own membership answer. Nobody
+  // signed in here is an Admin, so nobody may read the roster either.
+  const deploymentAdmins = opts.deploymentAdmins ?? ['Owner@Acme.com'];
+  const accessControl = new AccessControlService(workspaceService, KB, new NodeFs(), deploymentAdmins);
   const authService = { getUserById: vi.fn(async () => MEMBER) } as unknown as AuthService;
   const db = usersDbDouble(
     opts.accounts ?? [
@@ -102,7 +96,7 @@ async function makeHarness(
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       db,
       testKbContext({ kbDirName: KB }),
-      opts.deploymentAdmins ?? ['Owner@Acme.com'],
+      deploymentAdmins,
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -166,6 +160,14 @@ describe('GET /api/access/admins', () => {
     server = h.server;
     const body = (await (await fetch(`${h.baseUrl}/api/access/admins`)).json()) as { admins: unknown[] };
     expect(body.admins).toEqual([{ name: 'owner@acme.com', email: 'owner@acme.com' }]);
+  });
+
+  it('does not count the members of a GROUP named Admin, as the resolver does not', async () => {
+    const h = await makeHarness({ groups: 'groups:\n  Admin:\n    - priya@acme.com\n' });
+    server = h.server;
+    const text = await (await fetch(`${h.baseUrl}/api/access/admins`)).text();
+    expect(text).not.toContain('priya');
+    expect(text).toContain('sam.ortiz@acme.com');
   });
 
   it('leaves out a role member whose account is switched off, but not a switched-off deployment admin', async () => {

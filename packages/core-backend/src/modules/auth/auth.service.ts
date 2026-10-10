@@ -36,6 +36,13 @@ const ACTIVE_CACHE_MS = 30_000;
 const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL];
 
 /**
+ * What every password write refuses for the accounts the platform runs its own
+ * work as: a stored hash would make them able to sign in. One guard,
+ * {@link AuthService.assertNotSystemAccount}, on every path that writes one.
+ */
+const SYSTEM_ACCOUNT_PASSWORD_REFUSAL = 'System accounts cannot be given a password';
+
+/**
  * What every caller is told when it tries to give the deployment admin a
  * stored password — the Account page's own change and an admin's "Set
  * password" on the User Accounts page alike. One sentence in one place, so the
@@ -335,6 +342,7 @@ export class AuthService {
     }
     // Before the policy check, so the refusal names the real reason rather
     // than sending the admin off to pick a longer password first.
+    this.assertNotSystemAccount(normalizedEmail);
     if (this.isEnvAdminEmail(normalizedEmail)) {
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -382,9 +390,7 @@ export class AuthService {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
-    if (SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail)) {
-      throw new Error('System accounts cannot be given a password');
-    }
+    this.assertNotSystemAccount(normalizedEmail);
     if (this.isEnvAdminEmail(normalizedEmail)) {
       const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
       if (existing) {
@@ -485,6 +491,7 @@ export class AuthService {
     if (!user) throw new Error('User not found');
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
+    this.assertNotSystemAccount(user.email);
     if (this.isEnvAdminEmail(user.email)) {
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -537,6 +544,13 @@ export class AuthService {
         createdAt: row.createdAt,
       }))
       .sort((a, b) => a.email.localeCompare(b.email));
+  }
+
+  /** Every password write calls this first: the system accounts never get one. */
+  private assertNotSystemAccount(normalizedEmail: string): void {
+    if (SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail)) {
+      throw new Error(SYSTEM_ACCOUNT_PASSWORD_REFUSAL);
+    }
   }
 
   private assertPasswordPolicy(password: string): void {
