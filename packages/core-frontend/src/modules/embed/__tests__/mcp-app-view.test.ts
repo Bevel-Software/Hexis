@@ -367,8 +367,11 @@ describe('the MCP App view renewing its token', () => {
   it('asks with the path alone when the view was not opened at a heading', async () => {
     handshake({ serverTools: {} });
     const page = await opened({ path: 'Data/Thing.md' });
-    void page.renew();
+    const renewed = page.renew();
     expect(toolCalls()[0].params?.arguments).toEqual({ body: { path: 'Data/Thing.md' } });
+    // Answered, so no renewal timer outlives the test.
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2` } } });
+    await expect(renewed).resolves.toBe('t2');
   });
 
   it('shares one call between renewals asked for together', async () => {
@@ -441,6 +444,25 @@ describe('the MCP App view renewing its token', () => {
       expect(toolCalls()).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(20_000);
       await expect(renewed).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** Silence is not a refusal: a host that said nothing and answered too late is asked again. */
+  it('asks a host that said nothing again after it did not answer in time', async () => {
+    vi.useFakeTimers();
+    try {
+      handshake();
+      fromHost(pageResult({ path: 'Data/Thing.md' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const first = handoff()!.renew();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await expect(first).resolves.toBeNull();
+      const second = handoff()!.renew();
+      expect(toolCalls()).toHaveLength(2);
+      fromHost({ jsonrpc: '2.0', id: toolCalls()[1].id, result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2` } } });
+      await expect(second).resolves.toBe('t2');
     } finally {
       vi.useRealTimers();
     }

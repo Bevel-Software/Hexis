@@ -21,7 +21,14 @@ import {
   type EmbedFileView,
 } from '../services/embed.api';
 import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
-import { embedBaseUrl, embedToken, onEmbedTokenRenewed, withEmbedToken } from '../embed-config';
+import {
+  embedApiBase,
+  embedBaseUrl,
+  embedToken,
+  onEmbedTokenRenewed,
+  renewEmbedToken,
+  withEmbedToken,
+} from '../embed-config';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
@@ -110,6 +117,39 @@ export function EmbedView() {
   // renewal.
   const [token, setToken] = useState(embedToken);
   useEffect(() => onEmbedTokenRenewed(() => setToken(embedToken())), []);
+  // A picture is bytes under the token too, but the browser fetches it
+  // itself (`<img src>`), so its refusal never reaches `withEmbedToken`. A
+  // picture that fails to load is asked once more with `fetch` to learn why,
+  // and when the token was the reason, it is renewed — the addresses follow
+  // the renewal above, so the picture loads again under the fresh one. One
+  // renewal per token a picture was refused with: a picture refused under a
+  // token a picture already renewed to is left broken, never a loop.
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const imageRenewedTo = useRef<string | null>(null);
+  useEffect(() => {
+    const root = contentRef.current;
+    if (!root) return;
+    const onError = (event: Event) => {
+      const img = event.target;
+      if (!(img instanceof HTMLImageElement)) return;
+      const src = img.currentSrc || img.src;
+      // The browser reports the address absolute; the API base may be relative.
+      const raw = new URL(`${embedApiBase()}/api/embed/raw`, window.location.href).href;
+      if (!src.startsWith(`${raw}?`)) return;
+      const sent = new URL(src).searchParams.get('token');
+      // Under a token already replaced: the fresh address is on its way.
+      if (!sent || sent !== embedToken() || sent === imageRenewedTo.current) return;
+      void fetch(src, { credentials: 'omit' })
+        .then(async (res) => {
+          if (res.status !== 401 || sent !== embedToken()) return;
+          imageRenewedTo.current = await renewEmbedToken();
+        })
+        .catch(() => undefined);
+    };
+    // `error` does not bubble; an ancestor hears it on the way down.
+    root.addEventListener('error', onError, true);
+    return () => root.removeEventListener('error', onError, true);
+  });
   const registry = useAppRegistry();
   const [view, setView] = useState<EmbedFileView | null>(null);
   /**
@@ -548,7 +588,7 @@ export function EmbedView() {
         </p>
       )}
 
-      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+      <div ref={contentRef} className="min-h-0 min-w-0 flex-1 overflow-auto">
         <RendererSurfaceContext.Provider value={surface}>
           {/* The renderers read bytes through the surface above, so the
               workspace id here is never dialled — it is the default branch's,

@@ -642,6 +642,61 @@ describe('a chat view whose token runs out', () => {
   });
 
   /**
+   * A picture the browser loads itself (`<img src>`) never reaches
+   * `withEmbedToken`; one that fails is asked once more to learn why, and a
+   * refusal for the token renews it and gives the picture the fresh address.
+   */
+  it('renews when a picture is refused for the token, and loads it again under the fresh one', async () => {
+    const renew = inChat(async () => 'tok-2');
+    api.embedRawUrl.mockImplementation(
+      (token: string, path?: string) =>
+        `https://hexis.example/api/embed/raw?token=${token}${path ? `&path=${path}` : ''}`,
+    );
+    api.loadEmbed.mockResolvedValue(view({ content: '# Thing\n\n![shot](shot.png)\n' }));
+    const fetchMock = vi.fn(async () => new Response('', { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount();
+      const img = await screen.findByRole('img', { name: 'shot' });
+      fireEvent.error(img);
+      await waitFor(() =>
+        expect(screen.getByRole('img', { name: 'shot' }).getAttribute('src')).toBe(
+          'https://hexis.example/api/embed/raw?token=tok-2&path=/Data/shot.png',
+        ),
+      );
+      expect(renew).toHaveBeenCalledTimes(1);
+      // Refused again under the fresh token: left broken, never another renewal.
+      fireEvent.error(screen.getByRole('img', { name: 'shot' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(renew).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(EMBED_EXPIRED)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('asks for no renewal when a picture fails for a reason that is not the token', async () => {
+    const renew = inChat(async () => 'tok-2');
+    api.embedRawUrl.mockImplementation(
+      (token: string, path?: string) =>
+        `https://hexis.example/api/embed/raw?token=${token}${path ? `&path=${path}` : ''}`,
+    );
+    api.loadEmbed.mockResolvedValue(view({ content: '# Thing\n\n![shot](shot.png)\n' }));
+    const fetchMock = vi.fn(async () => new Response('', { status: 404 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount();
+      fireEvent.error(await screen.findByRole('img', { name: 'shot' }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await Promise.resolve();
+      expect(renew).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  /**
    * No renewal to be had — the host does not run tools for a view, the call
    * failed, or `open_page` refused (read access withdrawn): the expired
    * sentence as before, with the draft kept on screen above it to copy.

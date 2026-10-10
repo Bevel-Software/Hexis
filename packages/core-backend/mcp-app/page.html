@@ -168,7 +168,9 @@
             var id = 'call-' + callCount;
             var timer = setTimeout(function () {
               delete pending[id];
-              reject(new Error('the chat app did not answer'));
+              var silent = new Error('the chat app did not answer');
+              silent.timedOut = true;
+              reject(silent);
             }, RENEW_TIMEOUT_MS);
             pending[id] = function (message) {
               clearTimeout(timer);
@@ -219,10 +221,12 @@
                 if (handoff && typeof handoff === 'object') handoff.token = token;
                 return token;
               },
-              function () {
-                // The host refused the call, or never answered. One that
-                // said nothing about server tools has now said no.
-                if (serverTools === null) serverTools = false;
+              function (err) {
+                // The host refused the call: one that said nothing about
+                // server tools has now said no. One that did not answer in
+                // time has said nothing, and is asked again on the next
+                // refused call.
+                if (serverTools === null && !(err && err.timedOut)) serverTools = false;
                 return null;
               },
             )
