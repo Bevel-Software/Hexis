@@ -11,6 +11,9 @@ import { InviteDialogProvider } from '../state/invite-dialog';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { splitEmails } from '../invite-emails';
 
+/** Every invite promotion is sent `ifActive`: the server refuses a switched-off account at the write. */
+const ACTIVE = { ifActive: true };
+
 /**
  * The invite dialog: addresses become chips the way people paste them; the
  * dialog asks how the deployment signs people in before it lets anything be
@@ -32,7 +35,7 @@ const { listAccountsMock, createAccountMock, addMemberMock, fetchRolesMock, copy
           options?: { keepExistingPassword?: boolean },
         ) => Promise<{ passwordSet?: boolean }>
       >(),
-    addMemberMock: vi.fn<(canonical: string, email: string) => Promise<unknown>>(),
+    addMemberMock: vi.fn<(canonical: string, email: string, options?: { ifActive?: boolean }) => Promise<unknown>>(),
     fetchRolesMock: vi.fn<() => Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>>(),
     copyMock: vi.fn<(text: string) => Promise<boolean>>(),
     providersMock: vi.fn<() => Promise<LoginProviders>>(),
@@ -413,8 +416,8 @@ describe('InviteDialog: sending', () => {
     await screen.findByRole('dialog', { name: '2 people are invited' });
     expect(createAccountMock.mock.calls.map((c) => c[0])).toEqual(['ana@bevel.software']);
     expect(addMemberMock.mock.calls).toEqual([
-      ['admin', 'ana@bevel.software'],
-      ['admin', 'bo@bevel.software'],
+      ['admin', 'ana@bevel.software', ACTIVE],
+      ['admin', 'bo@bevel.software', ACTIVE],
     ]);
     expect(within(rowOf('bo@bevel.software')).getByText('Signs in with Duende Demo, now an admin')).toBeInTheDocument();
   });
@@ -677,7 +680,7 @@ describe('InviteDialog: a starting password', () => {
     expect(within(priya).getByText('Password not set')).toBeInTheDocument();
     expect(within(priya).getByText('Couldn’t set the password: Password too common')).toBeInTheDocument();
     // Left as it was: not made an admin either.
-    expect(addMemberMock.mock.calls).toEqual([['admin', 'lena@acme.com']]);
+    expect(addMemberMock.mock.calls).toEqual([['admin', 'lena@acme.com', ACTIVE]]);
   });
 
   it('when setting it fails on an account that has single sign-on, still counts it as invited and says how it signs in', async () => {

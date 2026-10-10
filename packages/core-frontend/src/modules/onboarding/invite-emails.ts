@@ -152,7 +152,9 @@ interface ListedAccount {
  * Admin too when invited as one: the admin asked for that person to be an
  * Admin, and that they could already sign in does not change the request.
  * A switched-off account is the exception: it is left unchanged, so it is
- * not made an Admin either (nor one found switched off at the write).
+ * not made an Admin either. The list says who was switched off when it was
+ * read; the promotion itself is sent `ifActive`, so the server refuses one
+ * switched off since, at the write, and the row says "switched off".
  * The roster is read first so an existing Admin (including one the server
  * configuration fixes) is reported as such rather than written again. A
  * refused promotion leaves the account standing as it was and says so on
@@ -160,6 +162,11 @@ interface ListedAccount {
  *
  * The password goes to the server and nowhere else: no outcome carries it.
  */
+/** The server refused a promotion because the account is switched off (`addMember`'s `ifActive`). */
+function isSwitchedOff(err: unknown): boolean {
+  return (err as { kind?: unknown } | null)?.kind === 'deactivated';
+}
+
 export async function sendInvites(
   emails: string[],
   role: InviteRole,
@@ -171,7 +178,7 @@ export async function sendInvites(
       password?: string,
       options?: { keepExistingPassword?: boolean },
     ): Promise<{ passwordSet?: boolean; deactivated?: boolean } | void>;
-    addMember(canonical: string, email: string): Promise<unknown>;
+    addMember(canonical: string, email: string, options?: { ifActive?: boolean }): Promise<unknown>;
     fetchRoles(): Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>;
   },
   options: { password?: string } = {},
@@ -228,9 +235,13 @@ export async function sendInvites(
         outcomes.push({ ...base, alreadyAdmin: true });
       } else {
         try {
-          await api.addMember(ADMIN_ROLE, email);
+          await api.addMember(ADMIN_ROLE, email, { ifActive: true });
           outcomes.push({ ...base, promoted: true });
         } catch (err) {
+          if (isSwitchedOff(err)) {
+            outcomes.push({ ...base, deactivated: true });
+            continue;
+          }
           const roleError = err instanceof Error ? err.message : 'Could not make them an admin';
           outcomes.push({ ...base, roleError });
         }
@@ -266,13 +277,17 @@ export async function sendInvites(
       continue;
     }
     try {
-      await api.addMember(ADMIN_ROLE, email);
+      await api.addMember(ADMIN_ROLE, email, { ifActive: true });
       outcomes.push(
         appeared
           ? { email, status: 'existing', ...appeared, promoted: true }
           : { email, status: 'created', role: 'admin', ...created },
       );
     } catch (err) {
+      if (isSwitchedOff(err)) {
+        outcomes.push({ email, status: 'existing', deactivated: true });
+        continue;
+      }
       const roleError = err instanceof Error ? err.message : 'Could not make them an admin';
       outcomes.push(
         appeared

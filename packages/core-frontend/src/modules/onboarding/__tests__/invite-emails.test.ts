@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { isInvited, sendInvites } from '../invite-emails';
 
+/** Every invite promotion is sent `ifActive`: the server refuses a switched-off account at the write. */
+const ACTIVE = { ifActive: true };
+
 /**
  * `sendInvites` with and without a starting password: who gets it, who keeps
  * their own, who is left alone, and that a send with a password never writes
@@ -74,8 +77,8 @@ describe('sendInvites with a starting password', () => {
     await sendInvites(['new@acme.com', 'nopw@acme.com'], 'admin', api, { password: PW });
     expect(api.createAccount.mock.calls.map((c) => c[2])).toEqual([PW, PW]);
     expect(api.addMember.mock.calls).toEqual([
-      ['admin', 'new@acme.com'],
-      ['admin', 'nopw@acme.com'],
+      ['admin', 'new@acme.com', ACTIVE],
+      ['admin', 'nopw@acme.com', ACTIVE],
     ]);
   });
 
@@ -149,7 +152,21 @@ describe('sendInvites with a starting password', () => {
   it('still promotes an account that got its own password since the read', async () => {
     api.createAccount.mockResolvedValue({ passwordSet: false });
     await sendInvites(['new@acme.com'], 'admin', api, { password: PW });
-    expect(api.addMember.mock.calls).toEqual([['admin', 'new@acme.com']]);
+    expect(api.addMember.mock.calls).toEqual([['admin', 'new@acme.com', ACTIVE]]);
+  });
+
+  it('reports an account switched off between the read and the promotion as switched off, not an admin', async () => {
+    // The list says switched on and it has its own password, so nothing is
+    // written but the promotion — which the server refuses at the write.
+    api.addMember.mockRejectedValueOnce(Object.assign(new Error('This account is switched off'), { kind: 'deactivated' }));
+    const result = await sendInvites(['own@acme.com'], 'admin', api, { password: PW });
+    expect(api.addMember.mock.calls).toEqual([['admin', 'own@acme.com', ACTIVE]]);
+    expect(result).toEqual({
+      status: 'sent',
+      outcomes: [{ email: 'own@acme.com', status: 'existing', hasOwnPassword: true, deactivated: true }],
+    });
+    if (result.status !== 'sent') throw new Error('not sent');
+    expect(result.outcomes.filter((o) => isInvited(o, true))).toEqual([]);
   });
 
   it('carries the password in no outcome', async () => {

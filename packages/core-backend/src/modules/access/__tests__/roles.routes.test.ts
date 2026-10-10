@@ -130,7 +130,10 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   } as unknown as WorkflowService;
 
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = usersDbDouble();
+  const db = usersDbDouble([
+    { email: 'off@example.com', deactivatedAt: new Date('2026-09-01T00:00:00Z') },
+    'on@example.com',
+  ]);
 
   const app = express();
   app.use(express.json());
@@ -257,5 +260,53 @@ describe('/api/access/roles routes', () => {
     expect(add.status).toBe(200);
     const body = (await add.json()) as { roles: { canonical: string; members: string[] }[] };
     expect(body.roles.find((r) => r.canonical === 'sales')!.members).toContain('mkt@example.com');
+  });
+
+  // The invite's promotion (`ifActive`) reads whether the account is switched
+  // off at the write, not from the list the dialog read before the send.
+  async function addAdmin(baseUrl: string, body: unknown) {
+    return fetch(`${baseUrl}/api/access/roles/admin/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('ifActive refuses a switched-off account (409 deactivated) and writes nothing', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await addAdmin(h.baseUrl, { email: 'Off@Example.com', ifActive: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'This account is switched off', kind: 'deactivated' });
+    const roster = (await (await fetch(`${h.baseUrl}/api/access/roles`)).json()) as {
+      roles: { canonical: string; members: string[] }[];
+    };
+    expect(roster.roles.find((r) => r.canonical === 'admin')!.members).not.toContain('off@example.com');
+  });
+
+  it('ifActive promotes a switched-on account, and one with no account yet', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    expect((await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive: true })).status).toBe(200);
+    const res = await addAdmin(h.baseUrl, { email: 'new@example.com', ifActive: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { roles: { canonical: string; members: string[] }[] };
+    expect(body.roles.find((r) => r.canonical === 'admin')!.members).toEqual(
+      expect.arrayContaining(['on@example.com', 'new@example.com']),
+    );
+  });
+
+  it('without ifActive, adding a switched-off account works as before', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    expect((await addAdmin(h.baseUrl, { email: 'off@example.com' })).status).toBe(200);
+  });
+
+  it('refuses a non-boolean ifActive (400)', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    for (const ifActive of ['true', 1, null]) {
+      expect((await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive })).status).toBe(400);
+    }
   });
 });

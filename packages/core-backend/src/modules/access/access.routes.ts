@@ -51,6 +51,7 @@ import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import '../auth/auth.middleware.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
@@ -1272,6 +1273,24 @@ export function createAccessRoutes(
       await assertRolesAdmin(user.email);
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
+      // `ifActive`: the invite's promotion. It leaves a switched-off account
+      // unchanged, so whether the account is switched off is read here, at
+      // the write, not from the list the dialog read before the send.
+      const ifActive = (req.body ?? {}).ifActive;
+      if (ifActive !== undefined && typeof ifActive !== 'boolean') {
+        res.status(400).json({ error: 'ifActive must be a boolean' });
+        return;
+      }
+      if (ifActive) {
+        const [account] = await db
+          .select({ deactivatedAt: users.deactivatedAt })
+          .from(users)
+          .where(inArray(users.emailBidx, [canonicalEmail(email)]));
+        if (account?.deactivatedAt) {
+          res.status(409).json({ error: 'This account is switched off', kind: 'deactivated' });
+          return;
+        }
+      }
       res.json({ roles: await rolesAdmin.addMember(user, canonical, email) });
     } catch (err) {
       const { status, body } = toHttpError(err);
