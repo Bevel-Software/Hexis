@@ -91,14 +91,20 @@ describe('useItemDeletedElsewhere', () => {
   // within the minute: the read that found it back ends "our own".
   it('tells the workspace the path is back, so a later delete is someone else\'s', async () => {
     const bus = makeFakeBus();
-    const ownDeletes = new Set([TOOL_A]);
+    // No marker at mount, so the open-time read stays out of it: only the
+    // event's read can forget the delete marked after the page opened.
+    const ownDeletes = new Set<string>();
     const isOwnDelete = vi.fn((path: string) => ownDeletes.has(path));
     const forgetOwnDelete = vi.fn((path: string) => { ownDeletes.delete(path); });
     readFile.mockResolvedValue('{}');
     const { result } = mount(bus, { isOwnDelete, forgetOwnDelete });
+    expect(readFile).not.toHaveBeenCalled();
 
+    ownDeletes.add(TOOL_A);
     act(() => bus.emit(changed(TOOL_A)));
     await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A));
+    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(ownDeletes.has(TOOL_A)).toBe(false);
 
     readFile.mockRejectedValue(new WorkspaceApiError(404));
     act(() => bus.emit(changed(TOOL_A)));
