@@ -532,7 +532,7 @@ describe('PluginPage', () => {
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }));
-    await waitFor(() => expect(href()).toBe('/connect'));
+    await waitFor(() => expect(href()).toBe('/skills-and-tools/connect'));
   });
 
   it('names a linked skill the members cannot read, above the integrations banner', async () => {

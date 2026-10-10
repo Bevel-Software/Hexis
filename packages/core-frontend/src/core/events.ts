@@ -102,8 +102,10 @@ export interface OpenComparisonDetail {
  * the write until the reader reaches for the browser's own reload button.
  *
  * An event rather than a direct call because the writing surfaces do not all
- * live under the Library's provider: `/connect` and `/secrets` are shell
- * routes of their own, so there is nothing to reach for from inside them.
+ * live under the Library's provider: `/secrets` and the `.tool` editor in
+ * Knowledge (`ToolRenderer`) are outside it, so there is nothing to reach for
+ * from inside them. (The Library's own tool page and "Connect your tools" are
+ * inside it, but announce the same way.)
  * Announcing regardless keeps ONE rule for every surface — with no listener
  * the announcement is simply unheard, which is the right outcome for a
  * provider that will refetch on its next mount anyway.

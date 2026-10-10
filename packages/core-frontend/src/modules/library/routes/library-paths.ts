@@ -24,6 +24,16 @@ import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
 export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
+ * "Connect your tools" — a Skills & Tools page, inside `LibraryLayout` like the
+ * welcome page, so it gets the sidebar, its toggle and the selected tab. The
+ * route (`LibraryRoutes`) is the segment, the shell's `/connect` redirect and
+ * every in-app link use the full path — both from here. The server keeps
+ * handing out `/connect`, which redirects here.
+ */
+export const CONNECT_TOOLS_SEGMENT = 'connect';
+export const CONNECT_TOOLS_PATH = `${LIBRARY_ROOT}/${CONNECT_TOOLS_SEGMENT}`;
+
+/**
  * What the sidebar should show as selected for a path. `null` on the pages that
  * are not a filtered view of the catalog — the item pages and the plugin
  * pages — where the gallery rows are all inactive.

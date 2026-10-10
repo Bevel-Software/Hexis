@@ -45,7 +45,7 @@ import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
-import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
+import { CONNECT_TOOLS_PATH, libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
@@ -737,7 +737,7 @@ export function SkillPage({
         />
       )}
 
-      <IntegrationsSection needed={needed} onConnect={() => navigate('/connect')} />
+      <IntegrationsSection needed={needed} onConnect={() => navigate(CONNECT_TOOLS_PATH)} />
 
       {skill && (
         <SharedViaPlugins

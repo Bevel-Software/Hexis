@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { setSidebarCollapsed } from '../../../layout/state/sidebar';
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { Toolbar } from '../Toolbar';
@@ -24,8 +24,10 @@ import { AdminContext } from '../../../admin/state/admin.context';
 import {
   ActiveAppIdContext,
   AppRegistryContext,
+  activeAppId as activeAppIdFor,
   makeRegistry,
   type AdminMenuItem,
+  type AppDef,
   type ToolbarItemDef,
 } from '../../../../core/registry';
 import { GIT_MENU_ITEMS } from '../../../git';
@@ -81,6 +83,8 @@ function renderToolbar(overrides?: {
   /** The shell-provided active app (see ActiveAppIdContext); the Library
    *  sidebar toggle follows this, not the path. */
   activeAppId?: string;
+  /** The switcher's apps; none by default. */
+  apps?: AppDef[];
 }) {
   const toggleExplorer = vi.fn();
   const toggleChat = vi.fn();
@@ -181,6 +185,7 @@ function renderToolbar(overrides?: {
                           // rows ahead of the registry's.
                           adminMenuItems: [...GIT_MENU_ITEMS, ...stubAdminMenuItems],
                           toolbarItems: overrides?.toolbarItems ?? [],
+                          apps: overrides?.apps ?? [],
                         })}
                       >
                         <Toolbar />
@@ -387,6 +392,51 @@ describe('Toolbar', () => {
           screen.getByRole('button', { name: /(hide|show) sidebar/i }),
         ).toBeInTheDocument();
       });
+    });
+  });
+
+  // "Connect your tools" is a Skills & Tools page. At `/connect` it belonged to
+  // no app, so the toggle vanished, the brand jumped left and no tab was
+  // selected. The active app here comes from the shell's own rule
+  // (`activeAppId`), not the harness's guess, so the test fails if the page
+  // ever leaves the app's path again.
+  describe('on Connect your tools', () => {
+    beforeEach(() => setSidebarCollapsed(false));
+
+    const apps: AppDef[] = [
+      { id: 'knowledge', label: 'Knowledge', path: '/workspace', order: 10, element: <div /> },
+      { id: 'skills-tools', label: 'Skills & Tools', path: '/skills-and-tools', order: 20, element: <div /> },
+    ];
+    const renderAt = (route: string) =>
+      renderToolbar({
+        route,
+        apps,
+        activeAppId: activeAppIdFor(apps, route),
+        layout: { canToggleExplorer: false, canToggleChat: false },
+      });
+
+    it('shows the sidebar toggle, and it hides and shows the sidebar', async () => {
+      renderAt('/skills-and-tools/connect');
+      await userEvent.click(screen.getByRole('button', { name: 'Hide sidebar' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Show sidebar' }));
+      expect(screen.getByRole('button', { name: 'Hide sidebar' })).toHaveAttribute('aria-expanded', 'true');
+    });
+
+    it('selects Skills & Tools', () => {
+      renderAt('/skills-and-tools/connect');
+      const appsNav = screen.getByRole('navigation', { name: 'Apps' });
+      expect(within(appsNav).getByRole('link', { name: 'Skills & Tools' })).toHaveAttribute('aria-current', 'page');
+      expect(within(appsNav).getByRole('link', { name: 'Knowledge' })).not.toHaveAttribute('aria-current');
+    });
+
+    it('renders the same top bar as /skills-and-tools, element for element', () => {
+      const markup = (route: string) => {
+        renderAt(route);
+        const html = document.querySelector('header')!.outerHTML;
+        cleanup();
+        return html;
+      };
+      expect(markup('/skills-and-tools/connect')).toBe(markup('/skills-and-tools'));
     });
   });
 

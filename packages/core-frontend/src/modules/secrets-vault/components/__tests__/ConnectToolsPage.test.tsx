@@ -8,11 +8,12 @@ import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
 /**
  * What this page owes the Library.
  *
- * `/connect` is a shell route of its own — no Library is mounted under it — so
- * a key entered here has no provider to call. It ANNOUNCES instead, the one
- * rule every writing surface in the app follows, and whichever surface is
- * holding a catalog picks it up. The rest of the page's behaviour (the agent
- * -connect mode, the Finish button) is not what these tests are about.
+ * The page sits inside Skills & Tools (`/skills-and-tools/connect`), under the
+ * Library's provider, yet it does not call that provider: a key entered here
+ * is ANNOUNCED, the one rule every writing surface in the app follows, and the
+ * provider — the one behind the sidebar's setup reminder — picks it up. The
+ * rest of the page's behaviour (the agent-connect mode, the Finish button) is
+ * not what these tests are about.
  */
 
 const connectMock = vi.hoisted(() => ({
@@ -79,7 +80,7 @@ function renderPage() {
 
 describe('ConnectToolsPage: telling the Library a credential landed', () => {
   beforeEach(() => {
-    window.history.replaceState(null, '', '/connect');
+    window.history.replaceState(null, '', '/skills-and-tools/connect');
     sessionStorage.clear();
     heard.mockReset();
     connectMock.getConnectPending.mockReset().mockResolvedValue(pending(false));
@@ -122,7 +123,7 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   });
 
   it('announces an OAuth return, and consumes the fragment', async () => {
-    window.history.replaceState(null, '', '/connect#authorized');
+    window.history.replaceState(null, '', '/skills-and-tools/connect#authorized');
     renderPage();
 
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
@@ -132,7 +133,7 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   it('announces a failed OAuth return too, and consumes that fragment', async () => {
     // A refused sign-in is still news: the provider may have revoked what was
     // there, and the Library's copy predates the browser leaving either way.
-    window.history.replaceState(null, '', '/connect#error=Nope.');
+    window.history.replaceState(null, '', '/skills-and-tools/connect#error=Nope.');
     renderPage();
 
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
@@ -421,5 +422,86 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
       // Survived, not re-asked — a refresh is not a reason to call the provider.
       expect(varsMock.checkToolConnection).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('ConnectToolsPage: inside Skills & Tools', () => {
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect');
+    sessionStorage.clear();
+    connectMock.getConnectPending.mockReset().mockResolvedValue(pending(false));
+    connectMock.getMcpOAuthRequest.mockReset();
+    connectMock.completeMcpOAuth.mockReset();
+  });
+
+  // The link existed because the page had no other way back. The sidebar and
+  // the selected tab are that way now, as on every Skills & Tools page.
+  it('carries no back link of its own', async () => {
+    renderPage();
+    expect(await screen.findByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Refresh/ })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Skills & tools/i })).toBeNull();
+    expect(screen.queryByText(/‹/)).toBeNull();
+  });
+
+  it('shows a sign-in that came back to it', async () => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect?from=agent#authorized=1');
+    renderPage();
+    await screen.findByLabelText('API_KEY value');
+    expect(
+      screen.getByText('Signed in. You can go back to your agent and try again.'),
+    ).toBeInTheDocument();
+    // The fragment is consumed; the address and its query stay.
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(
+      '/skills-and-tools/connect?from=agent',
+    );
+  });
+
+  // The page's first load answers right after the fragment is read, and a
+  // successful load clears the page's error — which used to wipe a refusal
+  // before anyone saw it. Waiting for the list proves the load has landed.
+  it('shows a refused sign-in that came back to it, after the list has loaded', async () => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect#error=The%20provider%20said%20no.');
+    renderPage();
+    await screen.findByLabelText('API_KEY value');
+    expect(screen.getByRole('alert')).toHaveTextContent('The provider said no.');
+    expect(window.location.hash).toBe('');
+  });
+
+  it('says the sign-in failed when the refusal carries no reason', async () => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect#error=');
+    renderPage();
+    await screen.findByLabelText('API_KEY value');
+    expect(screen.getByRole('alert')).toHaveTextContent('Authorization failed.');
+  });
+
+  it('keeps agent-connect mode: the per-tool include/skip control, and Finish back to the agent', async () => {
+    window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=signed-state');
+    connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null });
+    connectMock.completeMcpOAuth.mockResolvedValue('/agent-callback?code=abc');
+    renderPage();
+
+    expect(
+      await screen.findByRole('checkbox', {
+        name: 'Skip this tool (removes your saved keys and sign-ins for it)',
+      }),
+    ).toBeInTheDocument();
+    const finish = await screen.findByRole('button', { name: 'Finish & return to your agent' });
+
+    // jsdom does not navigate, so hold the address in a plain object for the
+    // click: what Finish writes to it is where the browser would have gone.
+    const realLocation = window.location;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...realLocation, href: realLocation.href },
+    });
+    try {
+      fireEvent.click(finish);
+      await waitFor(() => expect(window.location.href).toBe('/agent-callback?code=abc'));
+    } finally {
+      Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
+    }
+    expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state');
+    expect(connectMock.getMcpOAuthRequest).toHaveBeenCalledWith('signed-state');
   });
 });

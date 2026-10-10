@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigationType } from 'react-router-dom';
 import { ShellRoutes } from '../CoreAppShell';
 import type { AppDef } from '../registry';
 
@@ -148,5 +148,47 @@ describe('ShellRoutes — the change-request address', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/change-requests\/276$/);
     expect(await screen.findByTestId('cr-dialog')).toHaveTextContent('276');
     expect(screen.queryByTestId('knowledge-surface')).not.toBeInTheDocument();
+  });
+});
+
+describe('ShellRoutes — /connect', () => {
+  /** The whole address, and how the router got there. */
+  function AddressProbe() {
+    const { pathname, search, hash } = useLocation();
+    return (
+      <>
+        <div data-testid="address">{pathname + search + hash}</div>
+        <div data-testid="navigation">{useNavigationType()}</div>
+      </>
+    );
+  }
+
+  function renderConnect(path: string) {
+    return render(
+      <MemoryRouter initialEntries={[path]}>
+        <ShellRoutes apps={apps} />
+        <AddressProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  // The server keeps handing out `/connect` — MCP consent (`?oauth=`), tool
+  // sign-in returns (`#authorized`, `#error=`) — and each of those depends on
+  // what rides along, so the redirect must carry the query AND the fragment.
+  it.each([
+    ['/connect', '/skills-and-tools/connect'],
+    ['/connect?oauth=abc&x=1#authorized=1', '/skills-and-tools/connect?oauth=abc&x=1#authorized=1'],
+    ['/connect#error=Nope.', '/skills-and-tools/connect#error=Nope.'],
+    ['/connect?from=agent', '/skills-and-tools/connect?from=agent'],
+  ])('sends %s to %s inside Skills & Tools', (from, to) => {
+    renderConnect(from);
+    expect(screen.getByTestId('address').textContent).toBe(to);
+    expect(screen.getByTestId('skills-surface')).toBeInTheDocument();
+  });
+
+  // Back must not land on an address that only bounces forward again.
+  it('replaces the history entry rather than pushing one', () => {
+    renderConnect('/connect?oauth=abc');
+    expect(screen.getByTestId('navigation')).toHaveTextContent('REPLACE');
   });
 });

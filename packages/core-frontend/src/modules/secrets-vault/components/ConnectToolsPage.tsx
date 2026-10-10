@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
+import { pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '../services/tool-secrets.api';
@@ -85,6 +85,10 @@ export function ConnectToolsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A sign-in's refusal, carried back in the fragment. Its own state, like
+  // `notice`, because the first load answers moments later and a successful
+  // load clears `error` — which used to wipe this before anyone saw it.
+  const [returnError, setReturnError] = useState<string | null>(null);
   // Agent-connect mode: the signed authorization state + who is asking.
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
@@ -140,6 +144,7 @@ export function ConnectToolsPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the first load; refresh sets state once it answers
     void refresh();
   }, [refresh]);
 
@@ -148,6 +153,7 @@ export function ConnectToolsPage() {
     const fromUrl = new URLSearchParams(window.location.search).get('oauth');
     if (fromUrl) {
       sessionStorage.setItem(MCP_OAUTH_STATE_KEY, fromUrl);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the query is read once, on arrival
       setAgentState(fromUrl);
     } else {
       setAgentState(sessionStorage.getItem(MCP_OAUTH_STATE_KEY));
@@ -182,8 +188,9 @@ export function ConnectToolsPage() {
     const params = new URLSearchParams(hash);
     // "Signed in", not "Connected": the sign-in landing here proves a token was
     // issued, not that a call with it will succeed.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the fragment is read once, on arrival
     if (params.has('authorized')) setNotice('Signed in. You can go back to your agent and try again.');
-    else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
+    else if (params.has('error')) setReturnError(params.get('error') || 'Authorization failed.');
     if (params.has('authorized') || params.has('error')) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
       // Whichever way the round-trip went, a provider has just had its say
@@ -196,6 +203,7 @@ export function ConnectToolsPage() {
   const onAuthorize = async (id: string) => {
     try {
       const url = await startOAuth(id);
+      // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -205,6 +213,7 @@ export function ConnectToolsPage() {
   const onAuthorizeTool = async (slug: string, varName: string) => {
     try {
       const url = await startToolOAuth(slug, varName);
+      // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -297,18 +306,11 @@ export function ConnectToolsPage() {
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
 
+  // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
+  // scroller, so the header scrolls with the list rather than pinning.
   return (
-    <div className="flex h-full flex-col bg-canvas text-ink">
+    <div className="flex flex-col bg-canvas text-ink">
       <header className="flex shrink-0 items-center gap-3 border-b border-line px-8 py-4">
-        {/* The one page that had NO way back: it is reached from the library's
-            "Finish setup" and from tool pages, and stranded everyone it
-            helped. The Library is where every one of those journeys starts. */}
-        <Link
-          to={LIBRARY_ROOT}
-          className="rounded-xs text-detail text-ink-muted hover:text-ink"
-        >
-          {'‹ Skills & tools'}
-        </Link>
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
         {/* Quiet, like the refetch a save triggers. A loud one drops the page
             to "Loading…", which unmounts the row holding the verdict of the
@@ -326,7 +328,7 @@ export function ConnectToolsPage() {
         </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-8 py-6">
+      <div className="px-8 py-6">
         <div className="max-w-2xl">
           {agentMode && (
             <Surface tone="surface" radius="xl" elevation="card" padded className="mb-4">
@@ -358,6 +360,11 @@ export function ConnectToolsPage() {
           {error && (
             <Banner role="alert" tone="danger" className="mb-3">
               {error}
+            </Banner>
+          )}
+          {returnError && (
+            <Banner role="alert" tone="danger" className="mb-3">
+              {returnError}
             </Banner>
           )}
           {notice && (

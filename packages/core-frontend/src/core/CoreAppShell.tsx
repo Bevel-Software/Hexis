@@ -29,6 +29,7 @@ import { FileViewer } from '../modules/workspace/components/FileViewer';
 import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
 import { FileRoute } from '../modules/workspace/components/FileRoute';
 import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
+import { CONNECT_TOOLS_PATH } from '../modules/library';
 import { AppLayout } from '../modules/layout/components/AppLayout';
 import {
   LayoutContext,
@@ -38,7 +39,6 @@ import {
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
@@ -416,9 +416,9 @@ export function AppChrome() {
  *    still wins over it).
  *  - The standalone settings pages — full pages under the toolbar, outside
  *    any app surface (activeAppId is undefined there, so the switcher shows
- *    no checkmark and the pane toggles hide via NO_PANES_LAYOUT). `/connect`
- *    and `/secrets` are OAuth return targets: external redirects land on
- *    these exact URLs, so they must stay routes with these exact paths.
+ *    no checkmark and the pane toggles hide via NO_PANES_LAYOUT). `/secrets`
+ *    is an OAuth return target: external redirects land on this exact URL,
+ *    so it must stay a route with this exact path.
  *
  *    They now share a persistent nav via a PATHLESS `SettingsLayout` route,
  *    so moving between them no longer means re-opening the profile menu. They
@@ -429,12 +429,26 @@ export function AppChrome() {
  *    reachable, so a non-admin who follows a link gets the explanatory
  *    "Admins only" page rather than a silent redirect to somewhere they did
  *    not ask for. The nav merely declines to advertise the rows.
+ *  - `/connect`, a permanent redirect to "Connect your tools", which is a
+ *    Skills & Tools page (`CONNECT_TOOLS_PATH`). The server still hands out
+ *    `/connect` — MCP consent, the claude.ai hand-off, tool sign-in returns,
+ *    agents' "sign in again" links — so the redirect stays for as long as any
+ *    server code writes that address.
  *  - Redirects: `/` → `/workspace`, and a final catch-all for anything
  *    unknown (including the retired `/library` path).
  *
  * Extracted from AppChrome so the routing behavior is testable without the
  * full provider stack.
  */
+/**
+ * `/connect` → `/skills-and-tools/connect`, keeping the query and fragment, as
+ * a REPLACE: Back must not return to an address that only bounces forward.
+ */
+function ConnectToolsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`${CONNECT_TOOLS_PATH}${search}${hash}`} replace />;
+}
+
 export function ShellRoutes({ apps }: { apps: AppDef[] }) {
   return (
     <Routes>
@@ -445,11 +459,15 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           element={app.element}
         />
       ))}
-      {/* OUTSIDE the settings layout, deliberately. `/connect` is a flow page,
-          not a settings destination: it has no row in the profile menu, it is
-          an OAuth landing target, and in its agent-connect mode somebody else
-          is blocked waiting on a Finish button. Do not "complete the set". */}
-      <Route path="/connect" element={<ConnectToolsPage />} />
+      {/* OUTSIDE the settings layout, deliberately. "Connect your tools" is a
+          flow page, not a settings destination: it has no row in the profile
+          menu, it is an OAuth landing target, and in its agent-connect mode
+          somebody else is blocked waiting on a Finish button. Do not
+          "complete the set". It is a Skills & Tools page instead, and
+          `/connect` — the address the server hands out — is its permanent
+          redirect, carrying the query (`?oauth=`) and the fragment
+          (`#authorized`, `#error=`) those landings depend on. */}
+      <Route path="/connect" element={<ConnectToolsRedirect />} />
       {/* A PATHLESS layout route: the child paths below stay byte-identical,
           which is what keeps `/secrets` the exact URL external OAuth redirects
           land on. Its only job is to keep the settings nav mounted across
@@ -494,8 +512,8 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           every summary's `url`). It opens the request itself, in the
           change-request view, over a quiet page; closing it goes to Knowledge.
           Before this route existed the catch-all below swallowed the link.
-          OUTSIDE the settings layout and the apps, like `/connect`: a landing
-          target, not a destination with a nav row. */}
+          OUTSIDE the settings layout and the apps, like the `/connect`
+          redirect: a landing target, not a destination with a nav row. */}
       <Route path="/change-requests/:number" element={<ChangeRequestLink />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
