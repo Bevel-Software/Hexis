@@ -1754,13 +1754,16 @@ describe('SkillPage: deleted by someone else', () => {
 
   it("is not shown for this person's own delete, nor for another skill's file", async () => {
     const bus = makeFakeBus();
-    const pending = vi.fn((path: string) => path.startsWith('knowledge-base/Skills/newsletter'));
+    // The delete starts once the page is open, as it does from its sidebar.
+    let deleting = false;
+    const pending = vi.fn((path: string) => deleting && path.startsWith('knowledge-base/Skills/newsletter'));
     renderPage(false, [], [], bus, undefined, undefined, undefined, git, {
       ...workspace,
       isOwnDelete: pending,
     } as WorkspaceContextValue);
     await settled();
 
+    deleting = true;
     gone();
     act(() => bus.emit(changed({ path: 'knowledge-base/Skills/other/SKILL.md' })));
     expect(apiMock.readFile).not.toHaveBeenCalled();
