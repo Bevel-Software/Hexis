@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
-import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard.js';
-import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
-import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { testKbContext, TEST_BRANCH_MODEL } from '../../__tests__/kb-context.js';
+import { makeRolesYamlWriteValidator } from '../../modules/access-model/roles-yaml-guard.js';
+import { createFileReaderRegistry } from '../../modules/workspace/file-readers/file-reader.registry.js';
+import type { DocExtractOutcome, DocExtractService } from '../../modules/workspace/file-readers/doc-extract.service.js';
 import { composeEmbedService, type EmbedComposition } from '../compose-embed.js';
-import { EmbedRefParseError } from '../embed-link.js';
+import { EmbedRefParseError } from '../../modules/embed/embed-link.js';
 
 const KB = 'knowledge-base';
 const BRANCH = TEST_BRANCH_MODEL.defaultBranch;

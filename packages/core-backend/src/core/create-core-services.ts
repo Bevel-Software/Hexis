@@ -19,7 +19,7 @@ import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
 import type { EmbedService } from '../modules/embed/embed.service.js';
-import { composeEmbedService } from '../modules/embed/compose-embed.js';
+import { composeEmbedService } from './compose-embed.js';
 import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
 import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
