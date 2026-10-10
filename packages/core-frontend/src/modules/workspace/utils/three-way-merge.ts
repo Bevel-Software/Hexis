@@ -1,4 +1,4 @@
-import { diff3Merge } from 'node-diff3';
+import { diff3Merge, diffIndices } from 'node-diff3';
 
 /**
  * Line-based three-way merge of a tab's unsaved edits onto content that
@@ -16,10 +16,13 @@ import { diff3Merge } from 'node-diff3';
  * file's `base` and `theirs` keep their CRs, and diffing those as they are
  * made every line look changed on both sides — a conflict that discarded
  * the edits over an upstream change nowhere near them. The result takes
- * `theirs`' line endings, the file's as the branch holds it.
+ * `theirs`' line endings, the file's as the branch holds it, line by line:
+ * a line it shares with `theirs` keeps that line's ending, so a file mixing
+ * CRLF and LF is not rewritten wholesale; a line that replaced one of
+ * `theirs` takes the ending of the line it replaced, and a line only the
+ * edits added takes the ending most of `theirs` uses.
  */
 export function threeWayMerge(base: string, ours: string, theirs: string): string | null {
-  const eol = theirs.includes('\r\n') ? '\r\n' : '\n';
   const b = toLf(base);
   const o = toLf(ours);
   const t = toLf(theirs);
@@ -37,7 +40,39 @@ export function threeWayMerge(base: string, ours: string, theirs: string): strin
     }
     merged = lines.join('\n');
   }
-  return eol === '\n' ? merged : merged.replace(/\n/g, eol);
+  return withEndingsOf(theirs, t, merged);
+}
+
+
+/** `merged` (LF) with each line ended as the matching line of `theirs` is. */
+function withEndingsOf(theirs: string, theirsLf: string, merged: string): string {
+  if (!theirs.includes('\r\n')) return merged;
+  const tLines = theirsLf.split('\n');
+  // The ending after each line of `theirs`; the last line has none.
+  const tEnds = theirs
+    .split('\n')
+    .map((line, i, all) => (i === all.length - 1 ? '' : line.endsWith('\r') ? '\r\n' : '\n'));
+  const crlf = tEnds.filter((e) => e === '\r\n').length;
+  const lf = tEnds.filter((e) => e === '\n').length;
+  const fallback = crlf >= lf ? '\r\n' : '\n';
+  const mLines = merged.split('\n');
+  const ends: string[] = new Array(mLines.length).fill(fallback);
+  // Lines between the differences are shared with `theirs`, in order.
+  let i = 0;
+  let j = 0;
+  const shareUpTo = (mEnd: number, tEnd: number) => {
+    while (i < mEnd && j < tEnd) ends[i++] = tEnds[j++] || fallback;
+  };
+  for (const d of diffIndices(mLines, tLines)) {
+    shareUpTo(d.buffer1[0], d.buffer2[0]);
+    for (let k = 0; k < d.buffer1[1] && k < d.buffer2[1]; k++) {
+      ends[d.buffer1[0] + k] = tEnds[d.buffer2[0] + k] || fallback;
+    }
+    i = d.buffer1[0] + d.buffer1[1];
+    j = d.buffer2[0] + d.buffer2[1];
+  }
+  shareUpTo(mLines.length, tLines.length);
+  return mLines.map((line, k) => (k === mLines.length - 1 ? line : line + ends[k])).join('');
 }
 
 function toLf(text: string): string {

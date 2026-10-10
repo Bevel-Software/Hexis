@@ -1571,8 +1571,9 @@ export function FileViewer() {
           )}
 
           {/* The file changed on the branch under unsaved edits: a commit
-              pulled from the git host, which the file lock cannot stop. */}
-          {changedOnBranch && openFilePath && (
+              pulled from the git host, which the file lock cannot stop. Not
+              while proposing: those edits are for the suggestions branch. */}
+          {changedOnBranch && openFilePath && !proposeMode && (
             <Banner
               role="status"
               tone={changedOnBranch === 'merged' ? 'wait' : 'danger'}

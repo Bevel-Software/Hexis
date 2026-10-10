@@ -54,6 +54,9 @@ const PERSIST_DEBOUNCE_MS = 200;
 // balance: responsive without monopolizing the browser's HTTP/1.1 connection
 // budget or stressing the lock service.
 const UPLOAD_CONCURRENCY = 4;
+// How long a tree refresh trusts a read that found an open tab's file,
+// missing from the tree, still there — see `treeAbsentCheckedAtRef`.
+const TREE_ABSENT_RECHECK_MS = 30_000;
 const UNSAVED_TAB_WARNING = (filename: string) =>
   `You have unsaved changes in ${filename}. Close anyway?`;
 const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
@@ -284,6 +287,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * the window between the delete and the read that learns of it.
    */
   const existenceChecksRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  /**
+   * When a tree refresh last read an open tab's file, missing from the tree,
+   * and found it there after all (a file the tree leaves out: access-pruned,
+   * `.bevelignore`d), by path. Refreshes run on every change event; within
+   * `TREE_ABSENT_RECHECK_MS` of that read they do not read it again.
+   */
+  const treeAbsentCheckedAtRef = useRef<Map<string, number>>(new Map());
   const trackExistenceCheck = useCallback((path: string, read: Promise<unknown>) => {
     const gone = read.then(
       () => false,
@@ -450,7 +460,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const nextName = tab.deletedBy?.name ?? name;
       if (tab.deletedBy && tab.deletedBy.name === nextName) return prev;
       const next = prev.slice();
-      next[idx] = { ...tab, deletedBy: { name: nextName }, pendingFileContent: null };
+      // An agent version awaiting review goes with the file: its tool call
+      // already wrote those bytes to the branch, so they are in the history
+      // of the deleted file — unlike unsaved edits, which exist only here.
+      next[idx] = {
+        ...tab,
+        deletedBy: { name: nextName, at: tab.deletedBy?.at ?? Date.now() },
+        pendingFileContent: null,
+      };
       return next;
     });
   }, [isPendingDelete]);
@@ -474,9 +491,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         const present = collectPaths(tree);
         for (const tab of openTabsRef.current) {
           if (present.has(tab.path) || tab.deletedBy || isPendingDelete(tab.path)) continue;
+          if (existenceChecksRef.current.has(tab.path)) continue;
+          const checkedAt = treeAbsentCheckedAtRef.current.get(tab.path);
+          if (checkedAt !== undefined && Date.now() - checkedAt < TREE_ABSENT_RECHECK_MS) continue;
           const readFrom = workspaceId;
           const read = readFile(readFrom, tab.path);
           trackExistenceCheck(tab.path, read);
+          read.then(
+            () => treeAbsentCheckedAtRef.current.set(tab.path, Date.now()),
+            () => treeAbsentCheckedAtRef.current.delete(tab.path),
+          );
           read.catch((err) => {
             if (workspaceIdRef.current !== readFrom) return;
             if (err instanceof WorkspaceApiError && err.status === 404) markTabDeleted(tab.path, null);

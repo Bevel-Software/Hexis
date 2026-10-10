@@ -16,6 +16,7 @@ import {
 import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
 import { copyToClipboard } from '../../../lib/clipboard';
+import { formatRelativeTime } from '../../../lib/utils';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -782,6 +783,16 @@ function basename(path: string): string {
  * stays on screen with Copy edits beside Close — the tab is the only place
  * those edits exist.
  */
+/**
+ * How long ago this tab learned of the delete: "a moment ago" within the
+ * minute, then the relative time, so a tab revisited later does not claim
+ * the delete just happened.
+ */
+function deletedAgo(at: number | undefined): string {
+  if (at === undefined || Date.now() - at < 60_000) return 'a moment ago';
+  return formatRelativeTime(at);
+}
+
 function DeletedFileNotice({
   tab,
   branch,
@@ -799,7 +810,7 @@ function DeletedFileNotice({
       <p className="text-ui text-ink-muted">
         <span className="font-mono text-ink">{basename(tab.path)}</span> was deleted from{' '}
         <span className="font-mono text-ink">{branch}</span>
-        {name ? ` by ${name} a moment ago.` : '.'}
+        {name ? ` by ${name} ${deletedAgo(tab.deletedBy?.at)}.` : '.'}
       </p>
       {edits !== null && (
         <div className="space-y-2 text-left">

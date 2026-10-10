@@ -1478,6 +1478,23 @@ describe('FileViewer: proposing a change without write access', () => {
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
   });
+
+  it('shows no changed-on-the-branch banner while proposing: those edits are not on this branch', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness initialContent="official" branch="target-company-state" authUser={reader} captureTyped />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    await user.type(await screen.findByRole('textbox'), ' proposed');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'upstream', savedContent: 'upstream', outcome: 'discarded' });
+    });
+
+    expect(screen.getByText(/You're proposing a change/)).toBeInTheDocument();
+    expect(screen.queryByText(/changed on the branch while you were editing/)).not.toBeInTheDocument();
+  });
 });
 
 /**

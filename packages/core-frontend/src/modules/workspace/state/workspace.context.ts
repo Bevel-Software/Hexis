@@ -104,10 +104,12 @@ export interface OpenTab {
    * open with its `content` and `isDirty` intact, so unsaved edits survive,
    * and the file page shows "This file was deleted" in place of the file.
    * `name` is who deleted it, when the change event named a person; null when
-   * the deletion was learned another way (a tree refresh, a re-read). Only
-   * Close clears it, or the file coming back. Absent on every other tab.
+   * the deletion was learned another way (a tree refresh, a re-read). `at`
+   * is when this tab learned of it (ms since the epoch), so a notice read
+   * later says how long ago rather than "a moment ago". Only Close clears
+   * it, or the file coming back. Absent on every other tab.
    */
-  deletedBy?: { name: string | null } | null;
+  deletedBy?: { name: string | null; at: number } | null;
   /**
    * Set when a change pulled from the git host reached this tab while it had
    * unsaved edits: `merged` when the edits were merged onto the new content

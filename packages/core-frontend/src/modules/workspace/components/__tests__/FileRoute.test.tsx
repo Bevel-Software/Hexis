@@ -1126,7 +1126,7 @@ describe('FileRoute: a file deleted by someone else', () => {
   const KEEP = 'Knowledge/Keep.md';
 
   function deletedTab(overrides: Partial<OpenTab> = {}): OpenTab {
-    return { ...makeTab({ path: PATH, content: '# Draft\n\nA page to delete.' }), deletedBy: { name: 'Sam Rivera' }, ...overrides };
+    return { ...makeTab({ path: PATH, content: '# Draft\n\nA page to delete.' }), deletedBy: { name: 'Sam Rivera', at: Date.now() }, ...overrides };
   }
 
   function openOn(tab: OpenTab, others: OpenTab[] = [], extra: Partial<WorkspaceContextValue> = {}) {
@@ -1156,8 +1156,16 @@ describe('FileRoute: a file deleted by someone else', () => {
     expect(screen.queryByText(/Your unsaved edits exist only here/)).not.toBeInTheDocument();
   });
 
+  it('says how long ago when the tab learned of the delete a while back', async () => {
+    openOn(deletedTab({ deletedBy: { name: 'Sam Rivera', at: Date.now() - 5 * 60_000 } }));
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    expect(notice().textContent).toContain('Draft.md was deleted from main by Sam Rivera 5m ago.');
+    expect(notice().textContent).not.toContain('a moment ago');
+  });
+
   it('names nobody when the change event named nobody', async () => {
-    openOn(deletedTab({ deletedBy: { name: null } }));
+    openOn(deletedTab({ deletedBy: { name: null, at: Date.now() } }));
 
     await screen.findByRole('heading', { name: 'This file was deleted' });
     expect(notice().textContent).toContain('Draft.md was deleted from main.');
@@ -1180,7 +1188,7 @@ describe('FileRoute: a file deleted by someone else', () => {
   });
 
   it('shows the notice for a background tab whose bytes were dropped, not "Opening"', async () => {
-    openOn(deletedTab({ content: null, savedContent: null, deletedBy: { name: null } }));
+    openOn(deletedTab({ content: null, savedContent: null, deletedBy: { name: null, at: Date.now() } }));
 
     expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
     expect(screen.queryByText(/Opening Draft\.md/)).not.toBeInTheDocument();

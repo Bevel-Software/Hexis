@@ -352,7 +352,7 @@ describe('a file deleted by someone else', () => {
     disk.delete('KB/Draft.md');
     act(() => bus.emit(fileChanged('KB/Draft.md')));
 
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
     // Still the active tab — the page shows the notice, it does not move.
     expect(result.current.activeTab?.path).toBe('KB/Draft.md');
     expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.');
@@ -366,7 +366,7 @@ describe('a file deleted by someone else', () => {
     disk.delete('KB/Draft.md');
     act(() => bus.emit(fileChanged('KB/Draft.md')));
 
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
     expect(result.current.activeTab?.isDirty).toBe(true);
     expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.\n\nA paragraph I added.');
   });
@@ -378,7 +378,7 @@ describe('a file deleted by someone else', () => {
     disk.delete('KB/Draft.md');
     act(() => bus.emit(fileChanged('KB/Draft.md', GIT_SYNC)));
 
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: null }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
   });
 
   it('names nobody when only a tree refresh shows the file gone', async () => {
@@ -388,7 +388,7 @@ describe('a file deleted by someone else', () => {
     disk.delete('KB/Draft.md');
     act(() => bus.emit(treeChanged()));
 
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: null }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
   });
 
   it('does not mark a tab the tree omits but the server still reads', async () => {
@@ -402,6 +402,51 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.deletedBy ?? null).toBeNull();
   });
 
+  it('reads a file the tree omits once, not again on every refresh', async () => {
+    apiMocks.listFiles.mockImplementation(async () => treeOf([]));
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const reads = () => apiMocks.readFile.mock.calls.filter(([, p]) => p === 'KB/Draft.md').length;
+    const before = reads();
+
+    act(() => bus.emit(treeChanged()));
+    await settle();
+    expect(reads()).toBe(before + 1);
+    act(() => bus.emit(treeChanged()));
+    act(() => bus.emit(treeChanged()));
+    await settle();
+    expect(reads()).toBe(before + 1);
+
+    // A while later the next refresh checks again — and learns of a delete.
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 31_000);
+    try {
+      disk.delete('KB/Draft.md');
+      act(() => bus.emit(treeChanged()));
+      await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+      expect(reads()).toBe(before + 2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('dates the delete when the tab learns of it, and keeps that time', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const before = Date.now();
+
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+    const at = result.current.activeTab!.deletedBy!.at;
+    expect(at).toBeGreaterThanOrEqual(before);
+
+    act(() => bus.emit(treeChanged()));
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await settle();
+    expect(result.current.activeTab?.deletedBy?.at).toBe(at);
+  });
+
   it('a background tab deleted meanwhile shows as deleted once switched to', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md', 'KB/Keep.md');
@@ -413,7 +458,7 @@ describe('a file deleted by someone else', () => {
     disk.delete('KB/Draft.md');
     await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
 
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: null }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
     expect(result.current.activeTab?.path).toBe('KB/Draft.md');
     expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Draft.md', 'KB/Keep.md']);
   });
@@ -424,13 +469,13 @@ describe('a file deleted by someone else', () => {
 
     disk.delete('KB/Draft.md');
     act(() => bus.emit(fileChanged('KB/Draft.md')));
-    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
     await act(async () => { result.current.bumpFsRevision(); });
     await settle();
     await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
     await settle();
 
-    expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' });
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
     expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.');
   });
 
@@ -447,7 +492,7 @@ describe('a file deleted by someone else', () => {
     disk.delete('KB/Draft.md');
     let writeBack: Promise<void> | undefined;
     act(() => bus.emit(fileChanged('KB/Draft.md')));
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
     await act(async () => {
       writeBack = result.current.saveFile('KB/Draft.md', '# Draft\n\nA page to delete.\n\nA paragraph I added.');
       await expect(writeBack).rejects.toThrow('Draft.md was deleted from this branch');
@@ -458,7 +503,7 @@ describe('a file deleted by someone else', () => {
 
     expect(apiMocks.writeFile).not.toHaveBeenCalled();
     expect(disk.has('KB/Draft.md')).toBe(false);
-    expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' });
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
     expect(result.current.activeTab?.isDirty).toBe(true);
     expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.\n\nA paragraph I added.');
   });
@@ -475,7 +520,7 @@ describe('a file deleted by someone else', () => {
 
     disk.delete('KB/Draft.md');
     act(() => bus.emit(fileChanged('KB/Draft.md')));
-    await waitFor(() => expect(result.current.activeTab?.deletedBy).toEqual({ name: 'Sam Rivera' }));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
     await act(async () => {
       result.current.setHasUnsavedFileChanges?.(false);
       await result.current.saveFile('KB/Draft.md', edited).catch(() => {});

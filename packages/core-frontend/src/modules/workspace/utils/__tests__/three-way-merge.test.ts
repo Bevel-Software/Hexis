@@ -21,4 +21,19 @@ describe('threeWayMerge', () => {
   it('leaves nothing to save when upstream already holds the edits in CRLF', () => {
     expect(threeWayMerge('a\r\nb', 'a\nmine', 'a\r\nmine')).toBe('a\r\nmine');
   });
+
+  it("keeps each line's own ending in a file that mixes CRLF and LF", () => {
+    const base = 'a\r\nb\nc\r\nd\n';
+    const ours = 'a\nb\nc\nmine\n';
+    const theirs = 'up\r\nb\nc\r\nd\n';
+    // b keeps its LF and c its CRLF; mine ends as the d it replaced did.
+    expect(threeWayMerge(base, ours, theirs)).toBe('up\r\nb\nc\r\nmine\n');
+  });
+
+  it('ends a line only the edits have as most of the file does', () => {
+    const base = 'a\r\nb\r\nc\nd';
+    const ours = 'a\nnew\nb\nc\nd';
+    const theirs = 'a\r\nb\r\nc\nup';
+    expect(threeWayMerge(base, ours, theirs)).toBe('a\r\nnew\r\nb\r\nc\nup');
+  });
 });
