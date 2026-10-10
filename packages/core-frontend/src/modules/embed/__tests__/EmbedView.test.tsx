@@ -4,7 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
-import { EMBED_EXPIRED } from '../embed-host';
+import { useEffect, useState } from 'react';
+import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE } from '../embed-host';
+import { useKbGraphLoader } from '../../workspace/components/renderers/kbGraphLoader';
 
 /**
  * The HTTP surface, stubbed. The error CLASS is hoisted with the rest: the
@@ -101,6 +103,99 @@ afterEach(() => {
   // on its way out, and that call must still meet the stubbed API.
   cleanup();
   vi.restoreAllMocks();
+});
+
+/**
+ * A host that sizes its frame to the content (the Atlassian issue panel)
+ * follows the height the embed reports. Only when framed: with no host there
+ * is nobody to tell.
+ */
+describe('reporting the content height to the host', () => {
+  const realParent = Object.getOwnPropertyDescriptor(window, 'parent');
+  // The connector's mint puts `sizing=content` on the address: this host
+  // sizes its frame to the content.
+  beforeEach(() => window.history.replaceState({}, '', '/embed?token=tok&sizing=content'));
+  afterEach(() => {
+    if (realParent) Object.defineProperty(window, 'parent', realParent);
+  });
+
+  it('keeps a fixed reading pane as it is: nothing relaxed, nothing posted, when the host did not ask for content sizing', async () => {
+    window.history.replaceState({}, '', '/embed?token=tok');
+    const host = { postMessage: vi.fn() };
+    Object.defineProperty(window, 'parent', { configurable: true, value: host });
+    api.loadEmbed.mockResolvedValue(view());
+    mount();
+    await screen.findByRole('heading', { name: 'Thing' });
+    expect(host.postMessage.mock.calls.filter(([m]) => (m as { type?: string }).type === EMBED_HEIGHT_MESSAGE)).toEqual([]);
+    expect(document.documentElement.style.height).toBe('');
+  });
+
+  it('posts its height to the host when framed, and restores the page styles when it leaves', async () => {
+    const host = { postMessage: vi.fn() };
+    Object.defineProperty(window, 'parent', { configurable: true, value: host });
+    api.loadEmbed.mockResolvedValue(view());
+    const { unmount } = mount();
+    await screen.findByRole('heading', { name: 'Thing' });
+    const heights = () => host.postMessage.mock.calls.filter(([m]) => (m as { type?: string }).type === EMBED_HEIGHT_MESSAGE);
+    // Once at mount, and again once the page is on screen — without relying
+    // on a ResizeObserver, which jsdom (like some hosts) does not have.
+    expect(heights().length).toBeGreaterThanOrEqual(2);
+    expect(heights()[0]![0]).toEqual({ type: EMBED_HEIGHT_MESSAGE, height: expect.any(Number) });
+    const beforeEdit = heights().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await waitFor(() => expect(heights().length).toBeGreaterThan(beforeEdit));
+    // The three-pane shell's 100% height is relaxed while the embed is up…
+    expect(document.documentElement.style.height).toBe('auto');
+    unmount();
+    // …and put back when it is gone.
+    expect(document.documentElement.style.height).toBe('');
+  });
+
+  it('posts the new height when the content grows without anything on screen changing', async () => {
+    // The observer is what carries growth that changes no state — an image
+    // loading, a renderer settling. jsdom has none, so a stand-in captures
+    // the callback and the measured height is driven by hand.
+    let onResize: (() => void) | null = null;
+    class FakeResizeObserver {
+      constructor(cb: () => void) {
+        onResize = cb;
+      }
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    let measured = 240;
+    vi.spyOn(document.documentElement, 'getBoundingClientRect').mockImplementation(
+      () => ({ height: measured }) as DOMRect,
+    );
+    const host = { postMessage: vi.fn() };
+    Object.defineProperty(window, 'parent', { configurable: true, value: host });
+    api.loadEmbed.mockResolvedValue(view());
+    try {
+      mount();
+      await screen.findByRole('heading', { name: 'Thing' });
+      const last = () =>
+        host.postMessage.mock.calls
+          .map(([m]) => m as { type?: string; height?: number })
+          .filter((m) => m.type === EMBED_HEIGHT_MESSAGE)
+          .at(-1)?.height;
+      expect(last()).toBe(240);
+      expect(onResize).not.toBeNull();
+      measured = 640;
+      onResize!();
+      expect(last()).toBe(640);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('posts nothing when it is not framed', async () => {
+    const spy = vi.spyOn(window, 'postMessage');
+    api.loadEmbed.mockResolvedValue(view());
+    mount();
+    await screen.findByRole('heading', { name: 'Thing' });
+    expect(spy.mock.calls.filter(([m]) => (m as { type?: string })?.type === EMBED_HEIGHT_MESSAGE)).toEqual([]);
+  });
 });
 
 describe('a view with no usable token', () => {
@@ -392,6 +487,40 @@ describe('the renderer', () => {
     } as unknown as AppRegistry;
     mount(registry);
     expect(await screen.findByTestId('enterprise-html')).toBeTruthy();
+  });
+
+  /**
+   * A renderer that draws the knowledge graph asks the SURFACE for it, and
+   * the embed answers from the registry's graph source with its token —
+   * the renderer never picks an address, so the same one draws inside an
+   * issue panel as in the app. With no source registered the surface
+   * offers nothing, and the renderer draws its fallback.
+   */
+  it('gives a registered renderer the knowledge graph through the surface, read with the embed token', async () => {
+    api.loadEmbed.mockResolvedValue(
+      view({ repoRelative: 'Pages/Dash.html', workspacePath: `${KB}/Pages/Dash.html`, content: '<p>dash</p>' }),
+    );
+    const inEmbed = vi.fn(async () => ({ nodes: { a: {} }, edges: [] }));
+    const inApp = vi.fn(async () => ({ nodes: {}, edges: [] }));
+    const GraphReader = () => {
+      // As a dashboard renderer asks: never an address, only the loader.
+      const load = useKbGraphLoader('ws-never-dialled');
+      const [state, setState] = useState('no source');
+      useEffect(() => {
+        if (!load) return;
+        void load().then((graph) => setState(`nodes:${Object.keys((graph as { nodes: object }).nodes).length}`));
+      }, [load]);
+      return <div data-testid="graph-reader">{state}</div>;
+    };
+    const renderers = [{ extensions: ['.html', '.htm'], Component: GraphReader }];
+    mount({ ...EMPTY_REGISTRY, renderers, kbGraphSource: { inApp, inEmbed } } as unknown as AppRegistry);
+    await waitFor(() => expect(screen.getByTestId('graph-reader').textContent).toBe('nodes:1'));
+    expect(inEmbed).toHaveBeenCalledWith('tok');
+    expect(inApp).not.toHaveBeenCalled();
+    cleanup();
+
+    mount({ ...EMPTY_REGISTRY, renderers } as unknown as AppRegistry);
+    expect((await screen.findByTestId('graph-reader')).textContent).toBe('no source');
   });
 
   it('falls back to the built-in renderer for the type when nothing is registered', async () => {

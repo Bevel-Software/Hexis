@@ -18,7 +18,8 @@ import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
-import { EmbedService } from '../modules/embed/embed.service.js';
+import type { EmbedService } from '../modules/embed/embed.service.js';
+import { composeEmbedService } from './compose-embed.js';
 import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
 import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
@@ -1278,26 +1279,31 @@ export async function createCoreServices(
   // judges them with the same access resolver the app file page uses, so what
   // a reader may see and change inside a chat is what they may see and change
   // in the app — never a second answer to the same question.
-  const embedService = new EmbedService(
-    // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
-    // the environment value, empty on a deployment that took the default or
-    // named it in setup, and every path the embed builds starts with it.
-    { ...config, kbDirName },
-    kb,
-    workspaceService,
-    accessControl,
-    authService,
-    workflowService,
-    gitService,
-    new AccountLinkService(db),
-    // The SAME extension-to-reader registry `read_file` dispatches on, so the
-    // embed answer to "is this text, or bytes a renderer fetches?" cannot
-    // disagree with what a read of the file returns.
-    createFileReaderRegistry(docExtractService),
-    // The SAME pre-disk gate the file editor and the agent tools run: a
-    // `roles.yaml` that would not parse is refused before it is written, from
-    // a chat exactly as from the app.
-    makeRolesYamlWriteValidator(kbDirName),
+  const embedService = composeEmbedService(
+    {
+      // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+      // the environment value, empty on a deployment that took the default or
+      // named it in setup, and every path the embed builds starts with it.
+      config: { ...config, kbDirName },
+      kb,
+      workspaceService,
+      accessControl,
+      authService,
+      workflowService,
+      gitService,
+      accountLinks: new AccountLinkService(db),
+      // The SAME extension-to-reader registry `read_file` dispatches on, so the
+      // embed answer to "is this text, or bytes a renderer fetches?" cannot
+      // disagree with what a read of the file returns.
+      readers: createFileReaderRegistry(docExtractService),
+      // The SAME pre-disk gate the file editor and the agent tools run: a
+      // `roles.yaml` that would not parse is refused before it is written, from
+      // a chat exactly as from the app.
+      validateWrite: makeRolesYamlWriteValidator(kbDirName),
+    },
+    // A node-id reference resolves only where a node graph is: the
+    // distribution's, when it registers one (`ports.embedNodeIdResolver`).
+    ports,
   );
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.

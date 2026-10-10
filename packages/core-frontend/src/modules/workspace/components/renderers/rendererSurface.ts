@@ -67,6 +67,16 @@ export interface RendererSurface {
    * page perfectly fine. There is simply no download here.
    */
   offersDownload: boolean;
+  /**
+   * The knowledge graph as this surface's viewer may see it, for a renderer
+   * that draws it (a dashboard's HTML). Absent when the distribution
+   * registers no graph source (`AppRegistry.kbGraphSource`), and the
+   * renderer then draws its "open this in the app" fallback. The app reads
+   * it with the session, the embed with its token; the renderer never
+   * chooses an address itself — it asks `useKbGraphLoader`, which answers
+   * from here on a surface and from the registry's source in the app.
+   */
+  loadKbGraph?: () => Promise<unknown>;
 }
 
 export const RendererSurfaceContext = createContext<RendererSurface | null>(null);
