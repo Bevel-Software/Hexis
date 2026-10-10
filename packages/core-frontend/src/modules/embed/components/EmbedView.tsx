@@ -284,6 +284,13 @@ export function EmbedView() {
       }
     };
   }, [reportHeight]);
+  // The height again whenever what is on screen changes — the page arriving,
+  // the editor opening or closing, a notice — so the first real height never
+  // depends on a `ResizeObserver` the host's runtime may not have. Here, with
+  // the other hooks: the view returns early below for a page not yet loaded.
+  useEffect(() => {
+    reportHeight();
+  }, [reportHeight, view, mode, notice, sent, lockLost]);
 
   /**
    * The surface the app's renderers are mounted on. Rebuilt only when the
@@ -459,12 +466,6 @@ export function EmbedView() {
   // Nothing is implied about access; there is simply no text to change.
   const viewOnly = isViewOnlyFile(view.workspacePath) || !view.contentIsText;
   const writing = mode === 'write';
-  // The height again whenever what is on screen changes — the page arriving,
-  // the editor opening or closing, a notice — so the first real height never
-  // depends on a `ResizeObserver` the host's runtime may not have.
-  useEffect(() => {
-    reportHeight();
-  }, [reportHeight, view, writing, notice, sent, lockLost]);
 
   return (
     <div className="flex h-full min-w-0 flex-col gap-2 p-3">
