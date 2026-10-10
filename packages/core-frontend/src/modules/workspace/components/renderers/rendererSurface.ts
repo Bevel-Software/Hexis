@@ -73,7 +73,8 @@ export interface RendererSurface {
    * registers no graph source (`AppRegistry.kbGraphSource`), and the
    * renderer then draws its "open this in the app" fallback. The app reads
    * it with the session, the embed with its token; the renderer never
-   * chooses an address itself.
+   * chooses an address itself — it asks `useKbGraphLoader`, which answers
+   * from here on a surface and from the registry's source in the app.
    */
   loadKbGraph?: () => Promise<unknown>;
 }

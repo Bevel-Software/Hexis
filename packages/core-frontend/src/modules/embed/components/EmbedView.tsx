@@ -258,22 +258,23 @@ export function EmbedView() {
   // shell; inside a fixed-height frame that is exactly the gap, so the
   // embed relaxes them to natural height for as long as it is mounted.
   // Nothing is posted when the page is not framed: there is nobody to tell.
+  const reportHeight = useCallback(() => {
+    if (window.parent === window) return;
+    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    window.parent.postMessage({ type: EMBED_HEIGHT_MESSAGE, height }, hostOrigin() ?? '*');
+  }, []);
   useEffect(() => {
     if (window.parent === window) return;
-    const docEl = document.documentElement;
-    const root = document.getElementById('root');
-    const targets = [docEl, document.body, root].filter((el): el is HTMLElement => el !== null);
+    const targets = [document.documentElement, document.body, document.getElementById('root')].filter(
+      (el): el is HTMLElement => el !== null,
+    );
     const prev = targets.map((el) => ({ el, height: el.style.height, overflow: el.style.overflow }));
     for (const el of targets) {
       el.style.height = 'auto';
       el.style.overflow = 'visible';
     }
-    const report = () => {
-      const height = Math.ceil(docEl.getBoundingClientRect().height);
-      window.parent.postMessage({ type: EMBED_HEIGHT_MESSAGE, height }, hostOrigin() ?? '*');
-    };
-    report();
-    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(report) : null;
+    reportHeight();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(reportHeight) : null;
     observer?.observe(document.body);
     return () => {
       observer?.disconnect();
@@ -282,7 +283,7 @@ export function EmbedView() {
         el.style.overflow = overflow;
       }
     };
-  }, []);
+  }, [reportHeight]);
 
   /**
    * The surface the app's renderers are mounted on. Rebuilt only when the
@@ -458,6 +459,12 @@ export function EmbedView() {
   // Nothing is implied about access; there is simply no text to change.
   const viewOnly = isViewOnlyFile(view.workspacePath) || !view.contentIsText;
   const writing = mode === 'write';
+  // The height again whenever what is on screen changes — the page arriving,
+  // the editor opening or closing, a notice — so the first real height never
+  // depends on a `ResizeObserver` the host's runtime may not have.
+  useEffect(() => {
+    reportHeight();
+  }, [reportHeight, view, writing, notice, sent, lockLost]);
 
   return (
     <div className="flex h-full min-w-0 flex-col gap-2 p-3">

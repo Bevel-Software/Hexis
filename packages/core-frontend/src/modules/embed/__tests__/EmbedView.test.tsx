@@ -6,7 +6,7 @@ import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
 import { useEffect, useState } from 'react';
 import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE } from '../embed-host';
-import { useRendererSurface } from '../../workspace/components/renderers/rendererSurface';
+import { useKbGraphLoader } from '../../workspace/components/renderers/kbGraphLoader';
 
 /**
  * The HTTP surface, stubbed. The error CLASS is hoisted with the rest: the
@@ -122,9 +122,14 @@ describe('reporting the content height to the host', () => {
     api.loadEmbed.mockResolvedValue(view());
     const { unmount } = mount();
     await screen.findByRole('heading', { name: 'Thing' });
-    const heights = host.postMessage.mock.calls.filter(([m]) => (m as { type?: string }).type === EMBED_HEIGHT_MESSAGE);
-    expect(heights.length).toBeGreaterThan(0);
-    expect(heights[0]![0]).toEqual({ type: EMBED_HEIGHT_MESSAGE, height: expect.any(Number) });
+    const heights = () => host.postMessage.mock.calls.filter(([m]) => (m as { type?: string }).type === EMBED_HEIGHT_MESSAGE);
+    // Once at mount, and again once the page is on screen — without relying
+    // on a ResizeObserver, which jsdom (like some hosts) does not have.
+    expect(heights().length).toBeGreaterThanOrEqual(2);
+    expect(heights()[0]![0]).toEqual({ type: EMBED_HEIGHT_MESSAGE, height: expect.any(Number) });
+    const beforeEdit = heights().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await waitFor(() => expect(heights().length).toBeGreaterThan(beforeEdit));
     // The three-pane shell's 100% height is relaxed while the embed is up…
     expect(document.documentElement.style.height).toBe('auto');
     unmount();
@@ -446,12 +451,13 @@ describe('the renderer', () => {
     const inEmbed = vi.fn(async () => ({ nodes: { a: {} }, edges: [] }));
     const inApp = vi.fn(async () => ({ nodes: {}, edges: [] }));
     const GraphReader = () => {
-      const surface = useRendererSurface();
+      // As a dashboard renderer asks: never an address, only the loader.
+      const load = useKbGraphLoader('ws-never-dialled');
       const [state, setState] = useState('no source');
       useEffect(() => {
-        if (!surface?.loadKbGraph) return;
-        void surface.loadKbGraph().then((graph) => setState(`nodes:${Object.keys((graph as { nodes: object }).nodes).length}`));
-      }, [surface]);
+        if (!load) return;
+        void load().then((graph) => setState(`nodes:${Object.keys((graph as { nodes: object }).nodes).length}`));
+      }, [load]);
       return <div data-testid="graph-reader">{state}</div>;
     };
     const renderers = [{ extensions: ['.html', '.htm'], Component: GraphReader }];

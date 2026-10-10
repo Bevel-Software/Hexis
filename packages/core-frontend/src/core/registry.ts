@@ -548,9 +548,10 @@ export interface AppRegistry {
    * gets the graph from, on each surface it can be mounted on: the app,
    * where the reader's session reads it, and the embed, where only the
    * embed token does. Core has no graph; a distribution that has one
-   * registers both, and its renderer asks the surface
-   * (`RendererSurface.loadKbGraph`) rather than any address, so the same
-   * renderer draws inside a chat or an issue panel as it draws in the app.
+   * registers both, and its renderer asks `useKbGraphLoader` — which
+   * answers `inEmbed` through the embed's surface and `inApp` in the app —
+   * rather than any address, so the same renderer draws inside a chat or an
+   * issue panel as it draws in the app.
    */
   kbGraphSource?: KbGraphSource;
 }
