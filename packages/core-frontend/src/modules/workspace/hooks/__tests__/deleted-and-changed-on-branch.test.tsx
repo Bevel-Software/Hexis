@@ -430,6 +430,19 @@ describe('a file deleted by someone else', () => {
     }
   });
 
+  it("keeps an agent's change awaiting review on a tab someone else deleted", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+    expect(result.current.activeTab?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
+
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(treeChanged()));
+
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+    expect(result.current.activeTab?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
+  });
+
   it('dates the delete when the tab learns of it, and keeps that time', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');

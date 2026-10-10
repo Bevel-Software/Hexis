@@ -1187,6 +1187,23 @@ describe('FileRoute: a file deleted by someone else', () => {
     expect(screen.getByText('Edits copied.')).toBeInTheDocument();
   });
 
+  it("keeps an agent's change awaiting review on screen and copies it", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const agent = '# Draft\n\nThe agent rewrote this page.';
+    openOn(deletedTab({ pendingFileContent: agent }));
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    expect(screen.getByText(/The agent's change you had not reviewed yet is kept here too/)).toBeInTheDocument();
+    expect(screen.getByLabelText("The agent's version").textContent).toBe(agent);
+    // No unsaved edits of the user's own: only the agent's change to copy.
+    expect(screen.queryByRole('button', { name: 'Copy edits' })).not.toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: "Copy agent's version" })); });
+    expect(writeText).toHaveBeenCalledWith(agent);
+    expect(screen.getByText("Agent's version copied.")).toBeInTheDocument();
+  });
+
   it('shows the notice for a background tab whose bytes were dropped, not "Opening"', async () => {
     openOn(deletedTab({ content: null, savedContent: null, deletedBy: { name: null, at: Date.now() } }));
 

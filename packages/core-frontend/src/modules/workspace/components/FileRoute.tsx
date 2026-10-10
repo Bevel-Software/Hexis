@@ -802,9 +802,14 @@ function DeletedFileNotice({
   branch: string;
   onClose: () => void;
 }) {
-  const [copied, setCopied] = useState<boolean | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const name = tab.deletedBy?.name ?? null;
   const edits = tab.isDirty ? tab.content ?? '' : null;
+  // A version the agent wrote that was still awaiting review when the file
+  // went: kept here too, or it would be lost with the tab.
+  const agentVersion = tab.pendingFileContent;
+  const copy = async (text: string, done: string) =>
+    setCopied((await copyToClipboard(text)) ? done : "Couldn't copy: select the text above instead.");
   return (
     <ErrorScreen title="This file was deleted">
       <p className="text-ui text-ink-muted">
@@ -823,17 +828,33 @@ function DeletedFileNotice({
           </pre>
         </div>
       )}
+      {agentVersion !== null && (
+        <div className="space-y-2 text-left">
+          <p className="text-ui text-ink">The agent's change you had not reviewed yet is kept here too. Copy it before you close.</p>
+          <pre
+            aria-label="The agent's version"
+            className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-sunken p-3 text-detail text-ink"
+          >
+            {agentVersion}
+          </pre>
+        </div>
+      )}
       <div className="flex justify-center gap-2">
         {edits !== null && (
-          <Button variant="outline" onClick={async () => setCopied(await copyToClipboard(edits))}>
+          <Button variant="outline" onClick={() => copy(edits, 'Edits copied.')}>
             Copy edits
+          </Button>
+        )}
+        {agentVersion !== null && (
+          <Button variant="outline" onClick={() => copy(agentVersion, "Agent's version copied.")}>
+            Copy agent's version
           </Button>
         )}
         <Button variant="primary" onClick={onClose}>Close</Button>
       </div>
       {copied !== null && (
         <p role="status" className="text-meta text-ink-faint">
-          {copied ? 'Edits copied.' : "Couldn't copy: select the text above instead."}
+          {copied}
         </p>
       )}
     </ErrorScreen>

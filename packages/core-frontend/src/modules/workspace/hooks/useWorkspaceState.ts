@@ -460,14 +460,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const nextName = tab.deletedBy?.name ?? name;
       if (tab.deletedBy && tab.deletedBy.name === nextName) return prev;
       const next = prev.slice();
-      // An agent version awaiting review goes with the file: its tool call
-      // already wrote those bytes to the branch, so they are in the history
-      // of the deleted file — unlike unsaved edits, which exist only here.
-      next[idx] = {
-        ...tab,
-        deletedBy: { name: nextName, at: tab.deletedBy?.at ?? Date.now() },
-        pendingFileContent: null,
-      };
+      // An agent version awaiting review stays on the tab with the unsaved
+      // edits: the notice offers to copy it, as the file it was for is gone.
+      next[idx] = { ...tab, deletedBy: { name: nextName, at: tab.deletedBy?.at ?? Date.now() } };
       return next;
     });
   }, [isPendingDelete]);
