@@ -13,6 +13,7 @@ import {
   fetchNodeWorkspacePath,
   fetchNodeId,
 } from '../routing/kb-routes';
+import { landingAfterClose } from '../routing/landing';
 import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
 import { copyToClipboard } from '../../../lib/clipboard';
@@ -684,13 +685,12 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
         tab={deletedTab}
         branch={branchFromUrl}
         onClose={async () => {
-          // Close lands as the person's own delete does: on the tab that is
-          // left, or Knowledge home, replacing the entry for the gone file.
+          // Close lands as the person's own delete does (`landingAfterClose`).
           // The notice already said the edits exist only here and offered to
           // copy them, so it does not ask again.
           const { closed, newActivePath } = await workspace.closeTab(deletedTab, { skipConfirm: true });
           if (!closed) return;
-          navigate(kbFileUrl(branchFromUrl, newActivePath ?? undefined), { replace: true });
+          navigate(landingAfterClose(location.pathname, branchFromUrl, newActivePath), { replace: true });
         }}
       />
     );

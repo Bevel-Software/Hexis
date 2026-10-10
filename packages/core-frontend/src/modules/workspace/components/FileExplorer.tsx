@@ -64,8 +64,8 @@ import {
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { CR_FILE_PARAM, CR_PARAM, branchFromPathname, kbFileUrl, useFileNav } from '../routing/kb-routes';
-import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-paths';
+import { CR_FILE_PARAM, CR_PARAM, branchFromPathname, useFileNav } from '../routing/kb-routes';
+import { landingAfterClose } from '../routing/landing';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
@@ -645,18 +645,11 @@ function ContextMenu({
         const result = await deleteEntry(entry.relativePath);
         if (result === false) return false;
         // The file on screen went with it: land where closing its tab would,
-        // on the tab that is left or on Knowledge home, replacing the entry
-        // so Back never returns to a file that is gone. The file page trusts
-        // only the address, so without this it waited on the deleted file
-        // for good. Only on a workspace page — elsewhere nothing is on screen.
-        // A Library item's page has no Knowledge home behind it: with no tab
-        // left it lands on Skills & Tools, the surface the person was on.
+        // as `landingAfterClose` says. The file page trusts only the
+        // address, so without this it waited on the deleted file for good.
+        // Only on a workspace page — elsewhere nothing is on screen.
         if (result?.closedActive && branchOnScreen !== null) {
-          const landing =
-            result.newActivePath === null && isLibraryLocation(location.pathname)
-              ? LIBRARY_ROOT
-              : kbFileUrl(branchOnScreen, result.newActivePath ?? undefined);
-          navigate(landing, { replace: true });
+          navigate(landingAfterClose(location.pathname, branchOnScreen, result.newActivePath), { replace: true });
         }
         return true;
       } catch (err) {

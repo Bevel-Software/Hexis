@@ -17,7 +17,7 @@ vi.mock('../../routing/kb-routes', async (importOriginal) => {
     fetchNodeWorkspacePath: routesMock.fetchNodeWorkspacePath,
   };
 });
-import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
@@ -1233,6 +1233,27 @@ describe('FileRoute: a file deleted by someone else', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
 
     await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/workspace/main'));
+    expect(screen.getByLabelText('navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('Close on a Library item with no tab left lands on Skills & Tools, as the sidebar delete does', async () => {
+    const ITEM = 'Knowledge/Plugins/GTM/web-search.tool';
+    const tab = deletedTab({ path: ITEM });
+    const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: null }));
+    renderAt(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, {
+      workspace: makeWorkspace({
+        openTabs: [tab],
+        activeTab: tab,
+        closeTab,
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [ITEM] })),
+      }),
+      git: makeGit({ status: makeStatus(DEFAULT_BRANCH) }),
+    });
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
     expect(screen.getByLabelText('navigation-type')).toHaveTextContent('REPLACE');
   });
 
