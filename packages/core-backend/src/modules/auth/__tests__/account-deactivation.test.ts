@@ -18,8 +18,11 @@ import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
 /**
  * Drizzle chain stub, as in `auth.service.test.ts`: each db.select() /
  * insert() / update() consumes the next queued result; awaiting any point of
- * the chain resolves it. Records what was inserted and set, and the order of
- * the switch lock (`execute`) against the writes.
+ * the chain resolves it. Records what was inserted and set, and, in order,
+ * every write and lock (`execute`) with the handle it went through: `db`
+ * itself, or the `tx` a transaction hands its callback (a different object,
+ * between `begin` and `commit`), so a lock taken outside the transaction
+ * shows up as `db:`.
  */
 function makeFakeDb(queue: unknown[]) {
   const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[]; order: string[] } = {
@@ -50,16 +53,25 @@ function makeFakeDb(queue: unknown[]) {
     });
     return chain;
   }
-  const db = {
-    insert: vi.fn(() => (captured.order.push('insert'), nextChain())),
+  const handle = (tag: 'db' | 'tx') => ({
+    insert: vi.fn(() => (captured.order.push(`${tag}:insert`), nextChain())),
     select: vi.fn(() => nextChain()),
-    update: vi.fn(() => (captured.order.push('update'), nextChain())),
+    update: vi.fn(() => (captured.order.push(`${tag}:update`), nextChain())),
     execute: vi.fn(async (query: SQL) => {
       const { sql, params } = dialect.sqlToQuery(query);
-      captured.order.push(`${sql} ${JSON.stringify(params)}`);
+      captured.order.push(`${tag}:${sql} ${JSON.stringify(params)}`);
       return [];
     }),
-    transaction: async <T,>(cb: (tx: unknown) => Promise<T>) => cb(db),
+  });
+  const tx = handle('tx');
+  const db = {
+    ...handle('db'),
+    transaction: async <T,>(cb: (t: typeof tx) => Promise<T>) => {
+      captured.order.push('begin');
+      const out = await cb(tx);
+      captured.order.push('commit');
+      return out;
+    },
   };
   return { db: db as unknown as Database, captured };
 }
@@ -181,8 +193,10 @@ describe('AuthService.deactivate', () => {
     const { db, captured } = makeFakeDb([[{ ...ROW, email: 'Alice@Example.com' }], []]);
     await new AuthService(db, makeConfig()).deactivate(ROW.id);
     expect(captured.order).toEqual([
-      'select pg_advisory_xact_lock(hashtext($1)) ["account-switch:alice@example.com"]',
-      'update',
+      'begin',
+      'tx:select pg_advisory_xact_lock(hashtext($1)) ["account-switch:alice@example.com"]',
+      'tx:update',
+      'commit',
     ]);
   });
 
@@ -193,15 +207,15 @@ describe('AuthService.deactivate', () => {
 
   it('refuses the deployment admin, whose environment password is the way back in', async () => {
     const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
     await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toBeInstanceOf(AccountChangeRefusedError);
-    expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    expect(captured.order).toEqual([]);
   });
 
   it('refuses the accounts the platform runs its own work as', async () => {
-    const { db } = makeFakeDb([[{ ...ROW, email: RECOVERY_BOT_EMAIL }]]);
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: RECOVERY_BOT_EMAIL }]]);
     await expect(new AuthService(db, makeConfig()).deactivate(ROW.id)).rejects.toThrow('platform itself');
-    expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    expect(captured.order).toEqual([]);
   });
 });
 
@@ -246,20 +260,22 @@ describe('a first sign-in the port would rather keep waiting', () => {
     expect(captured.values[0].deactivatedAt).toBeInstanceOf(Date);
     // Created switched off, so under the address's switch lock.
     expect(captured.order).toEqual([
-      'select pg_advisory_xact_lock(hashtext($1)) ["account-switch:new@example.com"]',
-      'insert',
+      'begin',
+      'tx:select pg_advisory_xact_lock(hashtext($1)) ["account-switch:new@example.com"]',
+      'tx:insert',
+      'commit',
     ]);
   });
 
   it('is a plain refusal when an admin creates the account', async () => {
     const { port } = recordingPort(waiting);
-    const { db } = makeFakeDb([[]]);
+    const { db, captured } = makeFakeDb([[]]);
     const err = await new AuthService(db, makeConfig(), port)
       .createAccount('new@example.com', 'New')
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AccountAdmissionRefusedError);
     expect((err as AccountAdmissionRefusedError).waitingForAdmin).toBe(false);
-    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+    expect(captured.order).toEqual([]);
   });
 });
 
