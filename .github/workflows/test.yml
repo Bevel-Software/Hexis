@@ -43,6 +43,10 @@ jobs:
     # must not be able to tamper with the workspace that decides that.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # On a pull request the checkout is GitHub's merge commit; its first
+          # parent is the base, which the changed-files lint below diffs against.
+          fetch-depth: 2
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
@@ -76,6 +80,19 @@ jobs:
       # those reached dev unnoticed until someone ran tsc locally. After
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
+
+      # Lint ratchet. `eslint .` does not pass on dev yet (errors in files no
+      # one has touched since the rules landed), so it cannot gate as a whole;
+      # what a pull request CAN be held to is that every file it adds or
+      # changes lints clean. Files the config ignores are skipped quietly.
+      - name: Lint the files this pull request changes
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff --name-only --diff-filter=d HEAD^1 HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' > "$RUNNER_TEMP/changed-files.txt"
+          cat "$RUNNER_TEMP/changed-files.txt"
+          if [ -s "$RUNNER_TEMP/changed-files.txt" ]; then
+            xargs pnpm exec eslint --no-warn-ignored --max-warnings 0 < "$RUNNER_TEMP/changed-files.txt"
+          fi
 
       # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
       # child line with its package ("packages/core-backend test: …"). Vitest's
