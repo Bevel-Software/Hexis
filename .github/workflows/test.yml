@@ -81,20 +81,15 @@ jobs:
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
 
-      # Lint ratchet. `eslint .` does not pass on dev yet (errors in files no
-      # one has touched since the rules landed), so it cannot gate as a whole;
-      # what a pull request CAN be held to is that every file it adds or
-      # changes lints clean. Files the config ignores are skipped quietly.
-      # Paths are NUL-delimited so a name with spaces or non-ASCII stays one
-      # argument.
+      # Lint ratchet: every JS/TS file a pull request adds or changes must
+      # lint clean (`eslint .` does not pass on dev yet, so it cannot gate as
+      # a whole). HEAD is GitHub's merge commit, HEAD^1 the base. The script's
+      # own tests run first, so a broken gate cannot pass vacuously.
       - name: Lint the files this pull request changes
         if: github.event_name == 'pull_request'
         run: |
-          git diff -z --name-only --diff-filter=d HEAD^1 HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' > "$RUNNER_TEMP/changed-files.txt"
-          tr '\0' '\n' < "$RUNNER_TEMP/changed-files.txt"
-          if [ -s "$RUNNER_TEMP/changed-files.txt" ]; then
-            xargs -0 pnpm exec eslint --no-warn-ignored --max-warnings 0 < "$RUNNER_TEMP/changed-files.txt"
-          fi
+          pnpm test:scripts
+          pnpm lint:changed HEAD^1 HEAD
 
       # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
       # child line with its package ("packages/core-backend test: …"). Vitest's
