@@ -92,6 +92,11 @@ export function embedOpenLink(): ((url: string) => void) | null {
   return current.openLink;
 }
 
+/** Whether a refused token can be renewed here: the chat view can, the SPA page cannot. */
+export function embedCanRenew(): boolean {
+  return current.renew !== null;
+}
+
 /** The renewal in flight, shared by every call refused while it runs. */
 let renewing: Promise<string | null> | null = null;
 

@@ -676,6 +676,49 @@ describe('a chat view whose token runs out', () => {
     }
   });
 
+  it('shows the expired sentence when a picture is refused for the token and no renewal can be had', async () => {
+    const renew = inChat(async () => null);
+    api.embedRawUrl.mockImplementation(
+      (token: string, path?: string) =>
+        `https://hexis.example/api/embed/raw?token=${token}${path ? `&path=${path}` : ''}`,
+    );
+    api.loadEmbed.mockResolvedValue(view({ content: '# Thing\n\n![shot](shot.png)\n' }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 401 })),
+    );
+    try {
+      mount();
+      fireEvent.error(await screen.findByRole('img', { name: 'shot' }));
+      expect(await screen.findByText(EMBED_EXPIRED)).toBeTruthy();
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('leaves a picture refused on the SPA page alone: no probe, no renewal, no expired sentence', async () => {
+    // The SPA `/embed` page: a token in the address and no way to renew.
+    window.history.replaceState(null, '', '/embed?token=tok');
+    api.embedRawUrl.mockImplementation(
+      (token: string, path?: string) =>
+        `${window.location.origin}/api/embed/raw?token=${token}${path ? `&path=${path}` : ''}`,
+    );
+    api.loadEmbed.mockResolvedValue(view({ content: '# Thing\n\n![shot](shot.png)\n' }));
+    const fetchMock = vi.fn(async () => new Response('', { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount();
+      fireEvent.error(await screen.findByRole('img', { name: 'shot' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(screen.queryByText(EMBED_EXPIRED)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
   it('asks for no renewal when a picture fails for a reason that is not the token', async () => {
     const renew = inChat(async () => 'tok-2');
     api.embedRawUrl.mockImplementation(

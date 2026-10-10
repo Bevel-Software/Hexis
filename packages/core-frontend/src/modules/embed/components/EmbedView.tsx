@@ -24,6 +24,7 @@ import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
 import {
   embedApiBase,
   embedBaseUrl,
+  embedCanRenew,
   embedToken,
   onEmbedTokenRenewed,
   renewEmbedToken,
@@ -123,7 +124,10 @@ export function EmbedView() {
   // and when the token was the reason, it is renewed — the addresses follow
   // the renewal above, so the picture loads again under the fresh one. One
   // renewal per token a picture was refused with: a picture refused under a
-  // token a picture already renewed to is left broken, never a loop.
+  // token a picture already renewed to is left broken, never a loop. When no
+  // fresh token can be had, the token is dead and the view is expired, as
+  // for any other refused call. The SPA page cannot renew and so does not
+  // ask: a picture refused there stays broken, as it always has.
   const contentRef = useRef<HTMLDivElement | null>(null);
   const imageRenewedTo = useRef<string | null>(null);
   useEffect(() => {
@@ -131,7 +135,7 @@ export function EmbedView() {
     if (!root) return;
     const onError = (event: Event) => {
       const img = event.target;
-      if (!(img instanceof HTMLImageElement)) return;
+      if (!(img instanceof HTMLImageElement) || !embedCanRenew()) return;
       const src = img.currentSrc || img.src;
       // The browser reports the address absolute; the API base may be relative.
       const raw = new URL(`${embedApiBase()}/api/embed/raw`, window.location.href).href;
@@ -142,7 +146,9 @@ export function EmbedView() {
       void fetch(src, { credentials: 'omit' })
         .then(async (res) => {
           if (res.status !== 401 || sent !== embedToken()) return;
-          imageRenewedTo.current = await renewEmbedToken();
+          const renewed = await renewEmbedToken();
+          imageRenewedTo.current = renewed;
+          if (!renewed && sent === embedToken()) setExpired(true);
         })
         .catch(() => undefined);
     };
