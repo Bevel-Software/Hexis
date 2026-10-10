@@ -35,16 +35,24 @@ import type { IAccountLinkService } from './account-link.service.js';
 const log = logger('embed');
 
 /**
- * Token lifetime — long enough for a view left open in a chat, short enough
- * that a token copied out of a transcript stops working on its own. The
- * token rides in `open_page`'s result, so it sits in the chat transcript, and
- * whoever holds it reads and edits that one file as the token's user until
- * it expires. One hour (Razvan, 2026-10-09; the embed used two before): a
- * page left open in a chat is still covered, and the window is halved. A
- * view older than that shows the expired sentence and the agent opens the
- * page again.
+ * Lifetime of a token `open_page` mints (`kind: user`). The token rides in
+ * the tool's result, so it sits in the chat transcript, and whoever holds it
+ * reads and edits that one file as the token's user until it expires. Five
+ * minutes (Razvan, 2026-10-09; one hour before, two before that): a token
+ * copied out of a transcript stops working almost at once. A view left open
+ * longer is not ended by it — the MCP App view asks its host to call
+ * `open_page` again when a call is refused for the token, and carries on with
+ * the fresh one (see `mcp-app/page.html`).
  */
-export const EMBED_TOKEN_TTL_SECONDS = 60 * 60;
+export const EMBED_USER_TOKEN_TTL_SECONDS = 5 * 60;
+
+/**
+ * Lifetime of a token the Atlassian connector mints through the shared-secret
+ * route (`kind: atlassian`). One hour, unchanged: the connector frames
+ * `/embed` directly and has no host to renew a token through, and its mint
+ * contract does not change (Decision 9 of the parent specification).
+ */
+export const EMBED_CONNECTOR_TOKEN_TTL_SECONDS = 60 * 60;
 
 /** What the embed's config needs from the deployment's. */
 export interface EmbedConfig {
@@ -195,7 +203,9 @@ export class EmbedService implements IEmbedService {
       repoRelative,
       slug: ref.slug,
     };
-    const token = jwt.sign(claims, this.signingKey, { expiresIn: EMBED_TOKEN_TTL_SECONDS });
+    const expiresIn =
+      subject.kind === 'user' ? EMBED_USER_TOKEN_TTL_SECONDS : EMBED_CONNECTOR_TOKEN_TTL_SECONDS;
+    const token = jwt.sign(claims, this.signingKey, { expiresIn });
     return { token, embedUrl: this.embedUrlFor(token) };
   }
 

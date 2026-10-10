@@ -197,6 +197,19 @@ describe('open_page: the answer', () => {
     expect(body.appUrl).toContain('#what-it-is');
   });
 
+  /**
+   * The view renews its token by calling this tool again with the arguments
+   * it was opened with, and the result is all it is told — so the heading
+   * comes back beside the path, and is absent when none was named.
+   */
+  it('echoes the heading beside the path, for the view to call again with', async () => {
+    const { call } = await serve();
+    const { body } = await call({ path: 'Data/Thing.md', heading: 'what-it-is' });
+    expect(body).toMatchObject({ path: 'Data/Thing.md', heading: 'what-it-is' });
+    const plain = await call({ path: 'Data/Thing.md' });
+    expect(plain.body).not.toHaveProperty('heading');
+  });
+
   it('accepts a path with or without the knowledge-base prefix, as read_file documents', async () => {
     const { call, mints } = await serve();
     await call({ path: 'Data/Thing.md' });

@@ -35,9 +35,15 @@ export interface EmbedRuntimeConfig {
   token: string | null;
   /** How a link leaves the view, when the host lent a way; null means parent window or a new tab. */
   openLink: ((url: string) => void) | null;
+  /**
+   * How a fresh token is had when a call is refused for this one: the MCP App
+   * view asks its host to call `open_page` again. Null on the SPA's `/embed`
+   * page, which has no host to ask — a refused token there is the end of it.
+   */
+  renew: (() => Promise<string | null>) | null;
 }
 
-const UNCONFIGURED: EmbedRuntimeConfig = { baseUrl: '', token: null, openLink: null };
+const UNCONFIGURED: EmbedRuntimeConfig = { baseUrl: '', token: null, openLink: null, renew: null };
 
 let current: EmbedRuntimeConfig = UNCONFIGURED;
 
@@ -49,6 +55,7 @@ export function configureEmbed(config: Partial<EmbedRuntimeConfig>): void {
 /** Back to the SPA page's own answers — on unmount, and in tests. */
 export function resetEmbedConfig(): void {
   current = UNCONFIGURED;
+  renewing = null;
 }
 
 /**
@@ -85,6 +92,78 @@ export function embedOpenLink(): ((url: string) => void) | null {
   return current.openLink;
 }
 
+/** The renewal in flight, shared by every call refused while it runs. */
+let renewing: Promise<string | null> | null = null;
+
+/** Who wants to know when a renewal replaced the token. */
+const renewedListeners = new Set<() => void>();
+
+/**
+ * Be told when a renewal replaced the token — for what holds the token
+ * rather than asking for it per call (an image address). Returns the way to
+ * stop listening.
+ */
+export function onEmbedTokenRenewed(listener: () => void): () => void {
+  renewedListeners.add(listener);
+  return () => {
+    renewedListeners.delete(listener);
+  };
+}
+
+/**
+ * A fresh token in place of the current one, or null when none can be had —
+ * no way to renew (the SPA page), or the host and `open_page` gave none.
+ * Calls refused together share one renewal; a fresh token replaces the one
+ * every later call reads.
+ */
+export function renewEmbedToken(): Promise<string | null> {
+  const renew = current.renew;
+  if (!renew) return Promise.resolve(null);
+  if (!renewing) {
+    const config = current;
+    // A renewal that throws instead of answering null is a renewal that failed.
+    const mine: Promise<string | null> = Promise.resolve()
+      .then(renew)
+      .catch(() => null)
+      .then((token) => {
+        // A mount that was taken down meanwhile must not have its successor's
+        // token replaced by the answer to its own question.
+        if (current !== config) return null;
+        if (!token) return null;
+        current = { ...current, token };
+        for (const listener of renewedListeners) listener();
+        return token;
+      })
+      .finally(() => {
+        if (renewing === mine) renewing = null;
+      });
+    renewing = mine;
+  }
+  return renewing;
+}
+
+/**
+ * Run an embed call with the current token, and when it is refused for the
+ * token (401) renew the token once and run it once more with the fresh one.
+ * At most one renewal per refused call: a second refusal is the caller's to
+ * report, never another round.
+ *
+ * A call that was sent with a token another call has already replaced is
+ * retried with the new one without asking for a third.
+ */
+export async function withEmbedToken<T>(call: (token: string) => Promise<T>): Promise<T> {
+  const sent = embedToken();
+  try {
+    return await call(sent);
+  } catch (err) {
+    if ((err as { status?: unknown } | null)?.status !== 401) throw err;
+    const now = embedToken();
+    const fresh = now !== sent ? now : await renewEmbedToken();
+    if (!fresh) throw err;
+    return call(fresh);
+  }
+}
+
 /**
  * The global the MCP App view sets on its window before it loads the
  * deployment's embed bundle — the one contract between the view (a static
@@ -101,6 +180,8 @@ export interface EmbedHandoff {
   token: string;
   /** Opens an address in a new tab through the host (`ui/open-link`). */
   openLink?: (url: string) => void;
+  /** A fresh token through the host (`open_page` again), or null when there is none. */
+  renew?: () => Promise<string | null>;
 }
 
 /**
@@ -114,7 +195,7 @@ export interface EmbedHandoff {
 export function readEmbedHandoff(): EmbedHandoff | null {
   const raw = (window as unknown as Record<string, unknown>)[EMBED_HANDOFF_GLOBAL];
   if (!raw || typeof raw !== 'object') return null;
-  const h = raw as { baseUrl?: unknown; token?: unknown; openLink?: unknown };
+  const h = raw as { baseUrl?: unknown; token?: unknown; openLink?: unknown; renew?: unknown };
   if (typeof h.baseUrl !== 'string' || !/^https?:\/\//i.test(h.baseUrl)) return null;
   if (typeof h.token !== 'string' || h.token === '') return null;
   let baseUrl: string;
@@ -128,5 +209,6 @@ export function readEmbedHandoff(): EmbedHandoff | null {
     baseUrl,
     token: h.token,
     ...(typeof h.openLink === 'function' ? { openLink: h.openLink as (url: string) => void } : {}),
+    ...(typeof h.renew === 'function' ? { renew: h.renew as () => Promise<string | null> } : {}),
   };
 }

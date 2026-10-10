@@ -21,7 +21,7 @@ import {
   type EmbedFileView,
 } from '../services/embed.api';
 import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
-import { embedBaseUrl, embedToken } from '../embed-config';
+import { embedBaseUrl, embedToken, onEmbedTokenRenewed, withEmbedToken } from '../embed-config';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
@@ -38,6 +38,15 @@ const WRITE_WITHDRAWN =
 const READ_WITHDRAWN =
   "You no longer have access to this page, so these changes can't be saved or proposed. " +
   'Copy anything you want to keep before you discard them.';
+
+/**
+ * A call refused for its token AFTER the renewal `withEmbedToken` tries —
+ * or where there was nothing to renew with (the SPA page). The view has
+ * expired.
+ */
+function refusedForToken(err: unknown): boolean {
+  return err instanceof EmbedApiError && err.status === 401;
+}
 
 function lockLostMessage(holder: string): string {
   return `${holder} started editing this page while it was in the background — your draft can't be saved over theirs.`;
@@ -94,11 +103,20 @@ function embedRawPath(
 
 export function EmbedView() {
   // Handed over by the MCP App view that mounted this, or read from the
-  // page URL on the SPA's `/embed` route — see `embed-config`.
-  const token = embedToken();
+  // page URL on the SPA's `/embed` route — see `embed-config`. Every call
+  // reads it afresh through `withEmbedToken`, which renews it once when a
+  // call is refused for it (the chat view; the SPA page has no way to); the
+  // copy here is for the byte addresses a renderer holds, and follows a
+  // renewal.
+  const [token, setToken] = useState(embedToken);
+  useEffect(() => onEmbedTokenRenewed(() => setToken(embedToken())), []);
   const registry = useAppRegistry();
   const [view, setView] = useState<EmbedFileView | null>(null);
-  /** An expired/absent/rejected token — the one state that shows no content. */
+  /**
+   * An expired/absent/rejected token that could not be renewed — the one
+   * state that shows no content. A draft that was open stays on screen
+   * above the sentence, so nothing typed is lost.
+   */
   const [expired, setExpired] = useState(!token);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<'read' | 'write'>('read');
@@ -118,12 +136,12 @@ export function EmbedView() {
   const [accessLost, setAccessLost] = useState(false);
 
   const reload = useCallback(() => {
-    if (!token) {
+    if (!embedToken()) {
       setExpired(true);
       return;
     }
     setNotice(null);
-    loadEmbed(token)
+    withEmbedToken(loadEmbed)
       .then((next) => {
         setView(next);
         setExpired(false);
@@ -135,16 +153,17 @@ export function EmbedView() {
         if (next.linked) setAwaitingLink(false);
       })
       .catch((err: unknown) => {
-        // 401 is the token: absent, malformed, or past its hour. That is
-        // the expired view — a plain sentence and NO content, ever.
-        if (err instanceof EmbedApiError && err.status === 401) {
+        // 401 is the token: absent, malformed, or past its life, and not
+        // renewed. That is the expired view — a plain sentence and NO
+        // content, ever (a draft the reader typed is theirs, not content).
+        if (refusedForToken(err)) {
           setExpired(true);
           setView(null);
           return;
         }
         setLoadError(err instanceof Error ? err.message : 'This page could not be loaded.');
       });
-  }, [token]);
+  }, []);
 
   useEffect(() => reload(), [reload]);
 
@@ -176,14 +195,18 @@ export function EmbedView() {
     // the way out, and a heartbeat now would only renew somebody else's.
     if (!holdsLock || hidden) return;
     const id = window.setInterval(() => {
-      heartbeatEmbed(token).catch((err: unknown) => {
+      withEmbedToken(heartbeatEmbed).catch((err: unknown) => {
+        if (refusedForToken(err)) {
+          setExpired(true);
+          return;
+        }
         if (!(err instanceof EmbedApiError && err.status === 403)) return;
         // The edit lock goes NOW, whichever access went: nothing from this
         // editor can be saved any more, and holding it would block every
         // other writer until the TTL. Releasing needs no access — the
         // server lets go only of a lock this identity holds.
-        cancelEmbed(token).catch(() => undefined);
-        loadEmbed(token)
+        withEmbedToken(cancelEmbed).catch(() => undefined);
+        withEmbedToken(loadEmbed)
           .then((next) => {
             if (!next.linked || !next.canRead) {
               setAccessLost(true);
@@ -194,13 +217,16 @@ export function EmbedView() {
             setView(next);
           })
           .catch((loadErr: unknown) => {
-            // A 401 here is the token running out, which Save reports anyway.
+            if (refusedForToken(loadErr)) {
+              setExpired(true);
+              return;
+            }
             setNotice(loadErr instanceof Error ? loadErr.message : 'Your access to this page changed.');
           });
       });
     }, HEARTBEAT_MS);
     return () => window.clearInterval(id);
-  }, [holdsLock, hidden, token]);
+  }, [holdsLock, hidden]);
 
   // Best-effort lock release when the frame is hidden or closed mid-edit. The
   // server's lock TTL plus the heartbeat above is the real backstop — a
@@ -216,8 +242,10 @@ export function EmbedView() {
     holdsLockRef.current = holdsLock;
   }, [holdsLock]);
   useEffect(() => {
+    // Not renewed: a page going away has no time to wait for a host, and the
+    // lock's TTL is the backstop when the token has run out.
     const release = () => {
-      if (holdsLockRef.current) cancelEmbed(token).catch(() => undefined);
+      if (holdsLockRef.current) cancelEmbed(embedToken()).catch(() => undefined);
     };
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
@@ -230,11 +258,14 @@ export function EmbedView() {
       // Until the lock is held again, Save is refused here rather than by
       // the server: the editor is on screen, but the claim behind it is not.
       setReacquiring(true);
-      lockEmbed(token)
+      withEmbedToken(lockEmbed)
         .then((result) => {
           setLockLost(result.acquired ? null : (result.holderName ?? 'Someone else'));
         })
-        .catch(() => setLockLost('Someone else'))
+        .catch((err: unknown) => {
+          if (refusedForToken(err)) setExpired(true);
+          else setLockLost('Someone else');
+        })
         .finally(() => setReacquiring(false));
     };
     window.addEventListener('pagehide', release);
@@ -248,7 +279,7 @@ export function EmbedView() {
       // React unmount, so this is where it has to happen.
       release();
     };
-  }, [token]);
+  }, []);
 
   /**
    * The surface the app's renderers are mounted on. Rebuilt only when the
@@ -273,11 +304,27 @@ export function EmbedView() {
       // link appends its own fragment, and two fragments is no address.
       canonicalUrlFor: () => absolute(view.appUrl).split('#', 1)[0],
       rawUrl: (path, options) => embedRawUrl(token, embedRawPath(path, view), options),
-      rawFetch: (path, options) =>
-        fetch(embedRawUrl(token, embedRawPath(path, view), options), {
-          credentials: 'omit',
-          signal: options?.signal,
-        }),
+      // Bytes a renderer fetches itself are renewed like every other call:
+      // a 401 is retried once with a fresh token, and one that stays refused
+      // is the expired view.
+      rawFetch: async (path, options) => {
+        const seen: { last?: Response } = {};
+        try {
+          return await withEmbedToken(async (current) => {
+            const res = await fetch(embedRawUrl(current, embedRawPath(path, view), options), {
+              credentials: 'omit',
+              signal: options?.signal,
+            });
+            seen.last = res;
+            if (res.status === 401) throw new EmbedApiError(401, 'The token was refused');
+            return res;
+          });
+        } catch (err) {
+          if (!seen.last || !refusedForToken(err)) throw err;
+          setExpired(true);
+          return seen.last;
+        }
+      },
       // No download route under the token: `download:` is its own verb, which
       // the embed has nothing to resolve it with.
       offersDownload: false,
@@ -300,7 +347,7 @@ export function EmbedView() {
     setBusy(true);
     setNotice(null);
     try {
-      const result = await lockEmbed(token);
+      const result = await withEmbedToken(lockEmbed);
       if (!result.acquired) {
         setNotice(`${result.holderName ?? 'Someone else'} is editing this page — try again shortly.`);
         return;
@@ -309,11 +356,12 @@ export function EmbedView() {
       setLockLost(null);
       setMode('write');
     } catch (err) {
-      setNotice(err instanceof Error ? err.message : 'Could not start editing.');
+      if (refusedForToken(err)) setExpired(true);
+      else setNotice(err instanceof Error ? err.message : 'Could not start editing.');
     } finally {
       setBusy(false);
     }
-  }, [view, token]);
+  }, [view]);
 
   const onPropose = useCallback(() => {
     if (!view) return;
@@ -338,21 +386,24 @@ export function EmbedView() {
       setNotice(null);
       try {
         if (view.canWrite) {
-          await saveEmbed(token, content);
+          await withEmbedToken((current) => saveEmbed(current, content));
           reload();
         } else {
-          const result = await proposeEmbed(token, content);
+          const result = await withEmbedToken((current) => proposeEmbed(current, content));
           setSent({ url: result.url });
           setMode('read');
         }
       } catch (err) {
-        setNotice(err instanceof Error ? err.message : 'That could not be saved.');
+        // Refused for the token even after a renewal: the expired sentence,
+        // with the draft kept above it for the reader to copy.
+        if (refusedForToken(err)) setExpired(true);
+        else setNotice(err instanceof Error ? err.message : 'That could not be saved.');
         throw err;
       } finally {
         setBusy(false);
       }
     },
-    [view, token, reload, lockLost, accessLost, reacquiring],
+    [view, reload, lockLost, accessLost, reacquiring],
   );
 
   const onCancel = useCallback(async () => {
@@ -360,7 +411,7 @@ export function EmbedView() {
     try {
       // Released even after access was withdrawn (see the heartbeat above):
       // a second release is a no-op, a skipped one blocks other writers.
-      if (view?.canWrite) await cancelEmbed(token).catch(() => undefined);
+      if (view?.canWrite) await withEmbedToken(cancelEmbed).catch(() => undefined);
     } finally {
       setBusy(false);
       setMode('read');
@@ -370,11 +421,26 @@ export function EmbedView() {
       // reader lands on what they may now see, not on the old content.
       if (accessLost) reload();
     }
-  }, [view, token, accessLost, reload]);
+  }, [view, accessLost, reload]);
 
   // ── the states that show no content ──────────────────────────────────────
 
   if (expired) {
+    // A draft that was open stays on screen, read-only, above the sentence:
+    // nothing can be sent from it any more, but the reader can copy it out.
+    if (mode === 'write') {
+      return (
+        <div className="flex h-full min-w-0 flex-col gap-2 p-3">
+          <textarea
+            readOnly
+            aria-label="Your draft"
+            value={draft}
+            className="min-h-32 w-full flex-1 resize-none rounded border border-line bg-sunken px-2 py-1.5 font-mono text-detail text-ink"
+          />
+          <EmbedNotice>{EMBED_EXPIRED}</EmbedNotice>
+        </div>
+      );
+    }
     return (
       <EmbedNotice>
         {EMBED_EXPIRED}
