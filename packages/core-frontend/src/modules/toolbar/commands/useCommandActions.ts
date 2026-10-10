@@ -28,7 +28,7 @@ export function useCommandContext(): CommandContext {
   const editablePage = useEditablePage();
   const { openWorkspacePath } = useFileNav();
   const invite = useInviteDialog();
-  const { knowledgeRoot, createPage } = useCreatePage();
+  const { knowledgeRoot, createPage, pageFolder } = useCreatePage();
   const { showPill } = useOnboarding();
   return useMemo(
     () => ({
@@ -40,10 +40,12 @@ export function useCommandContext(): CommandContext {
       editablePage,
       openWorkspacePath,
       invite,
-      createPage: knowledgeRoot ? createPage : null,
+      // Not offered to someone who may write no Knowledge folder, nor before
+      // that is known; the C shortcut only runs commands that are offered.
+      createPage: knowledgeRoot && pageFolder ? createPage : null,
       onboardingPending: showPill,
     }),
-    [navigate, user, isAdmin, activeAppId, openFilePath, editablePage, openWorkspacePath, invite, knowledgeRoot, createPage, showPill],
+    [navigate, user, isAdmin, activeAppId, openFilePath, editablePage, openWorkspacePath, invite, knowledgeRoot, pageFolder, createPage, showPill],
   );
 }
 

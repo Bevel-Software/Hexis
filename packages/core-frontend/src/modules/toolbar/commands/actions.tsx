@@ -41,11 +41,13 @@ export interface CommandContext {
   /** THE invite dialog, or null where none is mounted. */
   invite: InviteDialogController | null;
   /**
-   * Create an untitled page in the Knowledge folder and open it for editing
-   * (`useCreatePage`); null until the workspace knows where that folder is.
+   * Create an untitled page in a Knowledge folder the person may write and
+   * open it for editing (`useCreatePage`); null until the workspace knows
+   * where that is, and for someone who may write no Knowledge folder.
+   * Resolves with null when a refused write found nowhere left to write.
    * Rejects with a message ready to show.
    */
-  createPage: (() => Promise<string>) | null;
+  createPage: (() => Promise<string | null>) | null;
   /** The connect-your-agent onboarding is still open for this person. */
   onboardingPending: boolean;
 }

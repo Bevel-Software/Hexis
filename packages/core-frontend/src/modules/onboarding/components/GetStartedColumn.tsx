@@ -25,7 +25,13 @@ import { useCreatePage } from '../../workspace/hooks/useCreatePage';
 import { findEntryByPath, pathExistsInTree } from '../../workspace/utils/fileTree';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
-import { chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
+import {
+  chatGptPromptUrl,
+  claudePromptUrl,
+  firstPagePromptFor,
+  firstPagePromptInFolder,
+  firstPageRoute,
+} from '../first-page-prompt';
 import { useStarterPacks } from '../state/starter-packs';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
@@ -182,7 +188,7 @@ export function GetStartedColumn() {
   const { kbDirName, openFilePath, workspaceBranch } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
   const { openWorkspacePath } = useFileNav();
-  const { createPage } = useCreatePage();
+  const { createPage, pageFolder, pageFolderSettled } = useCreatePage();
   const invite = useInviteDialog();
 
   /**
@@ -224,6 +230,12 @@ export function GetStartedColumn() {
   const knowledgeRoot = kbDirName ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
   const guidePath = knowledgeRoot ? `${knowledgeRoot}/${GUIDE_FILE}` : null;
   const guideExists = guidePath !== null && pathExistsInTree(tree, guidePath);
+  // Where New page writes, below the top of Knowledge (`Sales`), or null at
+  // the top itself — what the agent's request has to name.
+  const pageSubfolder =
+    pageFolder && knowledgeRoot && pageFolder.startsWith(`${knowledgeRoot}/`)
+      ? pageFolder.slice(knowledgeRoot.length + 1)
+      : null;
 
   /**
    * The starter pack the team chose, if any: its first-page request replaces
@@ -248,8 +260,9 @@ export function GetStartedColumn() {
   }, [tree, waitingOnPlaceholders, reloadStarter]);
 
   /**
-   * "New page": create a Markdown page in the Knowledge folder and open it
-   * already in the editor (`useCreatePage`, shared with the command menu). The failure is kept here and shown on the step
+   * "New page": create a Markdown page in a Knowledge folder the person may
+   * write and open it already in the editor (`useCreatePage`, shared with the
+   * command menu). The failure is kept here and shown on the step
    * because nothing else would say it — toasts only speak inside the
    * Library, and a refusal (a protected branch's write gate) is exactly what
    * the person needs to read.
@@ -324,8 +337,11 @@ export function GetStartedColumn() {
    * the whole list — and let it be closed — on the strength of placeholders.
    * A failed request settles too, and the pages count as the app counted
    * them before there were packs.
+   *
+   * Only for someone who may write a Knowledge folder: nobody else is shown
+   * the step, and the list counts and completes without it.
    */
-  items.push({
+  if (pageFolder) items.push({
     id: 'page',
     title: 'Write your first page',
     done:
@@ -340,7 +356,7 @@ export function GetStartedColumn() {
             <FirstPagePromptActions
               client={agent.client}
               kind={agent.kind}
-              prompt={firstPagePromptFor(chosenPack)}
+              prompt={firstPagePromptInFolder(firstPagePromptFor(chosenPack), pageSubfolder)}
               newPage={newPageAction}
             />
           ),
@@ -385,8 +401,10 @@ export function GetStartedColumn() {
   const doneCount = items.filter((i) => i.done).length;
   // Until the admin verdict and its two questions are answered, the list is
   // not known — and showing a half-ticked list for a moment to an admin who
-  // has done everything would be a column that flashes on every load.
-  const settled = !isAdminLoading && (!isAdmin || (plugin.settled && teammate.settled));
+  // has done everything would be a column that flashes on every load. The
+  // same for where a page may be written: the step must not show and vanish.
+  const settled =
+    pageFolderSettled && !isAdminLoading && (!isAdmin || (plugin.settled && teammate.settled));
   const allDone = doneCount === items.length;
   // The completion line says whether the agent can reach the knowledge base,
   // so it waits for that answer rather than rewriting itself under the reader.
