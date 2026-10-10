@@ -112,6 +112,11 @@ interface ListedAccount {
   isEnvAdmin?: boolean;
 }
 
+/** The server refused a promotion because the account is switched off (`addMember`'s `ifActive`). */
+function isSwitchedOff(err: unknown): boolean {
+  return (err as { kind?: unknown } | null)?.kind === 'deactivated';
+}
+
 /**
  * Invite each address (`POST /api/admin/accounts`): an account with the
  * starting password when the admin gave one, and otherwise with none — then
@@ -162,11 +167,6 @@ interface ListedAccount {
  *
  * The password goes to the server and nowhere else: no outcome carries it.
  */
-/** The server refused a promotion because the account is switched off (`addMember`'s `ifActive`). */
-function isSwitchedOff(err: unknown): boolean {
-  return (err as { kind?: unknown } | null)?.kind === 'deactivated';
-}
-
 export async function sendInvites(
   emails: string[],
   role: InviteRole,
