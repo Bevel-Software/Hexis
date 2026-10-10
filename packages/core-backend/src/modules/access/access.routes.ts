@@ -1273,25 +1273,31 @@ export function createAccessRoutes(
       await assertRolesAdmin(user.email);
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
-      // `ifActive`: the invite's promotion. It leaves a switched-off account
-      // unchanged, so whether the account is switched off is read here, at
-      // the write, not from the list the dialog read before the send.
+      // `ifActive`: the invite's promotion, which leaves a switched-off
+      // account unchanged. Whether the account is switched off is read inside
+      // the roles file's lock, just before roles.yaml is read and written,
+      // not from the list the dialog read before the send nor before the
+      // lock was waited for. Switching off does not take that lock, so one
+      // that commits after this read still lands after the promotion; that
+      // is the state of any Admin switched off later (its place in roles
+      // stays, its credentials stop being honoured), so it grants nothing.
       const ifActive = (req.body ?? {}).ifActive;
       if (ifActive !== undefined && typeof ifActive !== 'boolean') {
         res.status(400).json({ error: 'ifActive must be a boolean' });
         return;
       }
-      if (ifActive) {
+      const refuseSwitchedOff = async (): Promise<void> => {
         const [account] = await db
           .select({ deactivatedAt: users.deactivatedAt })
           .from(users)
           .where(inArray(users.emailBidx, [canonicalEmail(email)]));
         if (account?.deactivatedAt) {
-          res.status(409).json({ error: 'This account is switched off', kind: 'deactivated' });
-          return;
+          throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
         }
-      }
-      res.json({ roles: await rolesAdmin.addMember(user, canonical, email) });
+      };
+      res.json({
+        roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { beforeWrite: refuseSwitchedOff } : undefined),
+      });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

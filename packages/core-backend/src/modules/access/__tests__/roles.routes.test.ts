@@ -40,7 +40,9 @@ const ROLES = `roles:
 /** Temp workspace dirs to clean up after each test. */
 const tmpDirs: string[] = [];
 
-async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: Server; baseUrl: string }> {
+async function makeHarness(
+  opts: { isAdmin?: boolean; switchOffOnRolesLock?: string } = {},
+): Promise<{ server: Server; baseUrl: string }> {
   const isAdmin = opts.isAdmin ?? true;
 
   // Back the harness with a REAL temp workspace dir: the service's single-file
@@ -119,6 +121,8 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     acquireLock: vi.fn(async (_w: string, _b: string, p: string, user: { id: string; name: string }) => {
       const h = locks.get(p);
       if (h) return { acquired: false, lock: lockRow(h) };
+      // An account switched off while the promotion waited for the lock.
+      if (p.endsWith('roles.yaml')) rolesLocked = true;
       locks.set(p, user);
       return { acquired: true, lock: lockRow(user) };
     }),
@@ -130,10 +134,18 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   } as unknown as WorkflowService;
 
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = usersDbDouble([
+  const accounts = [
     { email: 'off@example.com', deactivatedAt: new Date('2026-09-01T00:00:00Z') },
     'on@example.com',
-  ]);
+  ];
+  const before = usersDbDouble(accounts);
+  const after = usersDbDouble(
+    accounts.map((a) =>
+      a === opts.switchOffOnRolesLock ? { email: a, deactivatedAt: new Date('2026-10-10T00:00:00Z') } : a,
+    ),
+  );
+  let rolesLocked = false;
+  const db = { select: () => (rolesLocked ? after : before).select() } as unknown as typeof before;
 
   const app = express();
   app.use(express.json());
@@ -263,7 +275,8 @@ describe('/api/access/roles routes', () => {
   });
 
   // The invite's promotion (`ifActive`) reads whether the account is switched
-  // off at the write, not from the list the dialog read before the send.
+  // off inside the roles lock, not from the list the dialog read before the
+  // send nor before the lock was waited for.
   async function addAdmin(baseUrl: string, body: unknown) {
     return fetch(`${baseUrl}/api/access/roles/admin/members`, {
       method: 'POST',
@@ -294,6 +307,18 @@ describe('/api/access/roles routes', () => {
     expect(body.roles.find((r) => r.canonical === 'admin')!.members).toEqual(
       expect.arrayContaining(['on@example.com', 'new@example.com']),
     );
+  });
+
+  it('ifActive reads the account once the roles lock is held: one switched off while it waited is refused', async () => {
+    const h = await makeHarness({ switchOffOnRolesLock: 'on@example.com' });
+    server = h.server;
+    const res = await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'This account is switched off', kind: 'deactivated' });
+    const roster = (await (await fetch(`${h.baseUrl}/api/access/roles`)).json()) as {
+      roles: { canonical: string; members: string[] }[];
+    };
+    expect(roster.roles.find((r) => r.canonical === 'admin')!.members).not.toContain('on@example.com');
   });
 
   it('without ifActive, adding a switched-off account works as before', async () => {

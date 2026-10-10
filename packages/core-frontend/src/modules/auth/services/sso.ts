@@ -82,28 +82,24 @@ export function takePostLoginRedirect(): string | null {
 /**
  * Probe which login methods are enabled. On failure default to password-only
  * so a transient error never hides the only working method (and never
- * surfaces an SSO button the backend can't service).
+ * surfaces an SSO button the backend can't service). This is the strict probe
+ * below with that fallback, not a second reading of the answer.
  */
 export async function fetchLoginProviders(): Promise<LoginProviders> {
   try {
-    const res = await fetch('/api/auth/providers');
-    if (!res.ok) return { password: true, sso: [] };
-    const body = (await res.json()) as Partial<LoginProviders>;
-    return {
-      password: body.password !== false,
-      sso: Array.isArray(body.sso) ? body.sso : [],
-    };
+    return await fetchLoginProvidersStrict();
   } catch {
     return { password: true, sso: [] };
   }
 }
 
 /**
- * The same probe, strictly: rejects on a failed request or a non-OK answer
- * instead of answering "password only". The login screen wants the fallback;
- * the Invite dialog and Manage access must tell "no single sign-on" from
- * "couldn't check", because they say different things to the admin. A body
- * that does not carry both answers is "couldn't check" too, not a guess.
+ * The one reading of `GET /api/auth/providers`: rejects on a failed request,
+ * a non-OK answer or a body that does not carry both answers, instead of
+ * guessing. The login screen wants the password-only fallback (see
+ * `fetchLoginProviders`); the Invite dialog and Manage access must tell "no
+ * single sign-on" from "couldn't check", because they say different things to
+ * the admin.
  */
 export async function fetchLoginProvidersStrict(): Promise<LoginProviders> {
   const res = await fetch('/api/auth/providers');
@@ -113,7 +109,10 @@ export async function fetchLoginProvidersStrict(): Promise<LoginProviders> {
   if (
     typeof body?.password !== 'boolean' ||
     !Array.isArray(sso) ||
-    !sso.every((p: Partial<SsoProvider> | null) => typeof p?.key === 'string' && typeof p.label === 'string')
+    !sso.every(
+      (p: Partial<SsoProvider> | null) =>
+        typeof p?.key === 'string' && typeof p.label === 'string' && typeof p.startPath === 'string',
+    )
   ) {
     throw new Error("Couldn't read the sign-in methods");
   }
