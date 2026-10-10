@@ -42,7 +42,7 @@ const tmpDirs: string[] = [];
 
 async function makeHarness(
   opts: { isAdmin?: boolean; switchOffOnRolesLock?: string } = {},
-): Promise<{ server: Server; baseUrl: string }> {
+): Promise<{ server: Server; baseUrl: string; txLog: string[] }> {
   const isAdmin = opts.isAdmin ?? true;
 
   // Back the harness with a REAL temp workspace dir: the service's single-file
@@ -145,7 +145,39 @@ async function makeHarness(
     ),
   );
   let rolesLocked = false;
-  const db = { select: () => (rolesLocked ? after : before).select() } as unknown as typeof before;
+  const current = () => (rolesLocked ? after : before);
+  // What happened inside each users transaction, in order: the row lock the
+  // read asked for, and what roles.yaml held when the transaction ended.
+  const txLog: string[] = [];
+  const rolesOnDisk = () => fs.readFile(path.join(repoDir, 'roles.yaml'), 'utf-8');
+  const db = {
+    select: () => current().select(),
+    transaction: async <T>(cb: (tx: unknown) => Promise<T>): Promise<T> => {
+      txLog.push('begin');
+      const tx = {
+        select: (fields: unknown) => ({
+          from: (table: unknown) => ({
+            where: (condition: unknown) => {
+              const q = (current().select(fields as never).from(table as never) as unknown as {
+                where: (c: unknown) => Promise<unknown[]> & { for: (strength: string) => Promise<unknown[]> };
+              }).where(condition);
+              return Object.assign(q, {
+                for: (strength: string) => {
+                  txLog.push(`select for ${strength}`);
+                  return q;
+                },
+              });
+            },
+          }),
+        }),
+      };
+      try {
+        return await cb(tx);
+      } finally {
+        txLog.push(`end: ${(await rolesOnDisk()).includes('on@example.com') ? 'promoted' : 'not promoted'}`);
+      }
+    },
+  } as unknown as typeof before;
 
   const app = express();
   app.use(express.json());
@@ -159,7 +191,7 @@ async function makeHarness(
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}` };
+  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, txLog };
 }
 
 function close(s: Server): Promise<void> {
@@ -319,6 +351,15 @@ describe('/api/access/roles routes', () => {
       roles: { canonical: string; members: string[] }[];
     };
     expect(roster.roles.find((r) => r.canonical === 'admin')!.members).not.toContain('on@example.com');
+  });
+
+  it('ifActive holds the account row locked until roles.yaml is written, so a switch-off cannot land in between', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    expect((await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive: true })).status).toBe(200);
+    // Switching off is an UPDATE of that row: it waits for this transaction,
+    // which ends only after the promotion is on disk.
+    expect(h.txLog).toEqual(['begin', 'select for update', 'end: promoted']);
   });
 
   it('without ifActive, adding a switched-off account works as before', async () => {

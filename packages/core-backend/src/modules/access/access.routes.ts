@@ -1274,29 +1274,33 @@ export function createAccessRoutes(
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
       // `ifActive`: the invite's promotion, which leaves a switched-off
-      // account unchanged. Whether the account is switched off is read inside
-      // the roles file's lock, just before roles.yaml is read and written,
-      // not from the list the dialog read before the send nor before the
-      // lock was waited for. Switching off does not take that lock, so one
-      // that commits after this read still lands after the promotion; that
-      // is the state of any Admin switched off later (its place in roles
-      // stays, its credentials stop being honoured), so it grants nothing.
+      // account unchanged. Inside the roles file's lock, the account's row is
+      // read FOR UPDATE in a transaction that stays open until roles.yaml is
+      // written and committed. Switching off is an UPDATE of that row, so it
+      // either committed before the read (the promotion is refused) or waits
+      // on the row lock until the promotion is written (it lands after, as
+      // for any Admin switched off later: the place in roles stays, the
+      // credentials stop being honoured). An address with no account has no
+      // row to switch off.
       const ifActive = (req.body ?? {}).ifActive;
       if (ifActive !== undefined && typeof ifActive !== 'boolean') {
         res.status(400).json({ error: 'ifActive must be a boolean' });
         return;
       }
-      const refuseSwitchedOff = async (): Promise<void> => {
-        const [account] = await db
-          .select({ deactivatedAt: users.deactivatedAt })
-          .from(users)
-          .where(inArray(users.emailBidx, [canonicalEmail(email)]));
-        if (account?.deactivatedAt) {
-          throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
-        }
-      };
+      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> =>
+        db.transaction(async (tx) => {
+          const [account] = await tx
+            .select({ deactivatedAt: users.deactivatedAt })
+            .from(users)
+            .where(inArray(users.emailBidx, [canonicalEmail(email)]))
+            .for('update');
+          if (account?.deactivatedAt) {
+            throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
+          }
+          await write();
+        });
       res.json({
-        roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { beforeWrite: refuseSwitchedOff } : undefined),
+        roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { aroundWrite: whileSwitchedOn } : undefined),
       });
     } catch (err) {
       const { status, body } = toHttpError(err);

@@ -460,19 +460,21 @@ export class RolesAdminService {
    * nothing, next to the fixed row the page already shows. Other roles are
    * unaffected: a deployment admin is an ordinary member of "Sales".
    *
-   * `beforeWrite`, when given, runs once the roles file's lock is held and
-   * before `roles.yaml` is read, so a check it makes (the invite's "is this
-   * account switched off?") is not stale by the time the lock was waited
-   * for. It may throw to refuse; nothing is written then.
+   * `aroundWrite`, when given, runs once the roles file's lock is held and
+   * is handed the edit itself (read, check, write, commit) to run. What it
+   * does around that call brackets the whole write: the invite holds the
+   * account's row lock across it, so a switch-off cannot commit in between
+   * (see the members route). It may throw instead of calling `write`;
+   * nothing is written then.
    */
   async addMember(
     actor: AuthUser,
     canonical: string,
     email: string,
-    opts?: { beforeWrite?: () => Promise<void> },
+    opts?: { aroundWrite?: (write: () => Promise<void>) => Promise<void> },
   ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
-    await this.runEdit(actor, (text) => editAddMember(text, canonical, email), opts?.beforeWrite);
+    await this.runEdit(actor, (text) => editAddMember(text, canonical, email), opts?.aroundWrite);
     return this.getRoster();
   }
 
@@ -705,19 +707,19 @@ export class RolesAdminService {
    * `pre` produces the candidate (and may throw RolesAdminError for invariant
    * violations before any write). Skips on a no-op. Every candidate passes
    * the resolver's own parser (assertLoadable) plus the pre-disk validator
-   * before a byte lands. `beforeWrite` runs first inside the lock (see
+   * before a byte lands. `aroundWrite` wraps the locked edit (see
    * {@link addMember}).
    */
   private async runEdit(
     actor: AuthUser,
     pre: (currentText: string) => EditResult,
-    beforeWrite?: () => Promise<void>,
+    aroundWrite?: (write: () => Promise<void>) => Promise<void>,
   ): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     await this.assertRolesUnlocked(workspaceId, actor);
-    return this.locked.withFileLocks(workspaceId, actor, [ROLES_YAML], async () => {
-      await beforeWrite?.();
-      return this.runEditLocked(workspaceId, actor, pre);
+    return this.locked.withFileLocks(workspaceId, actor, [ROLES_YAML], () => {
+      const write = () => this.runEditLocked(workspaceId, actor, pre);
+      return aroundWrite ? aroundWrite(write) : write();
     });
   }
 
