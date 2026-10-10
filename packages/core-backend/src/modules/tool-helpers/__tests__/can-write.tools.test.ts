@@ -8,7 +8,7 @@ import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
-import type { ToolContext } from '../tool.contract.js';
+import { ToolError, type ToolContext } from '../tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
@@ -22,9 +22,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { BranchNotFoundError } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { SkillService } from '../../skills/skills.service.js';
-import { registerSkillsTools } from '../../skills/skills.tools.js';
-import { defaultBranchWriteVerdicts } from '../default-branch-write.js';
+import { SkillService, registerSkillsTools } from '../../skills/index.js';
+import { defaultBranchWriteVerdicts } from '../index.js';
 
 /**
  * `canWrite` on `list_skills`, `get_skill`, `list_files` and `read_file`,
@@ -88,6 +87,14 @@ let caller = ENG;
 let scope: 'read' | 'write' = 'write';
 /** Calls the access layer took for write verdicts, by method, since the last reset. */
 let writeChecks: { method: string; workspaceId: string; paths: string[] }[] = [];
+/** A deployment's read hook: refuses the reads this matches; every read it is asked about is noted. */
+let refuseRead: ((branch: string, wsPath: string) => boolean) | null = null;
+let readsNoted: { branch: string; wsPath: string }[] = [];
+const hooks = new WorkflowHooks();
+hooks.onAgentRead(async ({ branch, wsPath = '' }) => {
+  readsNoted.push({ branch, wsPath });
+  if (refuseRead?.(branch, wsPath)) throw new ToolError('Not in this conversation.', 403);
+});
 
 const wsDir = (branch: string) => join(root, workspaceIdForBranch(branch));
 
@@ -157,7 +164,7 @@ beforeAll(async () => {
     new DocExtractService(docCache),
     counted,
     kb,
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks, notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     undefined,
@@ -186,6 +193,8 @@ beforeEach(() => {
   caller = ENG;
   scope = 'write';
   writeChecks = [];
+  refuseRead = null;
+  readsNoted = [];
 });
 
 async function call<T>(tool: string, body: Record<string, unknown>, as = caller): Promise<T> {
@@ -404,6 +413,20 @@ describe('read_file carries canWrite for the file read', () => {
     } finally {
       await writeFile(onMain, MAIN_TREE['AGENTS.md']);
     }
+  });
+
+  it('asks the default branch\'s read hook before judging AGENTS.md from a draft, and gives false on refusal', async () => {
+    const path = `${KB}/AGENTS.md`;
+    const allowed = await call<Read>('read_file', { branch: DRAFT, path }, ADMIN);
+    expect(allowed.canWrite).toBe(true);
+    expect(readsNoted).toContainEqual({ branch: MAIN, wsPath: path });
+    // The draft read itself is allowed; only the look at the default branch's file is refused.
+    refuseRead = (branch, wsPath) => branch === MAIN && wsPath === path;
+    writeChecks = [];
+    const refused = await call<Read>('read_file', { branch: DRAFT, path }, ADMIN);
+    expect(refused.content).toContain('Our conventions');
+    expect(refused.canWrite).toBe(false);
+    expect(writeChecks).toEqual([]);
   });
 
   it('carries no canWrite for a spill ref', async () => {

@@ -24,7 +24,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
-import { CAN_WRITE_CLAUSE } from '../../tool-helpers/default-branch-write.js';
+import { CAN_WRITE_CLAUSE } from '../../tool-helpers/index.js';
 import {
   TOOL_PREFIX_CAP,
   sharedFileRules,

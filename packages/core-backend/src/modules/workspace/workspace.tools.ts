@@ -1883,14 +1883,17 @@ export function registerWorkspaceTools(
   /**
    * Whether the DEFAULT branch has a file of the knowledge base's own at the
    * guide's name that this caller may read — not a copy of the platform's
-   * guide an earlier release wrote. Asked without the read hook: nothing is
-   * read for the caller, only whether there is something there. A failure is
+   * guide an earlier release wrote. Telling the two apart reads the file, so
+   * that branch's read hook is asked first, as {@link ownGuideFile} does —
+   * after the gate, before the bytes. A refusal, like any failure, is
    * `false`, so `canWrite` fails closed.
    */
   const ownGuideOnDefault = async (ctx: ToolContext, p: string): Promise<boolean> => {
     try {
       const fs = await ctx.getFilesystem(kb.defaultBranch);
-      return (await ownGuideReadable(fs, kb.defaultBranch, ctx, p)) && (await isOwnEntryStill(fs, p));
+      if (!(await ownGuideReadable(fs, kb.defaultBranch, ctx, p))) return false;
+      await notifyAgentRead(agentAccessGate, ctx, kb.defaultBranch, p);
+      return await isOwnEntryStill(fs, p);
     } catch {
       return false;
     }
