@@ -1,4 +1,4 @@
-// node --test scripts/__tests__/*.test.mjs
+// node --test scripts/__tests__/lint-changed.test.mjs (pnpm test:scripts)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
