@@ -377,12 +377,13 @@ export interface WorkspaceContextValue {
    */
   deleteEntry: (relativePath: string) => Promise<DeleteEntryResult | false | void>;
   /**
-   * Whether this session is deleting `relativePath` right now — itself, or
-   * under a folder being deleted. A 404 on such a path is this person's own
-   * delete, never someone else's. Optional so test fixtures need not supply
-   * it; absent reads as false.
+   * Whether `relativePath` went in this session's own delete — itself, or
+   * under a deleted folder — while the request runs and for a minute after
+   * it (the change events it causes can arrive after the request answers).
+   * A 404 on such a path is this person's own delete, never someone else's.
+   * Optional so test fixtures need not supply it; absent reads as false.
    */
-  isPendingDelete?: (relativePath: string) => boolean;
+  isOwnDelete?: (relativePath: string) => boolean;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
   saveFile: (relativePath: string, content: string) => Promise<void>;
   /**

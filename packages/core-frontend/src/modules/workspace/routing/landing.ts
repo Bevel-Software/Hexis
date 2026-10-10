@@ -1,5 +1,5 @@
 import { kbFileUrl } from './kb-routes';
-import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-paths';
+import { LIBRARY_ROOT, isLibraryLocation, libraryItemWorkspacePath } from '../../library/routes/library-paths';
 
 /**
  * Where the page lands once the file on screen has closed — deleted from the
@@ -12,4 +12,21 @@ import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-pa
 export function landingAfterClose(pathname: string, branch: string, newActivePath: string | null): string {
   if (newActivePath === null && isLibraryLocation(pathname)) return LIBRARY_ROOT;
   return kbFileUrl(branch, newActivePath ?? undefined);
+}
+
+/**
+ * Whether deleting `deletedPath` took the Library item on screen with it — a
+ * skill's or a tool's page, which holds no tab, so `deleteEntry` cannot say
+ * it closed the active one. True when the file the page's URL names is the
+ * deleted path or under it, and when the deleted path is the `SKILL.md` of
+ * the skill whose file is on screen: without it there is no skill. The
+ * caller lands as `landingAfterClose` says for no tab left: Skills & Tools.
+ */
+export function deleteTookLibraryItem(pathname: string, kbDirName: string | null, deletedPath: string): boolean {
+  if (!isLibraryLocation(pathname)) return false;
+  const onScreen = libraryItemWorkspacePath(pathname, kbDirName);
+  if (onScreen === null) return false;
+  if (onScreen === deletedPath || onScreen.startsWith(`${deletedPath}/`)) return true;
+  const skillMd = '/SKILL.md';
+  return deletedPath.endsWith(skillMd) && onScreen.startsWith(deletedPath.slice(0, -skillMd.length + 1));
 }

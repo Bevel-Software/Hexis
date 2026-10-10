@@ -21,7 +21,7 @@ import type { DeletedBy } from '../components/DeletedFileNotice';
  * host (the `system` user) and a tree-wide event name nobody.
  *
  * Never this person's own delete: a path this session is deleting
- * (`isPendingDelete`) is skipped, and `suppressed` lets a page skip while its
+ * (`isOwnDelete`: in flight, or a moment ago) is skipped, and `suppressed` lets a page skip while its
  * own delete dialog runs — that dialog lands the page somewhere else.
  *
  * The workspace is WATCHED for as long as the page is mounted: the Library
@@ -40,8 +40,8 @@ export function useItemDeletedElsewhere({
 }): DeletedBy | null {
   const bus = useEventBus();
   // Read softly: a tool page may be mounted with no workspace around it.
-  const isPendingDelete = useContext(WorkspaceContext)?.isPendingDelete;
-  const isPendingDeleteRef = useLatestRef(isPendingDelete);
+  const isOwnDelete = useContext(WorkspaceContext)?.isOwnDelete;
+  const isOwnDeleteRef = useLatestRef(isOwnDelete);
   const suppressedRef = useLatestRef(suppressed);
   const key = workspaceId && itemPath && keyFile ? `${workspaceId}\n${keyFile}` : null;
   // Stored WITH the item it is about, so another item reads as not deleted.
@@ -73,7 +73,7 @@ export function useItemDeletedElsewhere({
           (err) => {
             if (cancelled) return;
             if (!(err instanceof WorkspaceApiError && err.status === 404)) return;
-            if (suppressedRef.current || isPendingDeleteRef.current?.(keyFile)) return;
+            if (suppressedRef.current || isOwnDeleteRef.current?.(keyFile)) return;
             // The first answer that names someone is the delete; later ones
             // do not rename who did it.
             setDeleted((prev) =>
@@ -108,7 +108,7 @@ export function useItemDeletedElsewhere({
       offTreeChanged();
       release();
     };
-  }, [bus, workspaceId, itemPath, keyFile, key, isPendingDeleteRef, suppressedRef]);
+  }, [bus, workspaceId, itemPath, keyFile, key, isOwnDeleteRef, suppressedRef]);
 
   return deleted && deleted.key === key ? deleted.by : null;
 }

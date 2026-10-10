@@ -265,6 +265,31 @@ describe('deleteEntry: the delete says where the page lands', () => {
     expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Keep.md']);
     expect(result.current.openTabs.some((t) => t.deletedBy)).toBe(false);
   });
+
+  // A page with no tab (a skill's, a tool's) learns of the delete from the
+  // change events it causes, and those can trail the request's answer: the
+  // delete stays this session's own after the request, not only during it.
+  it('counts as our own after the request answers, for the path and what was under it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const result = await mountReady();
+      await open(result, 'KB/Keep.md');
+      expect(result.current.isOwnDelete?.('KB/Dir/In.md')).toBe(false);
+
+      await act(async () => { await result.current.deleteEntry('KB/Dir'); });
+
+      expect(result.current.isOwnDelete?.('KB/Dir')).toBe(true);
+      expect(result.current.isOwnDelete?.('KB/Dir/In.md')).toBe(true);
+      expect(result.current.isOwnDelete?.('KB/Dir-2/In.md')).toBe(false);
+      expect(result.current.isOwnDelete?.('KB/Keep.md')).toBe(false);
+
+      // Not for good: a later delete of the same path is someone else's.
+      vi.advanceTimersByTime(61_000);
+      expect(result.current.isOwnDelete?.('KB/Dir/In.md')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 /**

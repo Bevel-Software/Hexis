@@ -65,7 +65,7 @@ import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { CR_FILE_PARAM, CR_PARAM, branchFromPathname, useFileNav } from '../routing/kb-routes';
-import { landingAfterClose } from '../routing/landing';
+import { deleteTookLibraryItem, landingAfterClose } from '../routing/landing';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
@@ -650,6 +650,10 @@ function ContextMenu({
         // Only on a workspace page — elsewhere nothing is on screen.
         if (result?.closedActive && branchOnScreen !== null) {
           navigate(landingAfterClose(location.pathname, branchOnScreen, result.newActivePath), { replace: true });
+        } else if (result && branchOnScreen !== null && deleteTookLibraryItem(location.pathname, kbDirName, entry.relativePath)) {
+          // A skill's or a tool's page holds no tab, so no tab closed — but
+          // the item on screen is gone all the same. Land as with no tab left.
+          navigate(landingAfterClose(location.pathname, branchOnScreen, null), { replace: true });
         }
         return true;
       } catch (err) {

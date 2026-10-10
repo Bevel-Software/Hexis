@@ -3,7 +3,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { libraryUploadTarget, useWorkspace } from '../../workspace/state/workspace.context';
 import { checkoutRoot } from '../../workspace/utils/fileTree';
-import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { libraryItemWorkspacePath } from '../routes/library-paths';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { Puzzle } from 'lucide-react';
 import {
@@ -95,7 +96,7 @@ export function RootFolderTree({
 
   const nav = useMemo<TreeNav>(
     () => ({
-      activePath: activeWorkspacePath(location.pathname, kbDirName),
+      activePath: libraryItemWorkspacePath(location.pathname, kbDirName),
       open: (path) => navigate(kbFileUrl(DEFAULT_BRANCH, path)),
       menuItems,
     }),
@@ -188,17 +189,3 @@ function repoRelative(workspacePath: string, kbDirName: string | null): string |
   return workspacePath.startsWith(prefix) ? workspacePath.slice(prefix.length) : null;
 }
 
-/**
- * The workspace-relative path a Library URL names, or null. Library item
- * pages live at `/workspace/<default>/<kbDir>/...` — the inverse of
- * `kbFileUrl`, segment by segment. Any other URL (the index, a lens, a
- * plugin page) names no file, so no row is current.
- */
-function activeWorkspacePath(pathname: string, kbDirName: string | null): string | null {
-  const prefix = `${KB_ROUTE_PREFIX}/`;
-  if (!pathname.startsWith(prefix)) return null;
-  const [branch, ...rest] = pathname.slice(prefix.length).split('/').map(safeDecode);
-  if (branch !== DEFAULT_BRANCH || rest.length < 2) return null;
-  if (kbDirName !== null && rest[0] !== kbDirName) return null;
-  return rest.join('/');
-}

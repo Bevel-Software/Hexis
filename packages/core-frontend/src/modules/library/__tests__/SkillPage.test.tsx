@@ -1757,7 +1757,7 @@ describe('SkillPage: deleted by someone else', () => {
     const pending = vi.fn((path: string) => path.startsWith('knowledge-base/Skills/newsletter'));
     renderPage(false, [], [], bus, undefined, undefined, undefined, git, {
       ...workspace,
-      isPendingDelete: pending,
+      isOwnDelete: pending,
     } as WorkspaceContextValue);
     await settled();
 

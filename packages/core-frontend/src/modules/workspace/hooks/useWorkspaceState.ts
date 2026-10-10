@@ -57,6 +57,9 @@ const UPLOAD_CONCURRENCY = 4;
 // How long a tree refresh trusts a read that found an open tab's file,
 // missing from the tree, still there — see `treeAbsentCheckedAtRef`.
 const TREE_ABSENT_RECHECK_MS = 30_000;
+// How long a path this session deleted still counts as its own delete — see
+// `isOwnDelete`: the change events a delete causes can trail its answer.
+const OWN_DELETE_WINDOW_MS = 60_000;
 const UNSAVED_TAB_WARNING = (filename: string) =>
   `You have unsaved changes in ${filename}. Close anyway?`;
 const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
@@ -272,6 +275,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const pendingDeletePathsRef = useRef<Set<string>>(new Set());
   /**
+   * Paths this session deleted, with when the server confirmed it — see
+   * `isOwnDelete`. Kept OWN_DELETE_WINDOW_MS, long enough for the change
+   * events the delete caused to arrive after the request answered.
+   */
+  const ownDeletesRef = useRef<Map<string, number>>(new Map());
+  /**
    * Open tabs whose file someone else deleted (`OpenTab.deletedBy`), as a
    * ref so `saveFile` can refuse a write-back synchronously — the state that
    * marks the tab lands a render after the editor's unmount cleanup reads it.
@@ -438,6 +447,20 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     return false;
   }, []);
+
+  /** In flight, or deleted by this session a moment ago — see the context's `isOwnDelete`. */
+  const isOwnDelete = useCallback((path: string) => {
+    if (isPendingDelete(path)) return true;
+    const now = Date.now();
+    for (const [deleted, at] of ownDeletesRef.current) {
+      if (now - at > OWN_DELETE_WINDOW_MS) {
+        ownDeletesRef.current.delete(deleted);
+        continue;
+      }
+      if (path === deleted || path.startsWith(deleted + '/')) return true;
+    }
+    return false;
+  }, [isPendingDelete]);
 
   /**
    * Someone else deleted the file of the open tab at `path`. The tab stays,
@@ -1411,6 +1434,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     if (!isCurrent()) return;
     pendingDeletePathsRef.current.delete(relativePath);
+    ownDeletesRef.current.set(relativePath, Date.now());
     // Before the tabs go: closing them unmounts the editor, whose lock
     // cleanup writes its buffer back through `saveFile` — which, unguarded,
     // re-created the file this delete just removed. The set drops each path
@@ -1784,6 +1808,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   useEffect(() => {
     pendingUploadsRef.current = new Map();
     pendingDeletePathsRef.current = new Set();
+    ownDeletesRef.current = new Map();
     deletedPathsRef.current = new Set();
     existenceChecksRef.current = new Map();
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -2027,7 +2052,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     dispatchUpload,
     clearUploadError,
     deleteEntry,
-    isPendingDelete,
+    isOwnDelete,
     moveEntry,
     saveFile,
     reloadTabFromDisk,
@@ -2043,7 +2068,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadErrors, uploadNotices, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
-    deleteEntry, isPendingDelete, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
+    deleteEntry, isOwnDelete, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
     setPendingContent, acceptPendingContent, rejectPendingContent,
     setPersistenceBranch, deleteWorkspace,
   ]);

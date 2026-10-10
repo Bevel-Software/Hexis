@@ -242,6 +242,39 @@ describe('SkillsTree: deleting the item on screen', () => {
     await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
   });
 
+  // A skill's page holds no tab, so the delete reports no active tab closed —
+  // yet the skill on screen is gone. Before, the page stayed on its URL.
+  it("lands on Skills & Tools when the skill's folder on screen is deleted, though no tab closed", async () => {
+    const SKILL_MD = `${KB}/Skills/Sales/discovery-call/SKILL.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: null }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${SKILL_MD}`, { deleteEntry, openFilePath: null });
+
+    await deleteRow('discovery-call');
+
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call`);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  it("lands on Skills & Tools when the skill's SKILL.md goes while another of its files is on screen", async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: null }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/checklist.md`, { deleteEntry, openFilePath: null });
+
+    await deleteRow('SKILL.md');
+    // The skill's SKILL.md IS the skill: its other files go with it.
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  it('stays on the skill when the delete was called off', async () => {
+    const page = `/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/SKILL.md`;
+    const deleteEntry = vi.fn(async () => false as const);
+    renderTree(page, { deleteEntry, openFilePath: null });
+
+    await deleteRow('discovery-call');
+
+    expect(deleteEntry).toHaveBeenCalled();
+    expect(screen.getByLabelText('pathname').textContent).toBe(page);
+  });
+
   it('lands on the tab that is left when there is one', async () => {
     const left = `${KB}/KnowledgeBase/Handbook.md`;
     const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: left }));

@@ -7,7 +7,7 @@ import {
   isPersonalPluginFolder,
 } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
 import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
 
@@ -236,4 +236,19 @@ export function libraryHomeForItemPath(
     return { label: labelOf(plugin), path: pathForPlugin(plugin) };
   }
   return { label: 'Everything', path: LIBRARY_ROOT };
+}
+
+/**
+ * The workspace-relative path a Library URL names, or null. Library item
+ * pages live at `/workspace/<default>/<kbDir>/...` — the inverse of
+ * `kbFileUrl`, segment by segment. Any other URL (the index, a lens, a
+ * plugin page) names no file, so no row is current.
+ */
+export function libraryItemWorkspacePath(pathname: string, kbDirName: string | null): string | null {
+  const prefix = `${KB_ROUTE_PREFIX}/`;
+  if (!pathname.startsWith(prefix)) return null;
+  const [branch, ...rest] = pathname.slice(prefix.length).split('/').map(safeDecode);
+  if (branch !== DEFAULT_BRANCH || rest.length < 2) return null;
+  if (kbDirName !== null && rest[0] !== kbDirName) return null;
+  return rest.join('/');
 }
