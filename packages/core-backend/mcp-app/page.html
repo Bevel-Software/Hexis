@@ -197,7 +197,9 @@
         function renew() {
           if (renewing) return renewing;
           if (serverTools === false || !pageArgs || !deployment) return Promise.resolve(null);
-          renewing = callServerTool(OPEN_PAGE_TOOL, pageArgs)
+          // Every Hexis tool takes its arguments under `body`; flat ones are
+          // refused ("takes its arguments under body") and no token comes back.
+          renewing = callServerTool(OPEN_PAGE_TOOL, { body: pageArgs })
             .then(
               function (result) {
                 var data = (result && result.structuredContent) || {};

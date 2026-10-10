@@ -665,6 +665,35 @@ describe('a chat view whose token runs out', () => {
     expect(screen.queryByRole('heading', { name: 'Thing' })).toBeNull();
   });
 
+  /**
+   * Once the view has expired with an editor open, nothing keeps beating:
+   * a heartbeat would be refused, ask the host for another token, and do so
+   * again every beat — a renewal loop by another name.
+   */
+  it('stops the heartbeat once a refused heartbeat could not be renewed, so it never asks again', async () => {
+    const ticks = captureHeartbeats();
+    const clear = vi.spyOn(window, 'clearInterval');
+    const renew = inChat(async () => null);
+    api.loadEmbed.mockResolvedValue(view());
+    api.lockEmbed.mockResolvedValue({ acquired: true });
+    api.heartbeatEmbed.mockRejectedValue(expired());
+    mount();
+    await editing();
+    const beats = ticks.length;
+    ticks.at(-1)!();
+    expect(await screen.findByText(EMBED_EXPIRED)).toBeTruthy();
+    expect(renew).toHaveBeenCalledTimes(1);
+    // The interval was taken down and no new one was set up.
+    expect(clear).toHaveBeenCalled();
+    expect(ticks).toHaveLength(beats);
+    // Coming back to the tab does not take the lock again either.
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(api.lockEmbed).toHaveBeenCalledTimes(1);
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole('textbox', { name: 'Your draft' }) as HTMLTextAreaElement).value).toBe(EDITED);
+  });
+
   it('shows the expired sentence when the renewal itself fails', async () => {
     inChat(async () => {
       throw new Error('the chat app did not answer');

@@ -189,7 +189,12 @@ export function EmbedView() {
   // sent, and the reader is told why. Either way the edits are not lost. Any
   // other failure is left to the lock's TTL and to Save, which refuses with
   // its own reason.
-  const holdsLock = mode === 'write' && (view?.canWrite ?? false) && !accessLost;
+  //
+  // An expired view holds nothing either: its token was refused even after a
+  // renewal, so a heartbeat would only ask the host for another every beat —
+  // the loop one renewal per refused call rules out. The draft stays on
+  // screen; the lock is left to its TTL.
+  const holdsLock = mode === 'write' && (view?.canWrite ?? false) && !accessLost && !expired;
   useEffect(() => {
     // Nothing to keep alive while the frame is hidden: the lock was let go on
     // the way out, and a heartbeat now would only renew somebody else's.

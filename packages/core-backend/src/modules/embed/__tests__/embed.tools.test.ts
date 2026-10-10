@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { checkFor } from '@bevel-software/platform-mcp-core';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
@@ -120,6 +121,21 @@ describe('open_page: the listing', () => {
     // The in-app reader is already looking at the app, where every page is a
     // click away; an iframe of the page they are standing on cannot help.
     expect(internal).not.toContain(OPEN_PAGE_TOOL);
+  });
+
+  /**
+   * The chat view renews its token by having its host call this tool with
+   * `{ body: { path, heading } }` (see `mcp-app/page.html`). The listing's
+   * own check decides what `/api/mcp` accepts: that shape passes it, and the
+   * flat one the view once sent is refused, so no token ever came back.
+   */
+  it("accepts the chat view's renewal arguments under body, and refuses them flat", async () => {
+    const { registry } = await serve();
+    const def = (await registry.listExternal()).find((t) => t.name === OPEN_PAGE_TOOL)!;
+    const compiled = checkFor(def.inputs);
+    if (!compiled.checkable) throw new Error(`open_page's schema is not checkable: ${compiled.reason}`);
+    expect(compiled.check({ body: { path: 'Data/Thing.md', heading: 'what-it-is' } })).toEqual([]);
+    expect(compiled.check({ path: 'Data/Thing.md', heading: 'what-it-is' })).not.toEqual([]);
   });
 
   it('takes a path and an optional heading, and no branch at all', async () => {

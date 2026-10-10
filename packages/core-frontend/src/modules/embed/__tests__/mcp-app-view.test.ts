@@ -347,7 +347,12 @@ describe('the MCP App view renewing its token', () => {
     expect(call).toMatchObject({
       jsonrpc: '2.0',
       method: 'tools/call',
-      params: { name: 'open_page', arguments: { path: 'knowledge-base/Data/Thing.md', heading: 'what-it-is' } },
+      // Under `body`, as every Hexis tool takes its arguments over `/api/mcp`:
+      // flat ones are refused there and no token comes back.
+      params: {
+        name: 'open_page',
+        arguments: { body: { path: 'knowledge-base/Data/Thing.md', heading: 'what-it-is' } },
+      },
     });
     fromHost({
       jsonrpc: '2.0',
@@ -363,7 +368,7 @@ describe('the MCP App view renewing its token', () => {
     handshake({ serverTools: {} });
     const page = await opened({ path: 'Data/Thing.md' });
     void page.renew();
-    expect(toolCalls()[0].params?.arguments).toEqual({ path: 'Data/Thing.md' });
+    expect(toolCalls()[0].params?.arguments).toEqual({ body: { path: 'Data/Thing.md' } });
   });
 
   it('shares one call between renewals asked for together', async () => {
