@@ -105,16 +105,22 @@ export async function recoverRoles(): Promise<RoleRosterEntry[]> {
 // now 404). Membership (members + group assignments) is what this client edits;
 // legacy people-set roles migrate out via convertRoleToGroup.
 
+/**
+ * `ifActive`: refuse (409, kind `deactivated`) when the address's account is
+ * switched off at the time of the write — an invite leaves such an account
+ * unchanged, its role included.
+ */
 export async function addMember(
   canonical: string,
   email: string,
+  options: { ifActive?: boolean } = {},
 ): Promise<RoleRosterEntry[]> {
   const res = await authFetch(
     `/api/access/roles/${encodeURIComponent(canonical)}/members`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
+      body: JSON.stringify(options.ifActive ? { email, ifActive: true } : { email }),
     },
   );
   return parseRoster(res);

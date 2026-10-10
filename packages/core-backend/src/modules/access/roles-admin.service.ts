@@ -227,9 +227,10 @@ export class RolesAdminService {
   /**
    * Is `email` a deployment admin — an address the server configuration makes
    * an Admin, ahead of `roles.yaml`? Drives both the fixed member rows and
-   * the add/remove refusals on the Admin role.
+   * the add/remove refusals on the Admin role, and keeps a switched-off
+   * deployment admin among the admins people are told to ask.
    */
-  private isFixedAdmin(email: string): boolean {
+  isFixedAdmin(email: string): boolean {
     return this.fixedAdminEmails.includes(canonicalEmail(email));
   }
 
@@ -343,6 +344,18 @@ export class RolesAdminService {
   }
 
   /**
+   * The addresses the app treats as an Admin, each once — the resolver's own
+   * membership answer ({@link IAccessControl.adminEmails}), so who this names
+   * and who the admin gates admit cannot drift apart. Nothing else about
+   * roles: this backs a read any signed-in person may make (who to ask for an
+   * invite), unlike the roster.
+   */
+  async getAdminEmails(): Promise<string[]> {
+    const workspaceId = await this.ensureWorkspace();
+    return this.accessControl.adminEmails(workspaceId);
+  }
+
+  /**
    * Whether the default-branch roles.yaml parses. Drives the "roles file
    * corrupted" banner. Auth-only (never admin-gated): a corrupted file resolves
    * NOBODY as admin, so an admin-gated health check could never report the very
@@ -446,10 +459,24 @@ export class RolesAdminService {
    * admits it ahead of `roles.yaml` — so the write would add a row that means
    * nothing, next to the fixed row the page already shows. Other roles are
    * unaffected: a deployment admin is an ordinary member of "Sales".
+   *
+   * `aroundWrite`, when given, runs once the roles file's lock is held and
+   * is handed the edit itself (read, check, write, commit) to run. What it
+   * does around that call brackets the whole write: the invite holds the
+   * address's account-switch lock (a transaction-scoped advisory lock keyed
+   * on the canonical email, see `auth/account-switch-lock.ts`) across it, so
+   * a switch-off cannot commit in between, whether or not the account exists
+   * yet (see the members route). It may throw instead of calling `write`;
+   * nothing is written then.
    */
-  async addMember(actor: AuthUser, canonical: string, email: string): Promise<RoleRosterEntry[]> {
+  async addMember(
+    actor: AuthUser,
+    canonical: string,
+    email: string,
+    opts?: { aroundWrite?: (write: () => Promise<void>) => Promise<void> },
+  ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
-    await this.runEdit(actor, (text) => editAddMember(text, canonical, email));
+    await this.runEdit(actor, (text) => editAddMember(text, canonical, email), opts?.aroundWrite);
     return this.getRoster();
   }
 
@@ -682,17 +709,20 @@ export class RolesAdminService {
    * `pre` produces the candidate (and may throw RolesAdminError for invariant
    * violations before any write). Skips on a no-op. Every candidate passes
    * the resolver's own parser (assertLoadable) plus the pre-disk validator
-   * before a byte lands.
+   * before a byte lands. `aroundWrite` wraps the locked edit (see
+   * {@link addMember}).
    */
   private async runEdit(
     actor: AuthUser,
     pre: (currentText: string) => EditResult,
+    aroundWrite?: (write: () => Promise<void>) => Promise<void>,
   ): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     await this.assertRolesUnlocked(workspaceId, actor);
-    return this.locked.withFileLocks(workspaceId, actor, [ROLES_YAML], () =>
-      this.runEditLocked(workspaceId, actor, pre),
-    );
+    return this.locked.withFileLocks(workspaceId, actor, [ROLES_YAML], () => {
+      const write = () => this.runEditLocked(workspaceId, actor, pre);
+      return aroundWrite ? aroundWrite(write) : write();
+    });
   }
 
   private async runEditLocked(

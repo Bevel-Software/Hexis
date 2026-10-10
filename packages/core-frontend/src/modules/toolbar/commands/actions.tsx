@@ -111,7 +111,11 @@ const EDIT_PAGE: CommandAction = {
   },
 };
 
-/** Admins only, like the toolbar's Invite button: creating accounts is an admin act. */
+/**
+ * Admins only: creating accounts is an admin act. The toolbar's Invite shows to
+ * everyone and tells a non-admin whom to ask; a command menu entry that only
+ * answers "ask an admin" would be noise in a list of things you can do.
+ */
 const INVITE: CommandAction = {
   id: 'invite',
   label: 'Invite people',

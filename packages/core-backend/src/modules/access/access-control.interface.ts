@@ -679,6 +679,16 @@ export interface IAccessControl {
   holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
 
   /**
+   * Every address the resolver treats as an Admin in the working-tree model,
+   * each once: the Admin role's members — through a group too — and the
+   * deployment owners. The same membership answer {@link holdsAdminRootWrite}
+   * gives one address at a time, enumerated. When the model cannot be loaded
+   * (a `roles.yaml` that does not parse makes nobody an Admin), the
+   * deployment owners alone.
+   */
+  adminEmails(workspaceId: string): Promise<string[]>;
+
+  /**
    * Whether `userEmail` may put a misplaced platform file back at
    * `destinationRelativePath` — the ONE write that is allowed to land on a
    * destination whose own rules would refuse it.

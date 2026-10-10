@@ -5,6 +5,10 @@ import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
+  InviteDialogContext,
+  type InviteDialogController,
+} from '../../onboarding/state/invite-dialog.context';
+import {
   createAccount,
   deactivateAccount,
   deleteAccount,
@@ -12,6 +16,7 @@ import {
   listAccounts,
   reactivateAccount,
   type AccountReferences,
+  type AccountSummary,
 } from '../../auth/services/account.api';
 
 vi.mock('../../auth/services/account.api', () => ({
@@ -76,7 +81,7 @@ function row(name: string): HTMLElement {
   return within(li).getByText(/· Joined /);
 }
 
-function renderPage(opts: { isAdmin?: boolean } = {}) {
+function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController | null } = {}) {
   const auth: AuthContextValue = {
     user: ME,
     token: 't',
@@ -98,7 +103,9 @@ function renderPage(opts: { isAdmin?: boolean } = {}) {
           runRolesRecovery: async () => {},
         }}
       >
-        <UserAccountsPage />
+        <InviteDialogContext.Provider value={opts.invite === undefined ? null : opts.invite}>
+          <UserAccountsPage />
+        </InviteDialogContext.Provider>
       </AdminContext.Provider>
     </AuthContext.Provider>,
   );
@@ -113,7 +120,7 @@ beforeEach(() => {
     ]);
   vi.mocked(deleteAccount).mockReset().mockResolvedValue(null);
   vi.mocked(getAccountReferences).mockReset().mockResolvedValue(REFS);
-  vi.mocked(createAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(createAccount).mockReset().mockResolvedValue({});
   vi.mocked(deactivateAccount).mockReset().mockResolvedValue(undefined);
   vi.mocked(reactivateAccount).mockReset().mockResolvedValue(undefined);
 });
@@ -542,31 +549,6 @@ describe('UserAccountsPage', () => {
     expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
-  it('adds a new account and refreshes the list', async () => {
-    renderPage();
-    await waitFor(() => screen.getByText('Alice'));
-    await userEvent.type(screen.getByLabelText('Email'), 'bob@example.com');
-    await userEvent.type(screen.getByLabelText(/Name/), 'Bob');
-    await userEvent.type(screen.getByLabelText('Password'), 'bobs-password-1');
-    await userEvent.click(screen.getByRole('button', { name: 'Add account' }));
-    await waitFor(() =>
-      expect(createAccount).toHaveBeenCalledWith('bob@example.com', 'Bob', 'bobs-password-1'),
-    );
-    expect(listAccounts).toHaveBeenCalledTimes(2);
-  });
-
-  it('surfaces an add failure inline', async () => {
-    vi.mocked(createAccount).mockRejectedValueOnce(
-      new Error('Password must be at least 8 characters'),
-    );
-    renderPage();
-    await waitFor(() => screen.getByText('Alice'));
-    await userEvent.type(screen.getByLabelText('Email'), 'bob@example.com');
-    await userEvent.type(screen.getByLabelText('Password'), 'short');
-    await userEvent.click(screen.getByRole('button', { name: 'Add account' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('at least 8 characters');
-  });
-
   // "We could not ask" is not "there is nobody". The failure used to store an
   // empty list, so an admin whose backend was unreachable read "No user
   // accounts." — a deployment they would have had every reason to believe.
@@ -646,12 +628,163 @@ describe('UserAccountsPage — switching accounts off and on', () => {
     expect(screen.queryByRole('button', { name: 'Switch off root@example.com' })).not.toBeInTheDocument();
   });
 
-  it('adds an account without a password, for single sign-on', async () => {
-    const user = userEvent.setup();
-    renderPage();
+});
+
+/**
+ * One way to create an account: User accounts has no Add account form, and
+ * its list ends with an "Invite new users" row that opens the Invite dialog
+ * the toolbar opens. A send from that dialog shows on the list without a
+ * reload.
+ */
+describe('UserAccountsPage — inviting new users', () => {
+  function controller(invitedRevision = 0): InviteDialogController {
+    return { open: vi.fn(), invitedRevision };
+  }
+
+  it('has no Add account form', async () => {
+    renderPage({ invite: controller() });
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
-    await user.type(screen.getByLabelText('Email'), 'new@example.com');
-    await user.click(screen.getByRole('button', { name: 'Add account' }));
-    expect(createAccount).toHaveBeenCalledWith('new@example.com', '', '');
+    expect(screen.queryByText('Add account')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add account' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Leave it empty and they sign in with single sign-on/)).not.toBeInTheDocument();
+  });
+
+  it('ends the account list with "Invite new users", which opens the Invite dialog', async () => {
+    const invite = controller();
+    renderPage({ invite });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    const button = screen.getByRole('button', { name: 'Invite new users' });
+    const items = within(button.closest('ul')!).getAllByRole('listitem');
+    expect(items[items.length - 1]).toContainElement(button);
+    await userEvent.click(button);
+    expect(invite.open).toHaveBeenCalledTimes(1);
+    expect(createAccount).not.toHaveBeenCalled();
+  });
+
+  it('offers no row without an Invite dialog to open', async () => {
+    renderPage({ invite: null });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Invite new users' })).not.toBeInTheDocument();
+  });
+
+  it('reads the list again after a send, so the new accounts show without a reload', async () => {
+    const view = renderPage({ invite: controller(0) });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(listAccounts).toHaveBeenCalledTimes(1);
+
+    vi.mocked(listAccounts).mockResolvedValue([
+      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
+      ALICE,
+      { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
+    ]);
+    view.rerender(
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(1)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>,
+    );
+    expect(await screen.findByText('lena')).toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the refreshed list when an older read answers after it', async () => {
+    const withLena = [
+      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
+      ALICE,
+      { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
+    ];
+    let answerFirst: (rows: typeof withLena) => void = () => {};
+    vi.mocked(listAccounts)
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
+      .mockResolvedValue(withLena);
+    const page = (revision: number) => (
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(revision)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>
+    );
+    const view = render(page(0));
+    view.rerender(page(1));
+    expect(await screen.findByText('lena')).toBeInTheDocument();
+    // The first read, from before the send, answers last: it must not land.
+    answerFirst([withLena[0]!, ALICE]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('lena')).toBeInTheDocument();
+  });
+
+  it('keeps a switch busy until the latest read lands, even when a send’s refresh overtook its own', async () => {
+    const user = userEvent.setup();
+    const off = { ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' };
+    let answerSwitch: (rows: AccountSummary[]) => void = () => {};
+    let answerSend: (rows: AccountSummary[]) => void = () => {};
+    vi.mocked(listAccounts)
+      .mockReset()
+      .mockResolvedValueOnce([ALICE])
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSwitch = resolve)))
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSend = resolve)));
+    const page = (revision: number) => (
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(revision)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>
+    );
+    const view = render(page(0));
+    await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Switch off' }));
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
+    // A send from the Invite dialog reads the list again before the switch's read answers.
+    view.rerender(page(1));
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(3));
+    answerSwitch([off]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Its own read was overtaken: still busy, so the stale row offers no second click.
+    expect(screen.getByRole('button', { name: 'Switching off…' })).toBeDisabled();
+    answerSend([off]);
+    expect(await screen.findByText('(switched off)')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

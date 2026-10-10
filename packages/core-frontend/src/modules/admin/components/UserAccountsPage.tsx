@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Users } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAuth } from '../../auth/state/auth.context';
+import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
 import {
   createAccount,
   deactivateAccount,
@@ -109,10 +111,11 @@ function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordA
  * per-user passwords can't sign in until an admin sets one) or reset the one
  * they have — two acts the page names apart, see {@link PasswordAction} —
  * permanently delete an account (the GDPR erasure path — overlays contribute
- * their data slices via erasure participants), and add a new account. Set,
- * reset and create all go through `POST /api/admin/accounts`, an
- * upsert-by-email that preserves an existing display name when none is
- * supplied. The signed-in admin's own row offers neither action — the backend
+ * their data slices via erasure participants). New accounts come from the
+ * Invite dialog, the one way to create an account: the list ends with an
+ * "Invite new users" row that opens it, and is read again after each send.
+ * Set and reset go through `POST /api/admin/accounts`, an upsert-by-email
+ * that preserves an existing display name when none is supplied. The signed-in admin's own row offers neither action — the backend
  * refuses self-erasure, and their own password lives on the Account page. The
  * deployment admin's row offers no password action either, from any admin:
  * that account's password is set in the deployment environment, and the
@@ -121,6 +124,8 @@ function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordA
 export function UserAccountsPage() {
   const { isAdmin } = useAdmin();
   const { user: me } = useAuth();
+  const invite = useInviteDialog();
+  const invitedRevision = invite?.invitedRevision ?? 0;
   const [accounts, setAccounts] = useState<AccountSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The account awaiting delete confirmation; non-null drives the confirm
@@ -151,35 +156,46 @@ export function UserAccountsPage() {
     email: string;
     action: PasswordAction;
   } | null>(null);
-  // Add-account form.
-  const [addEmail, setAddEmail] = useState('');
-  const [addName, setAddName] = useState('');
-  const [addPassword, setAddPassword] = useState('');
-  const [addError, setAddError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
   // The account being switched off or on, while the request and the refresh after it are in flight.
   const [switching, setSwitching] = useState<string | null>(null);
   // The account awaiting confirmation before it is switched off; non-null drives that Dialog.
   const [pendingDeactivate, setPendingDeactivate] = useState<AccountSummary | null>(null);
 
-  const refresh = useCallback(() => {
-    return listAccounts()
+  // Only the latest read lands: an older one answering late would otherwise
+  // put back a list without the people a send just invited. And a caller
+  // waiting on a read that was overtaken waits on to the latest one, so
+  // "busy until the list shows the new state" still holds.
+  const accountsRequest = useRef(0);
+  const latestRead = useRef<Promise<void>>(Promise.resolve());
+  const refresh = useCallback(async () => {
+    const requestId = ++accountsRequest.current;
+    const read = listAccounts()
       .then((rows) => {
+        if (accountsRequest.current !== requestId) return;
         setAccounts(rows);
         setError(null);
       })
       .catch((err) => {
+        if (accountsRequest.current !== requestId) return;
         setError(err instanceof Error ? err.message : "Couldn't load accounts.");
         // `accounts` is deliberately left alone. A RELOAD that fails keeps the
         // rows it already had; a FIRST load that fails stays `null`, because
         // storing `[]` would render "No user accounts." — an admin reading
         // that would take a deployment they cannot reach for one nobody is on.
       });
+    latestRead.current = read;
+    let awaited = read;
+    await awaited;
+    while (latestRead.current !== awaited) {
+      awaited = latestRead.current;
+      await awaited;
+    }
   }, []);
 
+  // Again after every send from the Invite dialog, so the people just invited appear.
   useEffect(() => {
     if (isAdmin) refresh();
-  }, [isAdmin, refresh]);
+  }, [isAdmin, refresh, invitedRevision]);
 
   function openDeleteDialog(account: AccountSummary) {
     setPendingDelete(account);
@@ -287,24 +303,6 @@ export function UserAccountsPage() {
     } finally {
       setSwitching(null);
       setPendingDeactivate(null);
-    }
-  }
-
-  async function handleAdd(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (adding) return;
-    setAdding(true);
-    setAddError(null);
-    try {
-      await createAccount(addEmail.trim(), addName.trim(), addPassword);
-      setAddEmail('');
-      setAddName('');
-      setAddPassword('');
-      refresh();
-    } catch (err) {
-      setAddError(err instanceof Error ? err.message : "Couldn't add the account.");
-    } finally {
-      setAdding(false);
     }
   }
 
@@ -455,63 +453,21 @@ export function UserAccountsPage() {
                   </li>
                 );
               })}
+              {invite && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => invite.open()}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-sm text-accent hover:bg-hover"
+                  >
+                    <Users size={14} aria-hidden />
+                    Invite new users
+                  </button>
+                </li>
+              )}
             </ul>
           )}
 
-          <form onSubmit={handleAdd} className="border-t border-line pt-3 space-y-2 max-w-md">
-            <div className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
-              Add account
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">Email</span>
-                <input
-                  type="email"
-                  required
-                  value={addEmail}
-                  onChange={(e) => setAddEmail(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">
-                  Name <span className="text-ink-faint">(optional)</span>
-                </span>
-                <input
-                  type="text"
-                  value={addName}
-                  onChange={(e) => setAddName(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-            </div>
-            <label className="block space-y-1">
-              <span className="text-xs text-ink-muted">Password</span>
-              <input
-                type="password"
-                autoComplete="new-password"
-                aria-describedby="add-account-password-hint"
-                value={addPassword}
-                onChange={(e) => setAddPassword(e.target.value)}
-                className={inputClass}
-              />
-            </label>
-            <p id="add-account-password-hint" className="text-meta text-ink-faint">
-              Optional. Leave it empty and they sign in with single sign-on.
-            </p>
-            {addError && (
-              <div className="text-xs text-red-600" role="alert">
-                {addError}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={adding}
-              className="rounded-md bg-accent text-white text-sm font-medium px-3 py-1.5 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {adding ? 'Adding…' : 'Add account'}
-            </button>
-          </form>
         </div>
       </PageShell>
 
