@@ -46,17 +46,22 @@ vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 /**
  * The repo-relative folders the person may write, as the batch access
  * endpoint answers them. The top of Knowledge by default — what an admin
- * may, and what every test before this ticket assumed.
+ * may, and what every test before this ticket assumed. `readable` is what a
+ * draft branch asks instead, one folder at a time: there the server's only
+ * gate on a new page is that its author may read where it lands.
  */
 const { access } = vi.hoisted(() => ({
   access: {
     writable: new Set<string>(),
+    readable: new Set<string>(),
     batch: vi.fn<(workspaceId: string, paths: string[]) => Promise<{ results: Record<string, boolean> }>>(),
+    single: vi.fn<(workspaceId: string, path: string, kind?: 'folder' | 'file') => Promise<{ canRead: boolean }>>(),
   },
 }));
 vi.mock('../../access/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../access/api')>()),
   fetchFileAccessBatch: access.batch,
+  fetchFileAccess: access.single,
 }));
 vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
 const { fetchStarterPacksMock } = vi.hoisted(() => ({
@@ -301,6 +306,8 @@ beforeEach(() => {
   access.batch.mockReset().mockImplementation(async (_ws, paths) => ({
     results: Object.fromEntries(paths.map((p) => [p, access.writable.has(p)])),
   }));
+  access.readable = new Set(['KnowledgeBase']);
+  access.single.mockReset().mockImplementation(async (_ws, path) => ({ canRead: access.readable.has(path) }));
 });
 
 /** Calls to the onboarding write — the one `markDone` makes. */
@@ -675,22 +682,56 @@ describe('GetStartedColumn: where New page writes', () => {
     expect(createFile).toHaveBeenCalledTimes(1);
   });
 
-  it('on a draft branch writes at the top of Knowledge for anyone who can read it, asking no access check', async () => {
+  it('on a draft branch writes at the top of Knowledge for anyone who can read it, asking no write check', async () => {
     // Writes nothing on the protected branches — but a draft takes any
-    // reader's write, as the server's lock gate does.
+    // reader's write, as the server's read-before-write gate does.
     access.writable = new Set();
     const createFile = vi.fn(async () => {});
     await mount({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' });
     await userEvent.click(newPage());
     expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(access.batch).not.toHaveBeenCalled();
+    expect(access.single).toHaveBeenCalledWith('ws-1', 'KnowledgeBase', 'folder');
   });
 
-  it('on a draft branch offers nothing when the tree shows no Knowledge folder', async () => {
+  // Local Testing at db782b2f: the tree shows Knowledge because Product is
+  // shared with John, yet the top itself is not readable, and the server
+  // refused KnowledgeBase/Untitled.md ("You don't have read access").
+  it('on a draft branch passes over a top of Knowledge shown only for a folder inside it', async () => {
+    access.writable = new Set();
+    access.readable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${SALES}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+    expect(createFile).toHaveBeenCalledTimes(1);
+    expect(access.batch).not.toHaveBeenCalled();
+  });
+
+  it('on a draft branch prefers the folder of the page on screen when they may read it', async () => {
+    access.readable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft', openFilePath: `${SUPPORT}/FAQ.md` });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+  });
+
+  // Mia at db782b2f: shown the step on a draft where she reads nothing in
+  // Knowledge; a click was refused and the step vanished.
+  it('on a draft branch leaves the step out for someone who may read no Knowledge folder', async () => {
+    access.readable = new Set();
+    await mount({ files: FOLDERS_TREE, workspaceBranch: 'alice/draft' });
+    await screen.findByRole('complementary', { name: 'Get set up' });
+    expect(row(STEP)).toBeNull();
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
+  });
+
+  it('on a draft branch offers nothing when the tree shows no Knowledge folder, asking nothing', async () => {
     await mount({ files: [`${KB}/Skills/.gitkeep`], workspaceBranch: 'alice/draft' });
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(row(STEP)).toBeNull();
     expect(access.batch).not.toHaveBeenCalled();
+    expect(access.single).not.toHaveBeenCalled();
   });
 
   it('a refusal whose recheck answers after a switch of branch withdraws nothing there or back', async () => {

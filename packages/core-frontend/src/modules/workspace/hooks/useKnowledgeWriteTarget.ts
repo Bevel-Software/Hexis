@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { currentBranchModel, isProtectedBranch, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { fetchFileAccessBatch } from '../../access/api';
+import { fetchFileAccess, fetchFileAccessBatch } from '../../access/api';
 import { useWorkspace } from '../state/workspace.context';
 import { useMergedWorkspaceTree } from './useMergedWorkspaceTree';
 import { findEntryByPath } from '../utils/fileTree';
@@ -56,6 +56,25 @@ export function knowledgeFoldersInOrder(entry: FileTreeEntry | null, out: string
 }
 
 /**
+ * The folders a page may go in, in the order requirement 1 picks them: the
+ * Knowledge folder, the folder of the page on screen, then every folder in
+ * file tree order — each once.
+ */
+function candidateFolders(knowledgeRoot: string, openFolder: string | null, folders: readonly string[]): string[] {
+  const ordered = [knowledgeRoot, ...(openFolder && openFolder !== knowledgeRoot ? [openFolder] : [])];
+  const seen = new Set(ordered);
+  for (const folder of folders) {
+    if (seen.has(folder)) continue;
+    seen.add(folder);
+    ordered.push(folder);
+  }
+  return ordered;
+}
+
+/** How many folders a draft's read check asks about at once. */
+export const READ_CHECK_PARALLEL = 8;
+
+/**
  * The folder a page goes in, asked of the batch access endpoint in pages of
  * at most {@link ACCESS_BATCH_LIMIT} paths: the Knowledge folder when the
  * person may write it (admins, as before); else the folder of the page on
@@ -70,20 +89,42 @@ export async function findKnowledgeWriteTarget(
   openFolder: string | null,
   folders: readonly string[],
 ): Promise<string | null> {
-  // Asked in the order requirement 1 picks in, so the first page carries the
-  // two folders that win outright, and no path is asked about twice.
-  const ordered = [knowledgeRoot, ...(openFolder && openFolder !== knowledgeRoot ? [openFolder] : [])];
-  const seen = new Set(ordered);
-  for (const folder of folders) {
-    if (seen.has(folder)) continue;
-    seen.add(folder);
-    ordered.push(folder);
-  }
+  // The first page carries the two folders that win outright.
+  const ordered = candidateFolders(knowledgeRoot, openFolder, folders);
   const toRepo = (path: string) => path.slice(kbDirName.length + 1);
   for (let start = 0; start < ordered.length; start += ACCESS_BATCH_LIMIT) {
     const page = ordered.slice(start, start + ACCESS_BATCH_LIMIT);
     const { results } = await fetchFileAccessBatch(workspaceId, page.map(toRepo));
     const found = page.find((path) => results[toRepo(path)] === true);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * The same choice on a draft branch, where no write grant is needed and the
+ * server's only gate is READ-BEFORE-WRITE: a new page lands only in a folder
+ * its author may read. The tree cannot say which folders those are — it
+ * shows a folder the person may not read whenever something inside it is
+ * shared with them — so each candidate is asked, in order, a few at a time,
+ * stopping at the first readable one. In practice that is the first group:
+ * a folder shown only for what is inside it leads, depth first, straight to
+ * what is. Throws when a request fails, as above.
+ */
+export async function findKnowledgeReadTarget(
+  workspaceId: string,
+  kbDirName: string,
+  knowledgeRoot: string,
+  openFolder: string | null,
+  folders: readonly string[],
+): Promise<string | null> {
+  const ordered = candidateFolders(knowledgeRoot, openFolder, folders);
+  for (let start = 0; start < ordered.length; start += READ_CHECK_PARALLEL) {
+    const group = ordered.slice(start, start + READ_CHECK_PARALLEL);
+    const answers = await Promise.all(
+      group.map((path) => fetchFileAccess(workspaceId, path.slice(kbDirName.length + 1), 'folder')),
+    );
+    const found = group.find((_, i) => answers[i]!.canRead === true);
     if (found) return found;
   }
   return null;
@@ -98,11 +139,11 @@ export async function findKnowledgeWriteTarget(
  * that. That is how a folder an admin shares later brings New page without
  * a reload. `recheck` asks on demand.
  *
- * Only a protected branch asks the access endpoint. Anywhere else the
- * server lets anyone write where they may read — the same rule
- * `useFileAccess` and the explorer's folder hints follow — and the tree is
- * already filtered to what they may read, so the top of Knowledge is the
- * answer whenever the tree shows it, without a request.
+ * A protected branch asks who may WRITE ({@link findKnowledgeWriteTarget}).
+ * Anywhere else the server lets anyone write where they may read, so a
+ * draft asks who may READ, in the same order
+ * ({@link findKnowledgeReadTarget}); a tree with no Knowledge folder in it
+ * has nothing they may read there, and is answered without a request.
  *
  * A request that fails settles with no folder: New page is hidden until a
  * later check succeeds, rather than offered where it can only be refused.
@@ -141,11 +182,12 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
     if (!workspaceId || !kbDirName || !knowledgeRoot) return null;
     const n = ++asked.current;
     let folder: string | null;
-    if (draft) {
-      folder = knowledgeShown ? knowledgeRoot : null;
+    if (draft && !knowledgeShown) {
+      folder = null;
     } else {
+      const find = draft ? findKnowledgeReadTarget : findKnowledgeWriteTarget;
       try {
-        folder = await findKnowledgeWriteTarget(workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
+        folder = await find(workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
       } catch {
         folder = null;
       }
