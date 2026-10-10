@@ -1250,8 +1250,8 @@ export function createAccessRoutes(
               .select({ email: users.email, name: users.name, deactivatedAt: users.deactivatedAt })
               .from(users)
               .where(inArray(users.emailBidx, emails));
-      const names = new Map(rows.map((r) => [r.email.trim().toLowerCase(), r.name?.trim() ?? '']));
-      const off = new Set(rows.filter((r) => r.deactivatedAt).map((r) => r.email.trim().toLowerCase()));
+      const names = new Map(rows.map((r) => [canonicalEmail(r.email), r.name?.trim() ?? '']));
+      const off = new Set(rows.filter((r) => r.deactivatedAt).map((r) => canonicalEmail(r.email)));
       const admins = emails
         .filter((email) => !off.has(email) || rolesAdmin.isFixedAdmin(email))
         .map((email) => ({ name: names.get(email) || email, email }))
