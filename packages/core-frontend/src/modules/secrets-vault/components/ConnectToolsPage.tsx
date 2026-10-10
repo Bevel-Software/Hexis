@@ -144,6 +144,7 @@ export function ConnectToolsPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the first load; refresh sets state once it answers
     void refresh();
   }, [refresh]);
 
@@ -152,6 +153,7 @@ export function ConnectToolsPage() {
     const fromUrl = new URLSearchParams(window.location.search).get('oauth');
     if (fromUrl) {
       sessionStorage.setItem(MCP_OAUTH_STATE_KEY, fromUrl);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the query is read once, on arrival
       setAgentState(fromUrl);
     } else {
       setAgentState(sessionStorage.getItem(MCP_OAUTH_STATE_KEY));
@@ -186,6 +188,7 @@ export function ConnectToolsPage() {
     const params = new URLSearchParams(hash);
     // "Signed in", not "Connected": the sign-in landing here proves a token was
     // issued, not that a call with it will succeed.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the fragment is read once, on arrival
     if (params.has('authorized')) setNotice('Signed in. You can go back to your agent and try again.');
     else if (params.has('error')) setReturnError(params.get('error') || 'Authorization failed.');
     if (params.has('authorized') || params.has('error')) {
@@ -200,6 +203,7 @@ export function ConnectToolsPage() {
   const onAuthorize = async (id: string) => {
     try {
       const url = await startOAuth(id);
+      // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -209,6 +213,7 @@ export function ConnectToolsPage() {
   const onAuthorizeTool = async (slug: string, varName: string) => {
     try {
       const url = await startToolOAuth(slug, varName);
+      // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

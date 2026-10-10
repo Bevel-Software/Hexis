@@ -124,6 +124,7 @@ export function ExternalAgentAccessPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the first load; refresh sets state once it answers
     void refresh();
   }, [refresh]);
 
