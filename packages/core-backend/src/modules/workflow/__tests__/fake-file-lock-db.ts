@@ -66,10 +66,21 @@ function comparable(value: unknown): string {
 
 const dialect = new PgDialect();
 const TERM = /"file_locks"\."(\w+)"\s*(<=|>=|=|<|>)\s*\$(\d+)/g;
+/** `inArray`: `"file_locks"."col" in ($1, $2)`. */
+const IN_TERM = /"file_locks"\."(\w+)"\s+in\s*\(((?:\s*\$\d+\s*,?)+)\)/g;
 
 function predicateFor(condition: SQL | undefined): (row: LockRow) => boolean {
   if (!condition) return () => true;
-  const { sql: text, params } = dialect.sqlToQuery(condition);
+  const { sql: rawText, params } = dialect.sqlToQuery(condition);
+  const sets = [...rawText.matchAll(IN_TERM)].map(([, column, list]) => {
+    const field = FIELD_FOR_COLUMN[column];
+    if (!field) {
+      throw new Error(`fake file_locks db has no field mapped for column "${column}": ${rawText}`);
+    }
+    const values = [...list.matchAll(/\$(\d+)/g)].map(([, index]) => comparable(params[Number(index) - 1]));
+    return { field, values };
+  });
+  const text = rawText.replace(IN_TERM, '');
   const terms = [...text.matchAll(TERM)].map(([, column, operator, index]) => {
     const field = FIELD_FOR_COLUMN[column];
     // A column the regex matched but FIELD_FOR_COLUMN does not know would
@@ -92,7 +103,7 @@ function predicateFor(condition: SQL | undefined): (row: LockRow) => boolean {
   return (row) =>
     terms.every(({ field, operator, value }) =>
       COMPARISONS[operator](comparable(row[field]), value),
-    );
+    ) && sets.every(({ field, values }) => values.includes(comparable(row[field])));
 }
 
 function keyOf(row: Pick<LockRow, 'workspaceId' | 'branch' | 'path'>): string {

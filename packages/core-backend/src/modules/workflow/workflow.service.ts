@@ -541,7 +541,7 @@ export class WorkflowService implements IWorkflowService {
     // One line per deletion, whoever asked: the commit is what a restore
     // starts from, and for a deletion made in the app or by the cleanup this
     // line is the only trace there is.
-    // By id, never by address: log lines carry no email (the release's own promise).
+    // By id: log lines carry no email addresses.
     const actor = opts?.systemCleanup ? 'system' : user.id;
     log.info(`branch deleted by ${actor}: "${name}" at ${lastCommit ?? '(no commit)'}`);
     // Retire the deleted branch's own workspace clone, best-effort. A stale
@@ -628,6 +628,7 @@ export class WorkflowService implements IWorkflowService {
    */
   private async closeIfEmpty(
     number: number,
+    // `actor` is a user id or `system`, never an address: it goes into a log line.
     opts: { reason: string; actor: string; workspaceId?: string; fresh?: boolean },
   ): Promise<{ base: string } | null> {
     const summary = await this.prs.getPr(number);
@@ -3359,7 +3360,7 @@ export class WorkflowService implements IWorkflowService {
    * Returns true when THIS call closed it.
    */
   async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
-    const closed = await this.closeIfEmpty(number, { reason: 'found empty', actor: user.email });
+    const closed = await this.closeIfEmpty(number, { reason: 'found empty', actor: user.id });
     if (!closed) return false;
     await this.retireMergedSourceBranch(number, closed.base, user);
     return true;
