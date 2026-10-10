@@ -606,14 +606,15 @@ export function createWorkflowRoutes(
       // or not it is held. The gate judges the canonical spelling, which is
       // the one the lock is found under (`./kb//x.md` would otherwise slip
       // past the KB-prefix test), and a refused spelling keeps the file
-      // verbs' status.
+      // verbs' status. A path without the KB prefix is not exempted as
+      // non-KB: the git layer also takes the repo-relative form (`GTM/x.md`
+      // for `knowledge-base/GTM/x.md`, see `requireReadPermission`), so it is
+      // judged as the repository file it would name.
       const canonical = canonicalFileIdentity(targetPath);
-      const readable = await canReadWorkspacePath(
-        (w, e, p) => accessControl.canRead(w, e, p),
+      const readable = await accessControl.canRead(
         req.params.id,
         user.email,
-        kbDirName,
-        canonical,
+        toKbRelative(canonical, kbDirName) ?? canonical,
       );
       if (!readable) {
         res.status(403).json({ error: `You don't have permission to read "${targetPath}".` });

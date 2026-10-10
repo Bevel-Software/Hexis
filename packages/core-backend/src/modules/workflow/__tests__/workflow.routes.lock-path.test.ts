@@ -402,6 +402,18 @@ describe('lock routes coordinate on one workspace identity', () => {
     expect(h.canRead).toHaveBeenCalledWith(BRANCH, BOB.email, 'x/a.md');
   });
 
+  it('judges a path without the KB prefix as the repository file it names', async () => {
+    // The git layer reads `x/a.md` as `${KB}/x/a.md`, so the alias is no way
+    // round the read rule.
+    h.canRead.mockImplementation(async (_ws: string, email: string) => email !== BOB.email);
+    h.actAs(BOB);
+
+    const alias = await fetch(`${url('')}?branch=${encodeURIComponent(BRANCH)}&path=${encodeURIComponent('x/a.md')}`);
+
+    expect(alias.status).toBe(403);
+    expect(h.canRead).toHaveBeenCalledWith(BRANCH, BOB.email, 'x/a.md');
+  });
+
   it('leaves an unslashed workspace id as it is', async () => {
     const res = await fetch(`${h.baseUrl}/api/workspace/main/workflow/locks`, {
       method: 'POST',
