@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { currentBranchModel, isProtectedBranch, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { fetchFileAccessBatch } from '../../access/api';
 import { useWorkspace } from '../state/workspace.context';
 import { useMergedWorkspaceTree } from './useMergedWorkspaceTree';
@@ -98,6 +98,12 @@ export async function findKnowledgeWriteTarget(
  * that. That is how a folder an admin shares later brings New page without
  * a reload. `recheck` asks on demand.
  *
+ * Only a protected branch asks the access endpoint. Anywhere else the
+ * server lets anyone write where they may read — the same rule
+ * `useFileAccess` and the explorer's folder hints follow — and the tree is
+ * already filtered to what they may read, so the top of Knowledge is the
+ * answer whenever the tree shows it, without a request.
+ *
  * A request that fails settles with no folder: New page is hidden until a
  * later check succeeds, rather than offered where it can only be refused.
  * The last answer stays while a new one is on its way, so nothing that hangs
@@ -116,10 +122,14 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
     openFilePath && knowledgeRoot && openFilePath.startsWith(`${knowledgeRoot}/`)
       ? openFilePath.slice(0, openFilePath.lastIndexOf('/'))
       : null;
-  const folders = useMemo(
-    () => (knowledgeRoot ? knowledgeFoldersInOrder(findEntryByPath(tree, knowledgeRoot)) : []),
+  const knowledgeEntry = useMemo(
+    () => (knowledgeRoot ? findEntryByPath(tree, knowledgeRoot) : null),
     [tree, knowledgeRoot],
   );
+  const folders = useMemo(() => knowledgeFoldersInOrder(knowledgeEntry), [knowledgeEntry]);
+  // Not yet known (null) is asked about as protected: the stricter answer.
+  const draft = workspaceBranch !== null && !isProtectedBranch(currentBranchModel(), workspaceBranch);
+  const knowledgeShown = knowledgeEntry !== null;
   // What an answer was asked about; an answer about anything else is out of date.
   const workspaceKey = `${workspaceId}\n${workspaceBranch}\n${knowledgeRoot}`;
   const askingFor = `${workspaceKey}\n${openFolder}`;
@@ -131,14 +141,18 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
     if (!workspaceId || !kbDirName || !knowledgeRoot) return null;
     const n = ++asked.current;
     let folder: string | null;
-    try {
-      folder = await findKnowledgeWriteTarget(workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
-    } catch {
-      folder = null;
+    if (draft) {
+      folder = knowledgeShown ? knowledgeRoot : null;
+    } else {
+      try {
+        folder = await findKnowledgeWriteTarget(workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
+      } catch {
+        folder = null;
+      }
     }
     if (n === asked.current) setAnswer({ folder, settled: true, askedFor: askingFor });
     return folder;
-  }, [workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor]);
+  }, [workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor, draft, knowledgeShown]);
 
   const askedWorkspace = useRef<string | null>(null);
   const hasTree = tree !== null;

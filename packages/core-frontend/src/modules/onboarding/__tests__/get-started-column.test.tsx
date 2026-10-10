@@ -663,7 +663,8 @@ describe('GetStartedColumn: where New page writes', () => {
       await gate;
       return real(ws, paths);
     });
-    rerender(columnUi({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' }));
+    // The other protected branch: a draft takes no access check at all.
+    rerender(columnUi({ createFile, files: FOLDERS_TREE, workspaceBranch: 'current-company-state' }));
     await userEvent.click(newPage());
     await settle();
     // The answer on hand still says Sales, but it was for the other branch: nothing is written yet.
@@ -672,6 +673,55 @@ describe('GetStartedColumn: where New page writes', () => {
     await waitFor(() => expect(createFile).toHaveBeenCalled());
     expect(createFile).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(createFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('on a draft branch writes at the top of Knowledge for anyone who can read it, asking no access check', async () => {
+    // Writes nothing on the protected branches — but a draft takes any
+    // reader's write, as the server's lock gate does.
+    access.writable = new Set();
+    const createFile = vi.fn(async () => {});
+    await mount({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' });
+    await userEvent.click(newPage());
+    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
+    expect(access.batch).not.toHaveBeenCalled();
+  });
+
+  it('on a draft branch offers nothing when the tree shows no Knowledge folder', async () => {
+    await mount({ files: [`${KB}/Skills/.gitkeep`], workspaceBranch: 'alice/draft' });
+    await screen.findByRole('complementary', { name: 'Get set up' });
+    expect(row(STEP)).toBeNull();
+    expect(access.batch).not.toHaveBeenCalled();
+  });
+
+  it('a refusal whose recheck answers after a switch of branch withdraws nothing there or back', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales']);
+    let release!: () => void;
+    let held = false;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const real = access.batch.getMockImplementation()!;
+    access.batch.mockImplementation(async (ws, paths) => {
+      if (held) await gate;
+      return real(ws, paths);
+    });
+    const createFile = vi.fn(async (path: string) => {
+      // Refused although the check keeps saying Sales may be written; the
+      // check that would withdraw New page is held past a switch.
+      held = true;
+      throw new WorkspaceApiError(403, `You don't have permission to write to "${path}". Eligible: Admin.`);
+    });
+    const { rerender } = await mount({ createFile, files: FOLDERS_TREE });
+    await userEvent.click(newPage());
+    await settle();
+    rerender(columnUi({ createFile, files: FOLDERS_TREE, workspaceBranch: 'current-company-state' }));
+    await act(async () => release());
+    await settle();
+    // The withdrawal was for the branch left behind: the one on screen keeps New page…
+    expect(row(STEP)).not.toBeNull();
+    // …and so does the branch it was for, once the person comes back.
+    rerender(columnUi({ createFile, files: FOLDERS_TREE }));
+    await settle();
+    expect(row(STEP)).not.toBeNull();
+    expect(screen.queryByText(/Eligible|permission/)).not.toBeInTheDocument();
   });
 
   it('a refused write asks again and moves to the next folder they may write, with no permission text', async () => {
