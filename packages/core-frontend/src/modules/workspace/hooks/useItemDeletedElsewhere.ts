@@ -22,7 +22,12 @@ import type { DeletedBy } from '../components/DeletedFileNotice';
  *
  * Never this person's own delete: a path this session is deleting
  * (`isOwnDelete`: in flight, or a moment ago) is skipped, and `suppressed` lets a page skip while its
- * own delete dialog runs — that dialog lands the page somewhere else.
+ * own delete dialog runs — that dialog lands the page somewhere else. A
+ * successful read tells the workspace the path is back (`forgetOwnDelete`),
+ * so deleting it again a moment later is someone else's delete once more.
+ *
+ * What it learned holds while the item stays on screen: leave the item and
+ * come back, and it starts over — its events went unwatched in between.
  *
  * The workspace is WATCHED for as long as the page is mounted: the Library
  * renders the default branch while the session may be focused on another.
@@ -40,8 +45,9 @@ export function useItemDeletedElsewhere({
 }): DeletedBy | null {
   const bus = useEventBus();
   // Read softly: a tool page may be mounted with no workspace around it.
-  const isOwnDelete = useContext(WorkspaceContext)?.isOwnDelete;
-  const isOwnDeleteRef = useLatestRef(isOwnDelete);
+  const workspace = useContext(WorkspaceContext);
+  const isOwnDeleteRef = useLatestRef(workspace?.isOwnDelete);
+  const forgetOwnDeleteRef = useLatestRef(workspace?.forgetOwnDelete);
   const suppressedRef = useLatestRef(suppressed);
   const key = workspaceId && itemPath && keyFile ? `${workspaceId}\n${keyFile}` : null;
   // Stored WITH the item it is about, so another item reads as not deleted.
@@ -68,7 +74,9 @@ export function useItemDeletedElsewhere({
       readFile(workspaceId, keyFile)
         .then(
           () => {
-            if (!cancelled) setDeleted((prev) => (prev?.key === key ? null : prev));
+            if (cancelled) return;
+            forgetOwnDeleteRef.current?.(keyFile);
+            setDeleted((prev) => (prev?.key === key ? null : prev));
           },
           (err) => {
             if (cancelled) return;
@@ -107,8 +115,11 @@ export function useItemDeletedElsewhere({
       offFileChanged();
       offTreeChanged();
       release();
+      // Its events go unwatched from here: what was learned is for this
+      // visit, and coming back to the item starts over.
+      setDeleted(null);
     };
-  }, [bus, workspaceId, itemPath, keyFile, key, isOwnDeleteRef, suppressedRef]);
+  }, [bus, workspaceId, itemPath, keyFile, key, isOwnDeleteRef, forgetOwnDeleteRef, suppressedRef]);
 
   return deleted && deleted.key === key ? deleted.by : null;
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, within, act, waitFor } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
 import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
@@ -41,9 +41,18 @@ const TREE: FileTreeEntry = dir('.', [
   ]),
 ]);
 
+// A Knowledge page on the same branch: a workspace URL, but not the item.
+const ELSEWHERE = `/workspace/${DEFAULT_BRANCH}/${KB}/KnowledgeBase/Handbook.md`;
+
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  const navigate = useNavigate();
+  return (
+    <>
+      <div aria-label="pathname">{location.pathname}</div>
+      <button type="button" onClick={() => navigate(ELSEWHERE)}>Go elsewhere</button>
+    </>
+  );
 }
 
 function renderTree(url: string, over: Partial<WorkspaceContextValue> = {}) {
@@ -260,8 +269,24 @@ describe('SkillsTree: deleting the item on screen', () => {
     renderTree(`/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/checklist.md`, { deleteEntry, openFilePath: null });
 
     await deleteRow('SKILL.md');
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call/SKILL.md`);
     // The skill's SKILL.md IS the skill: its other files go with it.
     await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  // The landing reads the page as it is when the delete answers: a user who
+  // went elsewhere while it ran stays where they went.
+  it('leaves a page the user moved to while the delete ran', async () => {
+    let answer!: (result: { closedActive: boolean; newActivePath: null }) => void;
+    const deleteEntry = vi.fn(() => new Promise<{ closedActive: boolean; newActivePath: null }>((resolve) => { answer = resolve; }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/SKILL.md`, { deleteEntry, openFilePath: null });
+
+    await deleteRow('discovery-call');
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call`);
+    fireEvent.click(screen.getByRole('button', { name: 'Go elsewhere' }));
+    await act(async () => { answer({ closedActive: false, newActivePath: null }); });
+
+    expect(screen.getByLabelText('pathname').textContent).toBe(ELSEWHERE);
   });
 
   it('stays on the skill when the delete was called off', async () => {

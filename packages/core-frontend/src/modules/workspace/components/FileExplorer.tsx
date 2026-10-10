@@ -70,7 +70,7 @@ import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
-import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
+import { useDismissableMenu, useLatestRef, usePointerMenuPosition } from '../../../shared/components';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { AdminContext } from '../../admin/state/admin.context';
@@ -314,6 +314,14 @@ const TreeConfirmContext = createContext<(request: TreeConfirmRequest) => void>(
   void request.run();
 });
 const useTreeConfirm = () => useContext(TreeConfirmContext);
+
+/**
+ * The address as it is NOW, for an answer that lands after the row's menu has
+ * closed: a delete that ran while the user went to another page must land
+ * from that page, not the one it was asked on. `TreeChrome` outlives the menu
+ * and keeps it current; a row outside any chrome has only its own reading.
+ */
+const PathnameNowContext = createContext<(() => string) | null>(null);
 
 /**
  * The row button for a path, found in the DOM. A move is dropped on ANOTHER
@@ -633,7 +641,9 @@ function ContextMenu({
     entry.type === 'directory' && kbDirName && entry.relativePath.startsWith(`${kbDirName}/`)
       ? entry.relativePath.slice(kbDirName.length + 1)
       : null;
-  const branchOnScreen = branchFromPathname(location.pathname);
+  const chromePathnameNow = useContext(PathnameNowContext);
+  const clickPathname = location.pathname;
+  const pathnameNow = chromePathnameNow ?? (() => clickPathname);
   const handleDelete = () => {
     onClose();
     const deleteOnBranch = async (): Promise<boolean> => {
@@ -647,13 +657,16 @@ function ContextMenu({
         // The file on screen went with it: land where closing its tab would,
         // as `landingAfterClose` says. The file page trusts only the
         // address, so without this it waited on the deleted file for good.
-        // Only on a workspace page — elsewhere nothing is on screen.
+        // Only on a workspace page — elsewhere nothing is on screen. Read
+        // where the page is now: the user may have moved on while it ran.
+        const pathname = pathnameNow();
+        const branchOnScreen = branchFromPathname(pathname);
         if (result?.closedActive && branchOnScreen !== null) {
-          navigate(landingAfterClose(location.pathname, branchOnScreen, result.newActivePath), { replace: true });
-        } else if (result && branchOnScreen !== null && deleteTookLibraryItem(location.pathname, kbDirName, entry.relativePath)) {
+          navigate(landingAfterClose(pathname, branchOnScreen, result.newActivePath), { replace: true });
+        } else if (result && branchOnScreen !== null && deleteTookLibraryItem(pathname, kbDirName, entry.relativePath)) {
           // A skill's or a tool's page holds no tab, so no tab closed — but
           // the item on screen is gone all the same. Land as with no tab left.
-          navigate(landingAfterClose(location.pathname, branchOnScreen, null), { replace: true });
+          navigate(landingAfterClose(pathname, branchOnScreen, null), { replace: true });
         }
         return true;
       } catch (err) {
@@ -1885,6 +1898,8 @@ export function TreeChrome({
    * what is open, and no effect to keep it in step with.
    */
   const [searchParams, setSearchParams] = useSearchParams();
+  const pathnameRef = useLatestRef(useLocation().pathname);
+  const pathnameNow = useCallback(() => pathnameRef.current, [pathnameRef]);
   const openSuggestion = useMemo(() => {
     const number = Number(searchParams.get(CR_PARAM));
     const path = searchParams.get(CR_FILE_PARAM);
@@ -2136,6 +2151,7 @@ export function TreeChrome({
   return (
     <>
       <TreeConfirmContext.Provider value={askConfirm}>
+      <PathnameNowContext.Provider value={pathnameNow}>
       <TreeNavContext.Provider value={nav}>
       <UploadTargetContext.Provider value={uploadTarget}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
@@ -2147,6 +2163,7 @@ export function TreeChrome({
       </PinnedContext.Provider>
       </UploadTargetContext.Provider>
       </TreeNavContext.Provider>
+      </PathnameNowContext.Provider>
       </TreeConfirmContext.Provider>
       {confirmRequest && (
         <TreeActionConfirmDialog

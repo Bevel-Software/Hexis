@@ -384,6 +384,12 @@ export interface WorkspaceContextValue {
    * Optional so test fixtures need not supply it; absent reads as false.
    */
   isOwnDelete?: (relativePath: string) => boolean;
+  /**
+   * `relativePath` was read back, so it exists again: `isOwnDelete` stops
+   * covering it, and a later delete of it is someone else's. Optional, as
+   * `isOwnDelete` is.
+   */
+  forgetOwnDelete?: (relativePath: string) => void;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
   saveFile: (relativePath: string, content: string) => Promise<void>;
   /**

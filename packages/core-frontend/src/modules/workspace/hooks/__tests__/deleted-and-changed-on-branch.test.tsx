@@ -290,6 +290,19 @@ describe('deleteEntry: the delete says where the page lands', () => {
       vi.useRealTimers();
     }
   });
+
+  // Restored within the minute, then deleted again: the second delete is not
+  // ours, so a read that found the path back ends the marker covering it.
+  it('stops counting a path as our own once it was read back', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md');
+    await act(async () => { await result.current.deleteEntry('KB/Dir'); });
+    expect(result.current.isOwnDelete?.('KB/Dir/In.md')).toBe(true);
+
+    act(() => { result.current.forgetOwnDelete?.('KB/Dir/In.md'); });
+
+    expect(result.current.isOwnDelete?.('KB/Dir/In.md')).toBe(false);
+  });
 });
 
 /**

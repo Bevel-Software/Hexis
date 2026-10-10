@@ -463,6 +463,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [isPendingDelete]);
 
   /**
+   * `path` was read back: it exists again, so a marker covering it no longer
+   * describes the branch — a later 404 on it is a new delete, not ours.
+   */
+  const forgetOwnDelete = useCallback((path: string) => {
+    for (const deleted of ownDeletesRef.current.keys()) {
+      if (path === deleted || path.startsWith(deleted + '/')) ownDeletesRef.current.delete(deleted);
+    }
+  }, []);
+
+  /**
    * Someone else deleted the file of the open tab at `path`. The tab stays,
    * with its content and unsaved edits, and the file page shows the deleted
    * notice for it. A name already learned is kept: later signals (a tree
@@ -1859,6 +1869,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           if (workspaceIdRef.current === subscribedWorkspaceId) {
             // The file is there: writing it is no longer re-creating it.
             deletedPathsRef.current.delete(event.path);
+            forgetOwnDelete(event.path);
           }
           if (workspaceIdRef.current !== subscribedWorkspaceId) {
             // Workspace switched while the refetch was in flight. The
@@ -1995,7 +2006,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       offFsTreeChanged();
       offLockReleased();
     };
-  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted, trackExistenceCheck]);
+  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted, trackExistenceCheck, forgetOwnDelete]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 
@@ -2053,6 +2064,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     clearUploadError,
     deleteEntry,
     isOwnDelete,
+    forgetOwnDelete,
     moveEntry,
     saveFile,
     reloadTabFromDisk,
@@ -2068,7 +2080,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadErrors, uploadNotices, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
-    deleteEntry, isOwnDelete, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
+    deleteEntry, isOwnDelete, forgetOwnDelete, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
     setPendingContent, acceptPendingContent, rejectPendingContent,
     setPersistenceBranch, deleteWorkspace,
   ]);
