@@ -12,6 +12,7 @@ import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform
 import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { LibraryContextValue } from '../state/library-data';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 
 // The page's data loading goes through the module's api service (which wraps
 // authFetch), so the mocks sit there — same pattern as the other modules.
@@ -26,6 +27,7 @@ const apiMock = vi.hoisted(() => ({
   approvePrFile: vi.fn(),
   getOrCreateWorkspace: vi.fn(),
   writeFile: vi.fn(),
+  readFile: vi.fn(),
   listSkillAccessRequests: vi.fn(async (): Promise<unknown[]> => []),
 }));
 vi.mock('../services/library.api', () => ({
@@ -50,6 +52,7 @@ vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
   writeFile: apiMock.writeFile,
+  readFile: apiMock.readFile,
 }));
 // The change-request module's reads — the branch-file read feeds the editor
 // base and the per-request diffs.
@@ -359,6 +362,7 @@ function harness(
                   element={<SkillPage {...(pageProps ?? {})} />}
                 />
                 <Route path="/workspace/*" element={<NavigatedTo />} />
+                <Route path="/skills-and-tools" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
@@ -390,6 +394,8 @@ beforeEach(() => {
     .mockImplementation((branch: string) =>
       Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : RAW_MAIN),
     );
+  // The deleted check's read: the skill is there unless a test deletes it.
+  apiMock.readFile.mockReset().mockResolvedValue(RAW_MAIN);
   apiMock.proposeChange.mockReset().mockResolvedValue({ branch: 'b' });
   // 202 ack, which is all the endpoint ever returns — the merge itself runs
   // server-side afterwards and reports over the bus.
@@ -1654,5 +1660,116 @@ describe('SkillPage: Share', () => {
     } as unknown as WorkspaceContextValue);
     await settled();
     expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
+  });
+});
+
+/**
+ * Someone else deletes the skill on screen: the page shows the same "This
+ * file was deleted" notice as the Knowledge file page (the same component),
+ * not the old content until a reload; Close lands on Skills & Tools.
+ */
+describe('SkillPage: deleted by someone else', () => {
+  const SKILL_MD = 'knowledge-base/Skills/newsletter/SKILL.md';
+  const changed = (over: { path?: string } = {}): WorkflowEvent => ({
+    id: 1,
+    ts: '',
+    kind: 'file-changed',
+    workspaceId: DEFAULT_BRANCH,
+    branch: DEFAULT_BRANCH,
+    path: SKILL_MD,
+    newSha: 'abc',
+    byUserId: 'u2',
+    byUserName: 'Sam Rivera',
+    ...over,
+  });
+  const gone = () => apiMock.readFile.mockRejectedValue(new WorkspaceApiError(404));
+
+  it('replaces the page with the notice, naming the file, the branch and who; Close lands on Skills & Tools', async () => {
+    const bus = makeFakeBus();
+    renderPage(false, [], [], bus);
+    await settled();
+
+    gone();
+    act(() => bus.emit(changed()));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `newsletter/SKILL.md was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
+    );
+    expect(screen.queryByTestId('md-view')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy edits' })).toBeNull();
+    expect(apiMock.readFile).toHaveBeenCalledWith(encodeURIComponent(DEFAULT_BRANCH), SKILL_MD);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.getByTestId('navigated-to').textContent).toBe('/skills-and-tools'));
+  });
+
+  it('names nobody when the delete came from the git host or a folder-wide change', async () => {
+    const bus = makeFakeBus();
+    renderPage(false, [], [], bus);
+    await settled();
+
+    gone();
+    act(() => bus.emit({ id: 2, ts: '', kind: 'fs-tree-changed', workspaceId: DEFAULT_BRANCH, branch: DEFAULT_BRANCH }));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `newsletter/SKILL.md was deleted from ${DEFAULT_BRANCH}.`,
+    );
+  });
+
+  it('keeps unsaved edits on the notice with Copy edits', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    const bus = makeFakeBus();
+    renderPage(true, [], [], bus);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: 'my half-written body' } });
+
+    gone();
+    act(() => bus.emit(changed()));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText('Your unsaved edits exist only here. Copy them before you close.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Your unsaved edits').textContent).toBe('my half-written body');
+    expect(screen.getByRole('button', { name: 'Copy edits' })).toBeInTheDocument();
+  });
+
+  it('stays on the skill when the file is still there (a save, not a delete)', async () => {
+    const bus = makeFakeBus();
+    renderPage(false, [], [], bus);
+    await settled();
+
+    act(() => bus.emit(changed()));
+
+    await waitFor(() => expect(apiMock.readFile).toHaveBeenCalled());
+    expect(screen.queryByRole('heading', { name: 'This file was deleted' })).toBeNull();
+    expect(screen.getByTestId('md-view')).toBeInTheDocument();
+  });
+
+  it("is not shown for this person's own delete, nor for another skill's file", async () => {
+    const bus = makeFakeBus();
+    // The delete starts once the page is open, as it does from its sidebar.
+    let deleting = false;
+    const pending = vi.fn((path: string) => deleting && path.startsWith('knowledge-base/Skills/newsletter'));
+    renderPage(false, [], [], bus, undefined, undefined, undefined, git, {
+      ...workspace,
+      isOwnDelete: pending,
+    } as WorkspaceContextValue);
+    await settled();
+
+    deleting = true;
+    gone();
+    act(() => bus.emit(changed({ path: 'knowledge-base/Skills/other/SKILL.md' })));
+    expect(apiMock.readFile).not.toHaveBeenCalled();
+
+    act(() => bus.emit(changed()));
+    await waitFor(() => expect(pending).toHaveBeenCalledWith(SKILL_MD));
+    expect(screen.queryByRole('heading', { name: 'This file was deleted' })).toBeNull();
   });
 });

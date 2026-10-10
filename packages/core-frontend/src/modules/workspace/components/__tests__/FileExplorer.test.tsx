@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigationType } from 'react-router-dom';
 import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
 import {
@@ -234,10 +234,13 @@ interface RenderOptions {
 /** The router's current query, so a test can read what a click put there. */
 function LocationProbe() {
   const { search, pathname } = useLocation();
+  // PUSH or REPLACE: whether the last move added a history entry.
+  const navigationType = useNavigationType();
   return (
     <>
       <span data-testid="location-search">{search}</span>
       <span data-testid="location-pathname">{pathname}</span>
+      <span data-testid="location-navigation-type">{navigationType}</span>
     </>
   );
 }
@@ -4155,5 +4158,117 @@ describe('FileExplorer: deleting platform files', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     });
     expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Team/access.md`);
+  });
+});
+
+// ── Deleting the file on screen lands on the tab that is left ──
+//
+// The file page trusts only the address. A delete that closed the active tab
+// and left the address naming the deleted file showed "Opening <file>…" for
+// as long as anyone waited; the sidebar's delete now moves it, as closing a
+// tab does, and replaces the entry so Back never returns to the gone file.
+
+describe('FileExplorer: deleting the file on screen', () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'docs',
+        relativePath: 'docs',
+        type: 'directory',
+        children: [{ name: 'a.md', relativePath: 'docs/a.md', type: 'file' }],
+      },
+      { name: 'Gone.md', relativePath: 'Gone.md', type: 'file' },
+      { name: 'Keep.md', relativePath: 'Keep.md', type: 'file' },
+    ],
+  };
+  const urlOf = (path: string) => `/workspace/main/${kbPath(path)}`;
+
+  beforeEach(() => {
+    cleanup();
+  });
+
+  async function deleteFromMenu(name: string) {
+    fireEvent.contextMenu(screen.getByText(name));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+  }
+
+  it('lands on the tab that is left, replacing the history entry', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: kbPath('Keep.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Gone.md')], openFilePath: 'Gone.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(kbPath('Gone.md'));
+    await waitFor(() => expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Keep.md')));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('lands on Knowledge home on the same branch when no tab is left', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: null }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Gone.md')], openFilePath: 'Gone.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    await waitFor(() => expect(screen.getByTestId('location-pathname').textContent).toBe('/workspace/main'));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('lands the same way when a folder holding the open file is deleted', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: kbPath('Keep.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('docs/a.md')], openFilePath: 'docs/a.md' });
+
+    await deleteFromMenu('docs');
+
+    expect(deleteEntry).toHaveBeenCalledWith(kbPath('docs'));
+    await waitFor(() => expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Keep.md')));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('leaves the address alone when a tab that is not on screen is deleted', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: kbPath('Keep.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Keep.md')], openFilePath: 'Keep.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(kbPath('Gone.md'));
+    expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Keep.md'));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
+  });
+
+  it('leaves the file open and the address unchanged when the delete is called off', async () => {
+    // `false`: the person kept their unsaved tabs at the "Unsaved changes" question.
+    const deleteEntry = vi.fn(async () => false as const);
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Gone.md')], openFilePath: 'Gone.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    expect(deleteEntry).toHaveBeenCalled();
+    expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Gone.md'));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
+  });
+
+  it('leaves the file open and the address unchanged when the delete is refused or fails', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deleteEntry = vi.fn(async () => {
+      throw new Error('HTTP 403: You may not delete this file');
+    });
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Gone.md')], openFilePath: 'Gone.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('You may not delete this file'));
+    expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Gone.md'));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
+    alertSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });

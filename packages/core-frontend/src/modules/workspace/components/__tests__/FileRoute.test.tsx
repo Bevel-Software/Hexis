@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
-import { MemoryRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
+import { render, screen, waitFor, fireEvent, act, cleanup } from '@testing-library/react';
+import { MemoryRouter, Routes, Route, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
 // The node-id lookup behind the canonical-URL redirect, so a test can say a
@@ -17,7 +17,7 @@ vi.mock('../../routing/kb-routes', async (importOriginal) => {
     fetchNodeWorkspacePath: routesMock.fetchNodeWorkspacePath,
   };
 });
-import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
@@ -101,9 +101,11 @@ function makeHydrateResult(overrides: Partial<HydrateResult> = {}): HydrateResul
 
 function LocationProbe() {
   const location = useLocation();
+  const navigationType = useNavigationType();
   return (
     <>
       <div aria-label="pathname">{location.pathname}</div>
+      <div aria-label="navigation-type">{navigationType}</div>
       <div aria-label="location-state">{JSON.stringify(location.state)}</div>
     </>
   );
@@ -113,7 +115,15 @@ function LocationProbe() {
 function TreeClickProbe() {
   const navigate = useNavigate();
   return (
-    <button type="button" aria-label="tree-click-bar" onClick={() => navigate('/workspace/main/Knowledge/Bar.md')} />
+    <>
+      <button type="button" aria-label="tree-click-bar" onClick={() => navigate('/workspace/main/Knowledge/Bar.md')} />
+      {/* What the sidebar does after a delete that closed the file on screen. */}
+      <button
+        type="button"
+        aria-label="go-keep"
+        onClick={() => navigate('/workspace/main/Knowledge/Keep.md', { replace: true })}
+      />
+    </>
   );
 }
 
@@ -1103,5 +1113,231 @@ describe('FileRoute: ?trace=files diagnostics', () => {
 
     await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
     expect(traceCalls(info)).toHaveLength(0);
+  });
+});
+
+/**
+ * Someone else deleted the file on screen. The tab is marked (`deletedBy`)
+ * and the page says so in place of the file — never "Opening <file>…", and
+ * never the stale content as though nothing happened.
+ */
+describe('FileRoute: a file deleted by someone else', () => {
+  const PATH = 'Knowledge/Draft.md';
+  const KEEP = 'Knowledge/Keep.md';
+
+  function deletedTab(overrides: Partial<OpenTab> = {}): OpenTab {
+    return { ...makeTab({ path: PATH, content: '# Draft\n\nA page to delete.' }), deletedBy: { name: 'Sam Rivera', at: Date.now() }, ...overrides };
+  }
+
+  function openOn(tab: OpenTab, others: OpenTab[] = [], extra: Partial<WorkspaceContextValue> = {}) {
+    const workspace = makeWorkspace({
+      openTabs: [...others, tab],
+      activeTab: tab,
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () =>
+        makeHydrateResult({ surviving: [...others.map((t) => t.path), tab.path] }),
+      ),
+      ...extra,
+    });
+    return renderAt(`/workspace/main/${PATH}`, { workspace, git: makeGit({ status: makeStatus('main') }) });
+  }
+
+  const notice = () => screen.getByRole('heading', { name: 'This file was deleted' }).parentElement!;
+
+  it('replaces the content with the notice, naming the file, the branch and who', async () => {
+    openOn(deletedTab());
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(notice().textContent).toContain('Draft.md was deleted from main by Sam Rivera a moment ago.');
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    expect(screen.queryByText(/A page to delete/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Opening Draft\.md/)).not.toBeInTheDocument();
+    // No unsaved edits: nothing to copy.
+    expect(screen.queryByRole('button', { name: 'Copy edits' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your unsaved edits exist only here/)).not.toBeInTheDocument();
+  });
+
+  it('says how long ago when the tab learned of the delete a while back', async () => {
+    openOn(deletedTab({ deletedBy: { name: 'Sam Rivera', at: Date.now() - 5 * 60_000 } }));
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    expect(notice().textContent).toContain('Draft.md was deleted from main by Sam Rivera 5m ago.');
+    expect(notice().textContent).not.toContain('a moment ago');
+  });
+
+  it('names nobody when the change event named nobody', async () => {
+    openOn(deletedTab({ deletedBy: { name: null, at: Date.now() } }));
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    expect(notice().textContent).toContain('Draft.md was deleted from main.');
+    expect(notice().textContent).not.toMatch(/ by |a moment ago/);
+  });
+
+  it('keeps unsaved edits on screen and copies them', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const edited = '# Draft\n\nA page to delete.\n\nA paragraph I added and had not saved yet.';
+    openOn(deletedTab({ content: edited, isDirty: true }));
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    expect(screen.getByText('Your unsaved edits exist only here. Copy them before you close.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Your unsaved edits').textContent).toBe(edited);
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy edits' })); });
+    expect(writeText).toHaveBeenCalledWith(edited);
+    expect(screen.getByText('Edits copied.')).toBeInTheDocument();
+  });
+
+  it("keeps an agent's change awaiting review on screen and copies it", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const agent = '# Draft\n\nThe agent rewrote this page.';
+    openOn(deletedTab({ pendingFileContent: agent }));
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    expect(screen.getByText(/The agent's change you had not reviewed yet is kept here too/)).toBeInTheDocument();
+    expect(screen.getByLabelText("The agent's version").textContent).toBe(agent);
+    // No unsaved edits of the user's own: only the agent's change to copy.
+    expect(screen.queryByRole('button', { name: 'Copy edits' })).not.toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: "Copy agent's version" })); });
+    expect(writeText).toHaveBeenCalledWith(agent);
+    expect(screen.getByText("Agent's version copied.")).toBeInTheDocument();
+  });
+
+  it('shows the notice for a background tab whose bytes were dropped, not "Opening"', async () => {
+    openOn(deletedTab({ content: null, savedContent: null, deletedBy: { name: null, at: Date.now() } }));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.queryByText(/Opening Draft\.md/)).not.toBeInTheDocument();
+  });
+
+  it('Close closes the tab without asking and lands on the tab that is left, replacing the entry', async () => {
+    const keep = makeTab({ path: KEEP });
+    const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: KEEP }));
+    const tab = deletedTab({ isDirty: true, content: 'edited' });
+    openOn(tab, [keep], { closeTab });
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+
+    expect(closeTab).toHaveBeenCalledWith(tab, { skipConfirm: true });
+    await waitFor(() => expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${KEEP}`));
+    expect(screen.getByLabelText('navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('Close with no tab left lands on Knowledge home on the same branch', async () => {
+    const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: null }));
+    openOn(deletedTab(), [], { closeTab });
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/workspace/main'));
+    expect(screen.getByLabelText('navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('Close on a Library item with no tab left lands on Skills & Tools, as the sidebar delete does', async () => {
+    const ITEM = 'Knowledge/Plugins/GTM/web-search.tool';
+    const tab = deletedTab({ path: ITEM });
+    const closeTab = vi.fn<WorkspaceContextValue['closeTab']>(async () => ({ closed: true, newActivePath: null }));
+    renderAt(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, {
+      workspace: makeWorkspace({
+        openTabs: [tab],
+        activeTab: tab,
+        closeTab,
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [ITEM] })),
+      }),
+      git: makeGit({ status: makeStatus(DEFAULT_BRANCH) }),
+    });
+
+    await screen.findByRole('heading', { name: 'This file was deleted' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+    expect(screen.getByLabelText('navigation-type')).toHaveTextContent('REPLACE');
+  });
+
+  it('a link to a file that no longer exists still says "File not found"', async () => {
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ dropped: [PATH] }),
+    );
+    renderAt(`/workspace/main/${PATH}`, {
+      git: makeGit({ status: makeStatus('main') }),
+      workspace: makeWorkspace({ hydrateTabs }),
+    });
+
+    expect(await screen.findByText('File not found')).toBeInTheDocument();
+    expect(screen.queryByText('This file was deleted')).not.toBeInTheDocument();
+  });
+
+  it('after our own delete lands on the tab that is left, it shows that file, never "Opening" the deleted one', async () => {
+    // The page as `deleteEntry` + the sidebar leave it: the deleted tab gone,
+    // Keep active, and the address replaced with Keep's.
+    const gone = makeTab({ path: PATH });
+    const keep = makeTab({ path: KEEP, content: 'keep body' });
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [KEEP, PATH] }));
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
+    const git = makeGit({ status: makeStatus('main') });
+    const { rerenderWorkspace } = renderAt(`/workspace/main/${PATH}`, {
+      git,
+      workspace: makeWorkspace({ openTabs: [keep, gone], activeTab: gone, hydrateTabs, addTab }),
+    });
+    await settle();
+
+    rerenderWorkspace(makeWorkspace({ openTabs: [keep], activeTab: keep, hydrateTabs, addTab }));
+    // The URL still names the deleted file until the sidebar moves it: this
+    // is the state that used to hold "Opening Draft.md…" for good.
+    expect(screen.getByText(/Opening Draft\.md/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('go-keep'));
+
+    await waitFor(() => expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${KEEP}`));
+    await waitFor(() => expect(screen.queryByText(/Opening/)).not.toBeInTheDocument());
+    // Keep itself, not a blank or error page that also lacks "Opening".
+    expect(await screen.findByText('keep body')).toBeInTheDocument();
+  });
+
+  it('does not show a deletion on the branch being left as one on the branch being opened', async () => {
+    // A switch to `other` in flight: the URL names it, the workspace and its
+    // status are still on main, whose active tab is the deleted one.
+    const workspace = makeWorkspace({
+      openTabs: [deletedTab()],
+      activeTab: deletedTab(),
+      workspaceBranch: 'main',
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+    });
+    renderAt(`/workspace/other/${PATH}`, { workspace, git: makeGit({ status: makeStatus('main') }) });
+    await settle();
+
+    expect(screen.queryByText('This file was deleted')).not.toBeInTheDocument();
+  });
+
+  it("an id URL for the deleted file still finds its tab and shows the notice, not \"File not found\"", async () => {
+    // Seen once while the file existed: the id resolved to its path.
+    routesMock.fetchNodeWorkspacePath.mockResolvedValueOnce(PATH);
+    const live = makeTab({ path: PATH, content: '# Draft' });
+    renderAt('/workspace/main/draft_page', {
+      workspace: makeWorkspace({
+        openTabs: [live],
+        activeTab: live,
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+      }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+    await settle();
+    cleanup();
+
+    // Deleted since: the id resolves to nothing, but the tab is still open.
+    routesMock.fetchNodeWorkspacePath.mockResolvedValue(null);
+    renderAt('/workspace/main/draft_page', {
+      workspace: makeWorkspace({
+        openTabs: [deletedTab()],
+        activeTab: deletedTab(),
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+      }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.queryByText('File not found')).not.toBeInTheDocument();
   });
 });
