@@ -137,6 +137,44 @@ describe('reporting the content height to the host', () => {
     expect(document.documentElement.style.height).toBe('');
   });
 
+  it('posts the new height when the content grows without anything on screen changing', async () => {
+    // The observer is what carries growth that changes no state — an image
+    // loading, a renderer settling. jsdom has none, so a stand-in captures
+    // the callback and the measured height is driven by hand.
+    let onResize: (() => void) | null = null;
+    class FakeResizeObserver {
+      constructor(cb: () => void) {
+        onResize = cb;
+      }
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    let measured = 240;
+    vi.spyOn(document.documentElement, 'getBoundingClientRect').mockImplementation(
+      () => ({ height: measured }) as DOMRect,
+    );
+    const host = { postMessage: vi.fn() };
+    Object.defineProperty(window, 'parent', { configurable: true, value: host });
+    api.loadEmbed.mockResolvedValue(view());
+    try {
+      mount();
+      await screen.findByRole('heading', { name: 'Thing' });
+      const last = () =>
+        host.postMessage.mock.calls
+          .map(([m]) => m as { type?: string; height?: number })
+          .filter((m) => m.type === EMBED_HEIGHT_MESSAGE)
+          .at(-1)?.height;
+      expect(last()).toBe(240);
+      expect(onResize).not.toBeNull();
+      measured = 640;
+      onResize!();
+      expect(last()).toBe(640);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('posts nothing when it is not framed', async () => {
     const spy = vi.spyOn(window, 'postMessage');
     api.loadEmbed.mockResolvedValue(view());
