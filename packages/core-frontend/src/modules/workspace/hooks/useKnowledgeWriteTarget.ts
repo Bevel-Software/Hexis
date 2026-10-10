@@ -154,6 +154,9 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
   }, [ask, workspaceId, kbDirName, knowledgeRoot, hasTree, workspaceKey]);
 
   const [withdrawnFor, setWithdrawnFor] = useState<string | null>(null);
+  // A switch lifts a withdrawal for good, so coming back to that branch
+  // offers New page again; so does a withdrawal that lands after a switch.
+  if (withdrawnFor !== null && withdrawnFor !== workspaceKey) setWithdrawnFor(null);
   const withdrawn = withdrawnFor === workspaceKey;
   const withdraw = useCallback(() => setWithdrawnFor(workspaceKey), [workspaceKey]);
 

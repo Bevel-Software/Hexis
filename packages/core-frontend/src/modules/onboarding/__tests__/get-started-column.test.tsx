@@ -464,9 +464,17 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText(/protected|not allowed|permission|Eligible/)).not.toBeInTheDocument();
     // It stays gone through a later tree change on the same branch.
-    rerender(columnUi({ createFile, files: [...STARTER_TREE, `${KB}/KnowledgeBase/Notes.md`] }));
+    // A folder, not a page: a page would tick the step and hide it on its own.
+    const later = [...STARTER_TREE, `${KB}/KnowledgeBase/Notes/.gitkeep`];
+    rerender(columnUi({ createFile, files: later }));
     await settleRecheck();
     expect(row('Write your first page')).toBeNull();
+    // A switch away and back lifts it: the branch is asked about afresh.
+    rerender(columnUi({ createFile, files: later, workspaceBranch: 'alice/draft' }));
+    await settle();
+    rerender(columnUi({ createFile, files: later }));
+    await settle();
+    expect(row('Write your first page')).not.toBeNull();
   });
 
   it('"New page" says "Creating…" while it works, and says why it failed on the step', async () => {
