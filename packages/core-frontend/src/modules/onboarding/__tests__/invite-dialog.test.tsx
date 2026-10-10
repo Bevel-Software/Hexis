@@ -562,7 +562,7 @@ describe('InviteDialog: a starting password', () => {
     expect(screen.getByText('They can sign in now. Send them the link and the password.')).toBeInTheDocument();
   });
 
-  it('is given to Admin invites alike, and they are made admins as before', async () => {
+  it('is given to Admin invites alike, and they are made admins as before — the switched-off one left unchanged', async () => {
     await sendFive('admin');
     expect(createAccountMock.mock.calls.map((c) => c[2])).toEqual([SECRET, SECRET, SECRET]);
     expect(addMemberMock.mock.calls.map((c) => c[1])).toEqual([
@@ -570,8 +570,8 @@ describe('InviteDialog: a starting password', () => {
       'tom@acme.com',
       'priya@acme.com',
       'sam@acme.com',
-      'olga@acme.com',
     ]);
+    expect(within(rowOf('olga@acme.com')).getByText('Account switched off')).toBeInTheDocument();
     expect(within(rowOf('lena@acme.com')).getByText('Admin · signs in with the password you set')).toBeInTheDocument();
   });
 

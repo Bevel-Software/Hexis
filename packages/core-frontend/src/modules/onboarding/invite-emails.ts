@@ -54,7 +54,8 @@ export type InviteOutcome =
    * `promoted` when this call did it, `alreadyAdmin` when they were one.
    * `deactivated`: the account is switched off and cannot sign in until an
    * admin switches it back on. Inviting does not do that — switching on asks
-   * the deployment for a seat, and is the User accounts page's decision.
+   * the deployment for a seat, and is the User accounts page's decision —
+   * and leaves it entirely unchanged: no password, and no Admin role either.
    *
    * With a starting password: `passwordSet` when the account had none and
    * now has it, `hasOwnPassword` when it already had one (never replaced),
@@ -150,6 +151,8 @@ interface ListedAccount {
  * write after the account's. Somebody who already had an account is made an
  * Admin too when invited as one: the admin asked for that person to be an
  * Admin, and that they could already sign in does not change the request.
+ * A switched-off account is the exception: it is left unchanged, so it is
+ * not made an Admin either (nor one found switched off at the write).
  * The roster is read first so an existing Admin (including one the server
  * configuration fixes) is reported as such rather than written again. A
  * refused promotion leaves the account standing as it was and says so on
@@ -219,7 +222,7 @@ export async function sendInvites(
         passwordFlags = { hasOwnPassword: true };
       }
       const base = { email, status: 'existing' as const, ...off, ...passwordFlags };
-      if (role !== 'admin') {
+      if (role !== 'admin' || off.deactivated) {
         outcomes.push(base);
       } else if (admins?.has(email.toLowerCase())) {
         outcomes.push({ ...base, alreadyAdmin: true });
@@ -256,7 +259,7 @@ export async function sendInvites(
       );
       continue;
     }
-    if (role !== 'admin') {
+    if (role !== 'admin' || (appeared && 'deactivated' in appeared)) {
       outcomes.push(
         appeared ? { email, status: 'existing', ...appeared } : { email, status: 'created', role, ...created },
       );

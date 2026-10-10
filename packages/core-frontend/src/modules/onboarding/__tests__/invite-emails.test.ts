@@ -129,6 +129,29 @@ describe('sendInvites with a starting password', () => {
     expect(result.outcomes.filter((o) => isInvited(o, true))).toEqual([]);
   });
 
+  it('does not make a switched-off account an Admin, listed so or switched off since the read', async () => {
+    // Listed as switched off: no password write and no promotion.
+    const listed = await sendInvites(['off@acme.com'], 'admin', api, { password: PW });
+    expect(listed).toEqual({ status: 'sent', outcomes: [{ email: 'off@acme.com', status: 'existing', deactivated: true }] });
+    // Switched off between the read and the write: the server left it, and so does the promotion.
+    api.createAccount.mockResolvedValue({ passwordSet: false, deactivated: true });
+    const since = await sendInvites(['nopw@acme.com', 'new@acme.com'], 'admin', api, { password: PW });
+    expect(since).toEqual({
+      status: 'sent',
+      outcomes: [
+        { email: 'nopw@acme.com', status: 'existing', deactivated: true },
+        { email: 'new@acme.com', status: 'existing', deactivated: true },
+      ],
+    });
+    expect(api.addMember).not.toHaveBeenCalled();
+  });
+
+  it('still promotes an account that got its own password since the read', async () => {
+    api.createAccount.mockResolvedValue({ passwordSet: false });
+    await sendInvites(['new@acme.com'], 'admin', api, { password: PW });
+    expect(api.addMember.mock.calls).toEqual([['admin', 'new@acme.com']]);
+  });
+
   it('carries the password in no outcome', async () => {
     const result = await sendInvites(['new@acme.com', 'nopw@acme.com', 'own@acme.com'], 'member', api, {
       password: PW,
@@ -148,6 +171,11 @@ describe('sendInvites without a password', () => {
     const result = await sendInvites(['new@acme.com'], 'member', api);
     expect(api.createAccount).toHaveBeenCalledWith('new@acme.com', '');
     expect(result).toEqual({ status: 'sent', outcomes: [{ email: 'new@acme.com', status: 'created', role: 'member' }] });
+  });
+  it('leaves a switched-off account unchanged on an Admin invite: no promotion', async () => {
+    const result = await sendInvites(['off@acme.com'], 'admin', api);
+    expect(api.addMember).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'sent', outcomes: [{ email: 'off@acme.com', status: 'existing', deactivated: true }] });
   });
 });
 
