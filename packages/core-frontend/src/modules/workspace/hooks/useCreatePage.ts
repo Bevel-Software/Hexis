@@ -48,7 +48,7 @@ function isNameTaken(err: unknown): boolean {
 /**
  * A refusal to write there: 403. Access rules and a protected branch's gate
  * both answer it, so it is only a cue to ask again where the person may
- * write — the fresh answer tells the two apart.
+ * write — the fresh answer tells the two apart. Never shown either way.
  */
 function isRefused(err: unknown): boolean {
   return err instanceof WorkspaceApiError && err.status === 403;
@@ -63,10 +63,12 @@ export interface CreatePage {
   knowledgeRoot: string | null;
   /**
    * Create `Untitled.md` (or the next free `Untitled N.md`) in `pageFolder`
-   * and open it in edit mode. Resolves with the path, or with null when the
-   * write was refused and a fresh check found nowhere the person may write
-   * (New page then disappears; there is nothing to say). Rejects with an
-   * Error whose message is ready to show ("Couldn’t create the page: …").
+   * and open it in edit mode. Resolves with the path, or with null when a
+   * write was refused and there is nowhere left to try: a fresh check found
+   * nowhere the person may write, or the refusal was not about the folder
+   * (New page then disappears; there is nothing to say). Rejects, for any
+   * failure but a refusal, with an Error whose message is ready to show
+   * ("Couldn’t create the page: …").
    */
   createPage(): Promise<string | null>;
   /**
@@ -121,6 +123,7 @@ export function useCreatePage(): CreatePage {
     settled: pageFolderSettled,
     current: pageFolderCurrent,
     recheck,
+    withdraw,
   } = useKnowledgeWriteTarget(kbDirName !== null ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null);
 
   const createPage = useCallback(async (): Promise<string | null> => {
@@ -130,8 +133,10 @@ export function useCreatePage(): CreatePage {
     // An answer from before a switch of branch or page may name a folder
     // other than where the person is looking: ask again before writing.
     let folder = pageFolderCurrent ? pageFolder : await recheck();
-    // One fresh check after a refusal: access changed since the last answer.
-    let rechecked = false;
+    // Folders a write was refused in, this create: each refusal asks again,
+    // and a fresh answer naming one of these says the refusal is not about
+    // the folder.
+    const refused = new Set<string>();
     while (folder) {
       let n = freeUntitledNumber(tree, folder);
       let path = untitledPagePath(folder, n);
@@ -146,25 +151,31 @@ export function useCreatePage(): CreatePage {
             path = untitledPagePath(folder, n);
             continue;
           }
-          if (isRefused(err) && !rechecked) {
-            rechecked = true;
+          // A refusal is never shown: who may write where is nobody's business
+          // here. Access changed since the check, so ask again and move on to
+          // the next folder they may write — or, with none, New page is gone.
+          if (isRefused(err)) {
+            refused.add(folder);
             const next = await recheck();
-            // Still "may write" there: the refusal was not about access (a
-            // protected branch's gate), so it is said as it was.
-            if (next !== folder) {
+            if (next && !refused.has(next)) {
               folder = next;
               break;
             }
+            // The check still says they may write where they were refused:
+            // the branch, not the folder, said no, and no folder here would
+            // take the page. New page goes rather than fail on every click.
+            if (next) withdraw();
+            return null;
           }
-          // Who may write there is nobody's business here, whatever answered.
+          // And should any other failure name who may write, that goes too.
           const msg = (err instanceof Error ? err.message : String(err)).replace(/\s*Eligible:[\s\S]*$/, '');
           throw new Error(`Couldn’t create the page: ${msg}`, { cause: err });
         }
       }
     }
-    // Nowhere left to write: the fresh answer has hidden New page, which says it.
+    // Nowhere to write: the fresh answer has hidden New page, which says it.
     return null;
-  }, [knowledgeRoot, pageFolder, pageFolderSettled, pageFolderCurrent, recheck, tree, createFile, openWorkspacePath]);
+  }, [knowledgeRoot, pageFolder, pageFolderSettled, pageFolderCurrent, recheck, withdraw, tree, createFile, openWorkspacePath]);
 
   return { knowledgeRoot, createPage, pageFolder, pageFolderSettled };
 }

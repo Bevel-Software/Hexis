@@ -452,17 +452,21 @@ describe('GetStartedColumn: what a member sees', () => {
 
   // A protected branch's gate refuses with 403 too; the fresh access check
   // still says the folder may be written, so the refusal is said as it was.
-  it('"New page" does not retry a refusal that is not about the name or the folder', async () => {
+  it('"New page" goes quietly when a refusal is not about the folder: the check still says it may be written', async () => {
     const createFile = vi.fn(async () => {
       throw new WorkspaceApiError(403, 'Branch "main" is protected — writing is not allowed.');
     });
-    await mount({ createFile });
+    const { rerender } = await mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
-    expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
-      'Couldn’t create the page: Branch "main" is protected — writing is not allowed.',
-    );
+    await waitFor(() => expect(row('Write your first page')).toBeNull());
     expect(createFile).toHaveBeenCalledTimes(1);
     expect(access.batch).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/protected|not allowed|permission|Eligible/)).not.toBeInTheDocument();
+    // It stays gone through a later tree change on the same branch.
+    rerender(columnUi({ createFile, files: [...STARTER_TREE, `${KB}/KnowledgeBase/Notes.md`] }));
+    await settleRecheck();
+    expect(row('Write your first page')).toBeNull();
   });
 
   it('"New page" says "Creating…" while it works, and says why it failed on the step', async () => {
@@ -478,10 +482,10 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(within(row('Write your first page')!).getByRole('button', { name: 'Creating…' })).toBeDisabled();
 
     await act(async () => {
-      refuse(new Error('You don’t have permission to write to "KnowledgeBase/Untitled.md".'));
+      refuse(new Error('The server did not answer.'));
     });
     expect(within(row('Write your first page')!).getByRole('alert')).toHaveTextContent(
-      'Couldn’t create the page: You don’t have permission to write to "KnowledgeBase/Untitled.md".',
+      'Couldn’t create the page: The server did not answer.',
     );
     expect(within(row('Write your first page')!).getByRole('button', { name: 'New page' })).toBeEnabled();
     expect(openWorkspacePathMock).not.toHaveBeenCalled();
@@ -697,6 +701,51 @@ describe('GetStartedColumn: where New page writes', () => {
     await userEvent.click(newPage());
     await waitFor(() => expect(row(STEP)).toBeNull());
     expect(createFile).toHaveBeenCalledTimes(1);
+    expect(openWorkspacePathMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Eligible|permission/)).not.toBeInTheDocument();
+  });
+
+  it('a fallback write refused too asks again once more and moves on, with no permission text', async () => {
+    access.writable = new Set(['KnowledgeBase/Product', 'KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const refuse = (path: string) =>
+      new WorkspaceApiError(403, `You don't have permission to write to "${path}". Eligible: Admin.`);
+    const createFile = vi.fn(async (path: string) => {
+      // Product, then Sales, are taken away between the check and the write.
+      if (path.startsWith(`${PRODUCT}/`)) {
+        access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+        throw refuse(path);
+      }
+      if (path.startsWith(`${SALES}/`)) {
+        access.writable = new Set(['KnowledgeBase/Support']);
+        throw refuse(path);
+      }
+    });
+    await mount({ createFile, files: FOLDERS_TREE });
+    await userEvent.click(newPage());
+    await waitFor(() =>
+      expect(openWorkspacePathMock).toHaveBeenCalledWith(`${SUPPORT}/Untitled.md`, { edit: true }),
+    );
+    expect(createFile.mock.calls.map((c) => c[0])).toEqual([
+      `${PRODUCT}/Untitled.md`,
+      `${SALES}/Untitled.md`,
+      `${SUPPORT}/Untitled.md`,
+    ]);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Eligible|permission/)).not.toBeInTheDocument();
+  });
+
+  it('a fallback write refused where the check still allows it removes the step, with no permission text', async () => {
+    access.writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    const createFile = vi.fn(async (path: string) => {
+      if (path.startsWith(`${SALES}/`)) access.writable = new Set(['KnowledgeBase/Support']);
+      // Support is refused although the check keeps saying it may be written.
+      throw new WorkspaceApiError(403, `You don't have permission to write to "${path}". Eligible: Admin.`);
+    });
+    await mount({ createFile, files: FOLDERS_TREE });
+    await userEvent.click(newPage());
+    await waitFor(() => expect(row(STEP)).toBeNull());
+    expect(createFile.mock.calls.map((c) => c[0])).toEqual([`${SALES}/Untitled.md`, `${SUPPORT}/Untitled.md`]);
     expect(openWorkspacePathMock).not.toHaveBeenCalled();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText(/Eligible|permission/)).not.toBeInTheDocument();

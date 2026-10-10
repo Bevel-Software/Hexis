@@ -26,6 +26,13 @@ export interface KnowledgeWriteTarget {
    * a refused write does, since the refusal says the last answer is stale.
    */
   recheck(): Promise<string | null>;
+  /**
+   * Take New page away on this workspace and branch: a write was refused
+   * where the check still says the person may write, so the refusal is not
+   * about folders (a protected branch) and no folder here would take it.
+   * Lifted by a switch of workspace or branch.
+   */
+  withdraw(): void;
 }
 
 /** The access endpoint answers at most this many paths per call. */
@@ -146,10 +153,15 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
     return () => clearTimeout(timer);
   }, [ask, workspaceId, kbDirName, knowledgeRoot, hasTree, workspaceKey]);
 
+  const [withdrawnFor, setWithdrawnFor] = useState<string | null>(null);
+  const withdrawn = withdrawnFor === workspaceKey;
+  const withdraw = useCallback(() => setWithdrawnFor(workspaceKey), [workspaceKey]);
+
   return {
-    folder: answer.folder,
+    folder: withdrawn ? null : answer.folder,
     settled: answer.settled,
     current: answer.settled && answer.askedFor === askingFor,
     recheck: ask,
+    withdraw,
   };
 }
