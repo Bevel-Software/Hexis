@@ -2027,6 +2027,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     dispatchUpload,
     clearUploadError,
     deleteEntry,
+    isPendingDelete,
     moveEntry,
     saveFile,
     reloadTabFromDisk,
@@ -2042,7 +2043,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadErrors, uploadNotices, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
-    deleteEntry, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
+    deleteEntry, isPendingDelete, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
     setPendingContent, acceptPendingContent, rejectPendingContent,
     setPersistenceBranch, deleteWorkspace,
   ]);

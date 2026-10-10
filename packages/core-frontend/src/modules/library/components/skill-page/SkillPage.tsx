@@ -66,6 +66,9 @@ import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
 import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
 import { isBinaryFile } from '../../../workspace/components/renderers';
+import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
+import { useItemDeletedElsewhere } from '../../../workspace/hooks/useItemDeletedElsewhere';
+import { landingAfterClose } from '../../../workspace/routing/landing';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -522,6 +525,26 @@ export function SkillPage({
   const resolveImage = useWorkspaceImageResolver(skillWorkspaceId, fileWorkspacePath);
 
   /**
+   * The text in the editor that is not saved yet — reported by the editor as
+   * it changes, and kept HERE because the editor unmounts when the skill is
+   * deleted under it, and the deleted notice is then the only place left to
+   * offer it. Dropped as soon as the page leaves editing.
+   */
+  const [draft, setDraft] = useState<string | null>(null);
+  if (!editing && draft !== null) setDraft(null);
+
+  /**
+   * Someone else deleted this skill (its SKILL.md): the page shows the same
+   * "This file was deleted" notice as the Knowledge file page, in place of
+   * the old content it would otherwise keep until a reload.
+   */
+  const deletedBy = useItemDeletedElsewhere({
+    workspaceId: skillWorkspaceId,
+    itemPath: kbDirName && skillPath ? `${kbDirName}/${skillPath}` : null,
+    keyFile: kbDirName && skillPath ? `${kbDirName}/${skillPath}/SKILL.md` : null,
+  });
+
+  /**
    * A heading's citation deep-link — the file's KNOWLEDGE URL plus `#slug`,
    * because that is the surface that scrolls to a heading fragment. Same
    * affordance, same destination as copying the link from the Knowledge view
@@ -616,6 +639,24 @@ export function SkillPage({
   //
   // A confirmed name (the catalog resolved this URL to it) is unaffected: its
   // detail error is real and gets reported immediately.
+  if (deletedBy) {
+    return (
+      <DeletedFileNotice
+        // The file on screen, under the skill's own folder name, so the
+        // notice says which skill it was as well as which file.
+        fileName={`${skillPath.slice(skillPath.lastIndexOf('/') + 1)}/${active}`}
+        branch={DEFAULT_BRANCH}
+        deletedBy={deletedBy}
+        edits={editing ? draft : null}
+        onClose={() => {
+          // No tab to close: the page lands where a closed Library item does.
+          navigate(landingAfterClose(location.pathname, DEFAULT_BRANCH, null), { replace: true });
+          data.reload();
+        }}
+      />
+    );
+  }
+
   const catalogAnswered = !data.loading && !data.error;
   const mayConcludeAbsence = !provisional || catalogAnswered;
   if (!detail.loading && mayConcludeAbsence && (detail.error || !skill)) {
@@ -841,6 +882,7 @@ export function SkillPage({
           owner={ownerName}
           onCancel={() => setEditing(false)}
           onSubmit={canEditDirectly ? saveDirect : submitProposal}
+          onDraftChange={setDraft}
         />
       ) : (
         <SkillFilePane

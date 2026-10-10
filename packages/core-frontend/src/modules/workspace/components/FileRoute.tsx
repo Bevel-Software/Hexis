@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { useWorkspace, type OpenTab } from '../state/workspace.context';
+import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
 import { useGit } from '../../git/state/git.context';
 import { readPersistedTabs } from '../utils/tab-persistence';
@@ -16,8 +16,8 @@ import {
 import { landingAfterClose } from '../routing/landing';
 import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
-import { copyToClipboard } from '../../../lib/clipboard';
-import { formatRelativeTime } from '../../../lib/utils';
+import { DeletedFileNotice } from './DeletedFileNotice';
+import { ErrorScreen } from './ErrorScreen';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -682,8 +682,11 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   if (deletedTab) {
     return (
       <DeletedFileNotice
-        tab={deletedTab}
+        fileName={basename(deletedTab.path)}
         branch={branchFromUrl}
+        deletedBy={deletedTab.deletedBy}
+        edits={deletedTab.isDirty ? deletedTab.content ?? '' : null}
+        agentVersion={deletedTab.pendingFileContent}
         onClose={async () => {
           // Close lands as the person's own delete does (`landingAfterClose`).
           // The notice already said the edits exist only here and offered to
@@ -777,90 +780,6 @@ function basename(path: string): string {
   return i >= 0 ? path.slice(i + 1) : path;
 }
 
-/**
- * "This file was deleted": the file on screen was deleted by someone else.
- * The same frame as "File not found". With unsaved edits, the edited text
- * stays on screen with Copy edits beside Close — the tab is the only place
- * those edits exist.
- */
-/**
- * How long ago this tab learned of the delete: "a moment ago" within the
- * minute, then the relative time, so a tab revisited later does not claim
- * the delete just happened.
- */
-function deletedAgo(at: number | undefined): string {
-  if (at === undefined || Date.now() - at < 60_000) return 'a moment ago';
-  return formatRelativeTime(at);
-}
-
-function DeletedFileNotice({
-  tab,
-  branch,
-  onClose,
-}: {
-  tab: OpenTab;
-  branch: string;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = useState<string | null>(null);
-  const name = tab.deletedBy?.name ?? null;
-  const edits = tab.isDirty ? tab.content ?? '' : null;
-  // A version the agent wrote that was still awaiting review when the file
-  // went: kept here too, or it would be lost with the tab.
-  const agentVersion = tab.pendingFileContent;
-  const copy = async (text: string, done: string) =>
-    setCopied((await copyToClipboard(text)) ? done : "Couldn't copy: select the text above instead.");
-  return (
-    <ErrorScreen title="This file was deleted">
-      <p className="text-ui text-ink-muted">
-        <span className="font-mono text-ink">{basename(tab.path)}</span> was deleted from{' '}
-        <span className="font-mono text-ink">{branch}</span>
-        {name ? ` by ${name} ${deletedAgo(tab.deletedBy?.at)}.` : '.'}
-      </p>
-      {edits !== null && (
-        <div className="space-y-2 text-left">
-          <p className="text-ui text-ink">Your unsaved edits exist only here. Copy them before you close.</p>
-          <pre
-            aria-label="Your unsaved edits"
-            className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-sunken p-3 text-detail text-ink"
-          >
-            {edits}
-          </pre>
-        </div>
-      )}
-      {agentVersion !== null && (
-        <div className="space-y-2 text-left">
-          <p className="text-ui text-ink">The agent's change you had not reviewed yet is kept here too. Copy it before you close.</p>
-          <pre
-            aria-label="The agent's version"
-            className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-sunken p-3 text-detail text-ink"
-          >
-            {agentVersion}
-          </pre>
-        </div>
-      )}
-      <div className="flex justify-center gap-2">
-        {edits !== null && (
-          <Button variant="outline" onClick={() => copy(edits, 'Edits copied.')}>
-            Copy edits
-          </Button>
-        )}
-        {agentVersion !== null && (
-          <Button variant="outline" onClick={() => copy(agentVersion, "Agent's version copied.")}>
-            Copy agent's version
-          </Button>
-        )}
-        <Button variant="primary" onClick={onClose}>Close</Button>
-      </div>
-      {copied !== null && (
-        <p role="status" className="text-meta text-ink-faint">
-          {copied}
-        </p>
-      )}
-    </ErrorScreen>
-  );
-}
-
 /** The status and message of a failed read, for the `?trace=files` log. */
 function describeError(err: unknown): { status: number | null; message: string } {
   return {
@@ -869,29 +788,3 @@ function describeError(err: unknown): { status: number | null; message: string }
   };
 }
 
-/**
- * One frame for the four full-screen states this route can end in.
- *
- * They said the same thing four different ways before — four copies of the
- * centring, four hand-rolled buttons, four type scales. Every sentence they
- * carried is preserved verbatim, including the dirty-branch explanation;
- * only the chrome is shared.
- */
-function ErrorScreen({
-  title,
-  role,
-  children,
-}: {
-  title: string;
-  role?: 'alert';
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex h-full w-full items-center justify-center bg-canvas px-6">
-      <div role={role} className="max-w-md space-y-3 text-center">
-        <h2 className="text-head text-ink">{title}</h2>
-        {children}
-      </div>
-    </div>
-  );
-}

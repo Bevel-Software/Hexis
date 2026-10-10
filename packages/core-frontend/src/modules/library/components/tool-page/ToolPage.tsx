@@ -1,5 +1,6 @@
-import { useEffect, useId, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useContext, useEffect, useId, useState, type ReactNode } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ChevronRight } from 'lucide-react';
 import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { cn } from '../../../../lib/utils';
@@ -21,6 +22,10 @@ import { DeleteToolDialog } from './DeleteToolDialog';
 import { copyToClipboard } from '../../utils/clipboard';
 import { useLibraryToast } from '../../state/toast.context';
 import { NameWithBadges } from '../NameWithBadges';
+import { WorkspaceContext } from '../../../workspace/state/workspace.context';
+import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
+import { useItemDeletedElsewhere } from '../../../workspace/hooks/useItemDeletedElsewhere';
+import { landingAfterClose } from '../../../workspace/routing/landing';
 
 /**
  * One tool, as a page.
@@ -111,6 +116,39 @@ export function ToolPage({
   // only outcome is that refusal.
   const holder = toolPath ? pluginHoldingPath(toolPath, data.pluginSummaries) : null;
   const canDelete = (holder?.isOwner ?? false) && (holder?.linksAreManaged ?? false);
+
+  /**
+   * Someone else deleted the file this tool is read from (its `.tool`, or the
+   * plugin's `mcp.json`): the same "This file was deleted" notice as the
+   * Knowledge file page, in place of the old page. Not while this page's own
+   * delete runs — that dialog lands on the plugin itself.
+   */
+  const location = useLocation();
+  const kbDirName = useContext(WorkspaceContext)?.kbDirName ?? null;
+  const toolFile = kbDirName && toolPath ? `${kbDirName}/${toolPath}` : null;
+  const deletedBy = useItemDeletedElsewhere({
+    workspaceId: encodeURIComponent(DEFAULT_BRANCH),
+    itemPath: toolFile,
+    keyFile: toolFile,
+    suppressed: deleteOpen,
+  });
+
+  if (deletedBy) {
+    return (
+      <DeletedFileNotice
+        fileName={toolPath.slice(toolPath.lastIndexOf('/') + 1)}
+        branch={DEFAULT_BRANCH}
+        deletedBy={deletedBy}
+        edits={null}
+        onClose={() => {
+          // No tab to close: the page lands where a closed Library item does.
+          navigate(landingAfterClose(location.pathname, DEFAULT_BRANCH, null), { replace: true });
+          data.reload();
+          data.reloadPlugins();
+        }}
+      />
+    );
+  }
 
   if (page.loading) {
     return <div className="py-16 text-center text-ui text-ink-muted">Loading…</div>;

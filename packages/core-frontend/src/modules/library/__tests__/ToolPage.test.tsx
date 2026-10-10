@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
@@ -50,11 +50,18 @@ vi.mock('../services/library.api', () => ({
 // catalog the folder name stands in as the label — which is what the frame
 // tests assert on — and the provider's own fetches stay out of the picture.
 vi.mock('../state/library-data', () => ({
-  useLibrary: () => ({ pluginSummaries: [] }),
+  useLibrary: () => ({ pluginSummaries: [], reload: () => {}, reloadPlugins: () => {} }),
 }));
 
 const sourceMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
 vi.mock('../../change-requests/services/change-requests.api', () => sourceMock);
+
+// The deleted check's read of the tool's file.
+const workspaceApiMock = vi.hoisted(() => ({ readFile: vi.fn() }));
+vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  readFile: workspaceApiMock.readFile,
+}));
 
 vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
@@ -63,6 +70,9 @@ import { ToolPage } from '../components/tool-page/ToolPage';
 import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
+import { DEFAULT_BRANCH, type WorkflowEvent } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
@@ -176,6 +186,7 @@ beforeEach(() => {
   libraryMock.listSkills.mockReset().mockResolvedValue([]);
   libraryMock.getSkill.mockReset().mockResolvedValue({ allowedTools: [] });
   sourceMock.readFileOnBranch.mockReset().mockResolvedValue(SOURCE);
+  workspaceApiMock.readFile.mockReset().mockResolvedValue(SOURCE);
 });
 
 describe('ToolPage: frame', () => {
@@ -700,5 +711,93 @@ describe('ToolPage: source', () => {
       'Plugins/GTM/mcp.json',
     );
     expect(document.querySelector('pre')!.textContent).toBe(MCP_JSON);
+  });
+});
+
+/**
+ * Someone else deletes the tool on screen: the same "This file was deleted"
+ * notice as the Knowledge file page, and Close lands on Skills & Tools.
+ */
+describe('ToolPage: deleted by someone else', () => {
+  const TOOL_FILE = 'knowledge-base/Plugins/GTM/heyreach.tool';
+
+  function makeBus() {
+    const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
+    const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
+      subscribe(kind, handler) {
+        (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
+        return () => {
+          handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
+        };
+      },
+      setFocus() {},
+      watchWorkspace: () => () => {},
+      emit(e) {
+        (handlers[e.kind] ?? []).forEach((h) => h(e));
+      },
+    };
+    return bus;
+  }
+
+  function renderWithBus(bus: EventBusContextValue) {
+    return render(
+      <MemoryRouter initialEntries={['/skills-and-tools/tools/heyreach']}>
+        <EventBusContext.Provider value={bus}>
+          {wrap(
+            <Routes>
+              <Route path="/skills-and-tools/tools/:slug" element={<ToolPage />} />
+              <Route path="/skills-and-tools" element={<div>Gallery</div>} />
+            </Routes>,
+            false,
+          )}
+        </EventBusContext.Provider>
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  const deleted = (byUserName: string): WorkflowEvent => ({
+    id: 1,
+    ts: '',
+    kind: 'file-changed',
+    workspaceId: DEFAULT_BRANCH,
+    branch: DEFAULT_BRANCH,
+    path: TOOL_FILE,
+    newSha: 'abc',
+    byUserId: 'u2',
+    byUserName,
+  });
+
+  it('shows the notice with the file, the branch and who, and Close lands on Skills & Tools', async () => {
+    const bus = makeBus();
+    renderWithBus(bus);
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+
+    workspaceApiMock.readFile.mockRejectedValue(new WorkspaceApiError(404));
+    act(() => bus.emit(deleted('Sam Rivera')));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `heyreach.tool was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
+    );
+    expect(screen.queryByRole('heading', { name: 'heyreach', level: 1 })).toBeNull();
+    expect(workspaceApiMock.readFile).toHaveBeenCalledWith(encodeURIComponent(DEFAULT_BRANCH), TOOL_FILE);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  it('names nobody for a pull from the git host', async () => {
+    const bus = makeBus();
+    renderWithBus(bus);
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+
+    workspaceApiMock.readFile.mockRejectedValue(new WorkspaceApiError(404));
+    act(() => bus.emit({ ...deleted('Git sync'), byUserId: 'system' } as WorkflowEvent));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `heyreach.tool was deleted from ${DEFAULT_BRANCH}.`,
+    );
   });
 });
