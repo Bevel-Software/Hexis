@@ -45,7 +45,12 @@ const realParent = Object.getOwnPropertyDescriptor(window, 'parent');
  */
 const registered: EventListener[] = [];
 
-type Handoff = { baseUrl: string; token: string; openLink: (url: string) => void };
+type Handoff = {
+  baseUrl: string;
+  token: string;
+  openLink: (url: string) => void;
+  renew: () => Promise<string | null>;
+};
 const handoff = () => (window as unknown as { __HEXIS_EMBED__?: Handoff }).__HEXIS_EMBED__;
 
 beforeEach(() => {
@@ -127,6 +132,16 @@ describe('the MCP App view', () => {
     expect(params.protocolVersion).toEqual(expect.any(String));
     expect(params.appInfo).toMatchObject({ name: expect.any(String), version: expect.any(String) });
     expect(params.appCapabilities).toEqual(expect.any(Object));
+  });
+
+  /**
+   * The extension gives a view no way to say it CALLS server tools —
+   * `appCapabilities.tools` would mean the view exposes tools of its own — so
+   * the view declares nothing and reads the host's `serverTools` instead.
+   */
+  it('declares no capabilities of its own at ui/initialize', () => {
+    const [message] = host.postMessage.mock.calls[0] as [{ params: { appCapabilities: unknown } }];
+    expect(message.params.appCapabilities).toEqual({});
   });
 
   it('confirms the handshake with ui/notifications/initialized', () => {
@@ -291,5 +306,172 @@ describe('the MCP App view', () => {
     await settled();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(handoff()).toBeUndefined();
+  });
+});
+
+/**
+ * The token `open_page` mints lives minutes. When the bundle's call is
+ * refused for it, the bundle calls the `renew` the view handed it, and the
+ * view asks its host to call `open_page` again — `tools/call`, app to host,
+ * over the chat's own connection and so as its identity — for the same path
+ * and heading, and takes the token out of the `embedUrl` it answers.
+ */
+describe('the MCP App view renewing its token', () => {
+  /** The view's handshake, answered with the host capabilities given. */
+  function handshake(hostCapabilities?: Record<string, unknown>) {
+    const { id } = host.postMessage.mock.calls[0][0] as { id: string };
+    fromHost({
+      jsonrpc: '2.0',
+      id,
+      result: { protocolVersion: '2026-01-26', ...(hostCapabilities ? { hostCapabilities } : {}) },
+    });
+  }
+
+  /** The `tools/call` requests the view sent its host. */
+  const toolCalls = () =>
+    host.postMessage.mock.calls
+      .map((c) => c[0] as { id?: string; method?: string; params?: { name?: string; arguments?: unknown } })
+      .filter((m) => m.method === 'tools/call');
+
+  async function opened(structuredContent: Record<string, unknown> = { path: 'Data/Thing.md' }) {
+    fromHost(pageResult(structuredContent));
+    await settled();
+    return handoff()!;
+  }
+
+  it('asks the host to call open_page for its own path and heading, and takes the fresh token', async () => {
+    handshake({ serverTools: {} });
+    const page = await opened({ path: 'knowledge-base/Data/Thing.md', heading: 'what-it-is' });
+    const renewed = page.renew();
+    const [call] = toolCalls();
+    expect(call).toMatchObject({
+      jsonrpc: '2.0',
+      method: 'tools/call',
+      // Under `body`, as every Hexis tool takes its arguments over `/api/mcp`:
+      // flat ones are refused there and no token comes back.
+      params: {
+        name: 'open_page',
+        arguments: { body: { path: 'knowledge-base/Data/Thing.md', heading: 'what-it-is' } },
+      },
+    });
+    fromHost({
+      jsonrpc: '2.0',
+      id: call.id,
+      result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2`, appUrl: APP_URL } },
+    });
+    await expect(renewed).resolves.toBe('t2');
+    // The handoff follows, so whatever reads it next reads the fresh token.
+    expect(handoff()!.token).toBe('t2');
+  });
+
+  it('asks with the path alone when the view was not opened at a heading', async () => {
+    handshake({ serverTools: {} });
+    const page = await opened({ path: 'Data/Thing.md' });
+    const renewed = page.renew();
+    expect(toolCalls()[0].params?.arguments).toEqual({ body: { path: 'Data/Thing.md' } });
+    // Answered, so no renewal timer outlives the test.
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2` } } });
+    await expect(renewed).resolves.toBe('t2');
+  });
+
+  it('shares one call between renewals asked for together', async () => {
+    handshake({ serverTools: {} });
+    const page = await opened();
+    const first = page.renew();
+    const second = page.renew();
+    expect(toolCalls()).toHaveLength(1);
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2` } } });
+    await expect(first).resolves.toBe('t2');
+    await expect(second).resolves.toBe('t2');
+  });
+
+  it('does not ask a host that said it runs no server tools for a view', async () => {
+    handshake({ openLinks: {} });
+    const page = await opened();
+    await expect(page.renew()).resolves.toBeNull();
+    expect(toolCalls()).toHaveLength(0);
+  });
+
+  /** A host that said nothing either way is asked once; a refusal is its answer. */
+  it('asks a host that said nothing once, and takes a refusal as its answer', async () => {
+    handshake();
+    const page = await opened();
+    const renewed = page.renew();
+    expect(toolCalls()).toHaveLength(1);
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, error: { code: -32601, message: 'Method not found' } });
+    await expect(renewed).resolves.toBeNull();
+    await expect(page.renew()).resolves.toBeNull();
+    expect(toolCalls()).toHaveLength(1);
+  });
+
+  /**
+   * `open_page`'s own gate decides: a reader whose access was withdrawn is
+   * refused exactly as on a first call, and the view gets no token.
+   */
+  it('gets no token when open_page refuses the call', async () => {
+    handshake({ serverTools: {} });
+    const page = await opened();
+    const renewed = page.renew();
+    fromHost({
+      jsonrpc: '2.0',
+      id: toolCalls()[0].id,
+      result: { isError: true, content: [{ type: 'text', text: "You don't have read access to \"Data/Thing.md\"" }] },
+    });
+    await expect(renewed).resolves.toBeNull();
+    expect(handoff()!.token).toBe('t');
+  });
+
+  it.each([
+    ['carries no embed address', { note: 'This deployment is reached over plain http.' }],
+    ['names another deployment', { embedUrl: 'https://elsewhere.example/embed?token=t2' }],
+    ['carries no token', { embedUrl: `${ORIGIN}/embed` }],
+  ])('gets no token when the answer %s', async (_label, structuredContent) => {
+    handshake({ serverTools: {} });
+    const page = await opened();
+    const renewed = page.renew();
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, result: { structuredContent } });
+    await expect(renewed).resolves.toBeNull();
+    expect(handoff()!.token).toBe('t');
+  });
+
+  it('gives up when the host does not answer', async () => {
+    vi.useFakeTimers();
+    try {
+      handshake({ serverTools: {} });
+      fromHost(pageResult({ path: 'Data/Thing.md' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const renewed = handoff()!.renew();
+      expect(toolCalls()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await expect(renewed).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** Silence is not a refusal: a host that said nothing and answered too late is asked again. */
+  it('asks a host that said nothing again after it did not answer in time', async () => {
+    vi.useFakeTimers();
+    try {
+      handshake();
+      fromHost(pageResult({ path: 'Data/Thing.md' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const first = handoff()!.renew();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await expect(first).resolves.toBeNull();
+      const second = handoff()!.renew();
+      expect(toolCalls()).toHaveLength(2);
+      fromHost({ jsonrpc: '2.0', id: toolCalls()[1].id, result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2` } } });
+      await expect(second).resolves.toBe('t2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('has nothing to ask for when the result echoed no path', async () => {
+    handshake({ serverTools: {} });
+    const page = await opened({});
+    await expect(page.renew()).resolves.toBeNull();
+    expect(toolCalls()).toHaveLength(0);
   });
 });

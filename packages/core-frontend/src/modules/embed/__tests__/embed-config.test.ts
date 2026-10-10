@@ -111,6 +111,14 @@ describe('the handoff the view leaves on the window', () => {
     expect(readEmbedHandoff()).toEqual({ baseUrl: BASE, token: 'tok', openLink });
   });
 
+  it('keeps the way to renew the token the view lent, and only a function', () => {
+    const renew = async () => 'tok-2';
+    set({ baseUrl: BASE, token: 'tok', renew });
+    expect(readEmbedHandoff()).toEqual({ baseUrl: BASE, token: 'tok', renew });
+    set({ baseUrl: BASE, token: 'tok', renew: 'tok-2' });
+    expect(readEmbedHandoff()).toEqual({ baseUrl: BASE, token: 'tok' });
+  });
+
   it('keeps the path prefix a deployment is served under', () => {
     set({ baseUrl: `${BASE}/hexis/`, token: 'tok' });
     expect(readEmbedHandoff()).toEqual({ baseUrl: `${BASE}/hexis`, token: 'tok' });

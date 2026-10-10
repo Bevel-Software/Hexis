@@ -72,6 +72,26 @@
          * owns the view; later ones are ignored.
          */
         var loading = false;
+        /**
+         * What the view calls `open_page` with to renew its token: the path
+         * and heading the result that owns the view echoed. Null until then,
+         * and when the result echoed no path (nothing to ask for).
+         */
+        var pageArgs = null;
+        /** The deployment the owning result named; a renewed token must name the same one. */
+        var deployment = null;
+        /**
+         * Whether the host runs a server tool for the view (`tools/call`,
+         * app to host): true or false when the handshake's reply said so in
+         * `hostCapabilities.serverTools`, null when it said nothing — then
+         * the view tries once, and a refusal is the answer.
+         */
+        var serverTools = null;
+        /** Replies the view is waiting for, by request id. */
+        var pending = {};
+        var callCount = 0;
+        /** The one renewal in flight, shared by every call refused meanwhile. */
+        var renewing = null;
 
         /** The name the deployment's Vite build gives the embed entry. */
         var EMBED_ENTRY = 'embed';
@@ -90,6 +110,14 @@
          * part of the conversation rather than the whole screen.
          */
         var PREFERRED_HEIGHT = 640;
+        /** The tool that minted the token, and the one that renews it. */
+        var OPEN_PAGE_TOOL = 'open_page';
+        /**
+         * How long a renewal waits for the host before it gives up and the
+         * view says it has expired. A host that never answers must not leave
+         * a save spinning.
+         */
+        var RENEW_TIMEOUT_MS = 20000;
 
         function send(message) {
           // The host is this view's parent; it told us its origin on the
@@ -126,6 +154,87 @@
             method: 'ui/open-link',
             params: { url: url },
           });
+        }
+
+        /**
+         * Ask the host to call one of this server's tools for the view, over
+         * the connection the chat already holds — and so as the identity
+         * that connection authenticated. Resolves with the CallToolResult;
+         * rejects when the host refuses or does not answer in time.
+         */
+        function callServerTool(name, args) {
+          return new Promise(function (resolve, reject) {
+            callCount += 1;
+            var id = 'call-' + callCount;
+            var timer = setTimeout(function () {
+              delete pending[id];
+              var silent = new Error('the chat app did not answer');
+              silent.timedOut = true;
+              reject(silent);
+            }, RENEW_TIMEOUT_MS);
+            pending[id] = function (message) {
+              clearTimeout(timer);
+              delete pending[id];
+              if (message.error || !message.result) reject(message.error || new Error('no result'));
+              else resolve(message.result);
+            };
+            send({ jsonrpc: '2.0', id: id, method: 'tools/call', params: { name: name, arguments: args } });
+          });
+        }
+
+        /**
+         * A fresh token for the page this view shows, or null when there is
+         * none to be had. The view cannot mint one — minting needs the
+         * identity, which lives on the chat's connection — so it asks the
+         * host to call `open_page` again for the same path and heading and
+         * takes the token out of the `embedUrl` it answers. That call goes
+         * through `open_page`'s own gate: a reader whose access was
+         * withdrawn is refused there exactly as on a first call, and gets
+         * null here.
+         *
+         * Null without asking when the host said it runs no server tools for
+         * a view, or after a host that said nothing refused once. The bundle
+         * calls this at most once per refused call (see `embed-config.ts`).
+         */
+        function renew() {
+          if (renewing) return renewing;
+          if (serverTools === false || !pageArgs || !deployment) return Promise.resolve(null);
+          // Every Hexis tool takes its arguments under `body`; flat ones are
+          // refused ("takes its arguments under body") and no token comes back.
+          renewing = callServerTool(OPEN_PAGE_TOOL, { body: pageArgs })
+            .then(
+              function (result) {
+                var data = (result && result.structuredContent) || {};
+                if (result && result.isError) return null;
+                var url;
+                try {
+                  url = new URL(data.embedUrl);
+                } catch (err) {
+                  return null;
+                }
+                // The same deployment, or nothing: the bundle already runs
+                // against this one, and its API is the token's.
+                if (baseOf(url) !== deployment) return null;
+                var token = url.searchParams.get('token');
+                if (!token) return null;
+                var handoff = window[HANDOFF_GLOBAL];
+                if (handoff && typeof handoff === 'object') handoff.token = token;
+                return token;
+              },
+              function (err) {
+                // The host refused the call: one that said nothing about
+                // server tools has now said no. One that did not answer in
+                // time has said nothing, and is asked again on the next
+                // refused call.
+                if (serverTools === null && !(err && err.timedOut)) serverTools = false;
+                return null;
+              },
+            )
+            .then(function (token) {
+              renewing = null;
+              return token;
+            });
+          return renewing;
         }
 
         /** The text blocks of a CallToolResult, one line each. */
@@ -226,8 +335,15 @@
           }
           if (loading) return;
           loading = true;
+          deployment = base;
+          // What the view calls `open_page` with again when the token runs
+          // out: the arguments this result was answered for, as it echoed them.
+          if (typeof data.path === 'string' && data.path) {
+            pageArgs = { path: data.path };
+            if (typeof data.heading === 'string' && data.heading) pageArgs.heading = data.heading;
+          }
           // The handoff, before the bundle: it reads this the moment it runs.
-          window[HANDOFF_GLOBAL] = { baseUrl: base, token: token, openLink: openLink };
+          window[HANDOFF_GLOBAL] = { baseUrl: base, token: token, openLink: openLink, renew: renew };
 
           fetch(base + MANIFEST_PATH, { credentials: 'omit' })
             .then(function (res) {
@@ -302,6 +418,13 @@
           if (event.source !== window.parent) return;
           if (hostOrigin === null && event.origin) hostOrigin = event.origin;
 
+          // A reply to a request the view sent (a server tool call): it has
+          // the request's id and no method of its own.
+          if (!message.method && typeof message.id === 'string' && pending[message.id]) {
+            pending[message.id](message);
+            return;
+          }
+
           if (message.method === 'ui/notifications/tool-result') {
             // The params ARE the CallToolResult. A `result` wrapper is
             // accepted too, for a host that wrapped it.
@@ -314,16 +437,20 @@
             // whole of the layout; nothing to recompute.
             return;
           }
-          // The handshake's reply carries the host's capabilities. Nothing
-          // here depends on them, but a host that sends the first tool result
-          // only after the handshake completes needs us to have sent it.
-          if (message.id === INITIALIZE_ID) {
+          // The handshake's reply carries the host's capabilities. The one
+          // read here is `serverTools`: whether the host runs this server's
+          // tools for the view, which is how the view renews its token. And a
+          // host that sends the first tool result only after the handshake
+          // completes needs us to have sent it.
+          if (!message.method && message.id === INITIALIZE_ID) {
             // A rejected handshake is not advertised as ready — and the
             // reader is told, rather than left at "Opening the page…".
             if (message.error || !message.result) {
               if (!shown) say('The chat app refused to open this page.');
               return;
             }
+            var caps = message.result.hostCapabilities;
+            if (caps && typeof caps === 'object') serverTools = !!caps.serverTools;
             send({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
             if (!shown) say('Opening the page…');
           }
@@ -337,9 +464,11 @@
           params: {
             protocolVersion: '2026-01-26',
             appInfo: { name: 'hexis-knowledge-page', version: '1.0.0' },
-            // Asks the host for nothing: no tool calls, no messages, no
-            // model context. Links go out through ui/open-link, which every
-            // host offers.
+            // Declares nothing. The extension has no way for a view to say
+            // it CALLS server tools (`tools` here would mean the view
+            // exposes tools of its own); whether the host runs them for a
+            // view is the host's to say, in the reply's `serverTools`.
+            // Links go out through ui/open-link, which every host offers.
             appCapabilities: {},
           },
         });

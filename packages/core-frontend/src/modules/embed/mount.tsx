@@ -49,6 +49,7 @@ export function mountEmbed(root: HTMLElement, options: MountEmbedOptions): Embed
     baseUrl: options.baseUrl,
     token: options.token,
     openLink: options.openLink ?? null,
+    renew: options.renew ?? null,
   });
   const reactRoot: Root = createRoot(root);
   reactRoot.render(

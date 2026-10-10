@@ -168,13 +168,49 @@ describe('EmbedService: minting', () => {
   /**
    * The token rides in the tool result and so in the chat transcript;
    * whoever holds it acts on that one file as its user until it expires.
-   * One hour (Razvan, 2026-10-09), down from the two the embed used before.
+   * Five minutes (Razvan, 2026-10-09): the chat view renews it through its
+   * host when a call is refused, so a short life costs the reader nothing.
    */
-  it('mints a token that lives one hour', async () => {
+  it('mints an open_page token that lives five minutes', async () => {
     const { service } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
+    expect(exp - iat).toBe(5 * 60);
+  });
+
+  /** The connector frames `/embed` and has no host to renew through: its hour stands. */
+  it('mints a connector token that keeps its one-hour lifetime', async () => {
+    const { service } = build();
+    const { token } = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+    const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
     expect(exp - iat).toBe(60 * 60);
+  });
+
+  /**
+   * Both kinds are read by the same verification: each loads while it lives
+   * and is refused as a token once it has run out — the user's after five
+   * minutes, the connector's only after the hour.
+   */
+  it('reads both kinds while they live and refuses each once its own lifetime is over', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-09T10:00:00Z'));
+      const { service } = build();
+      const user = await service.mintForUser({ userId: USER.id, reference: REPO });
+      const connector = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+
+      vi.setSystemTime(new Date('2026-10-09T10:04:50Z'));
+      await expect(service.loadFile(user.token)).resolves.toMatchObject({ repoRelative: REPO });
+
+      vi.setSystemTime(new Date('2026-10-09T10:05:01Z'));
+      await expect(service.loadFile(user.token)).rejects.toThrow(EmbedTokenError);
+      await expect(service.loadFile(connector.token)).resolves.toMatchObject({ repoRelative: REPO });
+
+      vi.setSystemTime(new Date('2026-10-09T11:00:01Z'));
+      await expect(service.loadFile(connector.token)).rejects.toThrow(EmbedTokenError);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('mints for an outside account — the connector path, unchanged', async () => {
