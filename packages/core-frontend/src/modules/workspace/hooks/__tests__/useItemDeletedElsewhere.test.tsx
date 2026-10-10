@@ -94,14 +94,37 @@ describe('useItemDeletedElsewhere', () => {
     const ownDeletes = new Set([TOOL_A]);
     const isOwnDelete = vi.fn((path: string) => ownDeletes.has(path));
     const forgetOwnDelete = vi.fn((path: string) => { ownDeletes.delete(path); });
+    readFile.mockResolvedValue('{}');
     const { result } = mount(bus, { isOwnDelete, forgetOwnDelete });
 
-    readFile.mockResolvedValue('{}');
     act(() => bus.emit(changed(TOOL_A)));
     await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A));
 
     readFile.mockRejectedValue(new WorkspaceApiError(404));
     act(() => bus.emit(changed(TOOL_A)));
     await waitFor(() => expect(result.current?.name).toBe('Sam Rivera'));
+  });
+
+  // Deleted by this session, restored, then OPENED again: no event has
+  // re-read it yet, and someone else deletes it within the minute.
+  it('forgets our own delete when the restored item is opened', async () => {
+    const bus = makeFakeBus();
+    const ownDeletes = new Set([TOOL_A]);
+    const isOwnDelete = vi.fn((path: string) => ownDeletes.has(path));
+    const forgetOwnDelete = vi.fn((path: string) => { ownDeletes.delete(path); });
+    readFile.mockResolvedValue('{}');
+    const { result } = mount(bus, { isOwnDelete, forgetOwnDelete });
+
+    await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A));
+    expect(result.current).toBeNull();
+
+    readFile.mockRejectedValue(new WorkspaceApiError(404));
+    act(() => bus.emit(changed(TOOL_A)));
+    await waitFor(() => expect(result.current?.name).toBe('Sam Rivera'));
+  });
+
+  it('reads nothing on open when no delete of ours covers the item', () => {
+    mount(makeFakeBus(), { isOwnDelete: () => false });
+    expect(readFile).not.toHaveBeenCalled();
   });
 });

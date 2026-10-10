@@ -25,6 +25,9 @@ import type { DeletedBy } from '../components/DeletedFileNotice';
  * own delete dialog runs — that dialog lands the page somewhere else. A
  * successful read tells the workspace the path is back (`forgetOwnDelete`),
  * so deleting it again a moment later is someone else's delete once more.
+ * Opening the item counts: a page that opens an item this session deleted a
+ * moment ago (restored since) reads it once, so the next delete — someone
+ * else's — still shows the notice.
  *
  * What it learned holds while the item stays on screen: leave the item and
  * come back, and it starts over — its events went unwatched in between.
@@ -110,6 +113,17 @@ export function useItemDeletedElsewhere({
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
       check(null);
     });
+    // Opened while a delete of ours a moment ago still covers it: the page
+    // found the item, so it came back. Confirm with one read and forget the
+    // marker — otherwise the next delete, by someone else, is skipped.
+    if (isOwnDeleteRef.current?.(keyFile)) {
+      readFile(workspaceId, keyFile).then(
+        () => {
+          if (!cancelled) forgetOwnDeleteRef.current?.(keyFile);
+        },
+        () => {},
+      );
+    }
     return () => {
       cancelled = true;
       offFileChanged();
