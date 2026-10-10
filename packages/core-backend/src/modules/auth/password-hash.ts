@@ -17,7 +17,9 @@ const KEY_LEN = 32;
 const SALT_LEN = 16;
 
 /** Guard rail surfaced by the routes as a 400 — not a silent truncation. The
- *  policy itself is platform-shared so every password form reads the same one. */
+ *  policy itself is platform-shared so the Invite dialog's starting-password
+ *  field can hold Invite on the same minimum; the other password forms (Account
+ *  page, User accounts) don't check it and show the server's 400 instead. */
 export { MIN_PASSWORD_LENGTH } from '@bevel-software/platform-shared';
 
 function scryptAsync(
