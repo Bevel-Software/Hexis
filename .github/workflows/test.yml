@@ -43,6 +43,9 @@ jobs:
     # must not be able to tamper with the workspace that decides that.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The merge commit and its base parent, for "Lint changed files".
+          fetch-depth: 2
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
@@ -76,6 +79,18 @@ jobs:
       # those reached dev unnoticed until someone ran tsc locally. After
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
+
+      # ESLint over the files a pull request changes. Not `pnpm lint`: the repo
+      # as a whole still carries errors in files nobody is touching, so a
+      # repo-wide gate would fail every PR. This holds each PR to leaving the
+      # files it edits clean. On `pull_request` the checkout is GitHub's merge
+      # commit, whose first parent is the base, so `HEAD^1..HEAD` is exactly
+      # what the PR changes (hence `fetch-depth: 2` above).
+      - name: Lint changed files
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff --name-only --diff-filter=ACMR -z HEAD^1 HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' \
+            | xargs -0 -r pnpm exec eslint --no-warn-ignored --max-warnings 0
 
       # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
       # child line with its package ("packages/core-backend test: …"). Vitest's
