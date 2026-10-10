@@ -9,7 +9,7 @@ import { PersonalPluginPage } from '../components/PersonalPluginPage';
 import { TeamRoute } from '../components/TeamRoute';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
-import { ConnectToolsPage } from '../../secrets-vault/components/ConnectToolsPage';
+import { ConnectToolsPage } from '../../secrets-vault';
 import {
   CONNECT_TOOLS_SEGMENT,
   decodePluginSegment,

@@ -29,7 +29,7 @@ import { FileViewer } from '../modules/workspace/components/FileViewer';
 import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
 import { FileRoute } from '../modules/workspace/components/FileRoute';
 import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
-import { CONNECT_TOOLS_PATH } from '../modules/library/routes/library-paths';
+import { CONNECT_TOOLS_PATH } from '../modules/library';
 import { AppLayout } from '../modules/layout/components/AppLayout';
 import {
   LayoutContext,

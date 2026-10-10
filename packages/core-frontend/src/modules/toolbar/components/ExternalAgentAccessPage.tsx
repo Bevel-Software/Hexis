@@ -20,7 +20,7 @@ import {
 } from '../../../shared/mcp';
 import { CODEX_LOGIN_NOTE, GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { AgentInstructionsCard } from './AgentInstructionsCard';
-import { CONNECT_TOOLS_PATH } from '../../library/routes/library-paths';
+import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
 import {

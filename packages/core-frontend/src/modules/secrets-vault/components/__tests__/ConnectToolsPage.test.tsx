@@ -8,11 +8,12 @@ import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
 /**
  * What this page owes the Library.
  *
- * The page sits inside Skills & Tools (`/skills-and-tools/connect`), but a key
- * entered here still has no provider to call: it ANNOUNCES instead, the one
- * rule every writing surface in the app follows, and the Library's provider —
- * the one behind the sidebar's setup reminder — picks it up. The rest of the page's behaviour (the agent
- * -connect mode, the Finish button) is not what these tests are about.
+ * The page sits inside Skills & Tools (`/skills-and-tools/connect`), under the
+ * Library's provider, yet it does not call that provider: a key entered here
+ * is ANNOUNCED, the one rule every writing surface in the app follows, and the
+ * provider — the one behind the sidebar's setup reminder — picks it up. The
+ * rest of the page's behaviour (the agent-connect mode, the Finish button) is
+ * not what these tests are about.
  */
 
 const connectMock = vi.hoisted(() => ({
