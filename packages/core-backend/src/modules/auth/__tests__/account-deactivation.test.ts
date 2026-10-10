@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
@@ -16,10 +18,16 @@ import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
 /**
  * Drizzle chain stub, as in `auth.service.test.ts`: each db.select() /
  * insert() / update() consumes the next queued result; awaiting any point of
- * the chain resolves it. Records what was inserted and set.
+ * the chain resolves it. Records what was inserted and set, and the order of
+ * the switch lock (`execute`) against the writes.
  */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[] } = { values: [], set: [] };
+  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[]; order: string[] } = {
+    values: [],
+    set: [],
+    order: [],
+  };
+  const dialect = new PgDialect();
   function nextChain(): unknown {
     const result = queue.shift();
     const chain: Record<string, unknown> = {};
@@ -43,11 +51,17 @@ function makeFakeDb(queue: unknown[]) {
     return chain;
   }
   const db = {
-    insert: vi.fn(() => nextChain()),
+    insert: vi.fn(() => (captured.order.push('insert'), nextChain())),
     select: vi.fn(() => nextChain()),
-    update: vi.fn(() => nextChain()),
-  } as unknown as Database;
-  return { db, captured };
+    update: vi.fn(() => (captured.order.push('update'), nextChain())),
+    execute: vi.fn(async (query: SQL) => {
+      const { sql, params } = dialect.sqlToQuery(query);
+      captured.order.push(`${sql} ${JSON.stringify(params)}`);
+      return [];
+    }),
+    transaction: async <T,>(cb: (tx: unknown) => Promise<T>) => cb(db),
+  };
+  return { db: db as unknown as Database, captured };
 }
 
 function makeConfig(over: Partial<CoreConfig> = {}): CoreConfig {
@@ -163,6 +177,15 @@ describe('AuthService.deactivate', () => {
     expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
   });
 
+  it('switches off under the address switch lock, taken before the update', async () => {
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: 'Alice@Example.com' }], []]);
+    await new AuthService(db, makeConfig()).deactivate(ROW.id);
+    expect(captured.order).toEqual([
+      'select pg_advisory_xact_lock(hashtext($1)) ["account-switch:alice@example.com"]',
+      'update',
+    ]);
+  });
+
   it('answers false for an account that does not exist', async () => {
     const { db } = makeFakeDb([[]]);
     expect(await new AuthService(db, makeConfig()).deactivate('nobody')).toBe(false);
@@ -221,6 +244,11 @@ describe('a first sign-in the port would rather keep waiting', () => {
     expect(captured.values).toHaveLength(1);
     expect(captured.values[0]).toMatchObject({ email: 'new@example.com' });
     expect(captured.values[0].deactivatedAt).toBeInstanceOf(Date);
+    // Created switched off, so under the address's switch lock.
+    expect(captured.order).toEqual([
+      'select pg_advisory_xact_lock(hashtext($1)) ["account-switch:new@example.com"]',
+      'insert',
+    ]);
   });
 
   it('is a plain refusal when an admin creates the account', async () => {

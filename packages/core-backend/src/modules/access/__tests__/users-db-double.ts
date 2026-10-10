@@ -61,17 +61,11 @@ export function usersDbDouble(
     // `.where()` hung off it for the narrowed form. Drizzle's builder is
     // shaped the same way.
     const query = Promise.resolve(rows) as Promise<typeof rows> & {
-      where: (condition: unknown) => Promise<typeof rows> & { for: (strength: string) => Promise<typeof rows> };
+      where: (condition: unknown) => Promise<typeof rows>;
     };
-    query.where = (condition: unknown) => {
+    query.where = async (condition: unknown) => {
       const asked = new Set(boundValues(condition).map(canonical));
-      const narrowed = Promise.resolve(rows.filter((r) => asked.has(canonical(r.email)))) as Promise<typeof rows> & {
-        for: (strength: string) => Promise<typeof rows>;
-      };
-      // A row lock changes nothing a single connection can see; the double
-      // answers the same rows.
-      narrowed.for = () => narrowed;
-      return narrowed;
+      return rows.filter((r) => asked.has(canonical(r.email)));
     };
     return query;
   };
@@ -80,6 +74,8 @@ export function usersDbDouble(
     // One connection, no isolation to model: the callback runs on the same
     // double.
     transaction: async <T>(cb: (tx: unknown) => Promise<T>) => cb(db),
+    // Locks taken with `execute` (advisory locks) answer nothing.
+    execute: async () => [],
   };
   return db as unknown as Database;
 }

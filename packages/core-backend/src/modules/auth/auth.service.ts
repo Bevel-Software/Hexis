@@ -21,6 +21,7 @@ import {
 } from './password-hash.js';
 import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
+import { takeAccountSwitchLock } from './account-switch-lock.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -157,16 +158,20 @@ export class AuthService {
     // is put on file, switched off, for an admin to switch on — and is still
     // refused now, with the port's words. Only for single sign-on, the one
     // provisioning nobody asked for (see `AccountAdmissionVerdict`).
+    // Created switched off, so under the switch lock (see account-switch-lock).
     if (verdict.waitForAdmin && reason === 'sso') {
-      await this.db
-        .insert(users)
-        .values({
-          email: normalizedEmail,
-          emailBidx: normalizedEmail,
-          name: normalizedEmail.split('@')[0] || normalizedEmail,
-          deactivatedAt: new Date(),
-        })
-        .onConflictDoNothing({ target: users.emailBidx });
+      await this.db.transaction(async (tx) => {
+        await takeAccountSwitchLock(tx, normalizedEmail);
+        await tx
+          .insert(users)
+          .values({
+            email: normalizedEmail,
+            emailBidx: normalizedEmail,
+            name: normalizedEmail.split('@')[0] || normalizedEmail,
+            deactivatedAt: new Date(),
+          })
+          .onConflictDoNothing({ target: users.emailBidx });
+      });
       throw new AccountAdmissionRefusedError(verdict.message, { waitingForAdmin: true });
     }
     throw new AccountAdmissionRefusedError(verdict.message);
@@ -681,10 +686,15 @@ export class AuthService {
     if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
       throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');
     }
-    await this.db
-      .update(users)
-      .set({ deactivatedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    // Under the switch lock, so a promotion that checked this account was
+    // on is written before this lands (see account-switch-lock).
+    await this.db.transaction(async (tx) => {
+      await takeAccountSwitchLock(tx, row.email);
+      await tx
+        .update(users)
+        .set({ deactivatedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    });
     this.activeCache.delete(userId);
     return true;
   }

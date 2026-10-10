@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 
@@ -146,8 +148,8 @@ async function makeHarness(
   );
   let rolesLocked = false;
   const current = () => (rolesLocked ? after : before);
-  // What happened inside each users transaction, in order: the row lock the
-  // read asked for, and what roles.yaml held when the transaction ended.
+  // What happened inside each users transaction, in order: the lock taken
+  // with `execute` (rendered), and what roles.yaml held when it ended.
   const txLog: string[] = [];
   const rolesOnDisk = () => fs.readFile(path.join(repoDir, 'roles.yaml'), 'utf-8');
   const db = {
@@ -155,26 +157,18 @@ async function makeHarness(
     transaction: async <T>(cb: (tx: unknown) => Promise<T>): Promise<T> => {
       txLog.push('begin');
       const tx = {
-        select: (fields: unknown) => ({
-          from: (table: unknown) => ({
-            where: (condition: unknown) => {
-              const q = (current().select(fields as never).from(table as never) as unknown as {
-                where: (c: unknown) => Promise<unknown[]> & { for: (strength: string) => Promise<unknown[]> };
-              }).where(condition);
-              return Object.assign(q, {
-                for: (strength: string) => {
-                  txLog.push(`select for ${strength}`);
-                  return q;
-                },
-              });
-            },
-          }),
-        }),
+        execute: async (query: SQL) => {
+          const { sql, params } = new PgDialect().sqlToQuery(query);
+          txLog.push(`${sql} ${JSON.stringify(params)}`);
+          return [];
+        },
+        select: () => current().select(),
       };
       try {
         return await cb(tx);
       } finally {
-        txLog.push(`end: ${(await rolesOnDisk()).includes('on@example.com') ? 'promoted' : 'not promoted'}`);
+        const onDisk = await rolesOnDisk();
+        txLog.push(`end: ${['on@example.com', 'new@example.com'].filter((e) => onDisk.includes(e)).join(', ') || 'none'}`);
       }
     },
   } as unknown as typeof before;
@@ -353,14 +347,24 @@ describe('/api/access/roles routes', () => {
     expect(roster.roles.find((r) => r.canonical === 'admin')!.members).not.toContain('on@example.com');
   });
 
-  it('ifActive holds the account row locked until roles.yaml is written, so a switch-off cannot land in between', async () => {
-    const h = await makeHarness();
-    server = h.server;
-    expect((await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive: true })).status).toBe(200);
-    // Switching off is an UPDATE of that row: it waits for this transaction,
-    // which ends only after the promotion is on disk.
-    expect(h.txLog).toEqual(['begin', 'select for update', 'end: promoted']);
-  });
+  // Every switch-off (and an account created switched off) takes the same
+  // lock first; see account-deactivation.test for that side.
+  it.each([
+    ['an existing account', 'On@Example.com', 'on@example.com'],
+    ['an address with no account yet', 'new@example.com', 'new@example.com'],
+  ])(
+    'ifActive holds the address switch lock until roles.yaml is written, for %s',
+    async (_label, email, canonical) => {
+      const h = await makeHarness();
+      server = h.server;
+      expect((await addAdmin(h.baseUrl, { email, ifActive: true })).status).toBe(200);
+      expect(h.txLog).toEqual([
+        'begin',
+        `select pg_advisory_xact_lock(hashtext($1)) ["account-switch:${canonical}"]`,
+        `end: ${canonical}`,
+      ]);
+    },
+  );
 
   it('without ifActive, adding a switched-off account works as before', async () => {
     const h = await makeHarness();
