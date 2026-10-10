@@ -1,7 +1,8 @@
 /**
- * The command menu's two public facts, for anything outside the toolbar that
+ * The command menu's public facts, for anything outside the toolbar that
  * talks about it or opens it — the Get set up list does both: which keys open
- * it on this platform, and a way to open it from a button.
+ * it on this platform, and a way to open it from a button. Beside them, how
+ * the menu draws its commands' shortcuts on this platform.
  *
  * A plain module rather than a context: the palette lives in the toolbar and
  * the people asking for it (the setup column) sit beside it, not under it, so
@@ -25,6 +26,38 @@ export const COMMAND_MENU_SHORTCUT_ARIA = APPLE ? 'Meta+K' : 'Control+K';
 export function isCommandMenuShortcut(e: KeyboardEvent): boolean {
   if (e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k') return false;
   return APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}
+
+/** A command's shortcut as the menu draws it and says it. */
+export interface ShortcutHint {
+  /** The one keycap: `C`; `⇧K` on Apple platforms, `Shift K` elsewhere. */
+  label: string;
+  /**
+   * What a screen reader hears after the row: `C`, `Shift K`. Spoken, not
+   * declared with `aria-keyshortcuts`: the row is read while the menu is
+   * open, where the key types into the search rather than running it.
+   */
+  spoken: string;
+}
+
+/**
+ * How a command's shortcut is shown on this platform — `apple` is for tests;
+ * the app asks for the platform it runs on, as {@link COMMAND_MENU_SHORTCUT_LABEL}
+ * does.
+ */
+export function shortcutHint(shortcut: { key: string; shift?: boolean }, apple: boolean = APPLE): ShortcutHint {
+  const key = shortcut.key.toUpperCase();
+  if (!shortcut.shift) return { label: key, spoken: key };
+  return { label: apple ? `⇧${key}` : `Shift ${key}`, spoken: `Shift ${key}` };
+}
+
+/**
+ * Every keycap's width on this platform: wide enough for the widest one —
+ * `⇧K` on Apple platforms, `Shift K` elsewhere — so the keys line up down the
+ * menu, each centred in its cap.
+ */
+export function shortcutKeycapWidth(apple: boolean = APPLE): string {
+  return apple ? 'w-7' : 'w-14';
 }
 
 const openRequests = new Set<() => void>();

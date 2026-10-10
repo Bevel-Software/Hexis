@@ -43,6 +43,10 @@ jobs:
     # must not be able to tamper with the workspace that decides that.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # On a pull request the checkout is GitHub's merge commit; its first
+          # parent is the base, which the changed-files lint below diffs against.
+          fetch-depth: 2
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
@@ -76,6 +80,16 @@ jobs:
       # those reached dev unnoticed until someone ran tsc locally. After
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
+
+      # Lint ratchet: every JS/TS file a pull request adds or changes must
+      # lint clean (`eslint .` does not pass on dev yet, so it cannot gate as
+      # a whole). HEAD is GitHub's merge commit, HEAD^1 the base. The script's
+      # own tests run first, so a broken gate cannot pass vacuously.
+      - name: Lint the files this pull request changes
+        if: github.event_name == 'pull_request'
+        run: |
+          pnpm test:scripts
+          pnpm lint:changed HEAD^1 HEAD
 
       # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
       # child line with its package ("packages/core-backend test: …"). Vitest's
