@@ -51,6 +51,10 @@ const allowAll = {
   // everything, and answering "no rules at HEAD" for the batch write check,
   // keeps these tests about what they test rather than about access.
   canWrite: async () => true,
+  // The `canWrite` the read tools report, so a write-scope caller here gets a
+  // COMPUTED `true` — never the fail-closed `false` of a missing method.
+  canWriteBatch: async (_w: string, _u: string, paths: string[]) =>
+    new Map(paths.map((p) => [p, true])),
   canDownload: async () => true,
   canOwner: async () => true,
   canWriteBatchAtRef: async () => null,
@@ -372,7 +376,7 @@ async function isDeadOrZombie(pid: number): Promise<boolean> {
 describe('workspace file primitives', () => {
   it('read_file returns the content', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n', canWrite: true });
   });
 
   it('write_file then read_file round-trips', async () => {
@@ -505,7 +509,7 @@ describe('workspace file primitives', () => {
   // that same text into an agent: a leading slash names the same path.
   it('every path input accepts a leading slash as the same workspace path', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n', canWrite: true });
     expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: `/${KB_DIR}/a.md` })).json()).toMatchObject({ type: 'file' });
     await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/b.md`, content: 'fresh' });
     await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/c.md`, content: 'batch' });
@@ -1117,14 +1121,14 @@ describe('write modes and per-path outcomes', () => {
 describe("the agent guide at the guide's name", () => {
   const GUIDE = `${KB_DIR}/AGENTS.md`;
   const read = (base: string, p = GUIDE, extra: Record<string, unknown> = {}) =>
-    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string }>);
+    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string; canWrite?: boolean }>);
   const statOf = (base: string, p = GUIDE) =>
     post(`${base}/api/agent/tools/file_stat`, { path: p }).then((r) => r.json() as Promise<Record<string, unknown>>);
 
   it('answers with the guide when the knowledge base has no file of that name', async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
-    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
     // By the root-anchored and the prefix-less spellings too, like any path.
     expect((await read(base, `/${GUIDE}`)).content).toBe('THE PLATFORM GUIDE\n');
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
@@ -1145,7 +1149,9 @@ describe("the agent guide at the guide's name", () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nWrite tickets in the present tense.\n');
-    const { content } = await read(base);
+    const { content, canWrite } = await read(base);
+    // Its own file is a file like any other: the write verdict is the rules' answer for it.
+    expect(canWrite).toBe(true);
     expect(content.startsWith('# Acme\n\nWrite tickets in the present tense.\n\n---\n')).toBe(true);
     expect(content.endsWith('\n\nTHE PLATFORM GUIDE\n')).toBe(true);
     expect(content).toContain("The text above is this knowledge base's own conventions file.");
@@ -1155,7 +1161,7 @@ describe("the agent guide at the guide's name", () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
-    expect((await read(base)).content).toBe('THE PLATFORM GUIDE\n');
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
   });
 
   it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
@@ -1199,7 +1205,7 @@ describe("the agent guide at the guide's name", () => {
     };
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
     vanish = true;
-    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
     vanish = true;
     expect(await statOf(base)).toMatchObject({ platformGuide: true });
@@ -2211,7 +2217,7 @@ describe('images', () => {
     const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/photo.jpg` })).json()) as ImageSentinel;
     expect(body.mimeType).toBe('image/jpeg');
     expect(body.data).toBe(bytes.toString('base64'));
-    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes]`);
+    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes] (canWrite: true)`);
   });
 
   it('read_file refuses an image over 3.5 MiB raw with the downscale message, not a sentinel', async () => {
@@ -2237,6 +2243,7 @@ describe('images', () => {
     expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/icon.svg` })).json()).toEqual({
       path: `${KB_DIR}/icon.svg`,
       content: svg,
+      canWrite: true,
     });
   });
 
@@ -2776,6 +2783,7 @@ describe('the tools place an unprefixed path inside the repository', () => {
     expect(await (await tool(base, 'read_file', { path: 'Notes.md' })).json()).toEqual({
       path: `${KB_DIR}/Notes.md`,
       content: 'hello\nworld\n',
+      canWrite: true,
     });
     expect(await (await tool(base, 'file_stat', { path: 'Notes.md' })).json()).toMatchObject({ type: 'file' });
     const edited = await tool(base, 'edit_file', { path: 'Notes.md', old_string: 'world', new_string: 'earth' });

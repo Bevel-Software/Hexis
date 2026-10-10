@@ -52,6 +52,10 @@ export interface SkillSummary {
   unmerged?: true;
   /** With `unmerged`: the branch the skill was read from. */
   branch?: string;
+  // No `canWrite` here, on purpose: whether the caller may change a skill
+  // directly is a per-caller verdict the agent tools add onto a COPY of each
+  // summary (`skills.tools.ts`). The catalog is cached across users, so a
+  // verdict stored on it would be served to the next caller.
 }
 
 export interface Skill extends SkillSummary {

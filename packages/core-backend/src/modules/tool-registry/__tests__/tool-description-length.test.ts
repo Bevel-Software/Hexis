@@ -24,6 +24,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
+import { CAN_WRITE_CLAUSE } from '../../tool-helpers/index.js';
 import {
   TOOL_PREFIX_CAP,
   sharedFileRules,
@@ -79,7 +80,7 @@ function servedMetaTools(external: readonly UtcpTool[]) {
 }
 
 /** Every tool Hexis itself registers, on both surfaces, deduplicated by name. */
-async function hexisTools(): Promise<UtcpTool[]> {
+async function hexisTools(skills: Parameters<typeof registerSkillsTools>[4] = emptySkills): Promise<UtcpTool[]> {
   const registry = new ToolRegistry();
   const router = express.Router();
   const toolAuth = ((_req, _res, next) => next()) as unknown as ToolAuth;
@@ -112,7 +113,7 @@ async function hexisTools(): Promise<UtcpTool[]> {
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true);
   registerPluginsTools(registry, kb);
-  registerSkillsTools(registry, router, toolAuth, toolHandler, emptySkills);
+  registerSkillsTools(registry, router, toolAuth, toolHandler, skills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
     accessControl: unused(),
     variableStatus: unused(),
@@ -389,5 +390,38 @@ describe('the shared rules describe the tools they name', () => {
     // files can be extracted"), so the byte-tool clause must not sweep it in.
     expect(rule.body).toContain('unzip extracts the entries of a `.zip`');
     expect(rule.body).not.toContain('and unzip act on bytes of any kind');
+  });
+});
+
+/** A realistic catalog: forty skills with names as long as real ones, so the skill tools' name lists are full. */
+const fortySkills = {
+  listSkills: async () =>
+    Array.from({ length: 40 }, (_, i) => ({
+      name: `specialist-skill-number-${i}`,
+      description: 'A skill.',
+      path: `Plugins/Everyone/specialist-skill-number-${i}`,
+    })),
+} as unknown as Parameters<typeof registerSkillsTools>[4];
+
+describe('the four tools that report canWrite say what `false` means', () => {
+  const FOUR = ['list_skills', 'get_skill', 'list_files', 'read_file'];
+
+  it.each([
+    ['an empty skill catalog', emptySkills],
+    ['a forty-skill catalog', fortySkills],
+  ])('carries the clause within the caps, with %s', async (_label, skills) => {
+    const tools = (await hexisTools(skills)).filter((t) => FOUR.includes(t.name));
+    expect(tools.map((t) => t.name).sort()).toEqual([...FOUR].sort());
+    for (const tool of tools) {
+      expect(tool.description, tool.name).toContain(CAN_WRITE_CLAUSE);
+      expect(clientVisibleLength(tool), tool.name).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+      expect(firstSentenceEnd(tool.description!), tool.name).toBeLessThanOrEqual(CLIENT_SHORT_CUT);
+    }
+  });
+
+  it('keeps the clause ahead of the skill names a client may cut from the end', async () => {
+    for (const tool of (await hexisTools(fortySkills)).filter((t) => t.name === 'list_skills' || t.name === 'get_skill')) {
+      expect(tool.description!.indexOf(CAN_WRITE_CLAUSE), tool.name).toBeLessThan(tool.description!.indexOf('specialist-skill-number-0'));
+    }
   });
 });
