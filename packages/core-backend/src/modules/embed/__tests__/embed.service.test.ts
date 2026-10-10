@@ -189,7 +189,9 @@ describe('EmbedService: minting', () => {
 
   it('keeps the token PSEUDONYMOUS — no address, no name', async () => {
     const { service } = build();
-    const { token } = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+    const { token, embedUrl } = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+    // The connector's host sizes its frame to the content: its view is told so.
+    expect(embedUrl).toBe(`https://hexis.example/embed?token=${encodeURIComponent(token)}&sizing=content`);
     expect(JSON.stringify(claimsOf(token))).not.toContain(USER.email);
     expect(JSON.stringify(claimsOf(token))).not.toContain(USER.name);
   });

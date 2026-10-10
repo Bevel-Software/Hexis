@@ -17,7 +17,10 @@ export const EMBED_OPEN_MESSAGE = 'bevel-embed-open';
 /**
  * What the embed posts to its host when its content height changes, so a
  * host that sizes its frame to the content (the Atlassian issue panel does)
- * can follow. `{ type, height }`, height in CSS pixels.
+ * can follow. `{ type, height }`, height in CSS pixels. Posted only when the
+ * host asked for content sizing (`embedSizing() === 'content'`): a host with
+ * a fixed reading pane, the MCP App's, keeps its pane and the view scrolls
+ * inside it.
  */
 export const EMBED_HEIGHT_MESSAGE = 'bevel-embed-height';
 

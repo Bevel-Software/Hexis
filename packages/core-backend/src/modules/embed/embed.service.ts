@@ -149,7 +149,11 @@ export class EmbedService implements IEmbedService {
     if (!this.authService.isEmailDomainAllowed(email ?? '')) {
       throw new EmbedAccessError('Your email domain is not permitted to view this content');
     }
-    return this.mint({ kind: 'atlassian', accountId: input.accountId }, input.reference);
+    const minted = await this.mint({ kind: 'atlassian', accountId: input.accountId }, input.reference);
+    // The connector's host sizes its frame to the content (the issue panel
+    // grows with the page), so its view is told to report its height; the
+    // MCP path says nothing, and its host's fixed reading pane stays.
+    return { ...minted, embedUrl: this.embedUrlFor(minted.token, { sizing: 'content' }) };
   }
 
   /**
@@ -200,9 +204,14 @@ export class EmbedService implements IEmbedService {
     return { token, embedUrl: this.embedUrlFor(token) };
   }
 
-  /** The view's address — what a host frames. */
-  embedUrlFor(token: string): string {
-    return `${this.config.publicFrontendUrl}/embed?token=${encodeURIComponent(token)}`;
+  /**
+   * The view's address — what a host frames. `sizing: 'content'` tells the
+   * view its host sizes the frame to the content and wants the height
+   * reported; absent, the host's fixed pane is kept.
+   */
+  embedUrlFor(token: string, opts: { sizing?: 'content' } = {}): string {
+    const sizing = opts.sizing === 'content' ? '&sizing=content' : '';
+    return `${this.config.publicFrontendUrl}/embed?token=${encodeURIComponent(token)}${sizing}`;
   }
 
   /** A file's address in the app — what a link opens in a new tab. */

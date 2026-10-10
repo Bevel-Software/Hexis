@@ -112,8 +112,22 @@ afterEach(() => {
  */
 describe('reporting the content height to the host', () => {
   const realParent = Object.getOwnPropertyDescriptor(window, 'parent');
+  // The connector's mint puts `sizing=content` on the address: this host
+  // sizes its frame to the content.
+  beforeEach(() => window.history.replaceState({}, '', '/embed?token=tok&sizing=content'));
   afterEach(() => {
     if (realParent) Object.defineProperty(window, 'parent', realParent);
+  });
+
+  it('keeps a fixed reading pane as it is: nothing relaxed, nothing posted, when the host did not ask for content sizing', async () => {
+    window.history.replaceState({}, '', '/embed?token=tok');
+    const host = { postMessage: vi.fn() };
+    Object.defineProperty(window, 'parent', { configurable: true, value: host });
+    api.loadEmbed.mockResolvedValue(view());
+    mount();
+    await screen.findByRole('heading', { name: 'Thing' });
+    expect(host.postMessage.mock.calls.filter(([m]) => (m as { type?: string }).type === EMBED_HEIGHT_MESSAGE)).toEqual([]);
+    expect(document.documentElement.style.height).toBe('');
   });
 
   it('posts its height to the host when framed, and restores the page styles when it leaves', async () => {

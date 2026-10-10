@@ -21,7 +21,7 @@ import {
   type EmbedFileView,
 } from '../services/embed.api';
 import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE, hostOrigin, openThroughHost } from '../embed-host';
-import { embedBaseUrl, embedToken } from '../embed-config';
+import { embedBaseUrl, embedSizing, embedToken } from '../embed-config';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
@@ -257,14 +257,19 @@ export function EmbedView() {
   // global CSS pins html, body and #root to 100% height for the three-pane
   // shell; inside a fixed-height frame that is exactly the gap, so the
   // embed relaxes them to natural height for as long as it is mounted.
-  // Nothing is posted when the page is not framed: there is nobody to tell.
+  // Only for a host that asked to size its frame to the content
+  // (`sizing=content`, which the connector's mint puts on the address): a
+  // host with a fixed reading pane — the MCP App's — keeps its pane as it
+  // is, and the view scrolls inside it as it always did. Nothing is posted
+  // when the page is not framed either: there is nobody to tell.
+  const fitContent = useMemo(() => embedSizing() === 'content', []);
   const reportHeight = useCallback(() => {
-    if (window.parent === window) return;
+    if (!fitContent || window.parent === window) return;
     const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
     window.parent.postMessage({ type: EMBED_HEIGHT_MESSAGE, height }, hostOrigin() ?? '*');
-  }, []);
+  }, [fitContent]);
   useEffect(() => {
-    if (window.parent === window) return;
+    if (!fitContent || window.parent === window) return;
     const targets = [document.documentElement, document.body, document.getElementById('root')].filter(
       (el): el is HTMLElement => el !== null,
     );
@@ -283,7 +288,7 @@ export function EmbedView() {
         el.style.overflow = overflow;
       }
     };
-  }, [reportHeight]);
+  }, [fitContent, reportHeight]);
   // The height again whenever what is on screen changes — the page arriving,
   // the editor opening or closing, a notice — so the first real height never
   // depends on a `ResizeObserver` the host's runtime may not have. Here, with
