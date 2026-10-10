@@ -40,6 +40,7 @@ import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
+import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 function toHttpError(
@@ -501,6 +502,8 @@ export function createWorkflowRoutes(
   // answer for that same input, and `toHttpError` passes it through unchanged.
   // Nothing is canonicalised at this layer on purpose: a route-level fix would
   // leave any other caller of the service coordinating on its own identity.
+  // (The status read canonicalises once for its read gate only; the lookup
+  // still takes the caller's spelling.)
 
   router.post('/workspace/:id/workflow/locks', async (req, res) => {
     const user = await requireUser(req, res);
@@ -589,7 +592,8 @@ export function createWorkflowRoutes(
   });
 
   router.get('/workspace/:id/workflow/locks', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
     const branch = typeof req.query.branch === 'string' ? req.query.branch : '';
     const targetPath = typeof req.query.path === 'string' ? req.query.path : '';
     if (!branch || !targetPath) {
@@ -597,6 +601,24 @@ export function createWorkflowRoutes(
       return;
     }
     try {
+      // A lock names who is editing the file, so a caller who may not read
+      // the file is refused before the lookup: the answer is the same whether
+      // or not it is held. The gate judges the canonical spelling, which is
+      // the one the lock is found under (`./kb//x.md` would otherwise slip
+      // past the KB-prefix test), and a refused spelling keeps the file
+      // verbs' status.
+      const canonical = canonicalFileIdentity(targetPath);
+      const readable = await canReadWorkspacePath(
+        (w, e, p) => accessControl.canRead(w, e, p),
+        req.params.id,
+        user.email,
+        kbDirName,
+        canonical,
+      );
+      if (!readable) {
+        res.status(403).json({ error: `You don't have permission to read "${targetPath}".` });
+        return;
+      }
       res.json({ lock: await workflow.getLock(req.params.id, branch, targetPath) });
     } catch (err) {
       const { status, body } = toHttpError(err);

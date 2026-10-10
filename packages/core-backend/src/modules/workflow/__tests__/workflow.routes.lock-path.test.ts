@@ -56,6 +56,8 @@ interface Harness {
   commitFile: ReturnType<typeof vi.fn>;
   /** The service behind the routes, for the in-process callers (an agent's edits) that use it directly. */
   workflow: IWorkflowService;
+  /** The read rule the status read consults; every file is readable unless a test says otherwise. */
+  canRead: ReturnType<typeof vi.fn>;
   /** Whose credentials the next request carries. */
   actAs: (user: AuthUser) => void;
 }
@@ -88,6 +90,7 @@ async function makeHarness(): Promise<Harness> {
     events,
   );
 
+  const canRead = vi.fn(async () => true);
   let current = ALICE;
   const authService = {
     getUserById: vi.fn(async (id: string) => (id === BOB.id ? BOB : ALICE)),
@@ -106,7 +109,7 @@ async function makeHarness(): Promise<Harness> {
       {} as unknown as WorkspaceService,
       authService,
       events,
-      {} as unknown as IAccessControl,
+      { canRead } as unknown as IAccessControl,
       KB,
     ),
   );
@@ -121,6 +124,7 @@ async function makeHarness(): Promise<Harness> {
     enqueue,
     commitFile,
     workflow: workflow as unknown as IWorkflowService,
+    canRead,
     actAs: (user) => {
       current = user;
     },
@@ -370,6 +374,32 @@ describe('lock routes coordinate on one workspace identity', () => {
     h.actAs(BOB);
     expect(await (await acquire()).json()).toMatchObject({ acquired: false, lock: { holderUserId: ALICE.id } });
     expect(h.fake.rows()).toHaveLength(1);
+  });
+
+  it('answers a caller who may not read the file the same refusal whether or not anyone holds it', async () => {
+    // An agent's lock is found from the app's spelling, so the status read
+    // must not name its holder to someone the file is hidden from.
+    h.canRead.mockImplementation(async (_ws: string, email: string) => email !== BOB.email);
+    await h.workflow.acquireLock(workspaceIdForBranch(BRANCH), BRANCH, CANONICAL, ALICE);
+    h.actAs(BOB);
+
+    const rawStatus = () =>
+      fetch(`${url('')}?branch=${encodeURIComponent(BRANCH)}&path=${encodeURIComponent(RAW)}`);
+    const held = await status();
+    const heldRaw = await rawStatus();
+    expect(held.status).toBe(403);
+    expect(heldRaw.status).toBe(403);
+    const heldBody = await held.json();
+    expect(JSON.stringify(heldBody)).not.toContain(ALICE.id);
+
+    h.actAs(ALICE);
+    expect((await release()).status).toBe(200);
+    h.actAs(BOB);
+    const free = await status();
+    expect(free.status).toBe(403);
+    expect(await free.json()).toEqual(heldBody);
+    // The raw spelling is judged as the file it names, not let through as non-KB.
+    expect(h.canRead).toHaveBeenCalledWith(BRANCH, BOB.email, 'x/a.md');
   });
 
   it('leaves an unslashed workspace id as it is', async () => {
