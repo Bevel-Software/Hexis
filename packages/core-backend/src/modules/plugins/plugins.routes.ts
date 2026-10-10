@@ -68,11 +68,15 @@ import type {
 /**
  * Answer the arguments-do-not-match refusal when the body does not match the
  * tool hosted at this route; `true` when it answered. A body that is not a
- * JSON object is left to the route's own refusal.
+ * JSON object is refused here too, with the sentence `toolHandler` uses, so a
+ * `null` or an array never reaches the handler as if it were `{}`.
  */
 function refuseMismatchedArguments(req: express.Request, res: express.Response): boolean {
-  const body: unknown = req.body ?? {};
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+  const body: unknown = req.body === undefined ? {} : req.body;
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    res.status(400).json({ error: 'Request body must be a JSON object.' });
+    return true;
+  }
   const mismatch = argumentsRefusal(req.originalUrl, body as Record<string, unknown>, req.query);
   if (!mismatch) return false;
   res.status(mismatch.status).json({ ...mismatch.details, error: mismatch.message });

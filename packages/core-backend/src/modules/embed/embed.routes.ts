@@ -7,7 +7,14 @@ import {
   EmbedTokenError,
 } from './embed.errors.js';
 import { EmbedRefParseError } from './embed-link.js';
+import { rawExtensionOf, rawMimeFor } from '../workspace/file-readers/raw-mime.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
+
+/**
+ * What `/api/embed/raw` answers as `Content-Type`, by extension — the types a
+ * renderer draws from a URL. Anything else is bytes the renderer parses
+ * itself (a workbook, a deck), served as the octet stream it is.
+ */
 
 /**
  * The embed surface: a token-minted, pseudonymous, short-lived page that
@@ -63,7 +70,17 @@ export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   // itself.
   router.get('/embed', (_req, res, next) => {
     res.removeHeader('X-Frame-Options');
-    res.removeHeader('Content-Security-Policy');
+    // Only the framing directive goes: a policy's other directives (scripts,
+    // objects, connections) protect the page whoever frames it, and stay.
+    const csp = res.getHeader('Content-Security-Policy');
+    if (typeof csp === 'string') {
+      const kept = csp
+        .split(';')
+        .map((d) => d.trim())
+        .filter((d) => d !== '' && !/^frame-ancestors\b/i.test(d));
+      if (kept.length > 0) res.setHeader('Content-Security-Policy', kept.join('; '));
+      else res.removeHeader('Content-Security-Policy');
+    }
     next();
   });
   // The account-link page is the opposite: it acts under the viewer's own
@@ -124,17 +141,26 @@ export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   // text buffer: an image, a PDF, a Word document — and the pictures a
   // markdown page references, which arrive as `path`.
   router.get('/api/embed/raw', async (req, res) => {
+    // The token is in the URL, so no shared cache may keep ANY answer from
+    // it — a refusal included, which is why this is set before the token is
+    // even looked at.
+    res.setHeader('Cache-Control', 'no-store, private');
     const token = queryToken(req, res);
     if (token === null) return;
     const path = typeof req.query.path === 'string' ? req.query.path : undefined;
     try {
       const { bytes, path: served } = await embedService.readBytes(token, path);
-      res.setHeader('Content-Type', 'application/octet-stream');
+      // The type from the extension, the one table the workspace raw route
+      // serves from: under `nosniff` a browser draws an `<img>` only from an
+      // `image/*` answer, and never sniffs SVG at all, so an octet-stream
+      // picture is a broken image.
+      res.setHeader('Content-Type', rawMimeFor(served));
+      // An SVG can carry scripts; drawn through `<img>` they never run, but a
+      // tab opened on this address would run them under the app's origin.
+      if (rawExtensionOf(served) === '.svg') res.setHeader('Content-Security-Policy', 'sandbox');
       // Never a download, always bytes for a renderer to draw: an embed is a
       // view, and `download:` is a separate verb the app's own route gates.
       res.setHeader('Content-Disposition', 'inline');
-      // The token is in the URL, so no shared cache may keep the answer.
-      res.setHeader('Cache-Control', 'no-store, private');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Embed-Path', encodeURIComponent(served));
       res.end(bytes);

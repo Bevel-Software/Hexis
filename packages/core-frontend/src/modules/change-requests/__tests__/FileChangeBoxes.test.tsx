@@ -157,7 +157,7 @@ describe('FileChangeBoxes: who may decide', () => {
       bus.emit({ kind: 'change-request-merged', number: CR.number } as unknown as WorkflowEvent);
     });
     expect(
-      await screen.findByText('Applied: the file now reads with that change.'),
+      await screen.findByText('Published: the file now reads with that change.'),
     ).toBeInTheDocument();
   });
 });

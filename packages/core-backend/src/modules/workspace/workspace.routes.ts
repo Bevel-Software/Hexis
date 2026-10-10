@@ -13,6 +13,7 @@ import {
   canonicalRelativePath,
   folderPlaceholderPath,
   isPlatformFile,
+  isPlatformFolder,
   isPlatformRestoreShape,
   isRepositoryOwnFile,
   repositoryOwnFileDeleteRefusal,
@@ -42,6 +43,7 @@ import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
+import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
 
 /**
  * One file identity from one request field, or `null` when the caller sent
@@ -858,27 +860,15 @@ export function createWorkspaceRoutes(
         // its own weak ETag and answers a matching If-None-Match with a 304.
         res.setHeader('ETag', `"${at.blobId}"`);
       }
-      const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
-      const mimeTypes: Record<string, string> = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.webp': 'image/webp',
-        '.svg': 'image/svg+xml',
-        '.bmp': 'image/bmp',
-        '.ico': 'image/x-icon',
-        '.pdf': 'application/pdf',
-        '.docx':
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        '.xlsx':
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      };
+      // The type from the extension, the one table the embed's raw route
+      // serves from as well (`file-readers/raw-mime.ts`).
+      const ext = rawExtensionOf(filePath);
+      const inlineMime = rawMimeFor(filePath);
       // SVG is active web content (it can carry <script>), and it is active in
       // BOTH directions: a saved-to-disk SVG re-opened later runs its scripts
       // under the file:// origin, so a download is forced to octet-stream.
-      const downloadMime = ext === '.svg' ? 'application/octet-stream' : (mimeTypes[ext] || 'application/octet-stream');
-      res.setHeader('Content-Type', wantsDownload ? downloadMime : (mimeTypes[ext] || 'application/octet-stream'));
+      const downloadMime = ext === '.svg' ? OCTET_STREAM : inlineMime;
+      res.setHeader('Content-Type', wantsDownload ? downloadMime : inlineMime);
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1029,10 +1019,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      // A traversal refusal, or the access tree failing to load while the
-      // entries were judged (`AccessConfigError`): each carries its own status
-      // and payload, the same ones the single-file gate answers with.
-      if (error instanceof PathTraversalError || error instanceof WorkflowDomainError) {
+      // A traversal refusal (`PathTraversalError`), or the access tree failing
+      // to load while the entries were judged (`AccessConfigError`): both are
+      // domain errors carrying their own status and payload, the same ones
+      // the single-file gate answers with.
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -1131,11 +1122,14 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        // The repository root is the one folder whose sweep would take the
-        // root's `access.md` and `roles.yaml` with it — refused, as
-        // delete_folder refuses it. Every other folder holds neither.
-        if (filePath.replace(/\/+$/, '') === kbDirName) {
-          res.status(409).json({ error: platformFolderRefusal('') });
+        // A platform folder — the repository root, whose sweep would take the
+        // root's `access.md` and `roles.yaml` with it, or one of the reserved
+        // top-level folders that hold a whole section of the knowledge base —
+        // is refused here as `delete_folder` refuses it, by the same rule.
+        const trimmedFolder = filePath.replace(/\/+$/, '');
+        const folderRel = trimmedFolder === kbDirName ? '' : toKbRelative(trimmedFolder, kbDirName);
+        if (folderRel !== null && isPlatformFolder(folderRel, kb.layout)) {
+          res.status(409).json({ error: platformFolderRefusal(folderRel) });
           return;
         }
         const branch = branchForWorkspaceId(id);

@@ -9,6 +9,24 @@ import {
   type GitRunResult,
   type IGitRunner,
 } from '../../../shared/git.contract.js';
+import { logger } from '../../../shared/logging.js';
+import { credentialHelperValue } from '../../kb-fs/clone-config.js';
+
+const log = logger('git-runner');
+
+/**
+ * What git says when it had no credential to offer, or offered one the host
+ * threw out. Both happen before a byte of the transfer moves, so a command
+ * that failed this way did nothing, and running it again is safe for every
+ * subcommand — fetch, push, ls-remote and clone alike.
+ */
+const REFUSED_CREDENTIAL_RE = /could not read (?:Username|Password) for|terminal prompts disabled|Authentication failed for/i;
+
+/** Whether this failure is git being refused a credential (see {@link REFUSED_CREDENTIAL_RE}). */
+export function isCredentialRefusal(err: unknown): boolean {
+  if (!(err instanceof GitRunError) || err.timedOut) return false;
+  return REFUSED_CREDENTIAL_RE.test(`${err.stderr ?? ''}\n${err.message}`);
+}
 
 /**
  * The deadline every git call carries unless its caller says otherwise.
@@ -147,7 +165,8 @@ interface CommandFailure extends Error {
  * missing git — a string `code`, which is how callers tell "git never ran"
  * from "git said no"), and cuts off a child whose output passes `maxBuffer`.
  */
-function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number }): {
+/** `shown` is what a failure message names — the caller's arguments, without the runner's own `-c` pairs. */
+function spawnGit(args: string[], shown: string[], options: SpawnOptions & { maxBuffer: number }): {
   promise: Promise<Captured>;
   child: ChildProcess;
 } {
@@ -195,7 +214,7 @@ function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number })
         resolve({ stdout, stderr });
         return;
       }
-      const error: CommandFailure = new Error(`Command failed: git ${args.join(' ')}\n${stderr.toString()}`);
+      const error: CommandFailure = new Error(`Command failed: git ${shown.join(' ')}\n${stderr.toString()}`);
       error.code = code ?? undefined;
       error.signal = signal;
       error.stdout = stdout;
@@ -243,21 +262,77 @@ export class NodeGitRunner implements IGitRunner {
     return { ...env, ...overrides, ...FIXED_ENV };
   }
 
+  /**
+   * The credential helper, for THIS invocation, when a token is in hand: the
+   * same inline snippet the clones carry in their config, which reads the
+   * token from the child's environment. Given to every call so that a clone
+   * whose config lost its helper — unstamped while the deployment briefly
+   * had no token, created by a build that authenticated only its own clone,
+   * or touched by hand — still authenticates: the server's calls never
+   * depend on what a `.git/config` on disk happens to say. Nothing for a
+   * runner without a token, and nothing when the username cannot be made
+   * into a helper (the stamp refuses the same one, and says so).
+   */
+  private helperArgs(): string[] {
+    if (!this.credentials.token()) return [];
+    try {
+      const helper = credentialHelperValue(this.credentials);
+      return helper ? ['-c', `credential.helper=${helper}`] : [];
+    } catch {
+      return [];
+    }
+  }
+
   run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
   run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
   async run(cwd: string, args: string[], opts: GitRunOptions = {}): Promise<GitRunResult<string | Buffer>> {
-    const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
-    const timers: NodeJS.Timeout[] = [];
-    let timedOut = false;
-
     // A credential that expires is renewed before it is read. Renewing is
     // the credential's own business and its failure is not this call's:
     // plenty of git never leaves the disk, and a call that does is told by
     // the host what the token in hand is worth.
     await this.credentials.prepare?.().catch(() => undefined);
+    try {
+      return await this.attempt(cwd, args, opts);
+    } catch (err) {
+      if (!isCredentialRefusal(err)) throw err;
+      // A credential the CALLER laid over the provider's (the setup probe
+      // checking a token it was given) is the caller's to judge: nothing
+      // here can replace it, so the refusal is the answer.
+      if (opts.env?.[GIT_TOKEN_ENV] !== undefined) throw err;
+      // Refused a credential: the token in hand was dead, or there was none
+      // to hand over. Tell the provider so — it drops what the host refused
+      // and asks for another, past whatever it remembers about a recent
+      // failure — and run the command once more ONLY with a credential that
+      // is not the one just refused. The same token again would only be
+      // refused again, and a renewal that failed leaves none.
+      const subcommand = subcommandOf(args);
+      const refused = this.credentials.token();
+      const renewal = await this.credentials.prepare?.({ refused: true }).then(
+        () => null,
+        (e: unknown) => (e instanceof Error ? e.message : String(e)),
+      );
+      const renewed = this.credentials.token();
+      if (!renewed || renewed === refused) {
+        log.warn(
+          `git ${subcommand} was refused a credential, and no other token could be had to run it again` +
+            (renewal ? `: ${redactGitToken(renewal, refused)}` : ''),
+        );
+        throw err;
+      }
+      log.warn(`git ${subcommand} was refused a credential; the token was renewed and the command runs again`);
+      return await this.attempt(cwd, args, opts);
+    }
+  }
+
+  private async attempt(cwd: string, args: string[], opts: GitRunOptions): Promise<GitRunResult<string | Buffer>> {
+    const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
+    const timers: NodeJS.Timeout[] = [];
+    let timedOut = false;
 
     try {
-      const { promise: pending, child } = spawnGit(args, {
+      // The helper rides the invocation, not the error text: a failure
+      // message names the command the caller asked for.
+      const { promise: pending, child } = spawnGit([...this.helperArgs(), ...args], args, {
         cwd,
         env: this.childEnv(opts.env),
         maxBuffer: MAX_OUTPUT_BYTES,

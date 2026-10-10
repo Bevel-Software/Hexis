@@ -151,6 +151,20 @@ export class PluginProvisionService {
    */
   private readonly creations = new WorkspaceMutex();
 
+  /**
+   * Run `fn` holding the creation lock of every plugin name in `names` — for
+   * a writer outside this service that publishes plugins of its own (a
+   * starter pack) and whose name check and commit must be one step against
+   * a creation or a deletion of the same name. The set is taken in one
+   * `runAll`; `fn` must not take this lock again (see `WorkspaceMutex`).
+   */
+  withIdentities<T>(names: string[], fn: () => Promise<T>): Promise<T> {
+    return this.creations.runAll(
+      names.map((name) => `plugin:${pluginManifestName(name)}`),
+      fn,
+    );
+  }
+
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly commits: ProvisionCommitDriver,
@@ -693,7 +707,14 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
   return spliceGrant(seeded, 'read', creatorPrincipal(creator), { allowScalar: false, target: 'node' }).text;
 }
 
-function withCreatorGrants(base: string, creator: { name: string; email: string }): string {
+/**
+ * `base` — an access.md in the two-block shape — with `creator` named under
+ * `read`, `write` and `owner` of the folder: how a plugin made by someone is
+ * run by them. Exported for the one other door that brings a plugin into
+ * being, a starter pack (`modules/onboarding`), whose shipped rules it adds
+ * the admin who applied the pack to.
+ */
+export function withCreatorGrants(base: string, creator: { name: string; email: string }): string {
   const principal = creatorPrincipal(creator);
   let out = base;
   for (const verb of ['read', 'write', 'owner'] as const) {

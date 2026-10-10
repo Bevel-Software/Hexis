@@ -59,11 +59,19 @@ function skillFingerprint(s: SkillSummary): string {
 export function catalogRevision(
   manuals: readonly string[],
   skills: readonly SkillSummary[],
+  /**
+   * The MCP App views this deployment serves, by their bytes: a release that
+   * changes a view and nothing else must still move the revision, or a local
+   * server already running keeps serving the view it read at startup.
+   */
+  views: readonly { uri: string; text: string }[] = [],
 ): string {
   const lines = [
     ...[...manuals].sort(),
-    '\u0001', // separates the two lists, so a line can never migrate between them
+    '\u0001', // separates the lists, so a line can never migrate between them
     ...skills.map(skillFingerprint).sort(),
+    '\u0001',
+    ...views.map((v) => `${v.uri}\u0000${createHash('sha256').update(v.text).digest('hex')}`).sort(),
   ];
   return createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 32);
 }
@@ -84,6 +92,8 @@ export function createCatalogRevisionRoutes(deps: {
   manualAuth: RequestHandler;
   /** Connection-key/internal-token user id → email, for the per-caller ACL. */
   resolveUserEmail: (userId: string) => Promise<string | undefined>;
+  /** The MCP App views served; absent on a deployment that serves none. */
+  mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
 }): express.Router {
   const router = express.Router();
 
@@ -97,8 +107,11 @@ export function createCatalogRevisionRoutes(deps: {
       const [manuals, skills] = email
         ? await Promise.all([deps.toolManuals.catalogFingerprints(email), deps.skills.listSkills(email)])
         : [[], []];
+      // A manifest that cannot be read counts as no views, which is also what
+      // the MCP endpoint serves in that state.
+      const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
       res.json({
-        revision: catalogRevision(manuals, skills),
+        revision: catalogRevision(manuals, skills, views),
         tools: manuals.length,
         skills: skills.length,
       });

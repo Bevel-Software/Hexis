@@ -65,6 +65,15 @@ const FILES: Record<string, string | Buffer> = {
   // Ana may read here, and download nothing.
   'Readable/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\n',
   'Readable/Top.md': '# top\n',
+  // A folder Ana may read (the rule above) whose one file she may not: the explorer keeps it, empty.
+  'Readable/Deep/Secret.md': '---\nread:\n  - deny Ana <ana@x.io>\n---\n# deep secret\n',
+  // A folder whose rules deny Ana `download`, holding a file whose own
+  // frontmatter grants it: the file alone may go out, the folder's zip not.
+  // A folder nobody granted Ana (read is default-deny, and no rule reaches it) whose one
+  // file she may not read either: the explorer drops it, so for her it is not there.
+  'Veiled/Secret.md': '---\nread:\n  - deny Ana <ana@x.io>\n---\n# secret\n',
+  'Gated/access.md': '---\n---\nread:\n  - Ana <ana@x.io>\ndownload:\n  - deny Ana <ana@x.io>\n',
+  'Gated/Open.md': '---\ndownload:\n  - Ana <ana@x.io>\n---\n# open inside a gated folder\n',
   'Pictures/access.md': '---\n---\ndownload:\n  - Ana <ana@x.io>\n',
   'Pictures/logo.png': PNG,
   'Pictures/sub/.gitkeep': '',
@@ -254,21 +263,39 @@ describe('request_file_download: every file judged on its own', () => {
     expect(sha(got)).toBe(body.files[0]!.sha256);
   });
 
-  it('includes only the plain file from the folder-zip leak cases, and says why for each of the rest', async () => {
+  it('includes the readable, downloadable files from the folder-zip leak cases, names the one it may not download, and leaves the unreadable ones out unnamed', async () => {
     const h = await start();
     const { status, body } = await request(h.base, [`${KB}/Shared`]);
 
     expect(status).toBe(200);
     expect(body.files.map((f) => f.path).sort()).toEqual([`${KB}/Shared/Open.md`, `${KB}/Shared/access.md`]);
-    expect([...body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
-      { path: `${KB}/Shared/Inner/Plan.md`, reason: NOT_FOUND },
-      { path: `${KB}/Shared/Inner/access.md`, reason: NOT_FOUND },
-      { path: `${KB}/Shared/Node-Deny-Download.md`, reason: DOWNLOAD_PERMISSION_REQUIRED },
+    // A readable file the caller may not download is named: the explorer
+    // shows it. The files they may not read are not — their names are what
+    // the read model hides, and a folder answer must not list them.
+    expect(body.refused).toEqual([{ path: `${KB}/Shared/Node-Deny-Download.md`, reason: DOWNLOAD_PERMISSION_REQUIRED }]);
+    for (const hidden of ['Inner/Plan.md', 'Inner/access.md', 'Node-Deny-Read.md']) {
+      expect(JSON.stringify(body)).not.toContain(hidden);
+    }
+    // A hidden file or FOLDER the caller NAMES is answered exactly as a missing one.
+    const missing = await request(h.base, [`${KB}/Shared/Nope.md`, `${KB}/Shared/Node-Deny-Read.md`, `${KB}/Shared/Inner`, `${KB}/Shared/Nowhere`]);
+    expect([...missing.body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: `${KB}/Shared/Inner`, reason: NOT_FOUND },
       { path: `${KB}/Shared/Node-Deny-Read.md`, reason: NOT_FOUND },
+      { path: `${KB}/Shared/Nope.md`, reason: NOT_FOUND },
+      { path: `${KB}/Shared/Nowhere`, reason: NOT_FOUND },
     ]);
-    // A hidden file is answered exactly as a missing one.
-    const missing = await request(h.base, [`${KB}/Shared/Nope.md`]);
-    expect(missing.body.refused).toEqual([{ path: `${KB}/Shared/Nope.md`, reason: NOT_FOUND }]);
+    expect(JSON.stringify(missing.body)).not.toContain('Plan');
+    // As the explorer shows them: a folder the caller may not read with
+    // nothing readable beneath it is dropped, so it is `not found`; a folder
+    // they may read stays even when every file in it is kept from them, and
+    // "holds no files", exactly as a folder with nothing in it at all.
+    const veiled = await request(h.base, [`${KB}/Veiled`, `${KB}/Readable/Deep`, `${KB}/Pictures/sub`]);
+    expect([...veiled.body.refused].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: `${KB}/Pictures/sub`, reason: 'the folder holds no files' },
+      { path: `${KB}/Readable/Deep`, reason: 'the folder holds no files' },
+      { path: `${KB}/Veiled`, reason: NOT_FOUND },
+    ]);
+    expect(JSON.stringify(veiled.body)).not.toContain('Secret');
 
     // One zip for the folder, its entries at their full repository paths.
     expect(body.folders).toHaveLength(1);
@@ -500,16 +527,50 @@ describe('a download link answers once', () => {
     h.store.stopSweeping();
   });
 
+  it('a request issued after the store was stopped does not start the sweeper again', async () => {
+    const h = await start({ ttlMs: 50 });
+    await request(h.base, [`${KB}/Shared`]);
+    await new Promise((r) => setTimeout(r, 80));
+    // Stopped for good, as shutdown stops it. A request that still lands
+    // afterwards used to re-arm the sweeper, whose first sweep runs at once
+    // and would have deleted the expired request's bytes here.
+    h.store.stopSweeping();
+    await h.store.drainSweep();
+    await request(h.base, [`${KB}/Shared`]);
+    await h.store.drainSweep();
+    expect((await readdir(h.downloadsRoot)).length).toBe(2);
+  });
+
   it('deletes the bytes of a request once every link of it has been fetched', async () => {
     const h = await start();
     const { body } = await request(h.base, [`${KB}/Shared`]);
     for (const url of [...body.files.map((f) => f.downloadUrl), body.folders[0]!.downloadUrl]) {
       await (await fetchLink(h.base, url)).arrayBuffer();
     }
-    // `finish` runs as the response closes; give the event loop a turn.
-    await new Promise((r) => setTimeout(r, 20));
+    // `finish` runs as the response closes: wait for the state, not a fixed
+    // number of milliseconds a loaded machine may need more of.
+    const deadline = Date.now() + 5000;
+    while ((await readdir(h.downloadsRoot)).length > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(await readdir(h.downloadsRoot)).toEqual([]);
     expect(h.store.openRequestsOf(ANA.id)).toBe(0);
+    h.store.stopSweeping();
+  });
+});
+
+describe('a folder is gated as a folder', () => {
+  it("refuses a folder's zip when the folder denies download, though a file inside grants it; the file alone goes out", async () => {
+    const h = await start();
+    const folder = await request(h.base, [`${KB}/Gated`]);
+    expect(folder.status).toBe(200);
+    expect(folder.body.folders).toEqual([]);
+    expect(folder.body.files).toEqual([]);
+    expect(folder.body.refused).toEqual([{ path: `${KB}/Gated`, reason: DOWNLOAD_PERMISSION_REQUIRED }]);
+
+    const file = await request(h.base, [`${KB}/Gated/Open.md`]);
+    expect(file.status).toBe(200);
+    expect(file.body.files.map((f) => f.path)).toEqual([`${KB}/Gated/Open.md`]);
     h.store.stopSweeping();
   });
 });
@@ -574,14 +635,20 @@ describe('limits', () => {
     expect(one.folders).toHaveLength(1);
   });
 
-  it('refuses a request holding more files than one request may carry, before judging any', async () => {
-    const deps = fakeDeps({ [`${KB}/a`]: [{ path: 'a/1.md', bytes: 0 }, { path: 'a/2.md', bytes: 0 }] }, 10, 1);
-    const canRead = vi.spyOn(deps, 'canReadBatch');
+  it('refuses a request holding more readable files than one request may carry, before reading any', async () => {
+    const two = [{ path: 'a/1.md', bytes: 0 }, { path: 'a/2.md', bytes: 0 }];
+    const deps = fakeDeps({ [`${KB}/a`]: two }, 10, 1);
     await expect(buildDownload([`${KB}/a`], deps)).rejects.toMatchObject({
       status: 413,
       details: { kind: 'download-too-many-files', maxFiles: 1 },
     });
-    expect(canRead).not.toHaveBeenCalled();
+    expect(deps.readFile).not.toHaveBeenCalled();
+    // Only what the caller may read counts: the refusal must not tell them
+    // how many files they cannot see.
+    const oneHidden = { ...fakeDeps({ [`${KB}/a`]: two }, 10, 1), canReadBatch: async (ps: string[]) => new Map(ps.map((p) => [p, p === 'a/1.md'])) };
+    const built = await buildDownload([`${KB}/a`], oneHidden);
+    expect(built.files.map((f) => f.path)).toEqual([`${KB}/a/1.md`]);
+    expect(built.refused).toEqual([]);
   });
 
   it('counts calls still building against the cap, so parallel calls cannot all pass it', async () => {
@@ -641,7 +708,12 @@ describe('limits', () => {
     for (const url of [...first.files.map((f) => f.downloadUrl), first.folders[0]!.downloadUrl]) {
       await (await fetchLink(h.base, url)).arrayBuffer();
     }
-    await new Promise((r) => setTimeout(r, 20));
+    // Wait for the request to drop (the response's close runs `finish`),
+    // not a fixed number of milliseconds.
+    const deadline = Date.now() + 5000;
+    while (h.store.openRequestsOf(ANA.id) > 9 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect((await request(h.base, [`${KB}/Shared/Open.md`])).status).toBe(200);
     h.store.stopSweeping();
   });

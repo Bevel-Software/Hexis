@@ -2,22 +2,18 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem } from '../../../shared/components';
-import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
+import { useConfirm, useDismissableMenu, useLatestRef, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
 import type { OpenTab } from '../state/workspace.context';
+import { displayFileName } from '../utils/display-file-name';
 import '../workspace.css';
 
 const DRAG_MIME = 'application/x-bevel-tab-path';
 
 const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
   `You have unsaved changes in:\n  - ${filenames.join('\n  - ')}\nClose anyway?`;
-
-function basename(path: string): string {
-  const i = path.lastIndexOf('/');
-  return i >= 0 ? path.slice(i + 1) : path;
-}
 
 interface MenuState {
   tab: OpenTab;
@@ -31,8 +27,14 @@ export function EditorTabs() {
     activeTab,
     closeTab,
     reorderTab,
+    kbDirName,
+    workspaceId,
   } = useWorkspace();
   const { openFile: navigateToFile, closeFile: navigateToBranchRoot } = useFileNav();
+  const confirm = useConfirm();
+  // The live workspace, for a bulk close that awaits: the render that started
+  // it has gone stale by the time it navigates.
+  const workspaceIdRef = useLatestRef(workspaceId);
 
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
@@ -142,12 +144,18 @@ export function EditorTabs() {
             else navigateToBranchRoot();
           }}
           onCloseMany={async (tabs) => {
+            // The workspace these tabs were picked in. `closeTab` closes
+            // nothing if the question below outlives it.
+            const askedInWorkspaceId = workspaceId;
             const dirty = tabs.filter((t) => t.isDirty);
             if (dirty.length > 0) {
-              const ok = window.confirm(
-                UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))),
-              );
-              if (!ok) return;
+              const { confirmed } = await confirm({
+                title: 'Unsaved changes',
+                message: UNSAVED_TABS_BULK_WARNING(dirty.map((t) => displayFileName(t.path, kbDirName))),
+                confirmLabel: 'Close anyway',
+                destructive: true,
+              });
+              if (!confirmed) return;
             }
             // Pass skipConfirm so the per-tab dirty prompt doesn't fire again
             // (we already collected one bulk confirm). Run each close in a
@@ -157,21 +165,36 @@ export function EditorTabs() {
             const activePath = activeTab?.path ?? null;
             const closingActive = activePath !== null && tabs.some((t) => t.path === activePath);
             let lastActivePath = activePath;
+            let closedAny = false;
+            // With skipConfirm, a close is refused only because the workspace
+            // moved on; after that, every path computed here is the old branch's.
+            let movedOn = false;
             // Store only the path + error metadata — the full OpenTab carries
             // file content/pendingFileContent which we don't want in logs or
             // any future telemetry sink.
             const failures: { path: string; message: string; stack?: string }[] = [];
             for (const t of tabs) {
               try {
-                const { closed, newActivePath } = await closeTab(t, { skipConfirm: true });
-                if (closed) lastActivePath = newActivePath;
+                const { closed, newActivePath } = await closeTab(t, {
+                  skipConfirm: true,
+                  workspaceId: askedInWorkspaceId,
+                });
+                if (closed) {
+                  lastActivePath = newActivePath;
+                  closedAny = true;
+                } else {
+                  movedOn = true;
+                }
               } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
                 const stack = err instanceof Error ? err.stack : undefined;
                 failures.push({ path: t.path, message, stack });
               }
             }
-            if (closingActive) {
+            // The workspace moved on (while asked, or partway through): the URL
+            // belongs to the new branch now, leave it alone.
+            const stillHere = !movedOn && workspaceIdRef.current === askedInWorkspaceId;
+            if (closingActive && closedAny && stillHere) {
               if (lastActivePath) navigateToFile(lastActivePath);
               else navigateToBranchRoot();
             }
@@ -179,7 +202,7 @@ export function EditorTabs() {
               console.error('[EditorTabs] Failed to close tabs', failures);
               window.alert(
                 `Failed to close ${failures.length} tab(s): ${failures
-                  .map((f) => basename(f.path))
+                  .map((f) => displayFileName(f.path, kbDirName))
                   .join(', ')}`,
               );
             }
@@ -223,7 +246,8 @@ function TabPill(props: TabPillProps) {
     onDragEnd,
   } = props;
 
-  const filename = basename(tab.path);
+  const { kbDirName } = useWorkspace();
+  const filename = displayFileName(tab.path, kbDirName);
   const hasPending = tab.pendingFileContent !== null;
   const hasChangeRequest = useOpenChangeRequests().paths.has(tab.path);
   const ref = useRef<HTMLDivElement>(null);

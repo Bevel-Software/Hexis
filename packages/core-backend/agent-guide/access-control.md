@@ -239,3 +239,20 @@ File-level write access decides how a change lands on the default branch:
   app. Into a protected branch it merges only what you could commit there
   directly, under the rule above — and never a change to `roles.yaml`, whoever
   you are: roles are changed in the app, not merged in from a draft.
+- **Delete** a draft with `delete_branch`, which removes it for everyone. Only
+  its author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an
+  Admin may. Preview with `dryRun: true` first: it changes nothing and says
+  whether the delete would go through, how many commits are not on the default
+  branch, and the last commit. A branch holding such commits is refused unless
+  you pass `discardUnmerged: true` — only when the user wants that work gone. An
+  open change request from or into the branch that proposes nothing is closed
+  by the delete. One that still proposes something refuses it, with a link:
+  its author can withdraw it, or an Admin can decline it, in the app — hand the
+  user that link. A request you cannot see is not named, and a preview leaves
+  it out, so a delete can still be refused after a clean preview. Hand the user the
+  `lastCommit` it answers, so the branch can be restored. The server removes a
+  draft on its own once its change request was merged, but only while nothing
+  has happened to it since: no commit that is not on the default branch, no
+  request open from or into it, no save still landing, no file held for
+  editing, and its last commit
+  the one that was merged. Any other draft stays until someone deletes it.

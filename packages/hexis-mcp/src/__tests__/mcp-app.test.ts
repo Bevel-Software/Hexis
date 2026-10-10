@@ -3,7 +3,7 @@ import { MCP_APP_MIME_TYPE, MCP_APP_UI_META_KEY } from '@bevel-software/platform
 import type { ProxiedTool } from '@bevel-software/platform-mcp-core';
 import { REMOTE_MANUAL_NAME } from '../manuals.js';
 import { listedTools } from '../server.js';
-import { ConnectionKeyRejectedError, fetchMcpApps } from '../deployment.js';
+import { fetchMcpApps } from '../deployment.js';
 
 const VIEW_URI = 'ui://hexis/page.html';
 
@@ -150,9 +150,20 @@ describe('fetchMcpApps', () => {
    * else, and swallowing it here would turn a clear "mint a new key" into a
    * silently app-less server.
    */
-  it('lets a rejected connection key through', async () => {
+  it('reads a 401 on this optional route as a deployment without it, not as a dead key', async () => {
+    // The key passed the discovery a moment before; an older deployment
+    // answers an unknown agent route 401 rather than 404.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     stubFetch({ error: 'unauthorized' }, 401);
-    await expect(fetchMcpApps(config)).rejects.toThrow(ConnectionKeyRejectedError);
+    expect(await fetchMcpApps(config)).toEqual({ tools: {}, resources: [] });
+    expect(errors.mock.calls.flat().join('\n')).toContain('401');
+  });
+
+  it('keeps the views served when a refresh is answered 403: authorisation now, not a route gone', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const served = { tools: { open_page: { resourceUri: VIEW_URI } }, resources: [VIEW] };
+    stubFetch({ error: 'forbidden' }, 403);
+    expect(await fetchMcpApps(config, served)).toBe(served);
   });
 
   /**
@@ -172,7 +183,7 @@ describe('fetchMcpApps', () => {
    * advertise a `ui://` view the deployment no longer serves, and the refresh
    * is marked applied either way, so nothing would read again.
    */
-  it.each([404, 410, 403])('drops the views served when a refresh read answers %i', async (status) => {
+  it.each([404, 410])('drops the views served when a refresh read answers %i', async (status) => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const served = { tools: { open_page: { resourceUri: VIEW_URI } }, resources: [VIEW] };
     stubFetch({ error: 'gone' }, status);

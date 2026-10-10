@@ -101,7 +101,12 @@ function makeHydrateResult(overrides: Partial<HydrateResult> = {}): HydrateResul
 
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  return (
+    <>
+      <div aria-label="pathname">{location.pathname}</div>
+      <div aria-label="location-state">{JSON.stringify(location.state)}</div>
+    </>
+  );
 }
 
 /** Stands in for a file-tree click: navigates to a clean file URL. */
@@ -133,7 +138,13 @@ function SameBranchClickProbe() {
 
 function renderAt(
   url: string,
-  opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
+  opts: {
+    git?: GitContextValue;
+    workspace?: WorkspaceContextValue;
+    canonicalize?: boolean;
+    /** Router state on the first entry, as a navigation would have left it. */
+    state?: unknown;
+  } = {},
 ): {
   workspace: WorkspaceContextValue;
   git: GitContextValue;
@@ -192,7 +203,7 @@ function renderAt(
   }
 
   const tree = () => (
-    <MemoryRouter initialEntries={[url]}>
+    <MemoryRouter initialEntries={[opts.state === undefined ? url : { pathname: url, state: opts.state }]}>
       <Tree>
         <Routes>
           <Route path="/workspace/:branch/*" element={<FileRoute canonicalize={opts.canonicalize} />} />
@@ -245,6 +256,15 @@ describe('FileRoute: the canonical id URL', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
     );
+  });
+
+  it('keeps the entry’s router state across the swap, so a request not yet acted on survives it', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    renderAt(`/workspace/main/${PATH}`, { ...openOn(), state: { rawFile: true } });
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
+    );
+    expect(screen.getByLabelText('location-state')).toHaveTextContent('{"rawFile":true}');
   });
 
   it('keeps the path URL when canonicalising is off — the Library frame renders it there, and an id URL is no library location', async () => {

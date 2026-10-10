@@ -1870,7 +1870,7 @@ export function ManageAccessDialog({
 
         {proposal && (
           <Banner tone="neutral" role="status" className="mt-3">
-            {`You're editing access on change request #${proposal.number}. It takes effect when the request merges.`}
+            {`You're editing access on change request #${proposal.number}. It takes effect when the request is published.`}
           </Banner>
         )}
 

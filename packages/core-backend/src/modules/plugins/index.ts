@@ -4,6 +4,7 @@ export {
   PluginProvisionError,
   pluginAccessMd,
   personalAccessMd,
+  withCreatorGrants,
 } from './plugin-provision.service.js';
 export { JoinRequestsService, type JoinRequest } from './join-requests.service.js';
 export {

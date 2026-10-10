@@ -248,16 +248,19 @@ export interface WorkspaceContextValue {
    */
   addTab: (relativePath: string) => Promise<boolean>;
   /**
-   * Close a tab. Prompts via `window.confirm` if the tab has unsaved edits;
+   * Close a tab. Asks in the app's own dialog if the tab has unsaved edits;
    * pass `{ skipConfirm: true }` from bulk-close paths that have already
    * collected one consolidated confirm. If the closed tab was active,
    * activates the tab to its left (or right) and returns its path so the
    * caller can update the URL. Returns `{ closed: false }` when the user
-   * cancelled the dirty-confirm.
+   * cancelled the dirty-confirm, or when the workspace moved to another
+   * branch while it was asked. A bulk close that asked its own question
+   * passes the `workspaceId` it asked in, and closes nothing if that has
+   * moved on since: the same path on the new branch is a different tab.
    */
   closeTab: (
     tab: OpenTab,
-    options?: { skipConfirm?: boolean },
+    options?: { skipConfirm?: boolean; workspaceId?: string | null },
   ) => Promise<{ closed: boolean; newActivePath: string | null }>;
   /** Activate a tab without prompting. Triggers a refetch if the tab's cache was invalidated. */
   activateTab: (tab: OpenTab) => void;
@@ -283,7 +286,13 @@ export interface WorkspaceContextValue {
     activePath: string | null,
   ) => Promise<HydrateResult>;
 
-  createFile: (relativePath: string, content?: string) => Promise<void>;
+  /**
+   * Write a new file and refresh the tree. Unconditional by default, as the
+   * explorer's New file has always been; `ifAbsent` makes it an exclusive
+   * create, refused with a 409 `WorkspaceApiError` when the path already
+   * exists, for a caller that picked the name from a tree that may be stale.
+   */
+  createFile: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
   createDirectory: (relativePath: string) => Promise<void>;
   /**
    * Extract a `.zip` file already in the workspace. Defaults to "unzip here":

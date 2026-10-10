@@ -34,7 +34,7 @@ import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
-import { isAbsence } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
 import { accessRoster, resolveAccessView } from '../access/access-view.js';
 import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/access-mutation.service.js';
@@ -70,8 +70,9 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
-import { MoveLockedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
@@ -79,7 +80,7 @@ import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
-import type { AgentDownloadStore } from './agent-download.store.js';
+import type { IAgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
 import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
 import {
@@ -829,7 +830,7 @@ const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
  * the tools were built has to be written here rather than onto the shared
  * `SESSION_ID_INPUT` constant.
  */
-function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
+export function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
   const inputs = def.inputs as
     | { properties?: { body?: { properties?: Record<string, { description?: string }> } } }
     | undefined;
@@ -920,7 +921,20 @@ export function registerWorkspaceTools(
    * for the harnesses about the file primitives; without it the tool is not
    * mounted.
    */
-  downloads?: AgentDownloadStore,
+  downloads?: IAgentDownloadStore,
+  /**
+   * The starter pack the knowledge base was filled from, if any (see
+   * `modules/onboarding`): its untouched pages do not end the `firstRun`
+   * note, and the note names the pages it suggests. Optional; without it the
+   * note reads the knowledge folder alone.
+   */
+  starterPacks?: FirstRunStarterSource,
+  /**
+   * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
+   * note's look at the knowledge folder. Optional for the harnesses about the
+   * file primitives; without it `start_session` answers the id alone.
+   */
+  disk?: ITreeWalker,
 ): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
@@ -1725,12 +1739,17 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call, inside `call_tool_chain` too. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
-      properties: { sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.') },
+      properties: {
+        sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.'),
+        firstRun: str(
+          `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
+        ),
+      },
       required: ['sessionId'],
     },
     tags: ['workspace'],
@@ -1750,9 +1769,67 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
-      return { sessionId };
+      const firstRun = await firstRunFor(ctx);
+      return firstRun ? { sessionId, firstRun } : { sessionId };
     }),
   );
+
+  /**
+   * The `firstRun` note (see `first-run.ts`) while the default branch's
+   * knowledge folder holds nothing but the starter guide, else null. Asked of
+   * a clone that is ALREADY there — never one this call would have to make, so
+   * the first call of a conversation does no clone — and never allowed to fail
+   * the call: minting the id is what `start_session` is for, and the note is a
+   * courtesy on top of it.
+   */
+  const firstRunFor = async (ctx: ToolContext): Promise<string | null> => {
+    try {
+      if (!disk || !kb.isBranchModelConfigured()) return null;
+      const workspaceId = kb.defaultWorkspaceId();
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceId))) return null;
+      const knowledgeDir = kb.layout.knowledgeBaseDir;
+      // GATED LIKE A READ. The note says what the knowledge folder holds —
+      // nothing, or a pack's pages still as the pack wrote them — so it goes
+      // only to a caller who may read that folder, and judges the folder as
+      // THEY may see it: a page they may not read does not make it old for
+      // them (`mayRead` below), since reading the folder is no leave to learn
+      // what restricted pages sit in it.
+      if (!(await accessControl.canRead(workspaceId, ctx.user.email, knowledgeDir))) return null;
+      const root = await ctx.workspaceService.getWorkspacePath(workspaceId);
+      const mayRead = async (rels: string[]) => {
+        const verdicts = await accessControl.canReadBatch(workspaceId, ctx.user.email, rels.map((rel) => `${knowledgeDir}/${rel}`));
+        return new Map(rels.map((rel) => [rel, verdicts.get(`${knowledgeDir}/${rel}`) === true]));
+      };
+      // A starter pack's pages, still as the pack wrote them, are tasks to
+      // fill in rather than pages anyone wrote: they leave the note standing,
+      // and the note names what the pack suggests drafting first. A pack
+      // page the caller may not read keeps the note away altogether: it
+      // names the pack and what it suggests drafting, which is about pages
+      // this caller is not to know of — in the checkout or gone from it.
+      const starter = (await starterPacks?.firstRunStarter()) ?? null;
+      const pages = starter ? await readableStarterPages(ctx, workspaceId, knowledgeDir, starter.pages) : undefined;
+      if (starter && pages && pages.size < starter.pages.size) return null;
+      if (!(await knowledgeFolderIsNew(disk, join(root, kbDirName), knowledgeDir, pages, mayRead))) return null;
+      return firstRunNote(`${kbDirName}/${knowledgeDir}`, starter ?? undefined);
+    } catch (err) {
+      log.debug('start_session: could not tell whether the knowledge base is new', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  };
+
+  /** The starter pages (paths below the knowledge folder → text) the caller may read, and no other. */
+  const readableStarterPages = async (
+    ctx: ToolContext,
+    workspaceId: string,
+    knowledgeDir: string,
+    pages: ReadonlyMap<string, string>,
+  ): Promise<ReadonlyMap<string, string>> => {
+    const rels = [...pages.keys()];
+    const verdicts = await accessControl.canReadBatch(workspaceId, ctx.user.email, rels.map((rel) => `${knowledgeDir}/${rel}`));
+    return new Map(rels.filter((rel) => verdicts.get(`${knowledgeDir}/${rel}`)).map((rel) => [rel, pages.get(rel)!]));
+  };
 
   // ── reads ──────────────────────────────────────────────────────────────
 
@@ -3197,22 +3274,29 @@ export function registerWorkspaceTools(
             paths,
           ),
           writeBlocked: (paths) => writeBlocked(branch, ctx, paths),
-          readText: (p) => nodeFs.readFile(join(root, p), 'utf8'),
-          // Asked only once a page is known to be edited — the hooks hear of
-          // no page merely searched — so a read refusal arrives after the
-          // read; the plan then treats the page as unreadable and never names it.
-          hookRefusal: async (lockAt, path) => {
-            const why = (err: unknown) => `refused: ${err instanceof Error ? err.message : String(err)}`;
+          // Through the guarded filesystem the tools read with, never the raw
+          // disk: a page replaced by a link since the listing is refused there
+          // instead of read through to wherever the link points.
+          readText: async (p) => String(await fs.readFile(p, { encoding: 'utf8' })),
+          // The read hook, for every page the answer would NAME — an edited
+          // one, one left with its links listed — and for no page merely
+          // searched: naming is the disclosure, and the hook's refusal makes
+          // the page one the caller cannot read, covered by the one sentence.
+          readRefused: async (path) => {
             try {
-              await notifyAgentRead(agentAccessGate, ctx, branch, lockAt);
-            } catch (err) {
-              return { reason: why(err), read: true };
+              await notifyAgentRead(agentAccessGate, ctx, branch, path);
+              return false;
+            } catch {
+              return true;
             }
+          },
+          // The write hook, for a page the move would edit, at its post-move path.
+          writeRefusal: async (_lockAt, path) => {
             try {
               await assertAgentWriteAllowed(agentAccessGate, ctx, branch, path);
               return null;
             } catch (err) {
-              return { reason: why(err), read: false };
+              return `refused: ${err instanceof Error ? err.message : String(err)}`;
             }
           },
         })
@@ -3260,7 +3344,7 @@ export function registerWorkspaceTools(
         const edits = linkPlan.edits.map((e) => ({ path: e.path, lockAt: e.lockAt, content: e.content }));
         const check = async () => {
           for (const e of linkPlan.edits) {
-            const now = await nodeFs.readFile(join(root, e.lockAt), 'utf8').catch(() => null);
+            const now = await fs.readFile(e.lockAt, { encoding: 'utf8' }).then(String, () => null);
             if (now !== e.original) {
               throw new ToolError(`"${e.lockAt}" changed while the move was being planned, so nothing was moved. Run the move again.`, 409);
             }
@@ -3279,7 +3363,7 @@ export function registerWorkspaceTools(
             for (const e of edits) await fs.writeFile(e.path, e.content);
           }
         } catch (err) {
-          if (err instanceof MoveLockedError) throw new ToolError(err.message, 409);
+          if (err instanceof MoveLockedError || err instanceof MoveRacedError) throw new ToolError(err.message, 409);
           throw err;
         }
       }
@@ -3837,8 +3921,8 @@ export function registerWorkspaceTools(
         `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
         'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
         '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
-        'Refused: `not found` (missing or unreadable), `download permission required`; no link when nothing is ' +
-        'included. At most 500 MB per request.',
+        'Refused: `not found` (missing or named-but-unreadable; folders omit unreadable files), ' +
+        '`download permission required`; no link when nothing is included. At most 500 MB per request.',
       inputs: {
         type: 'object',
         properties: {
@@ -3914,7 +3998,7 @@ export function registerWorkspaceTools(
   async function requestFileDownload(
     a: Record<string, unknown>,
     ctx: ToolContext,
-    store: AgentDownloadStore,
+    store: IAgentDownloadStore,
   ): Promise<unknown> {
     const branch = a.branch as string;
     const raw = a.paths;
@@ -3932,8 +4016,9 @@ export function registerWorkspaceTools(
     for (const p of raw as string[]) {
       try {
         // As written: a name may begin or end with a space, and trimming it
-        // would ask for another file.
-        requested.push(normalizeWorkspacePath(p, kbDirName));
+        // would ask for another file. A trailing slash is the one spelling
+        // folded, so `Shared/` and `Shared` are one request, not two zips.
+        requested.push(normalizeWorkspacePath(p, kbDirName).replace(/\/+$/, ''));
       } catch (err) {
         if (!hasHttpStatus(err)) throw err;
         refusedSpelling.push({ path: p, reason: err.message });
@@ -3946,9 +4031,12 @@ export function registerWorkspaceTools(
         kbDirName,
         maxBytes: ZIP_DOWNLOAD_MAX_BYTES,
         maxFiles: DOWNLOAD_MAX_FILES,
-        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
+        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p),
         canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
         canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
+        // The folder-level gate the app's zip route applies, before the files.
+        canDownloadFolder: (p) =>
+          accessControl.canDownload(workspaceId, ctx.user.email, toKbRelative(p, kbDirName) ?? p),
         notifyRead: (p) => notifyAgentRead(agentAccessGate, ctx, branch, p),
         readFile: (p) => ctx.workspaceService.readFileBinary(workspaceId, p),
         contentTypeOf: downloadContentType,

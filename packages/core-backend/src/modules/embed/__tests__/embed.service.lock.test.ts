@@ -3,6 +3,8 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { FileLockService } from '../../workflow/file-lock.service.js';
 import { makeFakeLockDb, type FakeLockDb } from '../../workflow/__tests__/fake-file-lock-db.js';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
+import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService } from '../embed.service.js';
 import { EmbedLockedError } from '../embed.errors.js';
@@ -34,11 +36,22 @@ const BOB: AuthUser = { id: '22222222-2222-4222-8222-222222222222', email: 'bob@
 let fake: FakeLockDb;
 let locks: FileLockService;
 
+/** The extraction service the reader registry takes, typed against its contract; no document is read here. */
+function noDocExtract(): DocExtractService {
+  const extract = async (): Promise<DocExtractOutcome> => ({
+    ok: false,
+    message: 'this suite reads no document-format file',
+  });
+  return { extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService;
+}
+
 function build() {
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: encodeURIComponent(branch), kbDirName: KB })),
     readFileBinary: vi.fn(async () => Buffer.from('# Thing\n', 'utf8')),
+    isFile: vi.fn(async () => true),
     writeFile: vi.fn(async () => undefined),
+    withPathTurn: vi.fn(async (_id: string, _wsPath: string, op: () => Promise<unknown>) => op()),
   };
   // The lock verbs go straight to the real service; release drops the row as
   // the real `releaseLock` does once it has enqueued the commit.
@@ -62,11 +75,16 @@ function build() {
     testKbContext({ kbDirName: KB }),
     workspaceService as never,
     { canRead: async () => true, canWrite: async () => true } as never,
-    { getUserById: async (id: string) => (id === ALICE.id ? ALICE : BOB), isEmailDomainAllowed: () => true } as never,
+    {
+      getUserById: async (id: string) => (id === ALICE.id ? ALICE : BOB),
+      isEmailDomainAllowed: () => true,
+      isActive: async () => true,
+    } as never,
     workflowService as never,
-    { createBranch: async () => ({}) } as never,
+    { remoteBranchExists: async () => false } as never,
     { getUserId: async () => null } as never,
-    createFileReaderRegistry({ extract: async () => ({ kind: 'text', text: '' }) } as never),
+    createFileReaderRegistry(noDocExtract()),
+    makeRolesYamlWriteValidator(KB),
   );
   return { service, workspaceService, workflowService };
 }

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "operations-starter",
+  "displayName": "Operations starter",
+  "description": "Run the business smoothly: vendor reviews, process docs, runbooks, change requests, capacity plans, risk assessments, compliance tracking and status reports.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Anthropic, adapted for Hexis by Bevel"
+  }
+}

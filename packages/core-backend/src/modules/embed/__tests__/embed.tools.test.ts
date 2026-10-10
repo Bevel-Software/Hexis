@@ -6,6 +6,7 @@ import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ReadForTool } from '../../workspace/workspace.tools.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import {
   HTTP_DEPLOYMENT_NOTE,
@@ -28,6 +29,8 @@ interface Opts {
   /** What `read_file`'s own read answers — or throws. */
   read?: ReadForTool;
   canBeReached?: boolean;
+  /** The deployment's notes for the gated tools; a fresh, empty set when absent. */
+  notes?: ToolDescriptionNotes;
   /** The caller the tool auth resolves to: a signed-in session, or a connection key's owner. */
   caller?: { id: string; email: string; name: string; tokenId?: string };
 }
@@ -70,6 +73,7 @@ async function serve(opts: Opts = {}) {
   const readForTool: ReadForTool =
     opts.read ?? (async () => ({ kind: 'text', text: PAGE }));
 
+  const notes = opts.notes ?? new ToolDescriptionNotes();
   registerEmbedTools(registry, router, auth, createToolHandlerFactory(resolve), {
     embedService: embedService as never,
     kb: testKbContext({ kbDirName: KB }),
@@ -78,6 +82,7 @@ async function serve(opts: Opts = {}) {
     appUrlFor: (repoRelative, slug) =>
       `https://hexis.example/workspace/${encodeURIComponent(BRANCH)}/${KB}/${repoRelative}` +
       (slug ? `#${slug}` : ''),
+    notes,
   });
 
   const app = express();
@@ -95,7 +100,15 @@ async function serve(opts: Opts = {}) {
     });
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
-  return { call, registry, embedService, mints };
+  return { call, registry, embedService, mints, notes };
+}
+
+/** `open_page`'s definition as the external listing carries it, with its `sessionId` input. */
+async function openPageDef(registry: ToolRegistry) {
+  const def = (await registry.listExternal()).find((t) => t.name === OPEN_PAGE_TOOL)!;
+  const body = (def.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } })
+    .properties.body;
+  return { description: def.description, sessionId: body.properties.sessionId };
 }
 
 describe('open_page: the listing', () => {
@@ -114,11 +127,44 @@ describe('open_page: the listing', () => {
     const def = (await registry.listExternal()).find((t) => t.name === OPEN_PAGE_TOOL)!;
     const body = (def.inputs as { properties: { body: { properties: Record<string, unknown>; required: string[] } } })
       .properties.body;
-    expect(Object.keys(body.properties).sort()).toEqual(['heading', 'path']);
+    // `sessionId` as `read_file` takes it: the read is `read_file`'s own, and
+    // a deployment whose read hook wants the session must be able to get it.
+    expect(Object.keys(body.properties).sort()).toEqual(['heading', 'path', 'sessionId']);
     expect(body.required).toEqual(['path']);
     // The embedded view is editable, and an editable embed targets the
     // default branch only — so there is nothing for a caller to choose.
     expect(body.properties).not.toHaveProperty('branch');
+  });
+
+  /**
+   * The read is `read_file`'s own, so the access contract an agent reads
+   * about it is `read_file`'s too: the note a deployment registers for the
+   * gated tools, and the `sessionId` note — whether registered before this
+   * tool was mounted or after (an overlay registers from the tool-surface
+   * hook, which runs once the tools are up).
+   */
+  it('carries the deployment notes for the gated tools and the sessionId input, registered before or after mounting', async () => {
+    const early = new ToolDescriptionNotes();
+    early.registerGatedToolNote(' Early gated note.');
+    early.registerSessionIdNote(' Early session note.');
+    const before = await serve({ notes: early });
+    const seenEarly = await openPageDef(before.registry);
+    expect(seenEarly.description.endsWith(' Early gated note.')).toBe(true);
+    expect(seenEarly.sessionId.description).toBe(early.sessionIdDescription());
+    expect(seenEarly.sessionId.description?.endsWith(' Early session note.')).toBe(true);
+    if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+
+    const { registry, notes } = await serve();
+    const plain = await openPageDef(registry);
+    expect(plain.description.endsWith(' Early gated note.')).toBe(false);
+    expect(plain.sessionId.description).toBe(notes.sessionIdDescription());
+    notes.registerGatedToolNote(' Late gated note.');
+    notes.registerSessionIdNote(' Late session note.');
+    const late = await openPageDef(registry);
+    expect(late.description).toBe(plain.description + ' Late gated note.');
+    expect(late.sessionId.description).toBe(notes.sessionIdDescription());
+    expect(late.sessionId.description?.endsWith(' Late session note.')).toBe(true);
   });
 });
 
@@ -243,12 +289,13 @@ describe('toRepoRelative', () => {
     ['a leading slash', `/${KB}/Data/Thing.md`, 'Data/Thing.md'],
     ['a dot-slash', './Data/Thing.md', 'Data/Thing.md'],
     ['a trailing slash', 'Data/Thing.md/', 'Data/Thing.md'],
-    ['backslashes', 'Data\\Thing.md', 'Data/Thing.md'],
   ])('reads %s', (_label, input, expected) => {
     expect(toRepoRelative(input, KB)).toBe(expected);
   });
 
-  it.each([['empty', ''], ['the folder itself', KB], ['traversal', 'Data/../../x'], ['a newline', 'a\nb']])(
+  // A backslash is refused, as `read_file` refuses it: read as a separator it
+  // would name a file other than the one the caller wrote, in a signed token.
+  it.each([['empty', ''], ['the folder itself', KB], ['traversal', 'Data/../../x'], ['a newline', 'a\nb'], ['DEL', 'a\x7fb'], ['a backslash', 'Data\\Thing.md']])(
     'refuses %s',
     (_label, input) => {
       expect(toRepoRelative(input, KB)).toBeNull();

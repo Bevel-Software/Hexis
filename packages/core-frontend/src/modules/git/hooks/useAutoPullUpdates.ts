@@ -6,6 +6,7 @@ import {
 } from '../state/auto-update.context';
 import type { WorkspaceContextValue } from '../../workspace/state/workspace.context';
 import { sanitizeErrorText } from '../services/error-messages';
+import { pullFailureDetail } from '../services/pull-failure';
 import { PR_STALE_EVENT } from '../../../core/events';
 
 export function useAutoPullUpdates(
@@ -63,15 +64,18 @@ export function useAutoPullUpdates(
         await pull();
       } catch (err) {
         if (cancelled) return;
-        const sanitizedReason = sanitizeErrorText(err) || 'Could not get updates.';
+        // What the banner shows under "Couldn’t get the latest changes": the
+        // reader's words for it, not the sanitized error, which still speaks git.
         setAutoUpdate({
           status: 'failed',
           branch: status.branch,
-          reason: sanitizedReason,
+          reason: pullFailureDetail(err) ?? 'Something unexpected went wrong.',
         });
-        // Log only the sanitized text — raw err.message can contain urls,
-        // tokens, or local paths we just stripped from the user-facing reason.
-        console.debug('[git] auto-pull skipped:', sanitizedReason, {
+        // The log keeps git's own words, scrubbed: that is the diagnostic, and
+        // the summary above would fold distinct failures into one sentence.
+        // Only the sanitized text — raw err.message can contain urls, tokens,
+        // or local paths.
+        console.debug('[git] auto-pull skipped:', sanitizeErrorText(err), {
           branch: status.branch,
         });
         return;

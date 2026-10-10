@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type {
   BranchInfo,
@@ -21,6 +21,8 @@ vi.mock('../../access/api', () => ({
 import { fetchFileAccess } from '../../access/api';
 
 import { BranchSwitcher } from '../components/BranchSwitcher';
+import { ConfirmProvider } from '../../../shared/components';
+import { askBeforeBranchDelete } from '../state/branch-delete-confirm';
 import { GitContext, type GitContextValue } from '../state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
@@ -93,10 +95,11 @@ const workspace = {
   openFilePath: null,
 } as unknown as WorkspaceContextValue;
 
-function renderSwitcher(git: GitContextValue = makeGit()) {
+function renderSwitcher(git: GitContextValue = makeGit(), authValue: AuthContextValue = auth) {
   return render(
     <MemoryRouter>
-      <AuthContext.Provider value={auth}>
+      <ConfirmProvider>
+      <AuthContext.Provider value={authValue}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
             <ReviewContext.Provider value={makeReview()}>
@@ -105,6 +108,7 @@ function renderSwitcher(git: GitContextValue = makeGit()) {
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+      </ConfirmProvider>
     </MemoryRouter>,
   );
 }
@@ -352,5 +356,199 @@ describe('BranchSwitcher: admin-can-delete affordance', () => {
       expect(vi.mocked(fetchFileAccess)).toHaveBeenCalled();
     });
     expect(screen.queryByLabelText(/^Delete /)).toBeNull();
+  });
+});
+
+// Deleting a shared branch asks in the app's OWN dialog. The browser's
+// built-in confirm could be silenced by the browser ("prevent this page from
+// creating additional dialogs"), after which every delete answered "no"
+// without showing anything. "Don't ask again" skips the question, per person,
+// in this browser, until turned back on from the profile menu.
+describe('BranchSwitcher: deleting a shared branch asks in the app', () => {
+  const SKIP_KEY = 'hexis.skipBranchDeleteConfirm:alice@example.com';
+  const shared = (name: string): BranchInfo => ({
+    name,
+    isProtected: false,
+    ahead: 0,
+    behind: 0,
+    hasRemote: true,
+  });
+
+  let confirmSpy: MockInstance<Window['confirm']>;
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(fetchFileAccess).mockResolvedValue({
+      canRead: true,
+      canWrite: false,
+      canDownload: false,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: false, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+    });
+    // The browser's dialogs suppressed, as in the report: a built-in confirm
+    // that answers "no" without asking. It must never be consulted.
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  });
+  afterEach(() => {
+    expect(confirmSpy).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  function setup(
+    branches: BranchInfo[] = [shared('alice/draft-one'), shared('alice/draft-two')],
+    deleteBranch = vi.fn(async () => {}),
+    authValue: AuthContextValue = auth,
+  ) {
+    const git = makeGit({ status: makeStatus({ branch: 'alice/elsewhere' }), branches, deleteBranch });
+    const view = renderSwitcher(git, authValue);
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    return { deleteBranch, view };
+  }
+  const clickDelete = (name: string) =>
+    fireEvent.click(screen.getByLabelText(`Delete shared draft "${name}": removes it for everyone`));
+
+  it('names the branch, says it goes for everyone, and offers Cancel, Delete and "Don\'t ask again"', async () => {
+    setup();
+    clickDelete('alice/draft-one');
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain(
+      'Delete shared draft "alice/draft-one"? This removes it from the remote for everyone.',
+    );
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('checkbox', { name: "Don't ask again" })).not.toBeChecked();
+  });
+
+  it('Cancel keeps the branch', async () => {
+    const { deleteBranch } = setup();
+    clickDelete('alice/draft-one');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(deleteBranch).not.toHaveBeenCalled();
+    // The list is still open behind it.
+    expect(screen.getByText('alice/draft-one')).toBeInTheDocument();
+  });
+
+  it('Escape and the close button count as Cancel', async () => {
+    const { deleteBranch } = setup();
+    clickDelete('alice/draft-one');
+    await screen.findByRole('dialog');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    clickDelete('alice/draft-one');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('Delete deletes the branch, and the next delete asks again', async () => {
+    const { deleteBranch } = setup();
+    clickDelete('alice/draft-one');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-one'));
+    expect(localStorage.getItem(SKIP_KEY)).toBeNull();
+    clickDelete('alice/draft-two');
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('"Don\'t ask again" deletes, then later deletes go ahead without the dialog, after a reload too', async () => {
+    const { deleteBranch, view } = setup();
+    clickDelete('alice/draft-one');
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: "Don't ask again" }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-one'));
+    expect(localStorage.getItem(SKIP_KEY)).toBe('1');
+
+    clickDelete('alice/draft-two');
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-two'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // A reload: everything remounts; only the browser's storage remains.
+    view.unmount();
+    const again = setup([shared('alice/draft-three')]);
+    clickDelete('alice/draft-three');
+    await waitFor(() => expect(again.deleteBranch).toHaveBeenCalledWith('alice/draft-three'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('turned back on (what the profile menu does), the next delete asks again', async () => {
+    localStorage.setItem(SKIP_KEY, '1');
+    const { deleteBranch } = setup();
+    clickDelete('alice/draft-one');
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-one'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    askBeforeBranchDelete('Alice@Example.com');
+    expect(localStorage.getItem(SKIP_KEY)).toBeNull();
+    clickDelete('alice/draft-two');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-two'));
+  });
+
+  it('a "Don\'t ask again" ticked and then cancelled stores nothing', async () => {
+    const { deleteBranch } = setup();
+    clickDelete('alice/draft-one');
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: "Don't ask again" }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(deleteBranch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(SKIP_KEY)).toBeNull();
+  });
+
+  it('is per person: someone else signing in on the same browser is still asked', async () => {
+    localStorage.setItem(SKIP_KEY, '1');
+    const bob = {
+      ...auth,
+      user: { id: 'u2', email: 'bob@example.com', name: 'Bob' },
+    } as unknown as AuthContextValue;
+    const { deleteBranch } = setup([shared('bob/draft')], undefined, bob);
+    clickDelete('bob/draft');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('bob/draft'));
+  });
+
+  it('asks every time when the browser cannot store the choice, and a ticked box still deletes', async () => {
+    // What a browser in strict privacy mode does: touching storage throws.
+    vi.spyOn(window, 'localStorage', 'get').mockImplementation(() => {
+      throw new DOMException('The operation is insecure.', 'SecurityError');
+    });
+    const { deleteBranch } = setup();
+    clickDelete('alice/draft-one');
+    let dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: "Don't ask again" }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-one'));
+
+    clickDelete('alice/draft-two');
+    dialog = await screen.findByRole('dialog');
+    expect(deleteBranch).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('alice/draft-two'));
+  });
+
+  it('deletes a branch with no shared copy without a question', async () => {
+    const { deleteBranch } = setup([{ ...shared('bob/merged'), hasRemote: false }]);
+    fireEvent.click(screen.getByLabelText('Delete this draft (no longer shared)'));
+    await waitFor(() => expect(deleteBranch).toHaveBeenCalledWith('bob/merged'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('shows a failed deletion in the branch list after Delete', async () => {
+    const deleteBranch = vi.fn(async () => {
+      throw new Error('Could not delete the branch');
+    });
+    setup(undefined, deleteBranch);
+    clickDelete('alice/draft-one');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    // The list stayed open through the dialog's clicks, so its error shows.
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/delete/i);
+    expect(screen.getByText('alice/draft-one')).toBeInTheDocument();
   });
 });

@@ -82,7 +82,9 @@ function argumentsCameAsQuery(flat: unknown, query: unknown, args: Record<string
   const names = new Set(declaredNames(flat));
   // An argument the body DOES carry was not misplaced, whatever else the URL
   // holds: only one that reached the route by the query string alone was.
-  return sent.some((name) => names.has(name) && args[name] === undefined);
+  // An OWN property of the body: `?toString=` would otherwise read as carried
+  // by an empty `{}` through its prototype, and the tool would run without it.
+  return sent.some((name) => names.has(name) && !Object.prototype.hasOwnProperty.call(args, name));
 }
 
 /**
@@ -124,7 +126,9 @@ export function argumentsRefusal(
   // caller reads. Every mismatch line opens with the argument it is about.
   const mismatches = check
     .check(args)
-    .filter((line) => !schemas.refusesItself.has(/^"([^".]+)"/.exec(line)?.[1] ?? ''));
+    // The whole quoted name: an argument may carry a dot of its own, and a
+    // nested line (`"body.path"`) names nothing in `refusesItself` anyway.
+    .filter((line) => !schemas.refusesItself.has(/^"([^"]+)"/.exec(line)?.[1] ?? ''));
   // The shape first, when that is what went wrong: the lines below (every
   // required argument missing) are its symptoms, not the mistake.
   if (cameAsQuery) mismatches.unshift(ARGS_UNDER_BODY_LINE);

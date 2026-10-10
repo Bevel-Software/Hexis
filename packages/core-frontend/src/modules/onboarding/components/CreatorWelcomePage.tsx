@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Sparkles, Users } from 'lucide-react';
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
@@ -6,19 +6,21 @@ import { NewPluginDialog } from '../../library/components/NewPluginDialog';
 import { NewSkillPanel } from '../../library/components/NewSkillPanel';
 import { useLibrary } from '../../library/state/library-data';
 import { displayFirstName } from '../../library/utils/personal-plugin';
-import { useOnboarding } from '../state/onboarding';
 
 /**
- * The first useful screen in an empty deployment.
+ * The first useful screen in an empty deployment: Skills & Tools' empty state
+ * for an admin. `LibraryPage` shows it in place of the Everything gallery
+ * while the catalog holds no plugins and no skills or tools.
  *
  * A regular account needs to connect an agent before the library becomes
  * useful. The first admin has a different job: make the shared structure that
  * everyone else will find. This page offers the two smallest real beginnings,
- * using the same plugin and skill creation flows available everywhere else.
+ * using the same plugin and skill creation flows available everywhere else —
+ * and once either exists, the catalog is no longer empty and the gallery is
+ * back.
  */
 export function CreatorWelcomePage() {
   const { user } = useAuth();
-  const onboarding = useOnboarding();
   const data = useLibrary();
   const [newPluginOpen, setNewPluginOpen] = useState(false);
   const [newSkillOpen, setNewSkillOpen] = useState(false);
@@ -30,12 +32,6 @@ export function CreatorWelcomePage() {
    * you closed the door on".
    */
   const [newSkillBusy, setNewSkillBusy] = useState(false);
-
-  const { markWelcomed } = onboarding;
-  useEffect(() => {
-    markWelcomed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one idempotent welcome record per mount
-  }, []);
 
   const pluginNames = useMemo(
     () => [

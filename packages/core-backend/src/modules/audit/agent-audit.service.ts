@@ -1,7 +1,7 @@
-import { and, count, desc, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, isNotNull, isNull, lt, or, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 import type { Database } from '../database/connection.js';
-import { agentConnections, agentEvents, oauthTokens, users } from '../database/schema.js';
+import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/schema.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import {
   AuditPrincipalNotFoundError,
@@ -11,10 +11,12 @@ import {
   type AgentEventInput,
   type AgentEventPage,
   type AgentEventView,
+  type AgentUse,
   type AuditPrincipal,
   type AuditPrincipalRef,
   type AuditScope,
   type IAgentAuditService,
+  type IAgentConnectionStatus,
   type IAgentEventRecorder,
 } from './audit.contract.js';
 
@@ -39,7 +41,7 @@ const PRUNE_INTERVAL_MS = 60 * 60_000;
  * Connection keys are read through the key service rather than joined here,
  * so their summary shape (kind, revoked-by, …) has exactly one definition.
  */
-export class AgentAuditService implements IAgentAuditService, IAgentEventRecorder {
+export class AgentAuditService implements IAgentAuditService, IAgentEventRecorder, IAgentConnectionStatus {
   private lastPruneAt = 0;
 
   constructor(
@@ -240,6 +242,59 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
       total: totals ? Number(totals[0]?.total ?? 0) : null,
       nextCursor: hasMore && last ? formatCursor(last.at, last.id) : null,
     };
+  }
+
+  /**
+   * Whether one person's agent has reached the platform yet — what the
+   * onboarding asks once on arrival (the `agent-connected` event the stamp
+   * paths emit tells it the moment it changes). Two single-row reads on the
+   * per-user indexes, never a scan of the event log.
+   *
+   * Read from the `last_used_at` stamps, not from `agent_events`: an agent
+   * stamps its connection (or key) on its FIRST authenticated request — the
+   * `initialize` / `tools/list` every client sends straight after connecting
+   * — while an event is written only once it calls a tool, which may be
+   * never. The stamps are also outside the retention sweep, so "connected"
+   * cannot quietly turn back into "waiting" when old events are pruned.
+   *
+   * Live rows only: an agent its owner disconnected, or an admin revoked, is
+   * not a connected agent, whatever it did before. The key's columns are read
+   * here rather than through the key service because the service has no
+   * single-row read and this question needs only two columns of one row.
+   */
+  async lastAgentUse(userId: string): Promise<AgentUse | null> {
+    const [[agent], [key]] = await Promise.all([
+      this.db
+        .select({ client: agentConnections.clientName, at: agentConnections.lastUsedAt })
+        .from(agentConnections)
+        .where(
+          and(
+            eq(agentConnections.userId, userId),
+            isNull(agentConnections.revokedAt),
+            isNotNull(agentConnections.lastUsedAt),
+          ),
+        )
+        .orderBy(desc(agentConnections.lastUsedAt))
+        .limit(1),
+      this.db
+        .select({ client: externalApiKeys.label, at: externalApiKeys.lastUsedAt })
+        .from(externalApiKeys)
+        .where(
+          and(
+            eq(externalApiKeys.userId, userId),
+            isNull(externalApiKeys.revokedAt),
+            isNotNull(externalApiKeys.lastUsedAt),
+          ),
+        )
+        .orderBy(desc(externalApiKeys.lastUsedAt))
+        .limit(1),
+    ]);
+    const uses = [
+      agent?.at ? { at: agent.at, client: agent.client ?? 'Unnamed agent', kind: 'agent' as const } : null,
+      key?.at ? { at: key.at, client: key.client, kind: 'key' as const } : null,
+    ].filter((u): u is AgentUse => u !== null);
+    if (uses.length === 0) return null;
+    return uses.reduce((newest, u) => (u.at.getTime() > newest.at.getTime() ? u : newest));
   }
 
   async revokeConnection(id: string, by: 'owner' | 'admin', ownerUserId?: string): Promise<void> {

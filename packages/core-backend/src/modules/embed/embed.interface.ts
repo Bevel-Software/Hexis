@@ -1,3 +1,5 @@
+import type { AuthUser } from '@bevel-software/platform-shared';
+
 /**
  * WHO an embed token was minted for.
  *
@@ -102,6 +104,28 @@ export interface EmbedLinkedAccount {
 export type EmbedNodeIdResolver = (nodeId: string) => Promise<string | null>;
 
 /**
+ * What the embed service needs of the workspace: the clone of a branch, and
+ * four verbs on one file of it. A port rather than the workspace service
+ * itself, so a deployment (or a test) hands in whatever answers these.
+ */
+export interface EmbedWorkspacePort {
+  getOrCreateForBranch(branch: string): Promise<{ id: string }>;
+  isFile(workspaceId: string, wsPath: string): Promise<boolean>;
+  readFileBinary(workspaceId: string, wsPath: string): Promise<Buffer>;
+  writeFile(workspaceId: string, wsPath: string, content: string): Promise<void>;
+  /** One mutation at a time per resolved path, in this process: `op` runs after every turn already taken for `wsPath`. */
+  withPathTurn<T>(workspaceId: string, wsPath: string, op: () => Promise<T>): Promise<T>;
+}
+
+/** What the embed service needs of authentication: a user by id, and the email-domain rule. */
+export interface EmbedAuthPort {
+  getUserById(userId: string): Promise<AuthUser | null>;
+  isEmailDomainAllowed(email: string): boolean;
+  /** Whether the account is on: it exists and no admin switched it off — the gate every credential passes. */
+  isActive(userId: string): Promise<boolean>;
+}
+
+/**
  * Mints and consumes embed tokens that let a host — an MCP App's sandbox, an
  * Atlassian panel — display and edit one knowledge-base file inside itself.
  *
@@ -142,9 +166,13 @@ export interface IEmbedService {
   loadFile(token: string): Promise<EmbedFileView>;
 
   /**
-   * The raw bytes of the embedded file, or of one `path` beside it (an image
-   * a markdown page references), for the app renderers that read bytes rather
-   * than the text buffer. Gated on the token identity's read access, per file.
+   * The raw bytes of the embedded file, or of one asset `path` beside it (an
+   * image a markdown page shows — a file no reader edits as text, or an SVG,
+   * the one text format a page draws as a picture), for the app renderers
+   * that read bytes rather than the text buffer. Gated on the token
+   * identity's read access, per file. Any other text page than the embedded
+   * one is refused: the token scopes the view to ONE page, and another page
+   * opens in the app, never through this view's token.
    */
   readBytes(token: string, path?: string): Promise<{ bytes: Buffer; path: string }>;
 

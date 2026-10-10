@@ -1,22 +1,23 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+import { timingSafeStringEqual } from '../auth/password-hash.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
 import jwt from 'jsonwebtoken';
-import type { AuthUser } from '@bevel-software/platform-shared';
+import type { AuthUser, IGitService, IWorkflowService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { WorkflowService } from '../workflow/workflow.service.js';
-import type { GitService } from '../workflow/git/git.service.js';
 import { changeRequestLink, changeRequestLinkBase } from '../workflow/git/change-request-link.js';
 import type { FileReaderRegistry } from '../workspace/file-readers/file-reader.js';
+import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
 import type {
+  EmbedAuthPort,
   EmbedFileView,
   EmbedLinkedAccount,
   EmbedLockResult,
   EmbedNodeIdResolver,
+  EmbedWorkspacePort,
   EmbedProposalResult,
   EmbedSubject,
   EmbedTokenResult,
@@ -29,16 +30,21 @@ import {
   EmbedTokenError,
 } from './embed.errors.js';
 import { parseEmbedRef, EmbedRefParseError, isSafeRepoRelativeEmbedPath } from './embed-link.js';
-import type { AccountLinkService } from './account-link.service.js';
+import type { IAccountLinkService } from './account-link.service.js';
 
 const log = logger('embed');
 
 /**
  * Token lifetime — long enough for a view left open in a chat, short enough
- * that a token copied out of a transcript stops working on its own. Two hours
- * is what the embed has always used.
+ * that a token copied out of a transcript stops working on its own. The
+ * token rides in `open_page`'s result, so it sits in the chat transcript, and
+ * whoever holds it reads and edits that one file as the token's user until
+ * it expires. One hour (Razvan, 2026-10-09; the embed used two before): a
+ * page left open in a chat is still covered, and the window is halved. A
+ * view older than that shows the expired sentence and the agent opens the
+ * page again.
  */
-export const EMBED_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+export const EMBED_TOKEN_TTL_SECONDS = 60 * 60;
 
 /** What the embed's config needs from the deployment's. */
 export interface EmbedConfig {
@@ -88,13 +94,20 @@ export class EmbedService implements IEmbedService {
   constructor(
     private readonly config: EmbedConfig,
     private readonly kb: KbContext,
-    private readonly workspaceService: WorkspaceService,
+    private readonly workspaceService: EmbedWorkspacePort,
     private readonly accessControl: IAccessControl,
-    private readonly authService: AuthService,
-    private readonly workflowService: WorkflowService,
-    private readonly gitService: GitService,
-    private readonly accountLinks: AccountLinkService,
+    private readonly authService: EmbedAuthPort,
+    private readonly workflowService: IWorkflowService,
+    private readonly gitService: IGitService,
+    private readonly accountLinks: IAccountLinkService,
     private readonly readers: FileReaderRegistry,
+    /**
+     * The pre-disk write gate every other write surface runs — the file
+     * editor's and the agent tools' `roles.yaml` validity check. An embed
+     * save or proposal writes through `workspaceService.writeFile`, which
+     * puts bytes on disk without one, so the gate is asked here first.
+     */
+    private readonly validateWrite: WriteValidator,
     /** See {@link EmbedNodeIdResolver} — core has none, so core refuses an id reference. */
     private readonly resolveNodeId: EmbedNodeIdResolver | null = null,
   ) {
@@ -112,14 +125,8 @@ export class EmbedService implements IEmbedService {
   verifySharedSecret(secret: string | undefined): boolean {
     const expected = this.config.embedSharedSecret;
     if (!expected || !secret) return false;
-    const a = Buffer.from(secret, 'utf8');
-    const b = Buffer.from(expected, 'utf8');
-    const len = Math.max(a.length, b.length);
-    const aPadded = Buffer.alloc(len);
-    const bPadded = Buffer.alloc(len);
-    a.copy(aPadded);
-    b.copy(bPadded);
-    return timingSafeEqual(aPadded, bPadded) && a.length === b.length;
+    // The one constant-time comparison the platform has (the password hash's).
+    return timingSafeStringEqual(secret, expected);
   }
 
   async mintForUser(input: { userId: string; reference: string }): Promise<EmbedTokenResult> {
@@ -177,8 +184,10 @@ export class EmbedService implements IEmbedService {
       repoRelative = ref.repoRelative;
     }
     // Existence at mint time, so a dead reference fails where the caller can
-    // still say something about it rather than inside a rendered iframe.
-    await this.readFileBytes(repoRelative);
+    // still say something about it rather than inside a rendered iframe. A
+    // stat, not a read: a deck or a workbook can be hundreds of megabytes,
+    // and the view fetches its bytes later, from `/raw`, if at all.
+    await this.assertExists(repoRelative);
     const claims: EmbedClaims = {
       scope: 'embed',
       kind: subject.kind,
@@ -239,9 +248,29 @@ export class EmbedService implements IEmbedService {
     const bytes = await this.readFileBytes(claims.repoRelative);
     const result = await reader.read(bytes, claims.repoRelative);
     // A refusal IS the file's honest textual answer (unreadable binary under
-    // an extension the fallback reader took), and the app shows it as text.
-    const content = result.kind === 'text' ? result.text : result.kind === 'refusal' ? result.message : '';
-    return { ...base, content };
+    // an extension the fallback reader took), and the app shows it as text —
+    // but it is not the file's text, so the view neither claims it is nor
+    // offers to save over the bytes it stands for. `save` holds the same line.
+    const isText = result.kind === 'text';
+    const content = isText ? result.text : result.kind === 'refusal' ? result.message : '';
+    return { ...base, content, contentIsText: isText, canWrite: canWrite && isText };
+  }
+
+  /**
+   * Refuse to write text over a file whose bytes are not text: the reader
+   * that would show it answers a refusal, not the content, and a save would
+   * replace a binary with the viewer's draft.
+   */
+  /** A file a page draws rather than a page: bytes no reader edits as text, or an SVG. */
+  private isAsset(repoRelative: string): boolean {
+    return !this.readers.readerFor(repoRelative).textEditable || /\.svg$/i.test(repoRelative);
+  }
+
+  private async assertTextEditable(repoRelative: string): Promise<void> {
+    const reader = this.readers.readerFor(repoRelative);
+    if (!reader.textEditable) throw new EmbedAccessError('This file is not editable as text');
+    const result = await reader.read(await this.readFileBytes(repoRelative), repoRelative);
+    if (result.kind !== 'text') throw new EmbedAccessError('This file is not editable as text');
   }
 
   async readBytes(token: string, path?: string): Promise<{ bytes: Buffer; path: string }> {
@@ -254,6 +283,13 @@ export class EmbedService implements IEmbedService {
     // page, never to one page's read permissions.
     const target = path ? resolveBeside(claims.repoRelative, path) : claims.repoRelative;
     if (target === null) throw new EmbedAccessError('That path is not inside this knowledge base');
+    // ONE page, as the token promises: beside the page only an ASSET it draws
+    // is served — a file no reader edits as text, or an SVG, the one text
+    // format a page shows as a picture. Another page's text never comes
+    // through this token; that page opens in the app, under its own view.
+    if (target !== claims.repoRelative && !this.isAsset(target)) {
+      throw new EmbedAccessError('This view shows one page; another page opens in the app');
+    }
     const workspaceId = this.defaultWorkspaceId();
     if (!(await this.accessControl.canRead(workspaceId, user.email, target))) {
       throw new EmbedAccessError(`You don't have permission to read "${target}".`);
@@ -309,7 +345,11 @@ export class EmbedService implements IEmbedService {
   }
 
   async save(token: string, content: string): Promise<void> {
-    const { user, wsPath } = await this.requireEditor(token);
+    const { claims, user, wsPath } = await this.requireEditor(token);
+    await this.assertTextEditable(claims.repoRelative);
+    // The write gate before the lock: a text the gate refuses (a `roles.yaml`
+    // that would not parse) never takes a lock it has nothing to write under.
+    await this.validateWrite(wsPath, content);
     const workspaceId = this.defaultWorkspaceId();
     // Bytes reach the disk ONLY under a lock this viewer holds. ASK who holds
     // it rather than acquiring again: `acquire` is strict and refuses a live
@@ -372,27 +412,51 @@ export class EmbedService implements IEmbedService {
     // file's new text beside its old, so proposing on a file you may not read
     // would publish what you were not allowed to see.
     if (!canRead) throw new EmbedAccessError(`You don't have permission to read "${claims.repoRelative}".`);
+    // The guard a save runs: a proposal is text, so what it proposes over
+    // has to be text too — a PDF, an image or bytes under a markdown name
+    // are refused here as they are on Save, not committed as text.
+    await this.assertTextEditable(claims.repoRelative);
+    const wsPath = this.wsPathFor(claims.repoRelative);
+    // The same write gate as a save, before a branch is made for the text: a
+    // proposal is a commit, and a commit of an unparseable `roles.yaml` is
+    // exactly what the gate exists to keep out of the repository.
+    await this.validateWrite(wsPath, content);
     const branch = `${suggestionsBranchPrefixFor({ email: user.email, id: user.id })}knowledge`;
     // Create the branch when it is not there yet; an existing one is reused,
-    // which is what bundles a person's proposals into one request.
-    await this.gitService
-      .createBranch(this.defaultWorkspaceId(), branch, this.kb.defaultBranch)
-      .catch((err: unknown) => {
-        if (err instanceof Error && /already exists/i.test(err.message)) return;
-        throw err;
-      });
+    // which is what bundles a person's proposals into one request. Asked of
+    // ORIGIN first: a second proposal finds the branch already pushed, and
+    // creating it again would fail as a non-fast-forward push, not as
+    // "already exists" — the race between the two is still caught below.
+    // Created through the workflow service, under its branch-lifecycle lock,
+    // as every branch the app creates is: creating one is the one operation
+    // that can bring a "gone" branch back under a retirement's feet.
+    if (!(await this.gitService.remoteBranchExists(this.defaultWorkspaceId(), branch))) {
+      await this.workflowService
+        .createBranch(this.defaultWorkspaceId(), branch, this.kb.defaultBranch)
+        .catch((err: unknown) => {
+          if (err instanceof Error && /already exists|non-fast-forward|fetch first/i.test(err.message)) return;
+          throw err;
+        });
+    }
     const workspace = await this.workspaceService.getOrCreateForBranch(branch);
-    const wsPath = this.wsPathFor(claims.repoRelative);
-    await this.workspaceService.writeFile(workspace.id, wsPath, content);
-    // Scoped to the one path this proposal is about: the suggestions branch
-    // is shared by everything this person has proposed, and a bare commit
-    // would sweep in another in-flight write of theirs under this message.
-    await this.workflowService.commitChanges(
-      workspace.id,
-      user,
-      `Propose changes to ${claims.repoRelative}`,
-      [wsPath],
-    );
+    // One proposal at a time per file on this branch: two from the same
+    // person landing together would otherwise write over each other before
+    // either commit staged the file, and one would commit the other's text.
+    // The workspace service's own per-path turn is that queue — the one the
+    // app's file routes take around a write whose decision spans more than
+    // one call — and the write inside takes the same turn, re-entrantly.
+    await this.workspaceService.withPathTurn(workspace.id, wsPath, async () => {
+      await this.workspaceService.writeFile(workspace.id, wsPath, content);
+      // Scoped to the one path this proposal is about: the suggestions branch
+      // is shared by everything this person has proposed, and a bare commit
+      // would sweep in another in-flight write of theirs under this message.
+      await this.workflowService.commitChanges(
+        workspace.id,
+        user,
+        `Propose changes to ${claims.repoRelative}`,
+        [wsPath],
+      );
+    });
     try {
       const created = await this.workflowService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,
@@ -500,6 +564,10 @@ export class EmbedService implements IEmbedService {
     if (!userId) return unresolved;
     const user = await this.authService.getUserById(userId);
     if (!user) return unresolved;
+    // The gate every credential passes: a token minted for an account an
+    // admin has since switched off reads, saves and proposes nothing, and is
+    // told what every other door tells that person.
+    if (!(await this.authService.isActive(userId))) throw new EmbedAccessError(ACCOUNT_DEACTIVATED_MESSAGE);
     const workspaceId = this.defaultWorkspaceId();
     const canRead = await this.accessControl.canRead(workspaceId, user.email, claims.repoRelative);
     // Write implies read in the access resolver; the `canRead &&` guard pins
@@ -509,15 +577,23 @@ export class EmbedService implements IEmbedService {
     return { linked: true, user, canRead, canWrite };
   }
 
-  /** Read a file's bytes from the default branch's workspace. */
-  /** Whether `repoRelative` is a file on the default branch. */
+  /** Whether `repoRelative` is a file on the default branch — a stat, never a read. */
   private async fileExists(repoRelative: string): Promise<boolean> {
     try {
-      await this.readFileBytes(repoRelative);
+      await this.assertExists(repoRelative);
       return true;
     } catch (err) {
       if (err instanceof EmbedNodeNotFoundError) return false;
       throw err;
+    }
+  }
+
+  /** The typed 404 of {@link readFileBytes}, for a reference, without reading a byte. */
+  private async assertExists(repoRelative: string): Promise<void> {
+    const workspaceId = this.defaultWorkspaceId();
+    await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
+    if (!(await this.workspaceService.isFile(workspaceId, this.wsPathFor(repoRelative)))) {
+      throw new EmbedNodeNotFoundError(`${repoRelative} doesn't exist on ${this.kb.defaultBranch}`);
     }
   }
 
@@ -553,7 +629,7 @@ export class EmbedService implements IEmbedService {
       throw new EmbedTokenError();
     }
     // A token minted by the release BEFORE the subject was generalised keyed
-    // the identity on `accountId` alone. Those live two hours, so an upgrade
+    // the identity on `accountId` alone. Those were minted for two hours, so an upgrade
     // would otherwise expire every open Atlassian panel on the spot; reading
     // the old spelling costs one branch and keeps them working.
     if (typeof c.accountId === 'string' && c.accountId) {
@@ -582,13 +658,16 @@ function nodeNameFor(repoRelative: string): string {
  */
 export function resolveBeside(from: string, path: string): string | null {
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(path)) return null;
+  if (/[\x00-\x1f\x7f]/.test(path)) return null;
   let decoded = path;
   try {
     decoded = decodeURIComponent(path);
   } catch {
     return null;
   }
+  // Judged again decoded: `%0a` is a newline once the escape is undone.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(decoded)) return null;
   const absolute = decoded.startsWith('/');
   const base = absolute ? [] : from.split('/').slice(0, -1);
   const parts = [...base];
@@ -616,7 +695,10 @@ function duplicateRequestNumber(err: unknown): number | null {
   const candidate = detail?.details?.existingNumber ?? detail?.existingNumber;
   if (typeof candidate === 'number') return candidate;
   if (err instanceof Error) {
-    const match = /already\D+(\d+)/i.exec(err.message);
+    // The refusal's own sentence ("An open change request already exists
+    // from … to … (#12)"), and only that shape: a count or a numeric token
+    // after some other "already" is not a request.
+    const match = /change request already exists[^#]*#(\d+)/i.exec(err.message);
     if (match) return Number(match[1]);
   }
   return null;

@@ -19,6 +19,26 @@ export interface AccountSummary {
   createdAt: string;
 }
 
+/**
+ * A refused account request, with the HTTP status and the server's `kind`
+ * kept. Most callers only show the message; the invite dialog also needs to
+ * tell the deployment having no place for another account (a seat limit,
+ * say: 403 with `kind: 'admission'`) from any other refusal — a 403 from the
+ * admin check included — and the message alone is the host's own words, not
+ * a code.
+ */
+export class AccountRequestError extends Error {
+  status: number;
+  /** The server's machine-readable reason, when it gave one (`admission`). */
+  kind: string | null;
+  constructor(message: string, status: number, kind: string | null = null) {
+    super(message);
+    this.name = 'AccountRequestError';
+    this.status = status;
+    this.kind = kind;
+  }
+}
+
 async function readError(res: Response, fallback: string): Promise<string> {
   const body = await res.json().catch(() => ({}));
   return (body as { error?: string }).error || fallback;
@@ -48,6 +68,9 @@ export async function listAccounts(): Promise<AccountSummary[]> {
  * Create an account (or reset an existing account's password — deliberate
  * upsert). Without a password the account is for single sign-on: the person
  * finds it waiting the first time they sign in.
+ *
+ * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
+ * the deployment's admission rules had no place for the account.
  */
 export async function createAccount(
   email: string,
@@ -59,7 +82,11 @@ export async function createAccount(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, name: name || undefined, password: password || undefined }),
   });
-  if (!res.ok) throw new Error(await readError(res, 'Could not create account'));
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
+    const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
+    throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
+  }
 }
 
 /**

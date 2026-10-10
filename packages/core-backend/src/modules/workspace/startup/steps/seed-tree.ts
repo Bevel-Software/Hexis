@@ -8,6 +8,7 @@ import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from '.
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 import { GitInternalsError } from '../../../../shared/domain-errors.js';
 import { isManagedGuide } from '../../../agent-guide/agent-guide.js';
+import { utf8Text } from '../../../../shared/utf8-text.js';
 
 /**
  * The empty-remote seed builder the runner takes as `buildSeedTree`: the full
@@ -155,7 +156,7 @@ class KbSeedTree {
       // Judged the way the copy below judges: a binary under the name is
       // spotted from its first bytes and never read whole.
       const source = await this.templates.pathOf(name);
-      const text = (await headHasNul(source)) ? null : asText(await fs.readFile(source));
+      const text = (await headHasNul(source)) ? null : utf8Text(await fs.readFile(source));
       if (text !== null && isManagedGuide(text)) return;
     }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
@@ -179,7 +180,7 @@ class KbSeedTree {
     // A binary is spotted from its first bytes (a NUL turns up early in any
     // real one) and streamed across without ever being read whole; only what
     // may be text is read in full, and the full decode is still the judge.
-    const text = (await headHasNul(from)) ? null : asText(await fs.readFile(from));
+    const text = (await headHasNul(from)) ? null : utf8Text(await fs.readFile(from));
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
@@ -201,16 +202,6 @@ async function headHasNul(file: string): Promise<boolean> {
     return buf.subarray(0, bytesRead).includes(0);
   } finally {
     await handle.close();
-  }
-}
-
-/** The bytes as text when they ARE text — strict UTF-8, BOM kept, no NUL — else null. */
-function asText(bytes: Buffer): string | null {
-  if (bytes.includes(0)) return null;
-  try {
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return null;
   }
 }
 

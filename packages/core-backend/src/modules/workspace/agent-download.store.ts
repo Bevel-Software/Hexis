@@ -132,7 +132,38 @@ export interface AgentDownloadStoreOptions {
  * fetched has its bytes deleted once the response ends, however it ends; a
  * link nobody fetched is deleted when it expires.
  */
-export class AgentDownloadStore {
+/**
+ * The download store as its consumers see it — the port the tool, the
+ * download routes and the lifecycle depend on, so a deployment may substitute
+ * its own keeper of one-time links.
+ */
+export interface IAgentDownloadStore {
+  /** The absolute address a token's link is fetched at. */
+  downloadUrlFor(token: string): string;
+  /** Refuse, with the cap's sentence, when `user` holds the most requests allowed. */
+  assertCanIssue(user: { id: string }): void;
+  /** Take one of `user`'s request slots and run `work` in their turn — see the class. */
+  withRequestSlot<T>(
+    user: { id: string },
+    work: (issue: (items: DownloadArtifact[]) => Promise<IssuedDownload>) => Promise<T>,
+  ): Promise<T>;
+  /** Take `token`'s link for ONE fetch and answer what to send. */
+  claim(token: string, fetcherIds?: readonly string[]): ClaimedDownload;
+  /** A fetch is over: the link's bytes are gone. Idempotent. */
+  finish(token: string): Promise<void>;
+  /** How many requests `userId` holds open. */
+  openRequestsOf(userId: string): number;
+  /** Delete every expired request and every orphaned directory, once. */
+  sweepNow(): Promise<void>;
+  /** Sweep now, and keep sweeping. */
+  startSweeping(intervalMs?: number): void;
+  /** Stop the sweeps. */
+  stopSweeping(): void;
+  /** Wait for a sweep in flight, so a root can be torn down after it. */
+  drainSweep(): Promise<void>;
+}
+
+export class AgentDownloadStore implements IAgentDownloadStore {
   /** Token hash → the one artifact that link serves. */
   private readonly artifacts = new Map<string, ArtifactRecord>();
   /** Request id → the request its links belong to. */
@@ -141,6 +172,12 @@ export class AgentDownloadStore {
   private readonly building = new Map<string, Promise<unknown>>();
   /** Per user, slots held by calls still waiting, building or writing — counted as open. */
   private readonly reserved = new Map<string, number>();
+  /**
+   * Request ids whose bytes are being written right now: named in no map yet,
+   * and not the sweep's to reclaim. Entered before the first write and left
+   * once the request is recorded or its directory removed.
+   */
+  private readonly writing = new Set<string>();
   /** The users whose turn the current async context is running in — see {@link withRequestSlot}. */
   private readonly inTurn = new AsyncLocalStorage<ReadonlySet<string>>();
   private readonly root: string;
@@ -211,8 +248,11 @@ export class AgentDownloadStore {
     }
     this.assertCanIssue(user);
     this.reserved.set(user.id, (this.reserved.get(user.id) ?? 0) + 1);
+    // Once the request is recorded, the record is what counts as open and the
+    // reservation is given back by `write` — not here as well, which would
+    // count the request twice while `work` finishes.
+    let issued = false;
     try {
-      let issued = false;
       const issue = (items: DownloadArtifact[]): Promise<IssuedDownload> => {
         if (issued) return Promise.reject(new Error('A download request slot issues once.'));
         issued = true;
@@ -228,10 +268,15 @@ export class AgentDownloadStore {
         if (this.building.get(user.id) === mine) this.building.delete(user.id);
       }
     } finally {
-      const left = (this.reserved.get(user.id) ?? 1) - 1;
-      if (left > 0) this.reserved.set(user.id, left);
-      else this.reserved.delete(user.id);
+      if (!issued) this.releaseReservation(user.id);
     }
+  }
+
+  /** Give back one of `userId`'s reserved slots. */
+  private releaseReservation(userId: string): void {
+    const left = (this.reserved.get(userId) ?? 1) - 1;
+    if (left > 0) this.reserved.set(userId, left);
+    else this.reserved.delete(userId);
   }
 
   /**
@@ -245,6 +290,10 @@ export class AgentDownloadStore {
     const requestId = `download-${Date.now()}-${randomBytes(8).toString('hex')}`;
     const dir = path.join(this.root, requestId);
     const minted: { key: string; token: string; record: ArtifactRecord }[] = [];
+    // Reserved BEFORE the first filesystem await: a sweep running while a slow
+    // disk takes these writes would otherwise find a directory no request
+    // names and, past the age bound, reclaim it under the write.
+    this.writing.add(requestId);
     try {
       await fs.mkdir(dir, { recursive: true });
       for (let i = 0; i < items.length; i++) {
@@ -265,7 +314,14 @@ export class AgentDownloadStore {
         });
       }
     } catch (err) {
-      await this.removeDir(requestId);
+      try {
+        await this.removeDir(requestId);
+      } finally {
+        this.writing.delete(requestId);
+        // Nothing issued: the slot goes back here, since `withRequestSlot`
+        // treats an `issue` that was called as one that filled its slot.
+        this.releaseReservation(user.id);
+      }
       throw err;
     }
     // The TTL runs from the moment the links exist, not from when the build
@@ -277,9 +333,15 @@ export class AgentDownloadStore {
       request.pending.add(key);
     }
     this.requests.set(requestId, request);
+    this.writing.delete(requestId);
+    // The record counts as open from here; the reservation that held the
+    // place until now is given back, so the request is counted once.
+    this.releaseReservation(user.id);
     // AFTER the records exist: the first sweep runs at once and would
-    // otherwise take this request's directory for an orphan.
-    this.startSweeping();
+    // otherwise take this request's directory for an orphan. And never once
+    // the store is stopped: a request finishing after shutdown's
+    // `stopSweeping` must not re-arm the sweeper that was stopped for good.
+    if (!this.stopped) this.startSweeping();
     return {
       downloadUrls: minted.map((m) => this.downloadUrlFor(m.token)),
       expiresAt: new Date(expiresAt).toISOString(),
@@ -369,7 +431,7 @@ export class AgentDownloadStore {
     const live = new Set(this.requests.keys());
     for (const name of names) {
       if (this.stopped) return;
-      if (live.has(name)) continue;
+      if (live.has(name) || this.writing.has(name)) continue;
       if (await this.outlivedEveryLink(name, now)) await this.removeDir(name);
     }
   }
@@ -396,6 +458,9 @@ export class AgentDownloadStore {
   }
 
   private sweep(): void {
+    // One sweep at a time: a second starting while the first still deletes
+    // would make `drainSweep` wait for the newer and miss the older.
+    if (this.sweeping) return;
     const running = this.sweepNow()
       .catch((err: unknown) => {
         log.warn('could not sweep expired downloads:', { err });

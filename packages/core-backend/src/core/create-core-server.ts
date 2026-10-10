@@ -27,7 +27,8 @@ import {
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
-import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+import { changeRequestScope, registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
@@ -56,6 +57,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createAuditRoutes } from '../modules/audit/audit.routes.js';
+import { createAgentConnectionRoutes } from '../modules/audit/agent-connection.routes.js';
 import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
 import { createSetupRoutes, isComplete } from '../modules/settings/setup.routes.js';
@@ -467,12 +469,13 @@ export async function createCoreServer(
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
+  // `delete_branch` sees change requests as `get_change_request` does.
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee);
   // The five read tools over change requests. Separate from the workflow tools
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore, core.starterPackService, core.disk);
   // `open_page` — the knowledge-base page shown inside a chat. Registered
   // here, on the same router as the file tools, because it answers with
   // `read_file`'s own read: the read hook, the access gate and the
@@ -485,6 +488,9 @@ export async function createCoreServer(
     // the tool answers the text and the app address and says so.
     canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
     appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+    // The read is `read_file`'s, so the notes a deployment registers for the
+    // gated tools reach this one as well.
+    notes: agentAccessGate.notes,
   });
   // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
   // a host to this deployment over HTTP and has no other way to learn which
@@ -562,6 +568,9 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: core.mcpAppService,
   }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
@@ -768,6 +777,18 @@ export async function createCoreServer(
     '/api',
     core.authMiddleware,
     createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
+  );
+  // The onboarding's "is your agent connected yet?" — the caller's own
+  // agents only, read off the same connections and keys the Audit log lists.
+  app.use('/api', core.authMiddleware, createAgentConnectionRoutes(core.agentAuditService));
+  // "What does your team do?" — the starter-pack question a new knowledge
+  // base's admin is asked, and the pack it adds (admin-gated inside).
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createOnboardingRoutes(core.starterPackService, async (req) =>
+      req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    ),
   );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,

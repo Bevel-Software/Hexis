@@ -111,7 +111,7 @@ async function hexisTools(skills: Parameters<typeof registerSkillsTools>[4] = em
     undefined,
     unused(),
   );
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
+  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true);
   registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, skills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {

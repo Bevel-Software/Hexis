@@ -438,11 +438,28 @@ export function useFileNav() {
    * later segment happens to equal `kbDirName` — which a real folder inside
    * the tree is allowed to be. A path that came from the tree needs no
    * repair, so applying one could only ever open the wrong file.
+   *
+   * `edit` asks the viewer to open the file straight into edit mode — for a
+   * page the caller has just created, which is there to be written, not read.
+   * It travels as router state (`startEditing`, the key the skill page
+   * already answers to), not in the URL, so a shared or bookmarked link never
+   * drops anyone into the editor; `FileViewer` honours it once and clears it.
+   * The path rides along (`startEditingPath`) because the URL does not keep
+   * naming it: `FileRoute` swaps a node's path URL for its id URL.
+   *
+   * `replace` swaps the current history entry instead of adding one — for
+   * asking to edit the page already on screen, where a second entry for the
+   * same URL would make Back look like it did nothing.
    */
   const openWorkspacePath = useCallback(
-    (path: string) => {
+    (path: string, options?: { edit?: boolean; replace?: boolean }) => {
       if (!branch) return;
-      navigate(kbFileUrl(branch, path));
+      const url = kbFileUrl(branch, path);
+      const replace = options?.replace === true;
+      const state = { startEditing: true, startEditingPath: path };
+      if (options?.edit) navigate(url, replace ? { state, replace } : { state });
+      else if (replace) navigate(url, { replace });
+      else navigate(url);
     },
     [branch, navigate],
   );
@@ -480,7 +497,11 @@ export function useNodeIdNav() {
   const surface = useRendererSurface();
   const { openFile } = useFileNav();
   const git = useContext(GitContext);
-  const branch = git?.status?.branch ?? null;
+  const location = useLocation();
+  // The URL's branch first, the git status second — the same order as
+  // `useFileNav`: during a branch switch the status still names the branch
+  // being left, and an id resolved against it would open the wrong tree.
+  const branch = branchFromPathname(location.pathname) ?? git?.status?.branch ?? null;
 
   const openNodeId = useCallback(
     async (idOrLink: string) => {

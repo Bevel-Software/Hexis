@@ -3,7 +3,7 @@ import { parse as parseYaml } from 'yaml';
 import { extractFrontmatter } from '@bevel-software/platform-shared';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { authFetch } from '../../../../lib/api';
-import { Surface } from '../../../../shared/components';
+import { Surface, useConfirm } from '../../../../shared/components';
 import { Markdown } from '../../../../shared/markdown/Markdown';
 import { ToolForm } from './ToolForm';
 import { ToolSecretsPanel } from '../../../secrets-vault/components/ToolSecretsPanel';
@@ -104,6 +104,7 @@ export function ToolRenderer({
   readOnly = false,
 }: FileRendererProps) {
   const [value, setValue] = useState(content);
+  const confirm = useConfirm();
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -345,10 +346,17 @@ export function ToolRenderer({
               {(['inline', 'http', 'mcp'] as const).map((t) => (
                 <button
                   key={t}
-                  onClick={() => {
-                    if (!value.trim() || window.confirm('Replace the file contents with this scaffold?')) {
-                      updateValue(SCAFFOLDS[t]);
+                  onClick={async () => {
+                    if (value.trim()) {
+                      const { confirmed } = await confirm({
+                        title: 'Replace with scaffold',
+                        message: 'Replace the file contents with this scaffold?',
+                        confirmLabel: 'Replace',
+                        destructive: true,
+                      });
+                      if (!confirmed) return;
                     }
+                    updateValue(SCAFFOLDS[t]);
                   }}
                   className="rounded-xs bg-sunken px-2 py-1 text-meta text-ink-muted hover:bg-hover"
                 >

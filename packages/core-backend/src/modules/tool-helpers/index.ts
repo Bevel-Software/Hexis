@@ -31,8 +31,10 @@
  *    default branch configured answers such a call 503
  *    `default-branch-unset`. A writing tool (`write: true`, or a `write`
  *    tag) that declares it makes `toolDef` throw at startup, naming the tool.
- *  - neither, with no `branch` in `inputs`: the tool takes no branch, and
- *    a stray `branch` in a call is dropped before the tool runs.
+ *  - neither, with no `branch` in `inputs`: the tool takes no branch. A stray
+ *    `branch` in a call is refused by the argument check when the schema
+ *    forbids extra arguments (every platform tool's does), and dropped before
+ *    the tool runs when the schema leaves extras open.
  *
  * Under either branch declaration, a given branch that does not exist is
  * answered 404 `branch-not-found`, naming it, before the tool runs.

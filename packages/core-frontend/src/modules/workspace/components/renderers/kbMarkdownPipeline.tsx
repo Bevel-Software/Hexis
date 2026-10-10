@@ -253,16 +253,20 @@ export function useKbMarkdownComponents({
         // are excluded — they scroll inside this view and leave nothing —
         // judged on the NORMALISED spelling, as a browser judges it, so a
         // whitespace-padded ` #goal` still scrolls rather than leaving.
-        if (onOpenFile && linkPolicy === 'surface' && href && !normalizeHref(href).startsWith('#')) {
+        if (onOpenFile && linkPolicy === 'surface' && href !== undefined && !normalizeHref(href).startsWith('#')) {
+          // A destination that normalises to nothing (`href=""`, whitespace)
+          // is nowhere to go: inert, and its default — which would navigate
+          // the frame to itself — cancelled, like a same-page anchor's.
+          const inert = normalizeHref(href) === '';
           return (
             <a
               {...props}
               href={href}
               onClick={(e) => {
                 e.preventDefault();
-                onOpenFile(href);
+                if (!inert) onOpenFile(href);
               }}
-              className="cursor-pointer"
+              className={inert ? undefined : 'cursor-pointer'}
             >
               {children}
             </a>

@@ -17,8 +17,9 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
+import type { CommandAction } from '../modules/toolbar/commands/actions';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */
 export interface RouteDef {
@@ -71,6 +72,8 @@ export interface AdminMenuItemHelpers {
   closeMenu(): void;
   /** react-router navigation. */
   navigate(to: string): void;
+  /** The signed-in person the menu belongs to. */
+  user: AuthUser;
 }
 
 /**
@@ -108,6 +111,12 @@ export interface AdminMenuItem {
    */
   path?: string;
   onSelect?(helpers: AdminMenuItemHelpers): void;
+  /**
+   * Whether the dropdown offers this row to `user` right now. Asked each time
+   * the panel renders, so a row can come and go with state the menu does not
+   * own (a preference in storage, say). Absent means always shown.
+   */
+  isShown?(user: AuthUser): boolean;
   dialog?(props: { open: boolean; onClose(): void }): ReactElement;
 }
 
@@ -450,6 +459,21 @@ export interface AppRegistry {
    */
   signInOption?: SignInOptionDef;
   /**
+   * What the first-run storage screen calls the repository the deployment
+   * keeps for itself: the card a new admin is steered towards.
+   *
+   * WHO keeps it is a property of the distribution, not of the screen. On a
+   * core deployment it is this server ("This server keeps it"); a hosted
+   * distribution keeps it on the admin's behalf and says so by name. Absent
+   * means core's words.
+   *
+   * The description travels WITH the title for the same reason the
+   * `welcomeExit` label travels with its path: a caller renaming the keeper
+   * without the sentence under it is how the card would come to contradict
+   * itself.
+   */
+  managedStorage?: { title: string; description: string };
+  /**
    * How many unread items the gear menu's badge should show, if anything is
    * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
    * enterprise module, and core polled its endpoint every thirty seconds
@@ -493,6 +517,32 @@ export interface AppRegistry {
    * the other is the likeliest way to produce it.
    */
   welcomeExit?: { path: string; label: string };
+  /**
+   * A panel inside the invite dialog, between the role choice and the footer.
+   *
+   * Core invites by creating accounts and knows nothing about what a place in
+   * the deployment costs. A hosted deployment does: it renders its seat meter
+   * here (how many of the plan's seats these invites would fill — `inviting`
+   * is the number of valid addresses entered so far), and its "anyone at
+   * your domain can join" switch. Rendered inside a boundary, so a panel that
+   * throws costs its own place, never the invite form. Absent means core
+   * renders nothing there.
+   */
+  inviteExtras?: ComponentType<{ inviting: number }>;
+  /**
+   * Commands a distribution adds to the toolbar's command menu (Ctrl/⌘K),
+   * listed after core's own.
+   *
+   * Core's commands are the verbs every deployment has — New page, Invite
+   * people, the apps, the settings pages. A verb like "New ontology" belongs
+   * to the distribution that has ontologies, so core offers the place rather
+   * than the command, as it does for folder-menu entries. Each one is plain
+   * data plus `visible` and `run`, both handed the menu's context (router,
+   * admin verdict, page on screen) — see `CommandAction`. An id core already
+   * uses is dropped; a `visible` that throws costs only its own row. Absent
+   * means the menu offers core's commands and no others.
+   */
+  commandActions?: CommandAction[];
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {

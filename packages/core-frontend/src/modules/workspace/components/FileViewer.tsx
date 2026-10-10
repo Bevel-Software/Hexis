@@ -1,15 +1,22 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
-import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
+import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History, Users } from 'lucide-react';
+import {
+  KNOWLEDGE_BASE_DIR,
+  currentBranchModel,
+  type FileTreeEntry,
+  type PullRequestSummary,
+} from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
+import { publishEditablePage, withdrawEditablePage } from '../state/editable-page';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
+import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
-import { useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
@@ -44,6 +51,8 @@ import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
+import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
+import { useStarterPacks } from '../../onboarding/state/starter-packs';
 
 /**
  * How many pages the empty viewer offers. Enough to look like a starting
@@ -53,8 +62,20 @@ import { FilePaneCard } from './FilePaneCard';
 const SUGGESTION_LIMIT = 4;
 
 /** What a page is called, without the extension the reader did not choose. */
-function pageTitle(fileName: string): string {
-  return fileName.replace(/\.(md|markdown)$/i, '');
+function pageTitle(path: string, kbDirName: string | null): string {
+  return displayFileName(path, kbDirName).replace(/\.(md|markdown)$/i, '');
+}
+
+/**
+ * What an access rules file governs, said the way the explorer names it: the
+ * folder's own name, "Knowledge" for the knowledge section, and the whole
+ * knowledge base for the one at its top.
+ */
+function governedFolderLabel(folder: string, kbDirName: string | null): string {
+  if (kbDirName && folder === kbDirName) return 'everything in this knowledge base';
+  const rel = kbDirName && folder.startsWith(`${kbDirName}/`) ? folder.slice(kbDirName.length + 1) : folder;
+  if (rel === KNOWLEDGE_BASE_DIR) return 'everything in Knowledge';
+  return rel.slice(rel.lastIndexOf('/') + 1);
 }
 
 /** The folder a page sits in, or '' for one that sits at a root. */
@@ -67,6 +88,7 @@ export function FileViewer() {
     workspaceId,
     kbDirName,
     fileTree,
+    workspaceBranch,
     openFilePath,
     openFileContent,
     openFileSavedContent,
@@ -468,7 +490,18 @@ export function FileViewer() {
   // one, an old request's `.finally(() => setIsEnteringEdit(false))`
   // would clobber the new request's "Loading…" state on the new file.
   const enterEditRequestRef = useRef(0);
-  const handleEnterEditMode = useCallback(() => {
+  // The file whose editor should open with the caret at the end — see the
+  // effect beside `editorContainerRef`. Set only at the moment an enter-edit
+  // flow that asked for it SUCCEEDS, so a request the lock, the branch or the
+  // reload turned away leaves nothing behind for a later Edit by hand to trip.
+  const caretToEndForRef = useRef<string | null>(null);
+  /**
+   * Enter edit mode, the way the Edit button does. `caretToEnd` is the
+   * `startEditing` request's: put the caret at the end of the page once the
+   * editor is up (see the caret effect). The button itself goes through
+   * `handleEnterEditMode`, which never asks for that.
+   */
+  const enterEditMode = useCallback((caretToEnd: boolean) => {
     if (editMode || isEnteringEdit || !openFilePath || onProtectedBranch || isReviewingPending) return;
     // **Non-optimistic on entry.** We acquire the lock + reload disk
     // bytes FIRST, then flip into edit mode. The optimistic path —
@@ -487,8 +520,9 @@ export function FileViewer() {
       .then(async ({ acquired, contended, error }) => {
         if (!acquired) {
           // Two failure shapes:
-          //   - Contention (`contended`): held by someone else → the "Locked
-          //     by X" banner (below) already explains it; don't double-report.
+          //   - Contention (`contended`): held by someone else → the "X is
+          //     editing this page" banner (below) already explains it; don't
+          //     double-report.
           //   - Access-denied 403 / network (`error`, not contended): surface
           //     it. `useFileAccess` default-allows on a transient lookup
           //     failure, so the editor lets the user click Edit even when the
@@ -526,6 +560,7 @@ export function FileViewer() {
         // Stale-request check — file may have switched while we were
         // reloading. Don't flip editMode for the wrong file.
         if (!isStillCurrent()) return;
+        caretToEndForRef.current = caretToEnd ? targetPath : null;
         setEditMode(true);
       })
       .catch((err) => {
@@ -541,6 +576,92 @@ export function FileViewer() {
         }
       });
   }, [editMode, isEnteringEdit, openFilePath, onProtectedBranch, isReviewingPending, fileLock, reloadTabFromDisk]);
+  const handleEnterEditMode = useCallback(() => enterEditMode(false), [enterEditMode]);
+
+  /**
+   * Opening straight into edit mode, when the navigation asked for it
+   * (`openWorkspacePath(path, { edit: true })` — a page just created, there
+   * to be written). The request is router state (`startEditing`, the key the
+   * skill page already answers to), so no URL ever carries it.
+   *
+   * It is honoured the way a click on Edit would be, through
+   * `enterEditMode` — the lock and the fresh read are not skipped — and
+   * only once the request can be judged: the file it was made for is the one
+   * open, with bytes, on a known branch, and the access lookup has answered
+   * (`canWrite` null is "not asked yet", and acting on it would be a guess).
+   *
+   * "The file it was made for" is `startEditingPath` when the request names
+   * one, and the URL's path otherwise. The URL alone is not enough: a path
+   * URL is canonicalised to the node's id URL (`FileRoute`), sometimes before
+   * the file's bytes land, and from then on the URL names the id, not the
+   * path that is open.
+   *
+   * Then it is CONSUMED — replaced out of the history entry, other state
+   * kept — whether or not editing was allowed, so a refresh or a Back to this
+   * entry opens the page for reading like any other. The ref covers the beat
+   * before the replace lands (and StrictMode's second effect pass).
+   */
+  const location = useLocation();
+  const navigate = useNavigate();
+  const routePath = useParams<{ '*': string }>()['*'] ?? '';
+  const editRequest = location.state as { startEditing?: boolean; startEditingPath?: string } | null;
+  const startEditingRequested = editRequest?.startEditing === true;
+  const startEditingPath = editRequest?.startEditingPath ?? routePath;
+  const consumedEditRequestRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!startEditingRequested || consumedEditRequestRef.current === location.key) return;
+    if (!openFilePath || openFilePath !== startEditingPath || openFileContent === null || !Renderer) return;
+    if (currentBranch === null || access.canWrite === null) return;
+    consumedEditRequestRef.current = location.key;
+    const rest = { ...(location.state as Record<string, unknown>) };
+    delete rest.startEditing;
+    delete rest.startEditingPath;
+    navigate(
+      { pathname: location.pathname, search: location.search, hash: location.hash },
+      { replace: true, state: Object.keys(rest).length > 0 ? rest : null },
+    );
+    if (!isViewOnlyFile(openFilePath)) {
+      // A one-shot reaction to the router's state, not derived state: this is
+      // the Edit click the navigation asked for, made once its file is ready.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      enterEditMode(true);
+    }
+  }, [
+    startEditingRequested,
+    location,
+    navigate,
+    startEditingPath,
+    openFilePath,
+    openFileContent,
+    Renderer,
+    currentBranch,
+    access.canWrite,
+    enterEditMode,
+  ]);
+
+  // Tell the command menu whether "Edit this page" would do anything — the
+  // same conditions the Edit button is drawn and enabled by (see
+  // `editable-page.ts`), the content tab included: over History or Compare
+  // the button is not drawn, and the menu offers nothing the page does not.
+  // `canWrite` null is the button's optimistic Edit too.
+  const lockHolder = fileLock.externalLock?.holderName ?? null;
+  const editableNow =
+    openFilePath !== null &&
+    openFileContent !== null &&
+    !!Renderer &&
+    !isViewOnlyFile(openFilePath) &&
+    activeTab === 'content' &&
+    !editMode &&
+    !isEnteringEdit &&
+    !proposeMode &&
+    !isReviewingPending &&
+    access.canWrite !== false &&
+    lockHolder === null;
+  useEffect(() => {
+    if (!editableNow || !openFilePath) return;
+    publishEditablePage(openFilePath);
+    return () => withdrawEditablePage(openFilePath);
+  }, [editableNow, openFilePath]);
 
   const handleExitEditMode = useCallback(() => {
     if (!editMode) return;
@@ -756,7 +877,7 @@ export function FileViewer() {
         // Read the message off the resolved outcome, not `fileLock.lockError`
         // — that's React state and is stale in this closure right after the
         // await. Covers both the access-denied 403 and lock-contention cases.
-        throw new Error(error ?? 'File is locked by another user.');
+        throw new Error(error ?? 'Someone else is editing this page.');
       }
       try {
         await fileLock.saveAndRelease();
@@ -801,6 +922,20 @@ export function FileViewer() {
     el.addEventListener('scroll', onScroll, { capture: true, passive: true });
     return () => el.removeEventListener('scroll', onScroll, { capture: true } as EventListenerOptions);
   }, [editMode, recordActivity]);
+
+  // A page opened for writing (the `startEditing` request above) gets the
+  // caret at its END — under the title it was created with — rather than
+  // where a freshly focused textarea puts it, in front of the `#`. Only for
+  // that request: Edit on an existing page by hand leaves the caret alone,
+  // since jumping to the end of a long document would scroll the reader away.
+  useEffect(() => {
+    if (!editMode || !openFilePath || caretToEndForRef.current !== openFilePath) return;
+    caretToEndForRef.current = null;
+    const textarea = editorContainerRef.current?.querySelector('textarea');
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }, [editMode, openFilePath]);
 
   // No-op save when previewing pending content — don't let edits go through during review
   const handlePendingSave = useCallback(async () => {}, []);
@@ -860,6 +995,23 @@ export function FileViewer() {
     });
   }, [openFilePath]);
 
+  // An access rules file is its FOLDER's access, written down. Its page says
+  // so, and hands over the sheet that edits it: Manage access on the folder,
+  // the same sheet the folder's row in the tree opens. (Share in the header
+  // stays what it is on every page, access to this one file.)
+  const accessFolder =
+    openFilePath && isAccessRulesFile(openFilePath) && openFilePath.includes('/')
+      ? openFilePath.slice(0, openFilePath.lastIndexOf('/'))
+      : null;
+  const handleManageFolderAccess = useCallback(() => {
+    if (!accessFolder) return;
+    setShareTarget({
+      name: accessFolder.slice(accessFolder.lastIndexOf('/') + 1),
+      relativePath: accessFolder,
+      type: 'directory',
+    });
+  }, [accessFolder]);
+
   // Where to start, for a viewer with nothing open. Computed here rather than
   // in the empty branch below because that branch is a `return` and this is a
   // hook — and it costs nothing while a file IS open, which is the common case.
@@ -867,6 +1019,26 @@ export function FileViewer() {
     () => suggestedPages(fileTree, kbDirName, SUGGESTION_LIMIT),
     [fileTree, kbDirName],
   );
+  // A new knowledge base's admin is asked "What does your team do?" here in
+  // place of the empty state, for as long as the server offers it (admins
+  // only, until somebody answers, while the knowledge base is still new).
+  // What the chosen pack added is said once, above the ordinary empty state
+  // that then suggests its pages.
+  //
+  // Only on the default branch: the server lands the pack on the default
+  // branch whatever branch the viewer shows, so asked from a draft the card
+  // would promise pages here and put them somewhere else. The ordinary empty
+  // state stands in on every other branch, and the question waits on the
+  // default one.
+  const starterPacks = useStarterPacks();
+  const [starterNote, setStarterNote] = useState<string | null>(null);
+  const onDefaultBranch = workspaceBranch !== null && workspaceBranch === currentBranchModel().defaultBranch;
+  const starterOffer = starterPacks.answer?.offered && onDefaultBranch ? starterPacks.answer.packs : [];
+  // Until the server has answered (and, when it offers the question, until
+  // the branch is known) the pane shows neither: the reading empty state
+  // would flash under an admin for the length of one request, suggestions
+  // and all, before the question replaced it.
+  const starterPending = !starterPacks.settled || (starterPacks.answer?.offered === true && workspaceBranch === null);
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
   // refresh, share or back-press must land on the page — not on the empty
@@ -902,57 +1074,68 @@ export function FileViewer() {
         <GitSyncFailedBanner />
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
-          <div className="w-full max-w-md text-center">
-            <h2 className="mb-2 text-head text-ink">Open a page to start reading.</h2>
-            <p className="mb-6 text-ui text-ink-muted">
-              {suggestions.length > 0
-                ? 'Pick anything from the file tree, or start with one of these.'
-                : 'Pick anything from the file tree.'}
-            </p>
-            {/* Real pages, not prompts. Whoever lands here has a file tree and
-                a blank pane, and "browse until something looks right" is the
-                one instruction the tree already gives — so the suggestions are
-                documents that open, drawn from the top of the knowledge the
-                deployment actually holds. */}
-            {suggestions.length > 0 && (
-              <div className="flex flex-col gap-2 text-left">
-                {suggestions.map((page) => {
-                  const folder = parentFolder(page.relativePath);
-                  return (
-                    <Surface
-                      key={page.relativePath}
-                      as="button"
-                      tone="sunken"
-                      radius="lg"
-                      elevation="none"
-                      interactive
-                      type="button"
-                      onClick={() => openWorkspacePath(page.relativePath)}
-                      disabled={!navReady}
-                      className="flex items-center gap-2.5 px-3 py-2"
-                    >
-                      <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
-                      <span className="min-w-0 flex-1 truncate text-ui text-ink">
-                        {pageTitle(page.name)}
-                      </span>
-                      {/* The folder it sits in — two pages can share a name,
-                          and the one thing that tells them apart is where they
-                          live. */}
-                      {/* Capped so a long folder name truncates instead of
-                          squeezing out the page title it is there to
-                          disambiguate — same contract as the comparison
-                          panel's path label. */}
-                      {folder && (
-                        <span className="max-w-[40%] shrink-0 truncate text-meta text-ink-faint">
-                          {folder}
+          {starterOffer.length > 0 ? (
+            <div className="w-full max-w-md">
+              <StarterPackCard packs={starterOffer} onDone={(applied) => setStarterNote(applied.summary || null)} />
+            </div>
+          ) : starterPending ? null : (
+            <div className="w-full max-w-md text-center">
+              {starterNote && (
+                <p role="status" className="mb-4 text-ui text-ok">
+                  {starterNote}
+                </p>
+              )}
+              <h2 className="mb-2 text-head text-ink">Open a page to start reading.</h2>
+              <p className="mb-6 text-ui text-ink-muted">
+                {suggestions.length > 0
+                  ? 'Pick anything from the file tree, or start with one of these.'
+                  : 'Pick anything from the file tree.'}
+              </p>
+              {/* Real pages, not prompts. Whoever lands here has a file tree and
+                  a blank pane, and "browse until something looks right" is the
+                  one instruction the tree already gives — so the suggestions are
+                  documents that open, drawn from the top of the knowledge the
+                  deployment actually holds. */}
+              {suggestions.length > 0 && (
+                <div className="flex flex-col gap-2 text-left">
+                  {suggestions.map((page) => {
+                    const folder = parentFolder(page.relativePath);
+                    return (
+                      <Surface
+                        key={page.relativePath}
+                        as="button"
+                        tone="sunken"
+                        radius="lg"
+                        elevation="none"
+                        interactive
+                        type="button"
+                        onClick={() => openWorkspacePath(page.relativePath)}
+                        disabled={!navReady}
+                        className="flex items-center gap-2.5 px-3 py-2"
+                      >
+                        <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
+                        <span className="min-w-0 flex-1 truncate text-ui text-ink">
+                          {pageTitle(page.relativePath, kbDirName)}
                         </span>
-                      )}
-                    </Surface>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                        {/* The folder it sits in — two pages can share a name,
+                            and the one thing that tells them apart is where they
+                            live. */}
+                        {/* Capped so a long folder name truncates instead of
+                            squeezing out the page title it is there to
+                            disambiguate — same contract as the comparison
+                            panel's path label. */}
+                        {folder && (
+                          <span className="max-w-[40%] shrink-0 truncate text-meta text-ink-faint">
+                            {folder}
+                          </span>
+                        )}
+                      </Surface>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         {registeredPanels}
       </div>
@@ -979,8 +1162,9 @@ export function FileViewer() {
 
   // What the pane card's bar names — extension kept, unlike the `<h1>` above,
   // because the bar is the technical label (`SKILL.md`, `How to get
-  // started.md`) exactly as the skill page's file bar renders it.
-  const fileBaseName = openFilePath.slice(openFilePath.lastIndexOf('/') + 1);
+  // started.md`) exactly as the skill page's file bar renders it. A platform
+  // file is the exception: it reads by its plain name, its real one on hover.
+  const fileBaseName = displayFileName(openFilePath, kbDirName);
 
   // The repo-relative path (kbDirName stripped) — what the change-request
   // machinery speaks. Null for files outside the KB clone, which cannot have
@@ -1004,8 +1188,8 @@ export function FileViewer() {
     // above — not a component created during render. The provider hands the
     // open file's `download:` verdict to any DownloadFileButton inside the
     // renderer without widening the renderer contract.
-    // eslint-disable-next-line react-hooks/static-components
     <CanDownloadContext.Provider value={access.canDownload}>
+    {/* eslint-disable-next-line react-hooks/static-components */}
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
       // When a teammate's save lands, the workspace state updates the
@@ -1117,9 +1301,9 @@ export function FileViewer() {
       onClick={handleEnterEditMode}
       title={
         lockedBy
-          ? `Locked by ${lockedBy}`
+          ? `${lockedBy} is editing this page`
           : isEnteringEdit
-            ? 'Acquiring lock and fetching latest content…'
+            ? 'Getting the latest version…'
             : 'Click to edit this file'
       }
     >
@@ -1186,6 +1370,7 @@ export function FileViewer() {
         header={
           <KbPageHeader
             path={openFilePath}
+            kbDirName={kbDirName}
             canWrite={access.canWrite}
             editMode={editMode}
             entering={isEnteringEdit}
@@ -1270,6 +1455,20 @@ export function FileViewer() {
                   onClick={() => setBannerCr(requestsOnThisFile[0])}
                 >
                   Review the change
+                </Button>
+              </div>
+            </Banner>
+          )}
+          {accessFolder && (
+            <Banner role="note" tone="neutral" icon={<Users size={14} />} className="mb-4 flex-none">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1">
+                  This file controls who can see and change{' '}
+                  <span className="font-medium">{governedFolderLabel(accessFolder, kbDirName)}</span>.
+                  Change it with Manage access.
+                </span>
+                <Button variant="outline" size="sm" onClick={handleManageFolderAccess}>
+                  Manage access
                 </Button>
               </div>
             </Banner>
@@ -1365,12 +1564,12 @@ export function FileViewer() {
             <Banner
               role="status"
               tone="wait"
-              icon={<Lock size={14} />}
+              icon={<Pencil size={14} />}
               aria-live="polite"
               aria-atomic="true"
               className="mb-4 flex-none"
             >
-              Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
+              <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
             </Banner>
           )}
 
@@ -1438,7 +1637,7 @@ export function FileViewer() {
           >
             {shellVariant === 'prose' ? (
               <>
-                <FilePaneCard file={fileBaseName} actions={paneActions}>
+                <FilePaneCard file={fileBaseName} fileTitle={fileNameTooltip(openFilePath, kbDirName)} actions={paneActions}>
                   {rendererElement}
                 </FilePaneCard>
                 {/* Every open proposal on this file, under the file it is

@@ -13,7 +13,7 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
-import { McpAppService, OPEN_PAGE_VIEW_URI } from '../../embed/mcp-app.js';
+import { McpAppService, OPEN_PAGE_VIEW_URI_PREFIX } from '../../embed/mcp-app.js';
 import { OPEN_PAGE_TOOL } from '../../embed/embed.tools.js';
 
 /**
@@ -109,14 +109,19 @@ async function connect(opts: { serveApps?: boolean } = {}) {
   return client;
 }
 
+/** The URI the packaged view is served under — named by its content, so read off the service. */
+async function viewUri(): Promise<string> {
+  return (await new McpAppService({ publicFrontendUrl: PUBLIC }).manifest()).resources[0].uri;
+}
+
 describe('the hosted MCP endpoint serves the open_page view', () => {
   it('lists open_page carrying UI metadata that names a ui:// resource', async () => {
     const host = await connect();
     const { tools } = await host.listTools();
     const openPage = tools.find((t) => t.name === OPEN_PAGE_TOOL);
     expect(openPage).toBeDefined();
-    expect(openPage!._meta).toEqual({ [MCP_APP_UI_META_KEY]: { resourceUri: OPEN_PAGE_VIEW_URI } });
-    expect(OPEN_PAGE_VIEW_URI.startsWith('ui://')).toBe(true);
+    expect(openPage!._meta).toEqual({ [MCP_APP_UI_META_KEY]: { resourceUri: await viewUri() } });
+    expect((await viewUri()).startsWith(OPEN_PAGE_VIEW_URI_PREFIX)).toBe(true);
     // And only that tool: `read_file` is deliberately untouched.
     expect(tools.find((t) => t.name === 'read_file')!._meta).toBeUndefined();
   }, 30_000);
@@ -124,7 +129,8 @@ describe('the hosted MCP endpoint serves the open_page view', () => {
   it('lists the view with the MCP App media type', async () => {
     const host = await connect();
     const { resources } = await host.listResources();
-    const view = resources.find((r) => r.uri === OPEN_PAGE_VIEW_URI);
+    const uri = await viewUri();
+    const view = resources.find((r) => r.uri === uri);
     expect(view).toBeDefined();
     expect(view!.mimeType).toBe(MCP_APP_MIME_TYPE);
     expect(view!._meta).toMatchObject({
@@ -134,7 +140,7 @@ describe('the hosted MCP endpoint serves the open_page view', () => {
 
   it('reads the view, reaching exactly the deployment own origin and asking for no sandbox domain', async () => {
     const host = await connect();
-    const read = await host.readResource({ uri: OPEN_PAGE_VIEW_URI });
+    const read = await host.readResource({ uri: await viewUri() });
     expect(read.contents).toHaveLength(1);
     const [content] = read.contents as Array<{ mimeType: string; text: string; _meta: Record<string, unknown> }>;
     expect(content.mimeType).toBe(MCP_APP_MIME_TYPE);

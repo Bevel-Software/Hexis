@@ -1,0 +1,10 @@
+id: general
+name: Something else
+description: "Pages about who you are and how you work, and skills that keep a task list and teach your agent your team's shorthand."
+order: 99
+firstPagePrompt: |
+  Using our Hexis knowledge base, fill in the About us page in Knowledge: what we do, who we work with, and our main products or services. Ask me for anything you don't know, then save it.
+suggestedPages:
+  - "About us"
+  - "How we work"
+  - "Glossary"

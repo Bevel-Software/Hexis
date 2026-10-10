@@ -8,9 +8,14 @@ export function outsideAccountOf(token: string): string | null {
   try {
     const payload = token.split('.')[1];
     if (!payload) return null;
-    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
-    const claims = JSON.parse(json) as { kind?: unknown; sub?: unknown };
-    return claims.kind === 'atlassian' && typeof claims.sub === 'string' ? claims.sub : null;
+    // The payload is UTF-8: `atob` alone would hand an account name with a
+    // non-ASCII character to the page as mojibake.
+    const bytes = Uint8Array.from(atob(payload.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+    const claims = JSON.parse(new TextDecoder().decode(bytes)) as { kind?: unknown; sub?: unknown; accountId?: unknown };
+    if (claims.kind === 'atlassian' && typeof claims.sub === 'string') return claims.sub;
+    // A token from the release before the subject was generalised names the
+    // account as `accountId`; the server still accepts it for its lifetime.
+    return typeof claims.accountId === 'string' && claims.accountId ? claims.accountId : null;
   } catch {
     return null;
   }

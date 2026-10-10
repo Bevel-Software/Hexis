@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   checkoutRoot,
+  findEntryByPath,
+  knowledgeFiles,
   mergePendingIntoTree,
   omitPathFromTree,
   pathExistsInTree,
@@ -58,6 +60,54 @@ describe('subtreeHasVisibleEntries', () => {
   it('is empty for a root the listing does not have', () => {
     expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Agents')).toBe(false);
     expect(subtreeHasVisibleEntries(null, 'knowledge-base/Skills')).toBe(false);
+  });
+});
+
+/** The one exact-path lookup the workspace and the Get set up column share. */
+describe('findEntryByPath', () => {
+  const page: FileTreeEntry = { name: 'note.md', relativePath: 'knowledge-base/KnowledgeBase/note.md', type: 'file' };
+  const folder: FileTreeEntry = {
+    name: 'KnowledgeBase',
+    relativePath: 'knowledge-base/KnowledgeBase',
+    type: 'directory',
+    children: [page],
+  };
+  const tree: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [{ name: 'knowledge-base', relativePath: 'knowledge-base', type: 'directory', children: [folder] }],
+  };
+
+  it('finds a folder and a file at their exact paths', () => {
+    expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase')).toBe(folder);
+    expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase/note.md')).toBe(page);
+  });
+
+  it('answers null for a path the tree does not have, a prefix of a name included, and for no tree', () => {
+    expect(findEntryByPath(tree, 'knowledge-base/Knowledge')).toBeNull();
+    expect(findEntryByPath(tree, 'knowledge-base/KnowledgeBase/other.md')).toBeNull();
+    expect(findEntryByPath(null, 'knowledge-base')).toBeNull();
+  });
+
+  it('never opens a folder off the path', () => {
+    let opened = 0;
+    const skills: FileTreeEntry = { name: 'Skills', relativePath: 'knowledge-base/Skills', type: 'directory' };
+    Object.defineProperty(skills, 'children', {
+      get: () => {
+        opened++;
+        return [{ name: 'a.md', relativePath: 'knowledge-base/Skills/a.md', type: 'file' }];
+      },
+    });
+    const wide: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name: 'knowledge-base', relativePath: 'knowledge-base', type: 'directory', children: [skills, folder] }],
+    };
+    expect(findEntryByPath(wide, 'knowledge-base/KnowledgeBase/note.md')).toBe(page);
+    expect(findEntryByPath(wide, 'knowledge-base/Missing.md')).toBeNull();
+    expect(opened).toBe(0);
   });
 });
 
@@ -222,6 +272,31 @@ describe('suggestedPages', () => {
       `${KB}/KnowledgeBase/GTM/Pricing.md`,
     ]);
     expect(suggestedPages(dir('', [dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')])]), KB, 10)).toEqual([]);
+  });
+});
+
+describe('knowledgeFiles', () => {
+  it('lists every file the Knowledge explorer browses, not only documents — but never access rules or Plugins/', () => {
+    expect(knowledgeFiles(TREE, KB).map((e) => e.relativePath)).toEqual([
+      'knowledge-base/KnowledgeBase/Onboarding.md',
+      'knowledge-base/KnowledgeBase/GTM/Pricing.md',
+      'knowledge-base/KnowledgeBase/GTM/deals.csv',
+    ]);
+  });
+
+  it('skips dot-prefixed bookkeeping and is empty without a checkout', () => {
+    const tree = dir('', [
+      dir(KB, [
+        dir(`${KB}/KnowledgeBase`, [
+          file(`${KB}/KnowledgeBase/.bevelignore`),
+          dir(`${KB}/KnowledgeBase/.git`, [file(`${KB}/KnowledgeBase/.git/HEAD`)]),
+          file(`${KB}/KnowledgeBase/Team.md`),
+        ]),
+      ]),
+    ]);
+    expect(knowledgeFiles(tree, KB).map((e) => e.name)).toEqual(['Team.md']);
+    expect(knowledgeFiles(null, KB)).toEqual([]);
+    expect(knowledgeFiles(TREE, null)).toEqual([]);
   });
 });
 

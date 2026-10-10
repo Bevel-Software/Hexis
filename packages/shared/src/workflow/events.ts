@@ -310,6 +310,30 @@ export interface ResyncEvent {
   reason: string;
 }
 
+/**
+ * One of `forUserId`'s agents has reached the platform: the FIRST
+ * authenticated request on one of their agent connections or connection keys
+ * — the `initialize` or `tools/list` every client sends on connecting, before
+ * it has called any tool. Emitted once per connection or key, when its use
+ * stamp goes from never to now; later uses stamp quietly. It is what the
+ * onboarding waits for (the connect-your-agent page, the Get set up list),
+ * so those pages listen rather than ask on a timer. User-scoped: nobody
+ * else's session cares.
+ */
+export interface AgentConnectedEvent {
+  kind: 'agent-connected';
+  forUserId: string;
+  /** The agent's registered client name, or the connection key's label. */
+  client: string;
+  /**
+   * Which of the two `client` is: `agent` for an OAuth connection's
+   * registered name, `key` for a connection key's free-text label.
+   */
+  agentKind: 'agent' | 'key';
+  /** When the first request landed, ISO 8601. */
+  at: string;
+}
+
 // ── Union + helpers ──────────────────────────────────────────────────────────
 
 export type WorkflowEventPayload =
@@ -321,6 +345,7 @@ export type WorkflowEventPayload =
   | GitSyncRecoveredEvent
   | BranchSwitchedEvent
   | AgentToolCallEvent
+  | AgentConnectedEvent
   | ChangeRequestOpenedEvent
   | ChangeRequestMergedEvent
   | ChangeRequestRejectedEvent
@@ -352,6 +377,7 @@ export function isUserScoped(
 ): e is WorkflowEventPayload & { forUserId: string } {
   return (
     e.kind === 'agent-tool-call' ||
+    e.kind === 'agent-connected' ||
     e.kind === 'branch-switched' ||
     e.kind === 'change-request-merge-failed'
   );

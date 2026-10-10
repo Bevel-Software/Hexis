@@ -170,6 +170,12 @@ export function registerWorkflowTools(
   toolHandler: ToolHandlerFactory,
   /** The clone folder at the workspace root (`save_file` refuses a path outside it) and the branch model. */
   kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'protectedBranches'>,
+  /**
+   * Whether the caller may see change request `number` — `get_change_request`'s
+   * own gate (`changeRequestScope(...).maySee`). `delete_branch` neither names
+   * nor links a request it answers no for.
+   */
+  maySeeChangeRequest: (ctx: ToolContext, number: number) => Promise<boolean>,
 ): void {
   const { kbDirName } = kb;
   const mount = (spec: {
@@ -605,6 +611,81 @@ export function registerWorkflowTools(
         throw new ToolError('`source` and `target` are required branch names.', 400);
       }
       return { outcome: await ctx.workflowService.mergeBranch(ctx.user, source, target) };
+    },
+  });
+
+  mount({
+    name: 'delete_branch',
+    description:
+      'Delete branch `name` from the shared repository and the server. Allowed for the ' +
+      'branch\'s author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
+      'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
+      '(retry once they land). An open change request from or into it that proposes nothing is closed and the ' +
+      'delete goes ahead; one that still proposes something refuses it, naming and linking it: its author ' +
+      'withdraws it or an Admin declines it, in the app (one you cannot see is not named, nor in a preview). ' +
+      'Refuses a branch holding commits that are not on the ' +
+      'default branch, saying how many; `discardUnmerged: true` deletes it anyway and reports them as ' +
+      '`discardedCommits`. Refuses if the shared repository is unreachable. Preview with ' +
+      '`dryRun: true`: it changes nothing and answers `exists`, `canDelete`, `refusals`, `unmergedCommits`, ' +
+      '`openChangeRequests` and `lastCommit`. A preview grants nothing; checks rerun on delete. ' +
+      'Answers the deleted branch\'s `lastCommit`.',
+    // Names its branch itself; the deletion runs in the default branch's workspace.
+    skipBranch: true,
+    refusesItself: ['name'],
+    inputs: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', minLength: 1, description: 'The branch to delete.' },
+        dryRun: { type: 'boolean', description: 'Report what deleting would do, and change nothing.' },
+        discardUnmerged: {
+          type: 'boolean',
+          description: 'Delete even though the branch holds commits that are not on the default branch. They are lost.',
+        },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['preview', 'deleted'] },
+        branch: { type: 'string' },
+        lastCommit: { type: ['string', 'null'], description: 'The branch\'s tip — what a restore starts from. Null in a preview of a branch that does not exist.' },
+        discardedCommits: { type: 'integer', description: 'When `kind` is `deleted`: commits not on the default branch that went with it.' },
+        exists: { type: 'boolean', description: 'When `kind` is `preview`.' },
+        canDelete: { type: 'boolean', description: 'When `kind` is `preview`: whether a delete asked for now would go through.' },
+        refusals: { type: 'array', items: { type: 'string' }, description: 'When `kind` is `preview`: why it would not.' },
+        unmergedCommits: { type: 'integer', description: 'When `kind` is `preview`: commits not on the default branch.' },
+        openChangeRequests: {
+          type: 'array',
+          description: 'When `kind` is `preview`: open change requests from (`source`) or into (`target`) the branch that you can see.',
+          items: {
+            type: 'object',
+            properties: {
+              number: { type: 'integer' },
+              end: { type: 'string', enum: ['source', 'target'] },
+              url: { type: 'string', description: 'Link to the request in the app.' },
+              proposesNothing: { type: 'boolean', description: 'True when the delete would close it rather than be refused by it.' },
+            },
+            required: ['number', 'end', 'url', 'proposesNothing'],
+          },
+        },
+      },
+      required: ['kind', 'branch', 'lastCommit'],
+    },
+    write: true,
+    handler: async (args, ctx: ToolContext) => {
+      const name = args.name;
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new ToolError('`name` is required: pass the name of the branch to delete.', 400, {
+          kind: 'name-required',
+        });
+      }
+      return ctx.workflowService.deleteBranchChecked(ctx.user, name, {
+        dryRun: args.dryRun === true,
+        discardUnmerged: args.discardUnmerged === true,
+        maySee: (number) => maySeeChangeRequest(ctx, number),
+      });
     },
   });
 

@@ -68,8 +68,11 @@ function OpenRequest({ number }: { number: number }) {
       },
       (err: unknown) => {
         if (cancelled) return;
-        // Not there, or not for this viewer: the same sentence for both, so
-        // the address never says which.
+        // Not there. A 403 takes the same path for a deployment whose summary
+        // route is viewer-scoped; core's is not — every member sees the
+        // request list, and the FILES behind a request are what access rules
+        // gate, in the detail the dialog then reads — so the same sentence
+        // serves both and the address never says which.
         const hidden = err instanceof GitApiError && (err.status === 404 || err.status === 403);
         setLookup(
           hidden
@@ -121,12 +124,20 @@ function NoSuchRequest({ raw }: { raw: string }) {
   );
 }
 
-/** The page under the dialog: a sentence and a way out, nothing to be read as content. */
+/**
+ * The page under the dialog: a sentence and a way out, nothing to be read as
+ * content. A landmark with a heading all the same, and the sentence in a
+ * live region: somebody arriving by the address, or by keyboard, is told what
+ * page this is and hears the state change from "opening" to the request.
+ */
 function Quiet({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 bg-white text-sm text-ink-muted">
-      {children}
-    </div>
+    <main className="flex h-full flex-col items-center justify-center gap-2 bg-white text-sm text-ink-muted">
+      <h1 className="text-base font-semibold text-ink">Change request</h1>
+      <div aria-live="polite" className="contents">
+        {children}
+      </div>
+    </main>
   );
 }
 

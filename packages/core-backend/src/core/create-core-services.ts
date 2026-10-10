@@ -19,7 +19,7 @@ import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
 import { EmbedService } from '../modules/embed/embed.service.js';
-import { McpAppService } from '../modules/embed/mcp-app.js';
+import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
 import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
@@ -30,7 +30,7 @@ import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
-import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -59,7 +59,7 @@ function parseDomainList(raw: string): string[] {
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
-import { AgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
@@ -73,6 +73,7 @@ import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -117,6 +118,7 @@ import { ReviewWorkflowService } from '../modules/workflow/review-workflow/revie
 import { FileLockService } from '../modules/workflow/file-lock.service.js';
 import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
+import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
@@ -238,7 +240,7 @@ export interface CoreServices {
   /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
-  agentDownloadStore: AgentDownloadStore;
+  agentDownloadStore: IAgentDownloadStore;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
    * session cookie — none when it carries none that verifies — so the
@@ -274,6 +276,11 @@ export interface CoreServices {
   toolDeleteService: ToolDeleteService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
+  /**
+   * "What does your team do?" — the starter pack a new knowledge base's admin
+   * may fill it from, and the record of what was chosen. See modules/onboarding.
+   */
+  starterPackService: StarterPackService;
   joinRequestsService: JoinRequestsService;
   /**
    * Records a join request and finishes it in the background. Its `sweep()`
@@ -358,7 +365,7 @@ export interface CoreServices {
    */
   embedService: EmbedService;
   /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
-  mcpAppService: McpAppService;
+  mcpAppService: IMcpAppService;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -713,6 +720,13 @@ export async function createCoreServices(
   // upload root — outside every workspace, for the same reason — until their
   // one-time link is fetched or expires.
   const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  // An upload root that is itself named `agent-downloads` would make the two
+  // stores one directory, each sweeping the other's files.
+  if (agentDownloadsRoot === path.resolve(config.agentUploadsRoot)) {
+    throw new Error(
+      'AGENT_UPLOADS_ROOT must not be a directory named `agent-downloads`: that name, beside it, is the agent download root.',
+    );
+  }
   await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
     name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
     why:
@@ -909,6 +923,9 @@ export async function createCoreServices(
     // it reach every hook point.
     workflowHooks,
   );
+  // The leftover-branch cleanup asks the Deployment page at every round, so
+  // switching it off there applies without a restart.
+  workflowService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
@@ -1093,6 +1110,27 @@ export async function createCoreServices(
     [config.adminEmail],
   );
 
+  // The starter-pack question: one commit on the default branch through the
+  // same batch write the roles admin uses, the choice kept as a deployment
+  // setting. Read by its routes and by `start_session`'s first-run note.
+  const starterPackService = new StarterPackService({
+    packsDir: config.starterPacksDir,
+    kb,
+    workspaceService,
+    workflow: workflowService,
+    adminAccess,
+    settings,
+    accessControl,
+    disk,
+    pluginSource,
+    pluginLocks: pluginProvisionService,
+    events: eventBus,
+    fileChanges: fileChangeNotifier,
+    // Its own lock: one starter-pack choice at a time, a concern no other
+    // service's mutex serialises.
+    choosing: new WorkspaceMutex(),
+  });
+
   // In-app update check: lazily compares the running release version against
   // the newest published GitHub release, only when an admin's browser asks —
   // no timers, so a deployment nobody looks at makes zero calls. The flag
@@ -1192,9 +1230,13 @@ export async function createCoreServices(
   // Connection keys also come as GitHub-shaped links (`gho_…`, kind
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
-    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC,
-  });
+  const externalApiKeyService = new ExternalApiKeyService(
+    db,
+    config.externalApiKeyPrefix,
+    { [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC },
+    // A key's first use tells its owner's open tabs that the agent arrived.
+    eventBus,
+  );
 
   // The facade that lets products which sync marketplaces only from a GitHub
   // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
@@ -1252,6 +1294,10 @@ export async function createCoreServices(
     // embed answer to "is this text, or bytes a renderer fetches?" cannot
     // disagree with what a read of the file returns.
     createFileReaderRegistry(docExtractService),
+    // The SAME pre-disk gate the file editor and the agent tools run: a
+    // `roles.yaml` that would not parse is refused before it is written, from
+    // a chat exactly as from the app.
+    makeRolesYamlWriteValidator(kbDirName),
   );
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.
@@ -1314,6 +1360,8 @@ export async function createCoreServices(
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
     tokenPrefix: config.mcpOAuthTokenPrefix,
+    // An agent connection's first use tells its owner's open tabs the agent arrived.
+    events: eventBus,
   });
   // RFC 9728 pointer carried on every MCP 401 challenge so OAuth-capable
   // clients discover the AS. Single source of truth for the resource id.
@@ -1549,6 +1597,7 @@ export async function createCoreServices(
     agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
+    starterPackService,
     joinRequestsService,
     pluginJoinRequestJobs,
     pluginLinkIndex,

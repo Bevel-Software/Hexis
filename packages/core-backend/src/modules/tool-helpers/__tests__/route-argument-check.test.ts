@@ -306,4 +306,32 @@ describe('what the check says nothing about', () => {
     expect(body.error).toContain('"other" is required, and was not given.');
     expect(body.error).not.toContain('"name" is required');
   });
+
+  it('filters by the whole quoted name: a dotted argument is not its first segment, and a nested line is kept', async () => {
+    toolDef({
+      name: 'refuses_by_whole_name',
+      description: 'A tool whose refused argument is the first segment of another, and the name of a nested object.',
+      path: '/api/agent/tools/refuses_by_whole_name',
+      inputs: {
+        type: 'object',
+        properties: {
+          a: { type: 'string' },
+          'a.b': { type: 'string' },
+          body: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+        },
+        required: ['a', 'a.b', 'body'],
+        additionalProperties: false,
+      },
+      refusesItself: ['a', 'body'],
+    });
+    const base = await mount('refuses_by_whole_name');
+    const res = await post(base, 'refuses_by_whole_name', { body: {} });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    // `a` is the tool's own; `a.b` is another argument and IS reported…
+    expect(body.error).not.toContain('"a" is required');
+    expect(body.error).toContain('"a.b" is required, and was not given.');
+    // …and a line about `body.path` is about `body.path`, not about `body`.
+    expect(body.error).toContain('"body.path" is required, and was not given.');
+  });
 });

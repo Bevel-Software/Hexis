@@ -169,8 +169,12 @@ describe('GET /folder/zip judges every file it packs (real resolver, real zip)',
     expect(res.status).toBe(403);
   });
 
-  // `access.md` itself stays in: it is what grants the folder download, so a
-  // caller who may ask for the zip may always read the file that lets them.
+  // `access.md` itself stays in HERE: this fixture's declares nothing for
+  // itself (its frontmatter is empty), so the folder's rules — which admit
+  // the caller — admit the file too. That is not a guarantee: an `access.md`
+  // is judged like any file, by its own frontmatter and the folder chain, and
+  // one whose frontmatter denies the caller its read is left out of the
+  // archive exactly as the single-file route would refuse it.
   it('answers an archive holding only the grant file, not an error, when every content file is withheld', async () => {
     h = await makeHarness({
       'Shared/access.md': '---\n---\ndownload:\n  - Ana <ana@x.io>\n',

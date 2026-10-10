@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('external-api-key');
 import { and, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
-import type { AuthUser } from '@bevel-software/platform-shared';
+import type { AgentConnectedEvent, AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
 import {
@@ -51,6 +51,12 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     private readonly db: Database,
     private readonly keyPrefix: string,
     private readonly kinds: Readonly<Record<string, KeyKindSpec>> = {},
+    /**
+     * Where a key's FIRST use is announced to its owner (`agent-connected`,
+     * see `verifyAndLoadToken`). Optional: without it the stamp is written
+     * and nobody is told.
+     */
+    private readonly events?: { emit(event: AgentConnectedEvent): void },
   ) {
     this.prefixes = [keyPrefix, ...Object.values(kinds).map((k) => k.prefix)];
   }
@@ -97,6 +103,19 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return resolved ? resolved.user : null;
   }
 
+  async isKeyOfSwitchedOffAccount(plaintext: string): Promise<boolean> {
+    if (!this.looksLikeExternalApiKey(plaintext)) return false;
+    // The same key `verifyAndLoadToken` would accept (known, not revoked),
+    // but on an account that is off.
+    const [row] = await this.db
+      .select({ id: externalApiKeys.id })
+      .from(externalApiKeys)
+      .innerJoin(users, eq(externalApiKeys.userId, users.id))
+      .where(and(eq(externalApiKeys.tokenHash, hashToken(plaintext)), isNull(externalApiKeys.revokedAt), isNotNull(users.deactivatedAt)))
+      .limit(1);
+    return row !== undefined;
+  }
+
   async verifyAndLoadToken(
     plaintext: string,
   ): Promise<{ tokenId: string; user: AuthUser } | null> {
@@ -114,6 +133,8 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     const [row] = await this.db
       .select({
         tokenId: externalApiKeys.id,
+        label: externalApiKeys.label,
+        lastUsedAt: externalApiKeys.lastUsedAt,
         userId: users.id,
         email: users.email,
         name: users.name,
@@ -130,9 +151,28 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // the UPDATE. A failed touch is logged but never blocks the caller —
     // the worst case is a slightly stale `last_used_at`, which is fine for
     // a "when was this key last used" audit view.
-    this.touchLastUsed(row.tokenId).catch((err) => {
-      log.warn('touchLastUsed failed:', { err });
-    });
+    //
+    // A key's FIRST use is an agent that has just reached the platform —
+    // what the onboarding waits for — so its owner is told once the stamp
+    // has landed. A key never stamped is CLAIMED (`claimFirstUse`), so of
+    // two requests racing its first use exactly one announces it; a key
+    // stamped before is touched and nobody is told.
+    const stamped = row.lastUsedAt === null ? this.claimFirstUse(row.tokenId) : this.touchLastUsed(row.tokenId).then(() => false);
+    stamped.then(
+      (first) => {
+        if (!first) return;
+        this.events?.emit({
+          kind: 'agent-connected',
+          forUserId: row.userId,
+          client: row.label,
+          agentKind: 'key',
+          at: new Date().toISOString(),
+        });
+      },
+      (err) => {
+        log.warn('touchLastUsed failed:', { err });
+      },
+    );
 
     return {
       tokenId: row.tokenId,
@@ -279,6 +319,23 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       .update(externalApiKeys)
       .set({ lastUsedAt: new Date() })
       .where(eq(externalApiKeys.id, tokenId));
+  }
+
+  /**
+   * The first stamp as ONE statement: the row is taken only while
+   * `last_used_at` is still null, so of two requests (or two replicas)
+   * racing a key's first use the database hands it to exactly one, which
+   * answers true. The loser stamps the ordinary way and answers false.
+   */
+  private async claimFirstUse(tokenId: string): Promise<boolean> {
+    const won = await this.db
+      .update(externalApiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(and(eq(externalApiKeys.id, tokenId), isNull(externalApiKeys.lastUsedAt)))
+      .returning({ id: externalApiKeys.id });
+    if (won.length > 0) return true;
+    await this.touchLastUsed(tokenId);
+    return false;
   }
 }
 

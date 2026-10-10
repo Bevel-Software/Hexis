@@ -70,6 +70,40 @@ export class FileLockService {
   constructor(private readonly db: Database) {}
 
   /**
+   * Branches being deleted right now, with how many deletions hold each. No
+   * lock is granted on them: a deletion checks that no save is landing and
+   * then removes the branch, and a save that took its lock in between would
+   * be lost with the checkout. See `whileNoneAcquired`.
+   */
+  private readonly closing = new Map<string, number>();
+
+  /**
+   * Acquires on each branch that passed the `closing` check and have not
+   * settled yet. `whileNoneAcquired` waits for them: one whose row is still
+   * being written when a deletion starts would otherwise land after the
+   * deletion's last check.
+   */
+  private readonly acquiring = new Map<string, Set<Promise<unknown>>>();
+
+  /**
+   * Run `fn` while no lock can be acquired on `branch`, once every acquire
+   * already under way on it has settled. The deletion paths re-check for
+   * saves landing inside it, so that check sees every lock granted before it,
+   * and the deletion meets no save that started in between.
+   */
+  async whileNoneAcquired<T>(branch: string, fn: () => Promise<T>): Promise<T> {
+    this.closing.set(branch, (this.closing.get(branch) ?? 0) + 1);
+    try {
+      await Promise.allSettled([...(this.acquiring.get(branch) ?? [])]);
+      return await fn();
+    } finally {
+      const n = (this.closing.get(branch) ?? 1) - 1;
+      if (n > 0) this.closing.set(branch, n);
+      else this.closing.delete(branch);
+    }
+  }
+
+  /**
    * Acquire a lock for `(workspaceId, branch, path)` on behalf of `user`.
    *
    * Three outcomes folded into the same return shape:
@@ -98,6 +132,33 @@ export class FileLockService {
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
     const targetPath = canonicalFileIdentity(rawPath);
+    if (this.closing.has(branch)) {
+      throw new WorkflowValidationError(`"${branch}" is being deleted, so "${targetPath}" cannot be held for editing.`, {
+        kind: 'branch-being-deleted',
+        branch,
+        path: targetPath,
+      });
+    }
+    const pending = this.acquireUnchecked(workspaceId, branch, targetPath, user, opts);
+    const inFlight = this.acquiring.get(branch) ?? new Set<Promise<unknown>>();
+    inFlight.add(pending);
+    this.acquiring.set(branch, inFlight);
+    try {
+      return await pending;
+    } finally {
+      inFlight.delete(pending);
+      if (inFlight.size === 0 && this.acquiring.get(branch) === inFlight) this.acquiring.delete(branch);
+    }
+  }
+
+  /** `acquire` past the deletion gate. */
+  private async acquireUnchecked(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+    opts?: { coordination?: boolean },
+  ): Promise<AcquireLockResult> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 

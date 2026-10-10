@@ -1,7 +1,10 @@
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
+import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/roles-yaml-guard.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/account-admission.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
 import {
@@ -41,10 +44,27 @@ interface Opts {
   holderName?: string;
   files?: Record<string, string | Buffer>;
   emailDomainAllowed?: boolean;
+  /** Whether the token's account is still on; `false` = an admin switched it off. */
+  active?: boolean;
   openChangeRequest?: ReturnType<typeof vi.fn>;
   createBranch?: ReturnType<typeof vi.fn>;
+  /** Whether origin already carries the viewer's suggestions branch. */
+  remoteBranchExists?: boolean;
   config?: Partial<EmbedConfig>;
   resolveNodeId?: ((id: string) => Promise<string | null>) | null;
+}
+
+/**
+ * The extraction service the reader registry takes, typed against its
+ * contract: no test here reads a document-format file, and one that did
+ * would get this typed refusal, not a silent empty text.
+ */
+function noDocExtract(): DocExtractService {
+  const extract = async (): Promise<DocExtractOutcome> => ({
+    ok: false,
+    message: 'this suite reads no document-format file',
+  });
+  return { extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService;
 }
 
 function build(opts: Opts = {}) {
@@ -60,8 +80,19 @@ function build(opts: Opts = {}) {
       }
       return Buffer.isBuffer(found) ? found : Buffer.from(found, 'utf8');
     }),
+    // The mint's existence check: a stat, never a read.
+    isFile: vi.fn(async (_id: string, wsPath: string) => files[wsPath] !== undefined),
     writeFile: vi.fn(async () => undefined),
+    // The service's per-path turn, as the real one runs `op`: one at a time
+    // per path, callers in order. `turns` records what ran inside which turn.
+    withPathTurn: vi.fn(async (_id: string, wsPath: string, op: () => Promise<unknown>) => {
+      const before = turns.get(wsPath) ?? Promise.resolve();
+      const mine = before.catch(() => undefined).then(op);
+      turns.set(wsPath, mine);
+      return mine;
+    }),
   };
+  const turns = new Map<string, Promise<unknown>>();
   const accessControl = {
     canRead: vi.fn(async () => opts.canRead ?? true),
     canWrite: vi.fn(async () => opts.canWrite ?? true),
@@ -69,11 +100,15 @@ function build(opts: Opts = {}) {
   const authService = {
     getUserById: vi.fn(async () => USER),
     isEmailDomainAllowed: vi.fn(() => opts.emailDomainAllowed ?? true),
+    isActive: vi.fn(async () => opts.active ?? true),
   };
   const workflowService = {
     // No live lock: a save takes it. The contention rules themselves are
     // exercised against the real lock in embed.service.lock.test.ts.
     getLock: vi.fn(async () => null),
+    // The suggestions branch is created here, under the workflow's own
+    // branch-lifecycle lock, never straight through git.
+    createBranch: opts.createBranch ?? vi.fn(async () => ({})),
     acquireLock: vi.fn(async () => ({
       acquired: opts.acquired ?? true,
       lock: { holderName: opts.holderName ?? 'Bob' },
@@ -84,7 +119,10 @@ function build(opts: Opts = {}) {
     commitChanges: vi.fn(async () => ({ sha: 'deadbee' })),
     openChangeRequest: opts.openChangeRequest ?? vi.fn(async () => ({ number: 42 })),
   };
-  const gitService = { createBranch: opts.createBranch ?? vi.fn(async () => ({})) };
+  const gitService = {
+    // Origin has no suggestions branch yet unless a test says otherwise.
+    remoteBranchExists: vi.fn(async () => opts.remoteBranchExists ?? false),
+  };
   const accountLinks = {
     getUserId: vi.fn(async () => (opts.linkedUserId === undefined ? USER.id : opts.linkedUserId)),
     link: vi.fn(async () => undefined),
@@ -100,7 +138,10 @@ function build(opts: Opts = {}) {
     workflowService as never,
     gitService as never,
     accountLinks as never,
-    createFileReaderRegistry({ extract: async () => ({ kind: 'text', text: '' }) } as never),
+    createFileReaderRegistry(noDocExtract()),
+    // The real gate: the property under test is that an embed write cannot
+    // put on disk what the app's editor would refuse.
+    makeRolesYamlWriteValidator(KB),
     opts.resolveNodeId ?? null,
   );
   return { service, workspaceService, accessControl, authService, workflowService, gitService, accountLinks };
@@ -122,6 +163,18 @@ describe('EmbedService: minting', () => {
       sub: USER.id,
       repoRelative: REPO,
     });
+  });
+
+  /**
+   * The token rides in the tool result and so in the chat transcript;
+   * whoever holds it acts on that one file as its user until it expires.
+   * One hour (Razvan, 2026-10-09), down from the two the embed used before.
+   */
+  it('mints a token that lives one hour', async () => {
+    const { service } = build();
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
+    expect(exp - iat).toBe(60 * 60);
   });
 
   it('mints for an outside account — the connector path, unchanged', async () => {
@@ -364,6 +417,24 @@ describe('EmbedService: bytes', () => {
     expect([...bytes]).toEqual([9]);
   });
 
+  it('refuses another page beside the embedded one: the token shows one page', async () => {
+    const { service, workspaceService } = build({
+      files: { [WS]: PAGE, [`${KB}/Data/Other.md`]: '# Other\n', [`${KB}/Other.md`]: '# Root\n' },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.readBytes(token, './Other.md')).rejects.toThrow(EmbedAccessError);
+    await expect(service.readBytes(token, '/Other.md')).rejects.toThrow(EmbedAccessError);
+    // The page itself, under any spelling, is what the token is for.
+    const { path } = await service.readBytes(token, `/${REPO}`);
+    expect(path).toBe(REPO);
+    // An SVG is text, and the one text format a page draws as a picture.
+    const { service: withSvg } = build({ files: { [WS]: PAGE, [`${KB}/Data/d.svg`]: '<svg/>' } });
+    const svg = await withSvg.mintForUser({ userId: USER.id, reference: REPO });
+    expect((await withSvg.readBytes(svg.token, './d.svg')).path).toBe('Data/d.svg');
+    expect(workspaceService.readFileBinary).not.toHaveBeenCalledWith(expect.anything(), `${KB}/Other.md`);
+    expect(workspaceService.readFileBinary).not.toHaveBeenCalledWith(expect.anything(), `${KB}/Data/Other.md`);
+  });
+
   it('refuses the outside-the-knowledge-base form the view sends', async () => {
     const { service } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
@@ -463,6 +534,19 @@ describe('EmbedService: saving as a writer', () => {
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
   });
 
+  it('refuses to save text over bytes that are not text, and says so in the load', async () => {
+    // A PNG under a markdown name: the fallback reader is text-editable, but
+    // what it answers for these bytes is a refusal, not the file's text.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const { service, workspaceService } = build({ files: { [WS]: png } });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    const view = await service.loadFile(token);
+    expect(view.contentIsText).toBe(false);
+    expect(view.canWrite).toBe(false);
+    await expect(service.save(token, '# replaced')).rejects.toThrow(EmbedAccessError);
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+  });
+
   it('refuses to edit as an identity that does not resolve', async () => {
     const { service } = build({ linkedUserId: null });
     const { token } = await service.mintToken({ accountId: 'acc-1', reference: REPO });
@@ -472,13 +556,20 @@ describe('EmbedService: saving as a writer', () => {
 
 describe('EmbedService: proposing as a non-writer', () => {
   it('commits to the viewer OWN suggestions branch and opens a change request', async () => {
-    const { service, workspaceService, workflowService, gitService } = build({ canWrite: false });
+    const { service, workspaceService, workflowService } = build({ canWrite: false });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     const result = await service.propose(token, 'proposed text');
 
     const branch = 'suggestions/alice-u-1/knowledge';
-    expect(gitService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
+    expect(workflowService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
     expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(branch), WS, 'proposed text');
+    // The write and its commit run inside the workspace service's own
+    // per-path turn — the queue every other write surface takes — so two
+    // proposals for one file from one person cannot interleave.
+    expect(workspaceService.withPathTurn).toHaveBeenCalledWith(encodeURIComponent(branch), WS, expect.any(Function));
+    const turn = workspaceService.withPathTurn.mock.invocationCallOrder[0]!;
+    expect(workspaceService.writeFile.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
+    expect(workflowService.commitChanges.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
     /**
      * COMMITTED, and committed BEFORE the request is opened.
      *
@@ -530,6 +621,20 @@ describe('EmbedService: proposing as a non-writer', () => {
     expect(workflowService.openChangeRequest).toHaveBeenCalled();
   });
 
+  it('a second proposal finds the branch on origin and does not try to create it again', async () => {
+    // Created and pushed by the first proposal, the branch is on origin; a
+    // second `createBranch` would fail as a non-fast-forward push, not as
+    // "already exists" — so origin is asked first.
+    const createBranch = vi.fn(async () => {
+      throw new Error('git push failed: ! [rejected] suggestions/alice-u-1/knowledge (non-fast-forward)');
+    });
+    const { service, workflowService } = build({ canWrite: false, createBranch, remoteBranchExists: true });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.propose(token, 'again')).resolves.toMatchObject({ number: 42 });
+    expect(createBranch).not.toHaveBeenCalled();
+    expect(workflowService.openChangeRequest).toHaveBeenCalled();
+  });
+
   /**
    * The person's one open Knowledge request already covers this branch — which
    * is the state `propose` is trying to reach, not a failure. The refusal
@@ -557,6 +662,88 @@ describe('EmbedService: proposing as a non-writer', () => {
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, 'x')).rejects.toThrow(EmbedAccessError);
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses to propose text over bytes that are not text, as a save is refused', async () => {
+    // The same PNG-under-a-markdown-name the save test uses: a proposal is a
+    // commit of text, and must not commit text over bytes a Save refuses.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const { service, workspaceService, workflowService } = build({
+      canWrite: false,
+      files: { [WS]: png },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.propose(token, '# replaced')).rejects.toThrow(EmbedAccessError);
+    expect(workflowService.createBranch).not.toHaveBeenCalled();
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+    expect(workflowService.openChangeRequest).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The embed writes through `workspaceService.writeFile`, which puts bytes on
+ * disk with no gate of its own — the app's editor and the agent tools write
+ * through a filesystem that refuses a `roles.yaml` that would not parse. The
+ * embed asks that same gate first, so a chat cannot commit what the app
+ * would refuse.
+ */
+describe('EmbedService: a switched-off account', () => {
+  it('reads, saves and proposes nothing on a token minted for it, and is told why', async () => {
+    const { service, workspaceService, workflowService } = build({ active: false });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    for (const call of [
+      () => service.loadFile(token),
+      () => service.readBytes(token),
+      () => service.acquireLock(token),
+      () => service.save(token, 'x'),
+      () => service.propose(token, 'x'),
+    ]) {
+      // One invocation, both checks on its one rejection.
+      const err: unknown = await call().then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(EmbedAccessError);
+      expect((err as Error).message).toBe(ACCOUNT_DEACTIVATED_MESSAGE);
+    }
+    expect(workspaceService.readFileBinary).not.toHaveBeenCalled();
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.acquireLock).not.toHaveBeenCalled();
+    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+  });
+});
+
+describe('EmbedService: the roles.yaml write gate', () => {
+  const ROLES = `${KB}/roles.yaml`;
+  const VALID = 'roles:\n  Admin:\n    - a@x.eu\n';
+
+  it('refuses to save a roles.yaml that would not parse, writing nothing and taking no lock', async () => {
+    const { service, workspaceService, workflowService } = build({ files: { [ROLES]: VALID } });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
+    await expect(service.save(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.acquireLock).not.toHaveBeenCalled();
+    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('refuses to propose a roles.yaml that would not parse, before any branch is made', async () => {
+    const { service, workspaceService, workflowService } = build({
+      canWrite: false,
+      files: { [ROLES]: VALID },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
+    await expect(service.propose(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
+    expect(workflowService.createBranch).not.toHaveBeenCalled();
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+  });
+
+  it('saves a roles.yaml that parses, and any other file untouched by the gate', async () => {
+    const { service, workspaceService } = build({ files: { [ROLES]: VALID, [WS]: PAGE } });
+    const roles = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
+    await service.save(roles.token, `${VALID}  Editor:\n    - e@x.eu\n`);
+    expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(BRANCH), ROLES, expect.any(String));
+    const page = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await service.save(page.token, 'roles: [oops');
+    expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(BRANCH), WS, 'roles: [oops');
   });
 });
 
