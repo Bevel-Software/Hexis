@@ -103,6 +103,19 @@ export interface EmbedLinkedAccount {
  */
 export type EmbedNodeIdResolver = (nodeId: string) => Promise<string | null>;
 
+/** The viewer behind a token, as {@link IEmbedService.viewerOf} answers it. */
+export interface EmbedViewer {
+  /** Whether the token's identity resolved to a user at all. */
+  linked: boolean;
+  /** The linked user; null when unlinked. */
+  user: AuthUser | null;
+  /** Read access on the token's file — always false when unlinked. */
+  canRead: boolean;
+  canWrite: boolean;
+  /** The token's file, repository-relative. */
+  repoRelative: string;
+}
+
 /**
  * What the embed service needs of the workspace: the clone of a branch, and
  * four verbs on one file of it. A port rather than the workspace service
@@ -164,6 +177,17 @@ export interface IEmbedService {
 
   /** Load the file the token is scoped to, with the viewer's read/write status. */
   loadFile(token: string): Promise<EmbedFileView>;
+
+  /**
+   * Who is looking through `token`, and at what: the resolved viewer (the
+   * linked user, or none), their read and write verdicts on the token's
+   * file, and the file. The one answer a distribution's own token-authed
+   * route beside this surface (a graph for a dashboard, say) asks before it
+   * serves anything, so it judges the viewer exactly as the embed does — the
+   * same token check, the same account link, the same switched-off refusal.
+   * Throws as `loadFile` throws for a token that is invalid or expired.
+   */
+  viewerOf(token: string): Promise<EmbedViewer>;
 
   /**
    * The raw bytes of the embedded file, or of one asset `path` beside it (an

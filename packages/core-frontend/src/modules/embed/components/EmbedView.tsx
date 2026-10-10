@@ -20,7 +20,7 @@ import {
   saveEmbed,
   type EmbedFileView,
 } from '../services/embed.api';
-import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
+import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE, hostOrigin, openThroughHost } from '../embed-host';
 import { embedBaseUrl, embedToken } from '../embed-config';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
@@ -97,6 +97,7 @@ export function EmbedView() {
   // page URL on the SPA's `/embed` route — see `embed-config`.
   const token = embedToken();
   const registry = useAppRegistry();
+  const graphSource = registry.kbGraphSource;
   const [view, setView] = useState<EmbedFileView | null>(null);
   /** An expired/absent/rejected token — the one state that shows no content. */
   const [expired, setExpired] = useState(!token);
@@ -250,6 +251,39 @@ export function EmbedView() {
     };
   }, [token]);
 
+  // The content's height, reported to the host whenever it changes, so a
+  // host that sizes its frame to the content (the Atlassian issue panel)
+  // can follow instead of showing a gap or an inner scrollbar. The app's
+  // global CSS pins html, body and #root to 100% height for the three-pane
+  // shell; inside a fixed-height frame that is exactly the gap, so the
+  // embed relaxes them to natural height for as long as it is mounted.
+  // Nothing is posted when the page is not framed: there is nobody to tell.
+  useEffect(() => {
+    if (window.parent === window) return;
+    const docEl = document.documentElement;
+    const root = document.getElementById('root');
+    const targets = [docEl, document.body, root].filter((el): el is HTMLElement => el !== null);
+    const prev = targets.map((el) => ({ el, height: el.style.height, overflow: el.style.overflow }));
+    for (const el of targets) {
+      el.style.height = 'auto';
+      el.style.overflow = 'visible';
+    }
+    const report = () => {
+      const height = Math.ceil(docEl.getBoundingClientRect().height);
+      window.parent.postMessage({ type: EMBED_HEIGHT_MESSAGE, height }, hostOrigin() ?? '*');
+    };
+    report();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(report) : null;
+    observer?.observe(document.body);
+    return () => {
+      observer?.disconnect();
+      for (const { el, height, overflow } of prev) {
+        el.style.height = height;
+        el.style.overflow = overflow;
+      }
+    };
+  }, []);
+
   /**
    * The surface the app's renderers are mounted on. Rebuilt only when the
    * page changes: the renderers take it as a context, and a fresh object per
@@ -281,8 +315,11 @@ export function EmbedView() {
       // No download route under the token: `download:` is its own verb, which
       // the embed has nothing to resolve it with.
       offersDownload: false,
+      // The knowledge graph a dashboard draws, as this token's viewer may see
+      // it — when the distribution registered where the embed reads it from.
+      ...(graphSource ? { loadKbGraph: () => graphSource.inEmbed(token) } : {}),
     };
-  }, [view, token]);
+  }, [view, token, graphSource]);
 
   /**
    * The workspace the renderers believe they are reading from. Never dialled:

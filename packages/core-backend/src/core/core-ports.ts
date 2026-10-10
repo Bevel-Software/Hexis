@@ -10,6 +10,7 @@ import type { IAccountAdmission } from '../modules/auth/account-admission.js';
 import type { IWriteAccess } from '../modules/write-access/write-access.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
+import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -138,6 +139,15 @@ export interface CorePorts {
    * `modules/write-access/write-access.ts`.
    */
   writeAccess?: IWriteAccess;
+  /**
+   * How an embed reference that is a bare NODE ID (`/workspace/<branch>/<id>`,
+   * the app's copy-link form) becomes the repository path it names. Core has
+   * no node graph, so core refuses such a reference; a distribution with one
+   * answers from it, and the Atlassian connector's links to nodes mint as
+   * they did when that distribution served the embed itself. Returns null
+   * for an id that names nothing. See `modules/embed/embed.interface.ts`.
+   */
+  embedNodeIdResolver?: EmbedNodeIdResolver;
 }
 
 /**

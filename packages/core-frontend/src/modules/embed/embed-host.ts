@@ -14,6 +14,12 @@ export const EMBED_EXPIRED =
 
 /** The message the embed page sends its host to have a link opened. */
 export const EMBED_OPEN_MESSAGE = 'bevel-embed-open';
+/**
+ * What the embed posts to its host when its content height changes, so a
+ * host that sizes its frame to the content (the Atlassian issue panel does)
+ * can follow. `{ type, height }`, height in CSS pixels.
+ */
+export const EMBED_HEIGHT_MESSAGE = 'bevel-embed-height';
 
 /**
  * The host's origin, from the referrer — used as the explicit `postMessage`
@@ -24,7 +30,7 @@ export const EMBED_OPEN_MESSAGE = 'bevel-embed-open';
  * and not a leak: the payload is a URL to open, the host re-validates it
  * before acting, and the alternative is a dead link.
  */
-function hostOrigin(): string | null {
+export function hostOrigin(): string | null {
   try {
     return new URL(document.referrer).origin;
   } catch {

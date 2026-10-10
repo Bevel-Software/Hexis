@@ -21,6 +21,7 @@ import type {
   EmbedProposalResult,
   EmbedSubject,
   EmbedTokenResult,
+  EmbedViewer,
   IEmbedService,
 } from './embed.interface.js';
 import {
@@ -554,6 +555,12 @@ export class EmbedService implements IEmbedService {
     if (!canWrite) throw new EmbedAccessError();
     await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
     return { claims, user, wsPath: this.wsPathFor(claims.repoRelative) };
+  }
+
+  async viewerOf(token: string): Promise<EmbedViewer> {
+    const claims = this.verifyToken(token);
+    const identity = await this.resolveIdentity(claims);
+    return { ...identity, repoRelative: claims.repoRelative };
   }
 
   /** Resolve the token's identity to a user + read/write verdicts. */

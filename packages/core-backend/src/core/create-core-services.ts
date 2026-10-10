@@ -1298,6 +1298,9 @@ export async function createCoreServices(
     // `roles.yaml` that would not parse is refused before it is written, from
     // a chat exactly as from the app.
     makeRolesYamlWriteValidator(kbDirName),
+    // A node-id reference resolves only where a node graph is: the
+    // distribution's, when it registers one (`ports.embedNodeIdResolver`).
+    ports.embedNodeIdResolver ?? null,
   );
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.

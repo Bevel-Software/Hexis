@@ -711,6 +711,41 @@ describe('EmbedService: a switched-off account', () => {
   });
 });
 
+/**
+ * A distribution's own token-authed route beside the embed (a graph for a
+ * dashboard) asks who is looking before it serves anything, and must judge
+ * the viewer exactly as the embed does.
+ */
+describe('EmbedService: who is looking through a token', () => {
+  it('answers the linked user, their verdicts on the file, and the file', async () => {
+    const { service } = build({ canWrite: false });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: `${REPO}#intro` });
+    expect(await service.viewerOf(token)).toEqual({
+      linked: true,
+      user: expect.objectContaining({ id: USER.id, email: USER.email }),
+      canRead: true,
+      canWrite: false,
+      repoRelative: REPO,
+    });
+  });
+
+  it('answers nobody for an unlinked outside account, and refuses a switched-off one as the embed does', async () => {
+    const unlinked = build({ linkedUserId: null });
+    const outside = await unlinked.service.mintToken({ accountId: 'acc-1', reference: REPO });
+    expect(await unlinked.service.viewerOf(outside.token)).toEqual({
+      linked: false,
+      user: null,
+      canRead: false,
+      canWrite: false,
+      repoRelative: REPO,
+    });
+    const off = build({ active: false });
+    const { token } = await off.service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(off.service.viewerOf(token)).rejects.toThrow(ACCOUNT_DEACTIVATED_MESSAGE);
+    await expect(off.service.viewerOf('not-a-token')).rejects.toThrow(EmbedTokenError);
+  });
+});
+
 describe('EmbedService: the roles.yaml write gate', () => {
   const ROLES = `${KB}/roles.yaml`;
   const VALID = 'roles:\n  Admin:\n    - a@x.eu\n';
