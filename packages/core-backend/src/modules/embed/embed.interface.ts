@@ -121,6 +121,8 @@ export interface EmbedWorkspacePort {
 export interface EmbedAuthPort {
   getUserById(userId: string): Promise<AuthUser | null>;
   isEmailDomainAllowed(email: string): boolean;
+  /** Whether the account is on: it exists and no admin switched it off — the gate every credential passes. */
+  isActive(userId: string): Promise<boolean>;
 }
 
 /**

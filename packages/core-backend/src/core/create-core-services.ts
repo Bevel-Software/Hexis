@@ -1126,6 +1126,9 @@ export async function createCoreServices(
     pluginLocks: pluginProvisionService,
     events: eventBus,
     fileChanges: fileChangeNotifier,
+    // Its own lock: one starter-pack choice at a time, a concern no other
+    // service's mutex serialises.
+    choosing: new WorkspaceMutex(),
   });
 
   // In-app update check: lazily compares the running release version against

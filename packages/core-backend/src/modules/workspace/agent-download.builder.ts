@@ -23,7 +23,7 @@ export interface DownloadBuildDeps {
   maxFiles: number;
   /** What is at a workspace path: nothing, a file, or a folder's explorer-visible files (repository-relative). */
   candidatesAt(wsPath: string): Promise<DownloadCandidates>;
-  /** The caller's `read` verdicts, repository-relative paths. */
+  /** The caller's `read` verdicts, repository-relative paths — files and the requested folders alike, as the explorer tree asks them. */
   canReadBatch(paths: string[]): Promise<Map<string, boolean>>;
   /** The caller's `download` verdicts, repository-relative paths. */
   canDownloadBatch(paths: string[]): Promise<Map<string, boolean>>;
@@ -116,9 +116,17 @@ function zipsTooLarge(total: number, maxBytes: number): ToolError {
  * folder is not enough — a file's own frontmatter or a nested `access.md` can
  * withhold it, and the app's folder zip once packed such files.
  *
- * A file the caller may not read is `not found`, the same answer as a path
- * with nothing at it; a readable one they may not download is `download
- * permission required`. Every included file then goes to the deployment's read
+ * A file the caller NAMED and may not read is `not found`, the same answer
+ * as a path with nothing at it; a file met inside a requested folder that
+ * they may not read is left out without a word — its name is what the read
+ * model hides, and the explorer leaves it out the same way — and a folder
+ * the explorer would drop (one they may not read, with nothing readable
+ * beneath it) is `not found` too, while a folder they may read that holds
+ * nothing they may read "holds no files", as the explorer keeps it. A
+ * readable file they may not download is `download permission
+ * required`, named either way: the explorer shows it. The file count a
+ * request is held to counts only what the caller may read, so no refusal
+ * tells them how many files they cannot see. Every included file then goes to the deployment's read
  * hook once, as a `read_file` of it would, and one the hook refuses is listed
  * with the hook's own words. One refused path never stops the others.
  *
@@ -127,8 +135,8 @@ function zipsTooLarge(total: number, maxBytes: number): ToolError {
  * over: once on the distinct files (each file's own link), and once on the
  * folders' zips together, where a file is counted in every zip that packs it —
  * so what one request stores is bounded by twice the limit, however its
- * folders overlap. A request holding more than `maxFiles` files is refused
- * before anything is judged.
+ * folders overlap. A request holding more than `maxFiles` readable files is
+ * refused before any of them is read.
  */
 export async function buildDownload(requested: string[], deps: DownloadBuildDeps): Promise<BuiltDownload> {
   const { kbDirName } = deps;
@@ -141,9 +149,11 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
     refused.push({ path, reason });
   };
 
-  /** Every file named directly or found in a folder, once, in the order first met. */
+  /** Every candidate file, named directly or found in a folder, once, in the order first met. */
   const sizes = new Map<string, number>();
-  const folders: { path: string; files: string[] }[] = [];
+  /** The files named directly, and each requested folder's files, before any verdict. */
+  const direct: string[] = [];
+  const candidates: { path: string; files: string[] }[] = [];
   for (const wsPath of [...new Set(requested)]) {
     let found: DownloadCandidates;
     try {
@@ -161,30 +171,58 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
       refuse(wsPath, NOT_FOUND);
       continue;
     }
-    // The folder itself first: a zip of it is asked for as the app's folder
-    // download is, by `download` on the folder, before any file inside is
-    // judged — a file's own grant must not open a folder its rules deny.
-    if (found.kind === 'folder' && deps.canDownloadFolder && !(await deps.canDownloadFolder(wsPath))) {
-      refuse(wsPath, DOWNLOAD_PERMISSION_REQUIRED);
-      continue;
-    }
     for (const f of found.files) if (!sizes.has(f.path)) sizes.set(f.path, f.bytes);
-    if (sizes.size > deps.maxFiles) throw downloadTooManyFiles(deps.maxFiles);
-    if (found.kind === 'folder') {
-      if (found.files.length === 0) refuse(wsPath, EMPTY_FOLDER);
-      else folders.push({ path: wsPath, files: found.files.map((f) => f.path) });
-    }
+    if (found.kind === 'folder') candidates.push({ path: wsPath, files: found.files.map((f) => f.path) });
+    else direct.push(...found.files.map((f) => f.path));
   }
 
-  // Every file judged on its own: read first, download on what may be read.
-  const all = [...sizes.keys()];
-  const readable = all.length > 0 ? await deps.canReadBatch(all) : new Map<string, boolean>();
+  // READ first, over everything found — the files and the requested folders
+  // themselves (the root is every caller's) — before any other answer is
+  // given. One batch, the primitive the explorer tree judges with.
+  const relOfFolder = (wsPath: string): string =>
+    wsPath === kbDirName ? '' : wsPath.startsWith(`${kbDirName}/`) ? wsPath.slice(kbDirName.length + 1) : wsPath;
+  const folderRels = candidates.map((f) => relOfFolder(f.path)).filter((rel) => rel !== '');
+  const asked = [...new Set([...sizes.keys(), ...folderRels])];
+  const readable = asked.length > 0 ? await deps.canReadBatch(asked) : new Map<string, boolean>();
+  // The count the caller is held to is the count of what they may read: a
+  // refusal that counted hidden files would tell them how many there are.
+  const visibleCount = [...sizes.keys()].filter((p) => readable.get(p) === true).length;
+  if (visibleCount > deps.maxFiles) throw downloadTooManyFiles(deps.maxFiles);
+
+  // A folder is answered as the explorer shows it. The explorer keeps a
+  // folder the caller may read — left empty when its files are filtered, it
+  // stays, "holds no files" — and a folder with something readable beneath
+  // it; one that is neither it drops outright, so here it is `not found`,
+  // the answer a folder that is not there gets. Only a folder with files to
+  // pack is then asked for its own `download`: a zip of it is asked for as
+  // the app's folder download is, before any file inside is judged — a
+  // file's own grant must not open a folder its rules deny.
+  const folders: { path: string; files: string[] }[] = [];
+  for (const folder of candidates) {
+    const rel = relOfFolder(folder.path);
+    const folderReadable = rel === '' || readable.get(rel) === true;
+    const somethingReadable = folder.files.some((f) => readable.get(f) === true);
+    if (!folderReadable && !somethingReadable) refuse(folder.path, NOT_FOUND);
+    else if (!somethingReadable) refuse(folder.path, EMPTY_FOLDER);
+    else if (deps.canDownloadFolder && !(await deps.canDownloadFolder(folder.path))) {
+      refuse(folder.path, DOWNLOAD_PERMISSION_REQUIRED);
+    } else folders.push(folder);
+  }
+
+  // Every file judged on its own: the named ones and the kept folders' —
+  // read first, download on what may be read.
+  const all = [...new Set([...direct, ...folders.flatMap((f) => f.files)])];
   const visible = all.filter((p) => readable.get(p) === true);
   const downloadable = visible.length > 0 ? await deps.canDownloadBatch(visible) : new Map<string, boolean>();
+  const named = new Set(requested);
   const allowed: string[] = [];
   for (const rel of all) {
-    if (readable.get(rel) !== true) refuse(toWs(rel), NOT_FOUND);
-    else if (downloadable.get(rel) !== true) refuse(toWs(rel), DOWNLOAD_PERMISSION_REQUIRED);
+    if (readable.get(rel) !== true) {
+      // Named by the caller: answered as nothing there. Found inside a folder:
+      // not answered at all — listing it as refused would hand the caller the
+      // name of a file the read model hides from them.
+      if (named.has(toWs(rel))) refuse(toWs(rel), NOT_FOUND);
+    } else if (downloadable.get(rel) !== true) refuse(toWs(rel), DOWNLOAD_PERMISSION_REQUIRED);
     else allowed.push(rel);
   }
 

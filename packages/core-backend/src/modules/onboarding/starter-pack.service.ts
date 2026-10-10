@@ -68,7 +68,7 @@ import type { IAdminAccessService } from '../admin/admin.interface.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
 import {
   isUntouchedStarterPage,
@@ -149,16 +149,16 @@ export interface StarterPackServiceDeps {
   events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void };
   /** The post-commit hook catalogs refresh on — the plugin's skills appear without a restart. */
   fileChanges?: FileChangeNotifier;
-}
-
-export class StarterPackService implements IStarterPackService, FirstRunStarterSource {
   /**
    * One choice at a time on this replica: the second of two quick clicks
    * finds the first one's answer recorded. Across replicas the recorded
-   * answer itself is the guard (see `choose`).
+   * answer itself is the guard (see `choose`). Handed in by the composition
+   * root, as every lock a service runs under is.
    */
-  private readonly choosing = new WorkspaceMutex();
+  choosing: WorkspaceMutex;
+}
 
+export class StarterPackService implements IStarterPackService, FirstRunStarterSource {
   constructor(private readonly deps: StarterPackServiceDeps) {}
 
   /** What the caller is offered, and what was chosen. */
@@ -195,7 +195,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
     if (!(await this.deps.adminAccess.isAdmin(user.email))) {
       throw new StarterPackError('Only an admin can add starter pages.', 403);
     }
-    return this.choosing.run('starter-pack', async () => {
+    return this.deps.choosing.run('starter-pack', async () => {
       /**
        * Every value this call has written as its claim, newest first: the one
        * taken, and each renewal the fence wrote — or may have written, since a

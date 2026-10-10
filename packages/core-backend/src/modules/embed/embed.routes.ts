@@ -7,6 +7,7 @@ import {
   EmbedTokenError,
 } from './embed.errors.js';
 import { EmbedRefParseError } from './embed-link.js';
+import { rawExtensionOf, rawMimeFor } from '../workspace/file-readers/raw-mime.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /**
@@ -14,18 +15,6 @@ import '../auth/auth.middleware.js'; // Express Request augmentation
  * renderer draws from a URL. Anything else is bytes the renderer parses
  * itself (a workbook, a deck), served as the octet stream it is.
  */
-const RAW_MIME_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.svg': 'image/svg+xml',
-  '.bmp': 'image/bmp',
-  '.ico': 'image/x-icon',
-  '.avif': 'image/avif',
-  '.pdf': 'application/pdf',
-};
 
 /**
  * The embed surface: a token-minted, pseudonymous, short-lived page that
@@ -161,15 +150,14 @@ export function createEmbedRoutes(embedService: IEmbedService): express.Router {
     const path = typeof req.query.path === 'string' ? req.query.path : undefined;
     try {
       const { bytes, path: served } = await embedService.readBytes(token, path);
-      // The type from the extension, as the workspace raw route serves it:
-      // under `nosniff` a browser draws an `<img>` only from an `image/*`
-      // answer, and never sniffs SVG at all, so an octet-stream picture is a
-      // broken image.
-      const ext = served.slice(served.lastIndexOf('.')).toLowerCase();
-      res.setHeader('Content-Type', RAW_MIME_TYPES[ext] ?? 'application/octet-stream');
+      // The type from the extension, the one table the workspace raw route
+      // serves from: under `nosniff` a browser draws an `<img>` only from an
+      // `image/*` answer, and never sniffs SVG at all, so an octet-stream
+      // picture is a broken image.
+      res.setHeader('Content-Type', rawMimeFor(served));
       // An SVG can carry scripts; drawn through `<img>` they never run, but a
       // tab opened on this address would run them under the app's origin.
-      if (ext === '.svg') res.setHeader('Content-Security-Policy', 'sandbox');
+      if (rawExtensionOf(served) === '.svg') res.setHeader('Content-Security-Policy', 'sandbox');
       // Never a download, always bytes for a renderer to draw: an embed is a
       // view, and `download:` is a separate verb the app's own route gates.
       res.setHeader('Content-Disposition', 'inline');

@@ -3824,8 +3824,8 @@ export function registerWorkspaceTools(
         `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
         'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
         '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
-        'Refused: `not found` (missing or unreadable), `download permission required`; no link when nothing is ' +
-        'included. At most 500 MB per request.',
+        'Refused: `not found` (missing or named-but-unreadable; folders omit unreadable files), ' +
+        '`download permission required`; no link when nothing is included. At most 500 MB per request.',
       inputs: {
         type: 'object',
         properties: {
@@ -3934,7 +3934,7 @@ export function registerWorkspaceTools(
         kbDirName,
         maxBytes: ZIP_DOWNLOAD_MAX_BYTES,
         maxFiles: DOWNLOAD_MAX_FILES,
-        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
+        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p),
         canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
         canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
         // The folder-level gate the app's zip route applies, before the files.

@@ -105,6 +105,7 @@ function harness({
     settings: settings as never,
     accessControl,
     events,
+    choosing: new WorkspaceMutex(),
   });
   return { svc, store, settings, locks, lockRequests, workflow, events, accessControl, unreadable };
 }

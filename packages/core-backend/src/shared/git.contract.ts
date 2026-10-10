@@ -70,8 +70,15 @@ export interface GitCredentials {
    * failure here is not the call's failure: git runs with the token in
    * hand, and the host says what it thinks of it. Absent for a credential
    * that does not expire.
+   *
+   * `refused` is the runner reporting that the host just refused the
+   * credential in hand: whatever is held is dead, however much time the
+   * clock says it has left, and a fresh one is asked for now, past whatever
+   * the provider remembers about a recent failure. The failure is thrown to
+   * the caller; what `token` answers afterwards is what the runner judges
+   * by — a credential that could not be replaced is not offered again.
    */
-  prepare?(): Promise<void>;
+  prepare?(opts?: { refused?: boolean }): Promise<void>;
 }
 
 /** The username git is given when a deployment names none. */

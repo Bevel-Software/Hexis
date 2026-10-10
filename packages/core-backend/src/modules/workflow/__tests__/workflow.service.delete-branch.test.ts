@@ -588,6 +588,22 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     for (const line of lines) expect(line).not.toContain('@');
   });
 
+  it("names the person by id on the close made when a request's page is opened", async () => {
+    const rows = [open(23, 'ali/page', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/page': clean('p1') }, changes: { 'ali/page': [] } });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      await expect(h.svc.closeEmptyChangeRequest(23, BOB)).resolves.toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.filter((l) => l.includes('closed change request #23'))).toEqual([
+      expect.stringContaining(' by u-bob: '),
+    ]);
+    for (const line of lines) expect(line).not.toContain('@');
+  });
+
   it('a request the caller may not see is not in the preview at all, and is refused on without its number or link', async () => {
     // #21 is empty and #25 live; the caller can see neither.
     const rows = [open(21, 'bob/sync', DEFAULT), open(25, 'ali/secret', 'bob/sync')];
