@@ -92,6 +92,7 @@ import { EventBusContext, type EventBusContextValue } from '../../workflow/state
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { AuthContext } from '../../auth/state/auth.context';
+import { describeReadFailure } from '../services/denied-file.api';
 
 const SHA = 'f'.repeat(40);
 const APPLIED_AT = '2026-10-10T09:30:00.000Z';
@@ -421,6 +422,45 @@ describe('ChangeRequestDialog: an applied request', () => {
     expect(crApi.readFileAtCommit).toHaveBeenCalledWith('main', 'knowledge-base/Docs/original.yaml', SHA, 'before');
   });
 
+  it('names where a copied file came from', async () => {
+    commitHolds({
+      'Docs/copy.yaml': { after: 'kept: yes\n' },
+      'Docs/source.yaml': { before: 'kept: yes\n' },
+    });
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Docs/copy.yaml', { status: 'copied', previousPath: 'Docs/source.yaml' })]),
+    );
+    renderDialog();
+    expect(await screen.findByText('Copied: Docs/source.yaml → Docs/copy.yaml')).toBeInTheDocument();
+  });
+
+  it('a refused before side of a rename is described for the OLD path, whose owners lift it', async () => {
+    crApi.readFileAtCommit.mockImplementation(
+      async (_ws: string, _workspacePath: string, _sha: string, side: string) => {
+        if (side === 'before') throw new WorkspaceApiError(403);
+        return 'kept: yes\n';
+      },
+    );
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Sales/renamed.yaml', { status: 'renamed', previousPath: 'Finance/original.yaml' })]),
+    );
+    renderDialog();
+    expect(await screen.findByText(/You don't have access to read this file/)).toBeInTheDocument();
+    expect(describeReadFailure).toHaveBeenCalledWith(expect.anything(), 'main', 'Finance/original.yaml');
+    expect(describeReadFailure).not.toHaveBeenCalledWith(expect.anything(), 'main', 'Sales/renamed.yaml');
+  });
+
+  it('a deleted binary with no viewer is still gated, and locks for a reader who may not read it', async () => {
+    crApi.fileExistsOnWorkspace.mockRejectedValue(new WorkspaceApiError(403));
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Finance/terms.zip', { status: 'removed', isBinary: true })]),
+    );
+    renderDialog();
+    expect(await screen.findByText(/You don't have access to read this file/)).toBeInTheDocument();
+    expect(crApi.fileExistsOnWorkspace).toHaveBeenCalledWith('main', 'knowledge-base/Finance/terms.zip');
+    expect(screen.queryByText(/binary file .* this request deleted/)).not.toBeInTheDocument();
+  });
+
   it('renders a markdown file as applied through the document diff', async () => {
     commitHolds({ 'Docs/page.md': { before: '# Old', after: '# New' } });
     detailMock.fetchPrDetail.mockResolvedValue(detailOf('merged', [file('Docs/page.md')]));
@@ -472,6 +512,18 @@ describe('ChangeRequestDialog: an applied request', () => {
     expect(within(row).getByRole('img', { name: /You don't have access/ })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Open page' })).not.toBeInTheDocument();
     expect(screen.queryByText(/made no change of its own/)).not.toBeInTheDocument();
+  });
+
+  it('without a merge commit of its own, a failed read says so with Try again, never "already there"', async () => {
+    crApi.fileExistsOnWorkspace.mockRejectedValueOnce(new WorkspaceApiError(500, 'git timed out'));
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Docs/pricing.yaml')], { appliedSha: null }),
+    );
+    renderDialog();
+    expect(await screen.findByText(/couldn't be read right now \(git timed out\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/made no change of its own/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/made no change of its own/)).toBeInTheDocument();
   });
 
   it('with no files and no commit of its own, is the status line in a compact dialog', async () => {
@@ -546,6 +598,19 @@ describe('ChangeRequestDialog: a closed request', () => {
     expect(crApi.readFileOnBranch).not.toHaveBeenCalled();
   });
 
+  it("keeps the author's own headings, and drops only the generated owners block", async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('closed', [], {}, {
+        body: 'Why.\n\n## Background\n\nThe old pages.\n\n## Affected owners\n\n- `Docs/a.md` — Admin',
+      }),
+    );
+    renderDialog({ cr: { ...CR, state: 'closed' } });
+    await screen.findByRole('status');
+    expect(screen.getByText(/## Background/)).toBeInTheDocument();
+    expect(screen.getByText(/The old pages\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Affected owners/)).not.toBeInTheDocument();
+  });
+
   it('names the move of the knowledge base when that is why it closed', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detailOf('closed', [], { closedReason: 'repository-replaced' }));
     renderDialog({ cr: { ...CR, state: 'closed' } });
@@ -556,6 +621,14 @@ describe('ChangeRequestDialog: a closed request', () => {
 });
 
 describe('ChangeRequestDialog: opened from a link that already says it is finished', () => {
+  it('says why when the detail cannot be loaded, rather than loading forever', async () => {
+    detailMock.fetchPrDetail.mockRejectedValue(new Error('Change request #7 could not be read.'));
+    renderDialog({ cr: { ...CR, state: 'merged' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Change request #7 could not be read.');
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+    expectNoReviewControls();
+  });
+
   it('never shows the review view while the detail loads', () => {
     detailMock.fetchPrDetail.mockReturnValue(new Promise(() => {}));
     renderDialog({ cr: { ...CR, state: 'merged' } });

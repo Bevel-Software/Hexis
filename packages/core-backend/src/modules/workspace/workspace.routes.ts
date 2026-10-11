@@ -748,6 +748,8 @@ export function createWorkspaceRoutes(
   /**
    * GET /workspace/:id/file/raw?path=<file>[&download=1][&v=<n>][&ref=<sha>[&side=before]]
    *
+   * (A HEAD without `ref` passes the same gates and answers from a stat.)
+   *
    * The bytes of one workspace file: for the document renderers' fetches, the
    * file tree's Download, and the `<img>` tags the markdown pipeline emits for
    * `![alt](./assets/x.png)`. An `<img>` sends no Authorization header, so it
@@ -836,6 +838,23 @@ export function createWorkspaceRoutes(
     const wantsDownload = req.query.download === '1';
     if (wantsDownload) {
       if (!(await requireDownloadPermission(req, res, id, filePath))) return;
+    }
+    // A HEAD of today's file asks only "is it there" (a finished change
+    // request's Open page): the same gates, then a stat, never the bytes —
+    // Express would otherwise run this handler whole and read, then drop, a
+    // file that may be tens of MB.
+    if (req.method === 'HEAD' && ref === null) {
+      try {
+        res.setHeader('Cache-Control', 'private, no-cache');
+        res.status((await workspaceService.isFile(id, filePath)) ? 200 : 404).end();
+      } catch (error) {
+        if (error instanceof PathTraversalError) {
+          sendError(res, error);
+          return;
+        }
+        res.status(404).end();
+      }
+      return;
     }
     try {
       let buffer: Buffer;

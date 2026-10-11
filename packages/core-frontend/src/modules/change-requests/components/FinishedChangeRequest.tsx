@@ -28,6 +28,11 @@ interface FinishedChangeRequestProps {
    * finished, so such a request never shows the review view first.
    */
   detail: PullRequestDetail | null;
+  /**
+   * Why the detail could not be loaded, when it could not — said in place of
+   * the status line, rather than "Loading…" forever.
+   */
+  error?: string | null;
   /** The file to land on, repo-relative, when the request changed it. */
   initialPath?: string;
   onClose(): void;
@@ -56,6 +61,7 @@ interface FinishedChangeRequestProps {
 export function FinishedChangeRequest({
   cr,
   detail,
+  error,
   initialPath,
   onClose,
   onOpenPage,
@@ -74,9 +80,12 @@ export function FinishedChangeRequest({
   const selectedIsMarkdown = /\.md$/i.test(selected) && !rendersAsText(selected);
   const isAdded = selectedFile?.status === 'added';
   const isRemoved = selectedFile?.status === 'removed';
-  const movedFrom =
-    selectedFile?.status === 'renamed' && selectedFile.previousPath && selectedFile.previousPath !== selected
-      ? selectedFile.previousPath
+  /** Where the file came from, for a rename or a copy: the path its "before" side reads. */
+  const source =
+    (selectedFile?.status === 'renamed' || selectedFile?.status === 'copied') &&
+    selectedFile.previousPath &&
+    selectedFile.previousPath !== selected
+      ? { verb: selectedFile.status === 'copied' ? 'Copied' : 'Moved', from: selectedFile.previousPath }
       : null;
 
   const { read, failureOf, retry } = useAppliedFile(appliedSha, selectedFile, targetBranch, {
@@ -133,14 +142,16 @@ export function FinishedChangeRequest({
     // Refused, with or without a commit to read: the sentence and the lock,
     // never the content.
     pane = <MarkedFile diff={null} raw={null} failure={failure} onRetry={() => retry(selected)} />;
-  } else if (appliedSha === null) {
+  } else if (appliedSha === null && failure === null) {
+    // Only once the remaining read settled cleanly: a retryable failure falls
+    // through to the sentence with Try again rather than reading as success.
     pane = (
       <p className="py-6 text-center text-detail text-ink-faint">
         Everything this request proposed was already there when it was applied, so it made no
         change of its own to show.
       </p>
     );
-  } else if (selectedIsBinary && failure === null) {
+  } else if (selectedIsBinary && failure === null && appliedSha !== null) {
     pane = hasFileViewer(selected) ? (
       <BranchFilePreview
         branch={targetBranch}
@@ -187,7 +198,13 @@ export function FinishedChangeRequest({
 
         {/* How it ended, first, in one line. Nothing below it is a verb. */}
         {statusLine === null ? (
-          <p className="mt-5 px-8 text-detail text-ink-faint">Loading…</p>
+          error ? (
+            <Banner tone="danger" role="alert" className="mx-8 mt-5">
+              {error}
+            </Banner>
+          ) : (
+            <p className="mt-5 px-8 text-detail text-ink-faint">Loading…</p>
+          )
         ) : (
           <Banner tone="neutral" role="status" className="mx-8 mt-5">
             {statusLine}
@@ -244,9 +261,9 @@ export function FinishedChangeRequest({
                       />
                     ) : null)}
                 </div>
-                {movedFrom && (
+                {source && (
                   <p className="truncate pb-1 font-mono text-meta text-ink-faint">
-                    Moved: {movedFrom} → {selected}
+                    {source.verb}: {source.from} → {selected}
                   </p>
                 )}
                 <div className="min-h-0 flex-1 overflow-y-auto">{pane}</div>

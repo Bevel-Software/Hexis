@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { desc, eq, inArray, sql } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('cr');
@@ -63,6 +63,37 @@ export function applierName(name: string | null | undefined): { name: string } |
   const trimmed = name?.trim() ?? '';
   if (!trimmed || /\S+@\S+/.test(trimmed)) return null;
   return { name: trimmed };
+}
+
+/** One attempt in the merge log, as {@link lastApply} reads it. */
+export interface MergeLogAttempt {
+  name: string;
+  headSha: string;
+  succeeded: boolean;
+  /** Whether the attempt recorded an error (its text is never read here). */
+  hasError: boolean;
+  startedAt: Date;
+}
+
+/**
+ * Who applied a request, and the source head they applied, from its merge-log
+ * attempts. The newest SUCCEEDED attempt, unless that attempt is a recovery
+ * finalization (`finalizeAlreadyApplied`, recorded succeeded WITH a note):
+ * whoever finalized it merged nothing, so the applier is the earlier attempt
+ * that pushed and crashed before recording — begun, never completed (not
+ * succeeded, no error) — and nobody when there is none. `null` when the
+ * request has no succeeded attempt at all.
+ */
+export function lastApply(
+  attempts: MergeLogAttempt[],
+): { name: string | null; headSha: string } | null {
+  const newestFirst = [...attempts].sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+  const at = newestFirst.findIndex((a) => a.succeeded);
+  if (at === -1) return null;
+  const done = newestFirst[at];
+  if (!done.hasError) return { name: done.name, headSha: done.headSha };
+  const pushed = newestFirst.slice(at + 1).find((a) => !a.succeeded && !a.hasError);
+  return pushed ? { name: pushed.name, headSha: pushed.headSha } : { name: null, headSha: done.headSha };
 }
 
 /** How many mismatched applied rows to remember — see `touchedPathsFor`. */
@@ -715,6 +746,10 @@ export class PullRequestService implements IPullRequestService {
     // The SAME routing the list takes, from the same function, so the two
     // surfaces cannot disagree about which files a request has — see
     // {@link changeSourceFor} for why each state reads from what it does.
+    // One exception, below: an applied request with no merge commit of its
+    // own lists what it PROPOSED here, while the list (and owner routing)
+    // answers no touched paths for it — truthfully, since it changed nothing
+    // on the target and no owner's file was touched by it.
     const source = workspaceId ? changeSourceFor(row) : ({ kind: 'none' } as ChangeSource);
     try {
       if (workspaceId && source.kind === 'commit') {
@@ -836,16 +871,22 @@ export class PullRequestService implements IPullRequestService {
     // applied" diff (`finished.appliedSha` stays null). Never another
     // request's change — the head is this request's. A head this clone no
     // longer holds answers no files, as before.
-    const merge = row.state === 'merged' ? await this.lastSucceededMerge(row.number) : null;
-    if (row.state === 'merged' && appliedSha === null && workspaceId && merge?.headSha) {
+    //
+    // The merge-log lookup runs only when something reads it — this fallback,
+    // or the finished facts past the cache — so a warm read of an applied
+    // request with its own commit costs no query.
+    let mergeLookup: Promise<{ name: string | null; headSha: string } | null> | undefined;
+    const merge = () => (mergeLookup ??= this.lastSucceededMerge(row.number));
+    const applied = row.state === 'merged' && appliedSha === null && workspaceId ? await merge() : null;
+    if (workspaceId && applied?.headSha) {
       try {
         files = await this.gitService.changedFilesOfProposalHead(
           workspaceId,
           row.targetBranch,
-          merge.headSha,
+          applied.headSha,
           opts.patches === false ? { patchCap: 0 } : {},
         );
-        headSha = merge.headSha;
+        headSha = applied.headSha;
       } catch (err) {
         if (err instanceof WorkflowValidationError) {
           log.debug(`change request #${prNumber}'s applied head is not readable here; answering no files:`, { err });
@@ -978,7 +1019,10 @@ export class PullRequestService implements IPullRequestService {
       viewerCanBypassMerge,
     });
 
-    const finished = row.state === 'open' ? null : await this.finishedFacts(row, appliedSha, merge);
+    const finished =
+      row.state === 'open'
+        ? null
+        : await this.finishedFacts(row, appliedSha, row.state === 'merged' ? await merge() : null);
 
     const detail: PullRequestDetail = {
       ...summary,
@@ -1045,8 +1089,8 @@ export class PullRequestService implements IPullRequestService {
   /**
    * How a request that is no longer open ended — the facts its finished view
    * states. From the row (`closed_at`, `closed_reason`) and, for an applied
-   * request, the newest SUCCEEDED merge-log row's applier name: the name the
-   * merge commit carries, and the only record of who applied it. Who closed
+   * request, the applier's name from the merge log (see {@link lastApply}):
+   * the name the merge commit carries, and the only record of who applied it. Who closed
    * a request is recorded nowhere, so a closed one names nobody.
    *
    * Display name only (see {@link applierName}); the merge log's email column
@@ -1055,7 +1099,7 @@ export class PullRequestService implements IPullRequestService {
   private async finishedFacts(
     row: ChangeRequestRow,
     appliedSha: string | null,
-    merge: { name: string; headSha: string } | null,
+    merge: { name: string | null; headSha: string } | null,
   ): Promise<PullRequestFinished> {
     return {
       at: row.closedAt ? row.closedAt.toISOString() : null,
@@ -1069,24 +1113,28 @@ export class PullRequestService implements IPullRequestService {
   }
 
   /**
-   * The request's newest SUCCEEDED apply in the merge log: the applier's
-   * display name and the source head it applied. Only those two columns —
-   * the log's email column is never read here. `null` when none is recorded
+   * The request's apply in the merge log ({@link lastApply}): the applier's
+   * display name and the source head it applied. Never the log's email
+   * column, nor its error text. `null` when none is recorded
    * (a request applied before the log, or by a path that writes none) and
    * when the lookup fails: both are courtesies on top of what the row says,
    * so a failure reads as "not recorded", never as no answer.
    */
   private async lastSucceededMerge(
     prNumber: number,
-  ): Promise<{ name: string; headSha: string } | null> {
+  ): Promise<{ name: string | null; headSha: string } | null> {
     try {
-      const [merge] = await this.db
-        .select({ name: prMergeLog.triggeredByName, headSha: prMergeLog.headShaAtMerge })
+      const attempts = await this.db
+        .select({
+          name: prMergeLog.triggeredByName,
+          headSha: prMergeLog.headShaAtMerge,
+          succeeded: prMergeLog.succeeded,
+          hasError: sql<boolean>`${prMergeLog.error} is not null`,
+          startedAt: prMergeLog.startedAt,
+        })
         .from(prMergeLog)
-        .where(and(eq(prMergeLog.prNumber, prNumber), eq(prMergeLog.succeeded, true)))
-        .orderBy(desc(prMergeLog.startedAt))
-        .limit(1);
-      return merge ?? null;
+        .where(eq(prMergeLog.prNumber, prNumber));
+      return lastApply(attempts);
     } catch (err) {
       log.warn(`could not read who applied change request #${prNumber}:`, { err });
       return null;

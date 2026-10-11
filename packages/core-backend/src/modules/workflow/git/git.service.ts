@@ -3098,9 +3098,12 @@ export class GitService implements IGitService {
    *
    * The head is this request's own (its own merge-log row recorded it), so
    * the answer can never be another request's change: when the head is
-   * already part of the target the three-dot diff is simply empty. No fetch:
-   * the retired branch cannot be fetched, so the head is in this clone's
-   * object store or this rejects with a `WorkflowValidationError`.
+   * already part of the target the three-dot diff is simply empty. The
+   * TARGET is refreshed first, best-effort as for an open request: a stale
+   * target tip older than the head's fork point would put the target's own
+   * later work into the diff. The head is never fetched — the retired branch
+   * cannot be — so it is in this clone's object store or this rejects with a
+   * `WorkflowValidationError`.
    */
   async changedFilesOfProposalHead(
     workspaceId: string,
@@ -3113,10 +3116,15 @@ export class GitService implements IGitService {
       throw new WorkflowValidationError(`invalid commit sha: ${headSha}`);
     }
     const cwd = await this.repoDir(workspaceId);
+    await this.fetchPublishedRefs(cwd, [targetBranch]);
     return this.mutex.run(workspaceId, async () => {
       try {
-        await this.git(cwd, ['cat-file', '-e', `${headSha}^{commit}`]);
-      } catch {
+        await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${headSha}^{commit}`]);
+      } catch (err) {
+        // Only git's own "no such object" (exit 1 under --quiet) means the
+        // clone lacks the head; a deadline or a broken repository is not
+        // that answer and propagates as the failure it is.
+        if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
         throw new WorkflowValidationError(`commit ${headSha} is not in this clone`);
       }
       const baseRef = await this.resolvePublishedBranchRef(cwd, targetBranch);
@@ -3500,21 +3508,25 @@ export class GitService implements IGitService {
 
   /** Fetch the two branches a CR spans so origin refs reflect the latest push. */
   private async fetchPrRefs(cwd: string, baseBranch: string, headBranch: string): Promise<void> {
+    await this.fetchPublishedRefs(cwd, [baseBranch, headBranch]);
+  }
+
+  /** {@link fetchPrRefs} for any set of published branches, same contract. */
+  private async fetchPublishedRefs(cwd: string, branches: string[]): Promise<void> {
     // Best-effort: a branch may be local-only (rare) or origin briefly
     // unreachable; `resolveBranchRef` still falls back to whatever is local.
     // `--no-write-fetch-head` — this runs on the CR-detail path (polled around
-    // every merge) and only the `origin/<branch>` refs are read; writing two
+    // every merge) and only the `origin/<branch>` refs are read; writing
     // for-merge FETCH_HEAD entries here can break a concurrent refresh in the
     // same clone (see `pull`).
     //
     // Explicit destination refspecs for the same reason as `mergeChangeRequest`:
     // "reflect the latest push" is exactly what a drifted `remote.origin.fetch`
     // silently stops delivering, and the CR diff would then be computed against
-    // a stale head. Every caller `assertValidBranchName`s both branches.
+    // a stale head. Every caller `assertValidBranchName`s every branch.
     await this.git(cwd, [
       'fetch', '--no-write-fetch-head', 'origin',
-      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`,
-      `+refs/heads/${headBranch}:refs/remotes/origin/${headBranch}`,
+      ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`),
     ]).then(
       () => void this.prFetchFailureLoggedAt.delete(cwd),
       (err: unknown) => this.notePrFetchFailure(cwd, err),

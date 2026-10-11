@@ -94,6 +94,59 @@ describe('GitService.changedFilesOfProposalHead', () => {
     ).rejects.toBeInstanceOf(WorkflowValidationError);
   });
 
+  /**
+   * A head forked from a target tip this clone's `origin/main` has not seen:
+   * read against the stale ref, the target's own later work would show as
+   * the request's. The target is refreshed from origin first; the head's
+   * branch is gone from origin and is never asked for.
+   */
+  async function seedStaleTarget(): Promise<{ headOf9: string; origin: string }> {
+    await seed();
+    const init = await gitOut(repo, ['rev-list', '--max-parents=0', 'main']);
+    await runGit(repo, ['checkout', '-b', 'robin/nine', 'main']);
+    await fs.writeFile(path.join(repo, 'Pricing.md'), 'gold\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'edit on robin/nine']);
+    const headOf9 = await gitOut(repo, ['rev-parse', 'robin/nine']);
+    await runGit(repo, ['checkout', 'main']);
+    await runGit(repo, ['branch', '-D', 'robin/nine']);
+    const origin = path.join(root, 'origin.git');
+    await runGit(root, ['init', '--bare', '-b', 'main', 'origin.git']);
+    await runGit(repo, ['remote', 'add', 'origin', origin]);
+    await runGit(repo, ['push', 'origin', 'main']);
+    // The clone last saw the target before any of its later work.
+    await runGit(repo, ['update-ref', 'refs/remotes/origin/main', init]);
+    return { headOf9, origin };
+  }
+
+  it('refreshes the target before reading, so its later work is not the request\'s', async () => {
+    const { headOf9 } = await seedStaleTarget();
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
+    expect(files.map((f) => f.path)).toEqual(['Pricing.md']);
+    expect(await gitOut(repo, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+      await gitOut(repo, ['rev-parse', 'main']),
+    );
+  });
+
+  it('still answers from the clone when origin cannot be reached', async () => {
+    const { headOf9, origin } = await seedStaleTarget();
+    // Bring the ref up to date by hand, then take origin away.
+    await runGit(repo, ['update-ref', 'refs/remotes/origin/main', await gitOut(repo, ['rev-parse', 'main'])]);
+    await fs.rm(origin, { recursive: true, force: true });
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
+    expect(files.map((f) => f.path)).toEqual(['Pricing.md']);
+  });
+
+  it('a git failure other than "no such object" propagates as itself', async () => {
+    const { headOf8 } = await seed();
+    // A clone whose object store is broken is not a clone that lacks the head.
+    await fs.rm(path.join(repo, '.git', 'objects'), { recursive: true, force: true });
+    await fs.writeFile(path.join(repo, '.git', 'objects'), 'not a directory');
+    const err = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf8).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(WorkflowValidationError);
+  });
+
   it('refuses anything that is not a sha', async () => {
     await seed();
     await expect(git.changedFilesOfProposalHead(workspaceId, 'main', 'main')).rejects.toBeInstanceOf(

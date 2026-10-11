@@ -5,6 +5,7 @@ import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdo
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
 import type { DiffLine } from '../../../change-requests/utils/diff';
+import { MarkedLines } from '../../../change-requests/components/MarkedLines';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
 const NOOP_SAVE = async () => {};
@@ -61,7 +62,7 @@ export function SkillFilePane({
       {raw === null ? (
         <p className="py-4 text-center text-detail text-ink-faint">Loading…</p>
       ) : suggestion ? (
-        <SuggestionDiff lines={suggestion} />
+        <MarkedLines lines={suggestion} />
       ) : file.endsWith('.md') ? (
         // The SAME renderer, in the same configuration, as the Knowledge
         // view of this file: raw source (so the frontmatter panel shows),
@@ -94,29 +95,3 @@ export function SkillFilePane({
   );
 }
 
-/**
- * Removed and added lines as `<del>` / `<ins>`, not coloured `<div>`s: what is
- * on screen is a claim about what changed, and the elements that MEAN that are
- * the ones a screen reader announces as such. The colours come from `.lib-sug`
- * in `library.css` — the same rule the compare view's marks use, so an inline
- * suggestion and a reviewed one never drift apart visually.
- */
-function SuggestionDiff({ lines }: { lines: DiffLine[] }) {
-  return (
-    <pre className="lib-sug whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
-      {lines.map((l, i) =>
-        l.kind === 'same' ? (
-          <div key={i}>{l.text || ' '}</div>
-        ) : l.kind === 'removed' ? (
-          <del key={i} className="block">
-            {l.text || ' '}
-          </del>
-        ) : (
-          <ins key={i} className="block">
-            {l.text || ' '}
-          </ins>
-        ),
-      )}
-    </pre>
-  );
-}

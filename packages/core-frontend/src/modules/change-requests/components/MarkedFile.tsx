@@ -1,5 +1,6 @@
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import type { DiffLine } from '../utils/diff';
+import { MarkedLines } from './MarkedLines';
 
 /**
  * The file with the change marked in it — one document, not two panes. Removed
@@ -61,21 +62,5 @@ export function MarkedFile({
   if (diff === null) {
     return <p className="py-6 text-center text-detail text-ink-faint">Loading…</p>;
   }
-  return (
-    <pre className="lib-sug whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
-      {diff.map((l, i) =>
-        l.kind === 'removed' ? (
-          <del key={i} className="block">
-            {l.text || ' '}
-          </del>
-        ) : l.kind === 'added' ? (
-          <ins key={i} className="block">
-            {l.text || ' '}
-          </ins>
-        ) : (
-          <div key={i}>{l.text || ' '}</div>
-        ),
-      )}
-    </pre>
-  );
+  return <MarkedLines lines={diff} />;
 }

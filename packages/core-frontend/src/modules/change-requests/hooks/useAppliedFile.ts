@@ -44,6 +44,23 @@ export interface AppliedFileRead {
   pageNow: { workspacePath: string } | 'deleted' | null;
 }
 
+/** A read that failed, and the repo path it was reading — a rename's before side is its OLD path. */
+class FailedRead {
+  readonly path: string;
+  readonly cause: unknown;
+  constructor(path: string, cause: unknown) {
+    this.path = path;
+    this.cause = cause;
+  }
+}
+
+/** Run one read, tagging a failure with the path it was for. */
+function readOf<T>(path: string, run: () => Promise<T>): Promise<T> {
+  return run().catch((err: unknown) => {
+    throw new FailedRead(path, err);
+  });
+}
+
 const PENDING: AppliedFileRead = {
   loaded: false,
   before: null,
@@ -91,24 +108,35 @@ export function useAppliedFile(
         // No merge commit of its own: nothing to read "as applied" — only
         // whether the page is still there (which is also the read gate).
         const sha = appliedSha;
-        const [before, after] = readText && sha
+        const beforePath = previousPath || path;
+        const readsText = readText && sha !== null;
+        const [before, after] = readsText
           ? await Promise.all([
               added
                 ? Promise.resolve(null)
-                : readFileAtCommit(workspace.id, at(previousPath || path), sha, 'before'),
+                : readOf(beforePath, () => readFileAtCommit(workspace.id, at(beforePath), sha, 'before')),
               removed
                 ? Promise.resolve(null)
-                : readFileAtCommit(workspace.id, at(path), sha, 'after'),
+                : readOf(path, () => readFileAtCommit(workspace.id, at(path), sha, 'after')),
             ])
           : [null, null];
+        // A deleted file whose bytes are not read here (a binary the pane
+        // does not render, or no commit to read) is still gated: the probe
+        // passes the read gate on its path and answers 404, or refuses.
+        if (removed && !readsText) {
+          await readOf(beforePath, () => fileExistsOnWorkspace(workspace.id, at(beforePath)));
+        }
         const pageNow: AppliedFileRead['pageNow'] = removed
           ? null
-          : (await fileExistsOnWorkspace(workspace.id, at(path)))
+          : (await readOf(path, () => fileExistsOnWorkspace(workspace.id, at(path))))
             ? { workspacePath: at(path) }
             : 'deleted';
         land({ loaded: true, before, after, failure: null, pageNow });
       } catch (err) {
-        const failure = await describeReadFailure(err, targetBranch, path);
+        // Described for the path that was refused: a rename's old folder may
+        // have other owners than its new one.
+        const failed = err instanceof FailedRead ? err : new FailedRead(path, err);
+        const failure = await describeReadFailure(failed.cause, targetBranch, failed.path);
         land({ ...PENDING, loaded: true, failure });
       }
     })();

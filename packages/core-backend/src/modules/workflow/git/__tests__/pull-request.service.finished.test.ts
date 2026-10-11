@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PullRequestService, applierName } from '../pull-request.service.js';
+import { eq } from 'drizzle-orm';
+import { PullRequestService, applierName, lastApply } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
@@ -23,6 +24,9 @@ const CLOSED_AT = new Date('2026-10-10T09:30:00Z');
 interface MergeLogRow {
   name: string;
   headSha?: string;
+  succeeded?: boolean;
+  hasError?: boolean;
+  startedAt?: Date;
 }
 
 const PROPOSAL_HEAD = '9'.repeat(40);
@@ -62,20 +66,22 @@ function harness(
     select: (cols?: Record<string, unknown>) => ({
       from: (table: unknown) => {
         if (table === prMergeLog) {
-          // Only the name and the applied head may be asked for: the email
-          // beside them is never read by the finished facts.
-          expect(Object.keys(cols ?? {})).toEqual(['name', 'headSha']);
+          // Never the email beside the name, nor the error text: only whether
+          // an attempt recorded one.
+          expect(Object.keys(cols ?? {})).toEqual(['name', 'headSha', 'succeeded', 'hasError', 'startedAt']);
           return {
-            where: (...args: unknown[]) => {
-              mergeLogWhere(...args);
-              return {
-                orderBy: () => ({
-                  limit: async () => {
-                    if (opts.mergeLogThrows) throw new Error('db down');
-                    return opts.mergeLog ?? [];
-                  },
-                }),
-              };
+            where: async (cond: unknown) => {
+              mergeLogWhere(cond);
+              // This request's attempts, and no other request's.
+              expect(cond).toEqual(eq(prMergeLog.prNumber, row.number));
+              expect(cond).not.toEqual(eq(prMergeLog.prNumber, row.number + 1));
+              if (opts.mergeLogThrows) throw new Error('db down');
+              return (opts.mergeLog ?? []).map((r, i) => ({
+                succeeded: true,
+                hasError: false,
+                startedAt: new Date(Date.UTC(2026, 9, 10, 9, i)),
+                ...r,
+              }));
             },
           };
         }
@@ -179,6 +185,46 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
     const { svc, appliedChangeShas } = harness({ mergedSha: null }, { mergeLog: [{ name: 'Robin Lee' }] });
     expect((await svc.getPrDetail(4))?.finished).toMatchObject({ appliedSha: null });
     expect(appliedChangeShas).not.toHaveBeenCalled();
+  });
+
+  it('names the newest succeeded attempt, past failed and older ones', async () => {
+    const { svc } = harness(
+      {},
+      {
+        mergeLog: [
+          { name: 'Newest Failure', succeeded: false, hasError: true, startedAt: new Date('2026-10-10T09:20:00Z') },
+          { name: 'Robin Lee', startedAt: new Date('2026-10-10T09:10:00Z') },
+          { name: 'Older Success', startedAt: new Date('2026-10-09T09:00:00Z') },
+        ],
+      },
+    );
+    expect((await svc.getPrDetail(4))?.finished?.appliedBy).toEqual({ name: 'Robin Lee' });
+  });
+
+  it('names the attempt that pushed, not whoever finalized it afterwards', async () => {
+    const { svc } = harness(
+      {},
+      {
+        mergeLog: [
+          { name: 'Robin Lee', succeeded: false, hasError: false, startedAt: new Date('2026-10-10T09:00:00Z') },
+          { name: 'Dana Finalizer', succeeded: true, hasError: true, startedAt: new Date('2026-10-10T10:00:00Z') },
+        ],
+      },
+    );
+    expect((await svc.getPrDetail(4))?.finished?.appliedBy).toEqual({ name: 'Robin Lee' });
+  });
+
+  it('a warm read of an applied request with its own commit reads no merge log', async () => {
+    const h = harness({}, { mergeLog: [{ name: 'Robin Lee' }] });
+    const cachedValue = { state: 'merged', number: 4 };
+    (h.svc as unknown as { detailCache: Map<string, unknown> }).detailCache.set('ws:anon:4', {
+      at: Date.now(),
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      value: cachedValue,
+    });
+    expect(await h.svc.getPrDetail(4)).toBe(cachedValue);
+    expect(h.mergeLogWhere).not.toHaveBeenCalled();
   });
 
   it('a closed request says when, names nobody, and reads no merge log', async () => {
@@ -330,6 +376,40 @@ describe('withoutAddresses — the detail the app route serves', () => {
   it('leaves an open request untouched: its Undo compares the viewer with its approvers', () => {
     const open = appliedDetail('open');
     expect(withoutAddresses(open)).toBe(open);
+  });
+});
+
+describe('lastApply', () => {
+  const at = (minute: number) => new Date(Date.UTC(2026, 9, 10, 9, minute));
+  const attempt = (name: string, minute: number, succeeded: boolean, hasError: boolean) => ({
+    name,
+    headSha: String(minute).repeat(40).slice(0, 40),
+    succeeded,
+    hasError,
+    startedAt: at(minute),
+  });
+
+  it('is nobody without a succeeded attempt', () => {
+    expect(lastApply([])).toBeNull();
+    expect(lastApply([attempt('A', 1, false, true), attempt('B', 2, false, false)])).toBeNull();
+  });
+  it('takes the newest succeeded attempt, whatever order the rows come in', () => {
+    expect(lastApply([attempt('Old', 1, true, false), attempt('New', 3, true, false), attempt('Bad', 4, false, true)]))
+      .toEqual({ name: 'New', headSha: attempt('New', 3, true, false).headSha });
+  });
+  it('a finalization names the begun attempt before it, with that attempt\'s head', () => {
+    const pushed = attempt('Robin', 2, false, false);
+    expect(lastApply([attempt('Dana', 5, true, true), pushed, attempt('Failed', 1, false, true)])).toEqual({
+      name: 'Robin',
+      headSha: pushed.headSha,
+    });
+  });
+  it('a finalization with no begun attempt behind it names nobody', () => {
+    const fin = attempt('Dana', 5, true, true);
+    expect(lastApply([fin, attempt('Failed', 1, false, true)])).toEqual({ name: null, headSha: fin.headSha });
+  });
+  it('a begun attempt newer than the finalization is not the one it finalized', () => {
+    expect(lastApply([attempt('Dana', 5, true, true), attempt('Later', 6, false, false)])).toMatchObject({ name: null });
   });
 });
 

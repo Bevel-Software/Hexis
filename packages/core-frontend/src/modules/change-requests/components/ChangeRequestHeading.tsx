@@ -105,14 +105,18 @@ export function AuthorsReason({ body }: { body: string | undefined }) {
  * an `## Affected owners` block (and hidden identity markers) to whatever the
  * author wrote, and our propose flow writes no description at all — so the body
  * is USUALLY pure machinery. Rendering it as a pull-quote under the title
- * presents a routing table as the reason someone wants this change. Everything
- * from the first generated heading on is dropped; what survives is quoted only
- * if a human actually wrote it.
+ * presents a routing table as the reason someone wants this change. The body is
+ * cut at the LAST line that is exactly `## Affected owners` — the block is
+ * always appended last, and the author's own `##` headings stay — as the
+ * agent tools' `authorsDescription` cuts it; what survives is quoted only if
+ * a human actually wrote it.
  */
 function authorsReason(body: string | undefined): string | null {
   if (!body) return null;
-  const human = body
-    .split(/^##\s+/m)[0]
+  const lines = body.split('\n');
+  const generated = lines.map((l) => l.trimEnd()).lastIndexOf('## Affected owners');
+  const human = (generated === -1 ? lines : lines.slice(0, generated))
+    .join('\n')
     .replace(/<!--[\s\S]*?-->/g, '')
     .trim();
   return human.length > 0 ? human : null;

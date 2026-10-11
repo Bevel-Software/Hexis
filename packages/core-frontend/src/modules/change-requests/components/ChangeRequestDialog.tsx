@@ -1048,6 +1048,7 @@ export function ChangeRequestDialog({
       <FinishedChangeRequest
         cr={cr}
         detail={detail}
+        error={error}
         initialPath={picked ?? undefined}
         onClose={onClose}
         onOpenPage={onOpenPage}
