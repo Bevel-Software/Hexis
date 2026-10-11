@@ -152,6 +152,25 @@ describe('lint ratchet', () => {
     assert.deepEqual(counts['has-one.js -> moved/has-one.js'], { before: 1, now: 2 });
   });
 
+  // Below git's rename threshold (`-M`, half the content) a move is an
+  // addition, counted from zero: a rewrite that large owns the problems it
+  // carried over, where a move alone or with smaller edits does not.
+  test('counts a file moved and rewritten past half its content from zero, so a carried-over problem fails', async () => {
+    mkdirSync(join(root, 'moved'));
+    git('mv', 'has-one.js', 'moved/rewritten.js');
+    const rewritten = [
+      'const unusedOne = 1;',
+      ...Array.from({ length: 8 }, (_, i) => `export const added${i} = ${i};`),
+      '',
+    ].join('\n');
+    write('moved/rewritten.js', rewritten);
+    commit('move and rewrite');
+    const { counts, fails } = await run();
+    assert.equal(fails, true);
+    assert.deepEqual(counts['moved/rewritten.js'], { before: 0, now: 1 });
+    assert.equal(counts['has-one.js -> moved/rewritten.js'], undefined);
+  });
+
   test('skips files ESLint ignores and files no config covers', async () => {
     write('ignored/dirty.js', ONE_PROBLEM);
     write('uncovered.ts', ONE_PROBLEM);
