@@ -86,7 +86,7 @@ export async function createAccount(
   name: string,
   password?: string,
   options: { keepExistingPassword?: boolean } = {},
-): Promise<{ passwordSet?: boolean; deactivated?: boolean }> {
+): Promise<{ passwordSet?: boolean; deactivated?: boolean; notified?: string[] }> {
   const res = await authFetch('/api/admin/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -102,10 +102,19 @@ export async function createAccount(
     const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
     throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
   }
-  const body = (await res.json().catch(() => ({}))) as { passwordSet?: unknown; deactivated?: unknown };
+  const body = (await res.json().catch(() => ({}))) as {
+    passwordSet?: unknown;
+    deactivated?: unknown;
+    notified?: unknown;
+  };
+  // `notified`: how the deployment told a NEW account's person of the invite
+  // (`'email'`, say), as its listeners answered; empty or absent when nobody
+  // did and the admin hands over the link themselves.
+  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
   return {
     ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
     ...(body.deactivated === true ? { deactivated: true } : {}),
+    ...(notified.length > 0 ? { notified } : {}),
   };
 }
 

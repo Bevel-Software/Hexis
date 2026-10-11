@@ -47,8 +47,13 @@ const ADMIN_ROLE = 'admin';
 
 /** What became of one address. */
 export type InviteOutcome =
-  /** `passwordSet`: the account was created with the starting password. */
-  | { email: string; status: 'created'; role: InviteRole; roleError?: string; passwordSet?: boolean }
+  /**
+   * `passwordSet`: the account was created with the starting password.
+   * `notified`: how the deployment told the person of the invite (`'email'`
+   * from the cloud's mail, say), as the server's listeners answered; absent
+   * when nobody did and the admin hands over the link themselves.
+   */
+  | { email: string; status: 'created'; role: InviteRole; roleError?: string; passwordSet?: boolean; notified?: string[] }
   /**
    * Already had an account. Invited as Admin, they are made one too:
    * `promoted` when this call did it, `alreadyAdmin` when they were one.
@@ -101,6 +106,11 @@ export function isInvited(outcome: InviteOutcome, sso = false): boolean {
 /** The account now signs in with the starting password the admin typed. */
 export function gotPassword(outcome: InviteOutcome): boolean {
   return (outcome.status === 'created' || outcome.status === 'existing') && Boolean(outcome.passwordSet);
+}
+
+/** The deployment emailed this person the invite itself, so the admin need not send them the link. */
+export function wasEmailed(outcome: InviteOutcome): boolean {
+  return outcome.status === 'created' && (outcome.notified?.includes('email') ?? false);
 }
 
 /** One row of the account list, as much of it as inviting needs. */
@@ -177,7 +187,7 @@ export async function sendInvites(
       name: string,
       password?: string,
       options?: { keepExistingPassword?: boolean },
-    ): Promise<{ passwordSet?: boolean; deactivated?: boolean } | void>;
+    ): Promise<{ passwordSet?: boolean; deactivated?: boolean; notified?: string[] } | void>;
     addMember(canonical: string, email: string, options?: { ifActive?: boolean }): Promise<unknown>;
     fetchRoles(): Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>;
   },
@@ -248,19 +258,22 @@ export async function sendInvites(
       }
       continue;
     }
-    let created: { passwordSet?: boolean } = {};
+    let created: { passwordSet?: boolean; notified?: string[] } = {};
     /**
      * Not on the list, but there by the time of the write — with its own
      * password, or switched off — and left as it was.
      */
     let appeared: { hasOwnPassword: true } | { deactivated: true } | null = null;
+    /** How the deployment told the person, when its listeners did (a new account only). */
+    const told = (reply: { notified?: string[] } | void): { notified?: string[] } =>
+      reply?.notified && reply.notified.length > 0 ? { notified: reply.notified } : {};
     try {
       if (password) {
         const reply = await api.createAccount(email, '', password, { keepExistingPassword: true });
         if (reply?.passwordSet === false) appeared = reply.deactivated ? { deactivated: true } : { hasOwnPassword: true };
-        else created = { passwordSet: true };
+        else created = { passwordSet: true, ...told(reply) };
       } else {
-        await api.createAccount(email, '');
+        created = told(await api.createAccount(email, ''));
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not create account';

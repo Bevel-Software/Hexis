@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
+import type { AccountInvitedEvent } from '../account-hooks.js';
 import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
@@ -13,8 +14,10 @@ const authService = {
     { id: 'u1', email: 'a@example.com', name: 'A', hasPassword: true, createdAt: new Date() },
   ]),
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
+  createAccountWithoutPassword: vi.fn(async (email: string) => ({ user: { id: 'u2', email, name: 'B' }, created: true })),
   createAccountWithStartingPassword: vi.fn(async (email: string) => ({
     user: { id: 'u2', email, name: 'B' },
+    created: false,
     passwordSet: false,
     deactivated: false,
   })),
@@ -31,6 +34,11 @@ const accountErasure = {
   eraseUser: vi.fn<(userId: string, opts?: { erasureId?: string }) => Promise<boolean>>(async () => true),
 };
 
+/** The invite listeners: nobody registered unless a test says so (see "an invite tells the listeners"). */
+const accountHooks = {
+  runAccountInvited: vi.fn<(event: AccountInvitedEvent) => Promise<string[]>>(async () => []),
+};
+
 function makeApp(opts: { admin: boolean; email?: string }) {
   const adminAccess: IAdminAccessService = {
     isAdmin: vi.fn(async () => opts.admin),
@@ -44,7 +52,7 @@ function makeApp(opts: { admin: boolean; email?: string }) {
     req.userEmail = opts.email ?? 'caller@example.com';
     next();
   });
-  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure));
+  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure, accountHooks));
   return app;
 }
 
@@ -110,9 +118,12 @@ describe('account routes — admin gate', () => {
       name: 'B',
       passwordSet: false,
       deactivated: false,
+      notified: [],
     });
     expect(authService.createAccountWithStartingPassword).toHaveBeenCalledWith('b@example.com', 'long-enough-pw');
     expect(authService.createAccount).not.toHaveBeenCalled();
+    // The account was already there: nobody is told of an invitation.
+    expect(accountHooks.runAccountInvited).not.toHaveBeenCalled();
 
     const without = await fetch(`${base}/api/admin/accounts`, {
       method: 'POST',
@@ -132,6 +143,93 @@ describe('account routes — admin gate', () => {
       expect(await odd.json()).toEqual({ error: 'keepExistingPassword must be a boolean' });
     }
     expect(authService.createAccount).not.toHaveBeenCalled();
+  });
+
+  describe('an invite tells the listeners, and the answer says who was told', () => {
+    afterEach(() => {
+      vi.mocked(accountHooks.runAccountInvited).mockReset().mockResolvedValue([]);
+      vi.mocked(authService.createAccountWithStartingPassword).mockClear();
+      vi.mocked(authService.createAccountWithoutPassword).mockClear();
+    });
+
+    it('a NEW account with a starting password: once, with the account, the admin and the fact of the password, never the password', async () => {
+      vi.mocked(authService.createAccountWithStartingPassword).mockResolvedValueOnce({
+        user: { id: 'u-new', email: 'new@example.com', name: 'new' },
+        created: true,
+        passwordSet: true,
+        deactivated: false,
+      });
+      vi.mocked(accountHooks.runAccountInvited).mockResolvedValueOnce(['email']);
+      const base = await listen(makeApp({ admin: true }));
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'new@example.com', password: 'long-enough-pw', keepExistingPassword: true }),
+      });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({
+        id: 'u-new',
+        email: 'new@example.com',
+        name: 'new',
+        passwordSet: true,
+        deactivated: false,
+        notified: ['email'],
+      });
+      expect(accountHooks.runAccountInvited).toHaveBeenCalledTimes(1);
+      const [event] = vi.mocked(accountHooks.runAccountInvited).mock.calls[0]!;
+      expect(event).toEqual({
+        account: { id: 'u-new', email: 'new@example.com', name: 'new' },
+        // The caller, as the route knows them: `getUserById(req.userId)`.
+        invitedBy: { id: 'u1', email: 'u1@example.com', name: 'u1' },
+        passwordSet: true,
+      });
+      expect(JSON.stringify(event)).not.toContain('long-enough-pw');
+    });
+
+    it('a NEW account for single sign-on (no password) goes through the same seam, with passwordSet false', async () => {
+      vi.mocked(accountHooks.runAccountInvited).mockResolvedValueOnce(['email', 'chat']);
+      const base = await listen(makeApp({ admin: true }));
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'b@example.com', name: 'B' }),
+      });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'u2', email: 'b@example.com', name: 'B', notified: ['email', 'chat'] });
+      expect(authService.createAccountWithoutPassword).toHaveBeenCalledWith('b@example.com', 'B');
+      expect(authService.createAccount).not.toHaveBeenCalled();
+      expect(accountHooks.runAccountInvited).toHaveBeenCalledWith(
+        expect.objectContaining({ account: { id: 'u2', email: 'b@example.com', name: 'B' }, passwordSet: false }),
+      );
+    });
+
+    it('an account that was already there is not an invitation: the listeners are not run', async () => {
+      vi.mocked(authService.createAccountWithoutPassword).mockResolvedValueOnce({
+        user: { id: 'u2', email: 'b@example.com', name: 'B' },
+        created: false,
+      });
+      const base = await listen(makeApp({ admin: true }));
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'b@example.com' }),
+      });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'u2', email: 'b@example.com', name: 'B', notified: [] });
+      expect(accountHooks.runAccountInvited).not.toHaveBeenCalled();
+    });
+
+    it('a set or reset password (a password without keepExistingPassword) is not an invitation either', async () => {
+      const base = await listen(makeApp({ admin: true }));
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'b@example.com', password: 'long-enough-pw' }),
+      });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'u2', email: 'b@example.com', name: 'B' });
+      expect(accountHooks.runAccountInvited).not.toHaveBeenCalled();
+    });
   });
 
   it('list reports hasPassword + isEnvAdmin and never carries a hash or password', async () => {
@@ -159,7 +257,7 @@ describe('account routes — admin gate', () => {
       req.userEmail = 'caller@example.com';
       next();
     });
-    app.use('/api', createAccountRoutes(realAuth, { isAdmin: async () => true }, accountErasure));
+    app.use('/api', createAccountRoutes(realAuth, { isAdmin: async () => true }, accountErasure, accountHooks));
     const base = await listen(app);
 
     const res = await fetch(`${base}/api/admin/accounts`);
@@ -279,7 +377,7 @@ describe('account routes — removing the erased address from access files', () 
       req.userEmail = 'caller@example.com';
       next();
     });
-    app.use('/api', createAccountRoutes(auth, { isAdmin: async () => true }, accountErasure, accessRemoval));
+    app.use('/api', createAccountRoutes(auth, { isAdmin: async () => true }, accountErasure, accountHooks, accessRemoval));
     return { app, accessRemoval };
   }
 
@@ -520,7 +618,7 @@ describe('account routes — the owner cannot be locked out', () => {
       req.userEmail = 'second-admin@example.com';
       next();
     });
-    app.use('/api', createAccountRoutes(realAuth, { isAdmin: async () => true }, accountErasure));
+    app.use('/api', createAccountRoutes(realAuth, { isAdmin: async () => true }, accountErasure, accountHooks));
     return { app, updates };
   }
 
@@ -596,7 +694,7 @@ describe('account routes — the owner cannot be locked out', () => {
       body: JSON.stringify({ email: 'root@example.com', password: '' }),
     });
     expect(res.status).toBe(201);
-    expect(authService.createAccount).toHaveBeenCalledWith('root@example.com', undefined, '');
+    expect(authService.createAccountWithoutPassword).toHaveBeenCalledWith('root@example.com', undefined);
   });
 
   it("refuses to delete the owner's account where they could not sign back in (the cloud): nothing is erased", async () => {
@@ -627,7 +725,7 @@ describe('account routes — the owner cannot be locked out', () => {
   });
 
   it("still lets the owner's account be (re)created without a password, so an admin can restore it", async () => {
-    vi.mocked(authService.createAccount).mockClear();
+    vi.mocked(authService.createAccountWithoutPassword).mockClear();
     const base = await listen(makeApp({ admin: true }));
     const res = await fetch(`${base}/api/admin/accounts`, {
       method: 'POST',
@@ -635,7 +733,7 @@ describe('account routes — the owner cannot be locked out', () => {
       body: JSON.stringify({ email: 'root@example.com', name: 'Root' }),
     });
     expect(res.status).toBe(201);
-    expect(authService.createAccount).toHaveBeenCalledWith('root@example.com', 'Root', undefined);
+    expect(authService.createAccountWithoutPassword).toHaveBeenCalledWith('root@example.com', 'Root');
   });
 
   it('leaves the owner setting their own password through the same call to the service', async () => {

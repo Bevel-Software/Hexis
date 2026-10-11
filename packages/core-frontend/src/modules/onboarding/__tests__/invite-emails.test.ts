@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { isInvited, sendInvites } from '../invite-emails';
+import { isInvited, sendInvites, wasEmailed } from '../invite-emails';
 
 /** Every invite promotion is sent `ifActive`: the server refuses a switched-off account at the write. */
 const ACTIVE = { ifActive: true };
@@ -27,7 +27,7 @@ function makeApi(accounts: { email: string; hasPassword?: boolean; isEnvAdmin?: 
         name: string,
         password?: string,
         options?: { keepExistingPassword?: boolean },
-      ) => Promise<{ passwordSet?: boolean; deactivated?: boolean } | void>
+      ) => Promise<{ passwordSet?: boolean; deactivated?: boolean; notified?: string[] } | void>
     >(async () => ({ passwordSet: true })),
     addMember: vi.fn(async () => []),
     fetchRoles: vi.fn(async () => [{ canonical: 'admin', members: ['boss@acme.com'] }]),
@@ -195,6 +195,43 @@ describe('sendInvites without a password', () => {
     expect(result).toEqual({ status: 'sent', outcomes: [{ email: 'off@acme.com', status: 'existing', deactivated: true }] });
   });
 });
+
+describe('sendInvites carries how the deployment told the person', () => {
+  it('a new account the server says was emailed carries `notified`; one nobody told does not', async () => {
+    api.createAccount
+      .mockResolvedValueOnce({ passwordSet: true, notified: ['email'] })
+      .mockResolvedValueOnce({ passwordSet: true, notified: [] });
+    const result = await sendInvites(['one@acme.com', 'two@acme.com'], 'member', api, { password: PW });
+    expect(result).toEqual({
+      status: 'sent',
+      outcomes: [
+        { email: 'one@acme.com', status: 'created', role: 'member', passwordSet: true, notified: ['email'] },
+        { email: 'two@acme.com', status: 'created', role: 'member', passwordSet: true },
+      ],
+    });
+    expect(wasEmailed(result.status === 'sent' ? result.outcomes[0]! : failedOutcome)).toBe(true);
+    expect(wasEmailed(result.status === 'sent' ? result.outcomes[1]! : failedOutcome)).toBe(false);
+  });
+
+  it('without a password too, and only for a NEW account: an existing one that got a password was not invited', async () => {
+    api.createAccount.mockResolvedValue({ notified: ['email'] });
+    const result = await sendInvites(['new@acme.com'], 'member', api);
+    expect(result).toEqual({
+      status: 'sent',
+      outcomes: [{ email: 'new@acme.com', status: 'created', role: 'member', notified: ['email'] }],
+    });
+    // The server answers `notified` for a new account only; an existing
+    // account's password write never carries it onto the row.
+    api.createAccount.mockResolvedValue({ passwordSet: true, notified: ['email'] });
+    const existing = await sendInvites(['nopw@acme.com'], 'member', api, { password: PW });
+    expect(existing).toEqual({
+      status: 'sent',
+      outcomes: [{ email: 'nopw@acme.com', status: 'existing', passwordSet: true }],
+    });
+  });
+});
+
+const failedOutcome = { email: 'x@acme.com', status: 'error' as const, message: 'never' };
 
 describe('isInvited', () => {
   const failed = { email: 'nopw@acme.com', status: 'existing' as const, passwordError: 'Password too common' };

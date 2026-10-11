@@ -33,7 +33,7 @@ const { listAccountsMock, createAccountMock, addMemberMock, fetchRolesMock, copy
           name: string,
           password?: string,
           options?: { keepExistingPassword?: boolean },
-        ) => Promise<{ passwordSet?: boolean }>
+        ) => Promise<{ passwordSet?: boolean; notified?: string[] }>
       >(),
     addMemberMock: vi.fn<(canonical: string, email: string, options?: { ifActive?: boolean }) => Promise<unknown>>(),
     fetchRolesMock: vi.fn<() => Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>>(),
@@ -733,6 +733,55 @@ describe('InviteDialog: a starting password', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByRole('dialog', { name: '1 person is invited' });
     expect(createAccountMock).toHaveBeenCalledWith('lena@acme.com', '', SECRET, KEEP);
+  });
+});
+
+describe('InviteDialog: when the deployment emails the invite itself', () => {
+  async function sendTwo(notified: (string[] | undefined)[]) {
+    providersMock.mockResolvedValue(PASSWORD_ONLY);
+    listAccountsMock.mockResolvedValue([]);
+    for (const channels of notified) {
+      createAccountMock.mockResolvedValueOnce(channels ? { passwordSet: true, notified: channels } : { passwordSet: true });
+    }
+    const { input } = await mountDialog();
+    fireEvent.paste(input, { clipboardData: { getData: () => 'lena@acme.com, tom@acme.com' } });
+    await userEvent.type(passwordField(), SECRET);
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 2 people' }));
+    await screen.findByRole('dialog', { name: '2 people are invited' });
+  }
+
+  it('says so on each row, asks only for the password to be sent, and offers no message to forward', async () => {
+    await sendTwo([['email'], ['email']]);
+    expect(within(rowOf('lena@acme.com')).getByText('Emailed · Member · signs in with the password you set')).toBeInTheDocument();
+    expect(within(rowOf('tom@acme.com')).getByText('Emailed · Member · signs in with the password you set')).toBeInTheDocument();
+    expect(screen.getByText('They have been emailed the link. Send them the password separately.')).toBeInTheDocument();
+    expect(screen.getByText(/Send them the password you set, separately/)).toBeInTheDocument();
+    // The link is still there to copy; the message is not, the mail was it.
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy message' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/^I’ve added you to/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the message when somebody was not emailed, and says who was', async () => {
+    await sendTwo([['email'], undefined]);
+    expect(within(rowOf('lena@acme.com')).getByText('Emailed · Member · signs in with the password you set')).toBeInTheDocument();
+    expect(within(rowOf('tom@acme.com')).getByText('Member · signs in with the password you set')).toBeInTheDocument();
+    expect(screen.getByText('They can sign in now. Send them the link and the password.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+  });
+
+  it('without a password, the intro says the mail carried how to sign in', async () => {
+    providersMock.mockResolvedValue(SSO_AND_PASSWORD);
+    listAccountsMock.mockResolvedValue([]);
+    createAccountMock.mockResolvedValue({ notified: ['email'] });
+    const { input } = await mountDialog();
+    await userEvent.type(input, 'ana@acme.com{Enter}');
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(within(rowOf('ana@acme.com')).getByText('Emailed · Member · signs in with Duende Demo')).toBeInTheDocument();
+    expect(screen.getByText('They have been emailed the link and how to sign in.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy message' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Send them the password you set/)).not.toBeInTheDocument();
   });
 });
 
