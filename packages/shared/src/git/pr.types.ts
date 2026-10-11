@@ -426,6 +426,41 @@ export interface PullRequestDetail extends PullRequestSummary {
    * `DELETE /api/workflow/change-requests/:number` re-checks server-side.
    */
   viewerCanDelete: boolean;
+  /**
+   * How a request that is no longer open ended — what the finished view of
+   * the change-request dialog says about it. Absent (or `null`) while the
+   * request is open.
+   */
+  finished?: PullRequestFinished | null;
+}
+
+/**
+ * How an applied or closed change request ended, from its row and the merge
+ * log. Read-only facts; nothing here is a verb.
+ */
+export interface PullRequestFinished {
+  /** When it was applied or closed (the row's `closed_at`), ISO; `null` when the row records none. */
+  at: string | null;
+  /**
+   * Who applied it, by DISPLAY NAME only: the name the request's newest
+   * succeeded apply recorded in the merge log (the name its merge commit
+   * carries). Never an email address. `null` for a closed request — who
+   * closed one is recorded nowhere — and for an applied one whose apply
+   * recorded no usable name.
+   */
+  appliedBy: { name: string } | null;
+  /** The recorded close reason; `'repository-replaced'` is the one there is. `null` otherwise. */
+  closedReason: 'repository-replaced' | null;
+  /**
+   * The request's OWN merge commit, verified the way the detail's file list
+   * is (second parent, subject naming this request) — what the view reads
+   * each file "as applied" from (the commit against its first parent).
+   * `null` for a closed request, and for an applied one whose apply made no
+   * commit of its own (the target already held everything): the row's
+   * recorded sha is then the target tip, usually another request's commit,
+   * and is never sent.
+   */
+  appliedSha: string | null;
 }
 
 /**

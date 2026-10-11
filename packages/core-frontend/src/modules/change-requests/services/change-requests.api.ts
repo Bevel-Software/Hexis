@@ -5,7 +5,12 @@ import type {
 } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
-import { getOrCreateWorkspace, readFile } from '../../workspace/services/workspace.api';
+import {
+  WorkspaceApiError,
+  getOrCreateWorkspace,
+  rawFileUrl,
+  readFile,
+} from '../../workspace/services/workspace.api';
 import { BranchUnavailableError } from '../utils/readFailure';
 
 /**
@@ -111,4 +116,56 @@ export async function readFileAtForkPoint(
   return handleApiResponse<ForkPointFile>(
     await authFetch(`/api/workflow/change-requests/${crNumber}/fork-point-file?${qs}`),
   );
+}
+
+/**
+ * A file's text at a commit of a branch's workspace — `side: 'after'` the
+ * commit itself, `'before'` its first parent — through the raw route Version
+ * history reads past saves with, behind the same read gate as any file read.
+ * What an APPLIED request's file is read with: its merge commit against the
+ * target as it stood just before the apply. A refusal or a missing path
+ * rejects with a `WorkspaceApiError` carrying the status.
+ */
+export async function readFileAtCommit(
+  workspaceId: string,
+  workspacePath: string,
+  sha: string,
+  side: 'after' | 'before',
+): Promise<string> {
+  const res = await authFetch(rawFileUrl(workspaceId, workspacePath, { ref: sha, side }));
+  if (!res.ok) throw new WorkspaceApiError(res.status, await errorMessage(res));
+  return res.text();
+}
+
+/**
+ * Whether a file exists on a branch's workspace NOW — the "Open page" or
+ * "This page has since been deleted." question of a finished request's file.
+ * A HEAD on the raw route: no bytes, binary files included. `false` only for
+ * a 404. A refusal (403) rejects as one, so the file shows locked as any
+ * refused read does; any other failure answers `true` and leaves the page
+ * itself to say what is wrong, rather than calling a page deleted that may
+ * well be there.
+ */
+export async function fileExistsOnWorkspace(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<boolean> {
+  let res: Response;
+  try {
+    res = await authFetch(rawFileUrl(workspaceId, workspacePath), { method: 'HEAD' });
+  } catch {
+    return true;
+  }
+  if (res.status === 403) throw new WorkspaceApiError(403);
+  return res.status !== 404;
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body?.error === 'string') return body.error;
+  } catch {
+    // Not JSON: the status says it.
+  }
+  return `HTTP ${res.status}`;
 }

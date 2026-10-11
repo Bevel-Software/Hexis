@@ -8,7 +8,6 @@ import {
 import '../change-requests.css';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
-import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
@@ -23,7 +22,7 @@ import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { describeReadFailure } from '../services/denied-file.api';
-import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
+import { deniedSentence, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
@@ -35,6 +34,9 @@ import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
 import { hasOwnApproval } from '../utils/approval';
+import { AuthorsReason, ChangeRequestHeader } from './ChangeRequestHeading';
+import { FinishedChangeRequest } from './FinishedChangeRequest';
+import { MarkedFile } from './MarkedFile';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -68,6 +70,12 @@ interface ChangeRequestDialogProps {
   /** Applying is the only verdict this view reaches. Declining a change
    *  request lives on the skill page, beside the request's own row. */
   onResolved(): void;
+  /**
+   * Go to a page an APPLIED request changed — the finished view's Open page.
+   * Defaults to navigating there and closing the dialog; a host whose close
+   * navigates elsewhere (the request's own link) navigates here instead.
+   */
+  onOpenPage?(url: string): void;
 }
 
 /**
@@ -91,6 +99,7 @@ export function ChangeRequestDialog({
   initialPath,
   onClose,
   onResolved,
+  onOpenPage,
 }: ChangeRequestDialogProps) {
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -213,10 +222,12 @@ export function ChangeRequestDialog({
     };
   }, [cr.number]);
 
-  // Somebody else's apply of THIS request just failed or landed. Re-read the
-  // detail so a reader with the dialog open sees the refusal the clicker saw
-  // (or that there is nothing left to decide), not the state from when it
-  // opened. Fresh: the event exists because the cached answer just went stale.
+  // Somebody else's apply of THIS request just failed or landed, or somebody
+  // closed it (a person's delete, the system's clean-up). Re-read the detail
+  // so a reader with the dialog open sees the refusal the clicker saw, or the
+  // finished view of a request with nothing left to decide, not the state
+  // from when it opened. Fresh: the event exists because the cached answer
+  // just went stale.
   const bus = useEventBus();
   useEffect(() => {
     if (!bus) return;
@@ -233,6 +244,7 @@ export function ChangeRequestDialog({
     const offs = [
       bus.subscribe('change-request-apply-failed', reread),
       bus.subscribe('change-request-merged', reread),
+      bus.subscribe('change-request-rejected', reread),
     ];
     return () => {
       cancelled = true;
@@ -249,6 +261,14 @@ export function ChangeRequestDialog({
     if (!bus) return;
     return bus.watchWorkspace(sourceWorkspaceId);
   }, [bus, sourceWorkspaceId]);
+
+  /**
+   * The request was applied or closed: it is a record now, shown by the
+   * finished view (`FinishedChangeRequest`), and nothing here may read its
+   * draft branch — an apply removes it, and reading it is the "HTTP 410" a
+   * finished request used to show for every file.
+   */
+  const finished = detail !== null ? detail.state !== 'open' : cr.state !== 'open';
 
   // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
   // lifted to full paths, and every touched file lists whatever folder it is
@@ -346,7 +366,13 @@ export function ChangeRequestDialog({
     // Nothing is read before the DETAIL, though: a dialog opened about a file
     // has a selection from the first render (`initialPath`), and the pane
     // cannot draw a diff before the detail names its fork point.
-    if (detail !== null && selected && !selectedIsBinary && !asked.current.has(selected)) {
+    if (
+      detail !== null &&
+      detail.state === 'open' &&
+      selected &&
+      !selectedIsBinary &&
+      !asked.current.has(selected)
+    ) {
       const token = {};
       asked.current.set(selected, token);
       const current = () => asked.current.get(selected) === token;
@@ -470,7 +496,7 @@ export function ChangeRequestDialog({
    * point to read) — the old reading, which is the only one left.
    */
   const forkSha = detail?.mergeBaseSha ?? null;
-  const readAtFork = touchesSelected && forkSha !== null;
+  const readAtFork = !finished && touchesSelected && forkSha !== null;
   const forkRead = useForkPointFileRead(
     cr.number,
     readAtFork ? forkSha : null,
@@ -481,7 +507,7 @@ export function ChangeRequestDialog({
     { targetBranch: cr.base || DEFAULT_BRANCH, revision: baseRevision },
   );
   const tipRead = useDefaultBranchFileRead(
-    detail !== null && !readAtFork ? beforePath : null,
+    detail !== null && !finished && !readAtFork ? beforePath : null,
     baseRevision,
   );
   const mainRead = readAtFork ? forkRead : tipRead;
@@ -1013,16 +1039,21 @@ export function ChangeRequestDialog({
 
   const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
-  const why = authorsReason(detail?.body);
-  const [whyExpanded, setWhyExpanded] = useState(false);
-  /**
-   * Whether the one-line view is actually hiding anything — a short reason
-   * with a pointless "Read more" beside it would be a button that does
-   * nothing visible. Length is a heuristic (true truncation depends on the
-   * viewport), erring toward showing the toggle: a newline always overflows a
-   * single line, and ~90 characters approximates one row of the quote.
-   */
-  const whyOverflows = !!why && (why.includes('\n') || why.length > 90);
+
+  // Applied or closed — by this reader in another tab, by anyone while this
+  // was open, or long before the link was clicked. Every hook above has run;
+  // from here on the request is a record, not a decision.
+  if (finished) {
+    return (
+      <FinishedChangeRequest
+        cr={cr}
+        detail={detail}
+        initialPath={picked ?? undefined}
+        onClose={onClose}
+        onOpenPage={onOpenPage}
+      />
+    );
+  }
 
   return (
     <div
@@ -1039,65 +1070,9 @@ export function ChangeRequestDialog({
         elevation="overlay"
         className="relative mx-auto mt-[4vh] mb-[4vh] flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden"
       >
-        <div className="flex items-start gap-4 px-8 pt-7">
-          <div className="min-w-0 flex-1">
-            <p className="text-label font-semibold uppercase text-ink-faint">Change request</p>
-            <h1 className="mt-1 text-title font-medium text-ink">{cr.title}</h1>
-            <p className="mt-2 flex flex-wrap items-center gap-2 text-detail text-ink-muted">
-              <span>{author}</span>
-              <span aria-hidden="true" className="text-ink-faint">·</span>
-              <span className="font-mono">{cr.branch}</span>
-            </p>
-          </div>
-          <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close change request">
-            ✕
-          </Button>
-        </div>
+        <ChangeRequestHeader cr={cr} onClose={onClose} />
 
-        {/* Why, in the author's words. Omitted rather than faked when the
-            request carries no description — an empty quote block reads as the
-            author having said nothing worth reading.
-
-            ONE line by default, because agents write essays: the decision is
-            made on the diff below, and every line the description takes is a
-            line the file grid (the dialog's one flexible region) loses. Read
-            more opens the whole thing (self-scrolling past half the surface,
-            so even an essay never pushes the files off screen); Hide folds it
-            back to the line. */}
-        {why && (
-          <blockquote
-            className={cn(
-              'mx-8 mt-5 shrink-0 border-l-2 border-line-strong pl-4 text-body text-ink',
-              whyExpanded && 'max-h-[50vh] overflow-y-auto',
-            )}
-          >
-            {whyExpanded ? (
-              <>
-                <span className="whitespace-pre-wrap">{why}</span>{' '}
-                <button
-                  type="button"
-                  className="text-detail font-medium text-ink-faint transition-colors hover:text-ink"
-                  onClick={() => setWhyExpanded(false)}
-                >
-                  Hide
-                </button>
-              </>
-            ) : (
-              <span className="flex items-baseline gap-3">
-                <span className="min-w-0 flex-1 truncate">{why}</span>
-                {whyOverflows && (
-                  <button
-                    type="button"
-                    className="shrink-0 text-detail font-medium text-ink-faint transition-colors hover:text-ink"
-                    onClick={() => setWhyExpanded(true)}
-                  >
-                    Read more
-                  </button>
-                )}
-              </span>
-            )}
-          </blockquote>
-        )}
+        <AuthorsReason body={detail?.body} />
 
         {/* Never state a scale we do not have yet. `detail` can take many
             seconds, and "0 files · +0 −0" is not a loading state — it is a
@@ -1487,104 +1462,5 @@ export function ChangeRequestDialog({
         </div>
       </Surface>
     </div>
-  );
-}
-
-/**
- * The author's reason, or nothing.
- *
- * A change request's body is part human and part machine: the backend appends
- * an `## Affected owners` block (and hidden identity markers) to whatever the
- * author wrote, and our propose flow writes no description at all — so the body
- * is USUALLY pure machinery. Rendering it as a pull-quote under the title
- * presents a routing table as the reason someone wants this change. Everything
- * from the first generated heading on is dropped; what survives is quoted only
- * if a human actually wrote it.
- */
-function authorsReason(body: string | undefined): string | null {
-  if (!body) return null;
-  const human = body
-    .split(/^##\s+/m)[0]
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .trim();
-  return human.length > 0 ? human : null;
-}
-
-/**
- * The file with the change marked in it — one document, not two panes. Removed
- * passages stay in place struck through, added ones sit where they will land,
- * so what you read is the file as it would become.
- *
- * Markdown never reaches this view when both sides are in — it renders
- * through `MarkdownDiffViewer` above. This is the presentation for the files
- * that ARE source (yaml, scripts, config, the access rules file), plus the loading and unreadable
- * states for everything.
- */
-function MarkedFile({
-  diff,
-  raw,
-  failure,
-  onRetry,
-}: {
-  diff: DiffLine[] | null;
-  raw: string | null;
-  /**
-   * Why the copy this pane needs could not be read — `null` when it could.
-   * Two forms, whichever side failed: a refusal, which a person has to lift,
-   * and everything else, which another attempt might.
-   */
-  failure?: ReadFailure | null;
-  /** Re-fetch this file. Offered only beside the retryable form. */
-  onRetry(): void;
-}) {
-  if (failure) {
-    return (
-      <p className="py-6 text-center text-detail text-ink-faint">
-        {failure.kind === 'denied' ? (
-          deniedSentence(failure.folder)
-        ) : (
-          <>
-            {readErrorLead(failure.reason)}{' '}
-            {/* The retry IS the sentence's last words — a reader told to try
-                again should not then have to find where. */}
-            <button
-              type="button"
-              className="underline underline-offset-2 transition-colors hover:text-ink"
-              onClick={onRetry}
-            >
-              Try again
-            </button>
-            .
-          </>
-        )}
-      </p>
-    );
-  }
-  if (raw !== null) {
-    return (
-      <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
-        {raw}
-      </pre>
-    );
-  }
-  if (diff === null) {
-    return <p className="py-6 text-center text-detail text-ink-faint">Loading…</p>;
-  }
-  return (
-    <pre className="lib-sug whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
-      {diff.map((l, i) =>
-        l.kind === 'removed' ? (
-          <del key={i} className="block">
-            {l.text || ' '}
-          </del>
-        ) : l.kind === 'added' ? (
-          <ins key={i} className="block">
-            {l.text || ' '}
-          </ins>
-        ) : (
-          <div key={i}>{l.text || ' '}</div>
-        ),
-      )}
-    </pre>
   );
 }

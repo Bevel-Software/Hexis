@@ -15,15 +15,18 @@ vi.mock('../components/ChangeRequestDialog', () => ({
     cr,
     onClose,
     onResolved,
+    onOpenPage,
   }: {
     cr: PullRequestSummary;
     onClose(): void;
     onResolved(): void;
+    onOpenPage?(url: string): void;
   }) => (
     <div role="dialog" aria-label={`change request ${cr.number}`}>
       {cr.title}
       <button onClick={onClose}>Close</button>
       <button onClick={onResolved}>Apply</button>
+      <button onClick={() => onOpenPage?.('/workspace/main/knowledge-base/Docs/a.md')}>Open page</button>
     </div>
   ),
 }));
@@ -92,6 +95,17 @@ describe('ChangeRequestLink', () => {
 
   // The link's entry is replaced, not pushed: Back after closing must not
   // land on the address again and reopen the request.
+  it("a finished request's Open page goes to the page, in place of the link", async () => {
+    api.getPullRequest.mockResolvedValue({ ...CR, state: 'merged' });
+    renderAt('/change-requests/276');
+    await userEvent.click(await screen.findByRole('button', { name: 'Open page' }));
+    // To the page — not through the dialog's close, which goes to Knowledge's root.
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/main/knowledge-base/Docs/a.md');
+    // And the link's entry is replaced, so Back does not reopen the request.
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await waitFor(() => expect(screen.getByTestId('pathname')).toHaveTextContent('/somewhere-before'));
+  });
+
   it('leaves no history entry behind, so Back goes to where the person was before the link', async () => {
     api.getPullRequest.mockResolvedValue(CR);
     renderAt('/change-requests/276');

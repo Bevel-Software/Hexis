@@ -13,6 +13,7 @@ import {
   getFileRenderer,
   getRendererLayout,
 } from '../../workspace/components/renderers';
+import type { RendererFileRef } from '../../workspace/components/renderers/rendererWorkspace';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
 
@@ -178,7 +179,13 @@ export interface BranchFilePreviewProps {
   /** Repo-relative path (the dialog's own currency), no `kbDirName` prefix. */
   repoRelativePath: string;
   /** What this pane is showing. */
-  label: 'Proposed version' | 'Current version';
+  label: 'Proposed version' | 'Current version' | 'As applied' | 'Before it was applied';
+  /**
+   * A commit to read the file at instead of the branch's working tree — an
+   * APPLIED request's merge commit (`side: 'before'` for the target just
+   * before it, what a file the request deleted shows). Same read gate.
+   */
+  fileRef?: RendererFileRef | null;
   /**
    * The branch to open the CURRENT version on, for a file the request
    * CHANGES. Null for an added file (there is no current version), for one the
@@ -205,6 +212,7 @@ export function BranchFilePreview({
   label,
   currentVersionBranch = null,
   currentVersionPath,
+  fileRef = null,
 }: BranchFilePreviewProps) {
   const { workspace, failed } = useBranchWorkspace(branch);
   const access = useBranchFileAccess(workspace?.id ?? null, repoRelativePath);
@@ -249,7 +257,7 @@ export function BranchFilePreview({
     body = <AccessRefused repoRelativePath={repoRelativePath} />;
   } else {
     const viewer = (
-      <RendererWorkspaceContext.Provider value={{ workspaceId: workspace.id }}>
+      <RendererWorkspaceContext.Provider value={{ workspaceId: workspace.id, fileRef }}>
         <CanDownloadContext.Provider value={access.canDownload}>
           {/* Not a component created during render: `getFileRenderer` returns
               one of a fixed set of module-level components (or a lazy wrapper

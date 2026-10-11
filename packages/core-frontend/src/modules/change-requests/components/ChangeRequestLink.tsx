@@ -17,7 +17,8 @@ import { ChangeRequestDialog } from './ChangeRequestDialog';
  *
  * What it opens is THE change-request view — {@link ChangeRequestDialog},
  * the same one the explorer and the skill page open — over a quiet page, on
- * the request's first changed file. Closing it, or applying the request,
+ * the request's first changed file. A request that was applied or closed
+ * opens in that view's finished form, which says how it ended. Closing it, or applying the request,
  * goes to the workspace: there is nothing under the dialog to go back to.
  *
  * A number that is not one, a request that is not there, and one the
@@ -106,7 +107,15 @@ function OpenRequest({ number }: { number: number }) {
         <BackToKnowledge />
       </Quiet>
       {lookup.kind === 'open' && (
-        <ChangeRequestDialog cr={lookup.cr} onClose={leave} onResolved={leave} />
+        <ChangeRequestDialog
+          cr={lookup.cr}
+          onClose={leave}
+          onResolved={leave}
+          // An applied request's Open page: to the page, in place of this
+          // address, rather than through `leave`, which goes to the
+          // knowledge base's root.
+          onOpenPage={(url) => navigate(url, { replace: true })}
+        />
       )}
     </>
   );

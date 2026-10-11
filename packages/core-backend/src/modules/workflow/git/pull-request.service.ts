@@ -1,4 +1,4 @@
-import { desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('cr');
@@ -10,13 +10,14 @@ import type {
   PrReviewComment,
   PullRequestDetail,
   PullRequestFile,
+  PullRequestFinished,
   PullRequestState,
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
-import { changeRequests } from '../../database/schema.js';
+import { changeRequests, prMergeLog } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
@@ -52,6 +53,18 @@ const LIST_PR_CACHE_TTL_MS = 30_000;
  * is evicted.
  */
 const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
+/**
+ * The applier as the finished view names them: a display name, or nobody.
+ * Blank names and anything shaped like an email address (an account that
+ * never set a name) are dropped — the view never shows an address, and
+ * "Applied on <date>." is the honest line when no name was recorded.
+ */
+export function applierName(name: string | null | undefined): { name: string } | null {
+  const trimmed = name?.trim() ?? '';
+  if (!trimmed || /\S+@\S+/.test(trimmed)) return null;
+  return { name: trimmed };
+}
+
 /** How many mismatched applied rows to remember — see `touchedPathsFor`. */
 const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
 /** How many rows a listing reads from git at once. */
@@ -692,6 +705,13 @@ export class PullRequestService implements IPullRequestService {
     };
     /** Did the target change, since the fork point, a file this request changes? */
     let targetChangedShared = false;
+    /**
+     * The applied request's merge commit, set only once the git layer has
+     * verified it is this request's own (see `appliedChangeShas`). Never the
+     * row's raw `merged_sha`, which is the target tip when the apply made no
+     * commit — usually another request's merge.
+     */
+    let appliedSha: string | null = null;
     // The SAME routing the list takes, from the same function, so the two
     // surfaces cannot disagree about which files a request has — see
     // {@link changeSourceFor} for why each state reads from what it does.
@@ -722,6 +742,10 @@ export class PullRequestService implements IPullRequestService {
         files = await this.gitService.changedFilesOfAppliedChange(workspaceId, source.applied, {
           ...(opts.patches === false ? { patchCap: 0 } : {}),
         });
+        // Only now, past the verification both reads above run, is the
+        // recorded sha known to be this request's OWN merge commit — the one
+        // the finished view may read each file "as applied" from.
+        appliedSha = source.applied.mergeSha;
         // `forkPoint` and `targetChangedShared` stay at their defaults. "Is this
         // behind its target, and does the divergence reach its files" is a
         // question about a proposal that could still be updated; an applied one
@@ -800,6 +824,7 @@ export class PullRequestService implements IPullRequestService {
       files = [];
       forkPoint = { mergeBaseSha: null, behind: false };
       targetChangedShared = false;
+      appliedSha = null;
     }
 
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
@@ -810,7 +835,12 @@ export class PullRequestService implements IPullRequestService {
       now - cached.at < DETAIL_CACHE_TTL_MS &&
       cached.headSha === headSha &&
       // The target moving on changes `behind` without touching the head.
-      cached.baseSha === baseSha
+      cached.baseSha === baseSha &&
+      // An apply leaves both shas where the open request's detail had them
+      // (the merge commit's parents ARE the two tips it merged), so the state
+      // is compared too, or a cached open detail would answer for an applied
+      // request.
+      cached.value.state === row.state
     ) {
       return cached.value;
     }
@@ -920,8 +950,11 @@ export class PullRequestService implements IPullRequestService {
       viewerCanBypassMerge,
     });
 
+    const finished = row.state === 'open' ? null : await this.finishedFacts(row, appliedSha);
+
     const detail: PullRequestDetail = {
       ...summary,
+      finished,
       body: row.body,
       headSha,
       baseSha,
@@ -979,6 +1012,47 @@ export class PullRequestService implements IPullRequestService {
   invalidateListCache(): void {
     this.cacheGeneration++;
     this.cachedList.clear();
+  }
+
+  /**
+   * How a request that is no longer open ended — the facts its finished view
+   * states. From the row (`closed_at`, `closed_reason`) and, for an applied
+   * request, the newest SUCCEEDED merge-log row's applier name: the name the
+   * merge commit carries, and the only record of who applied it. Who closed
+   * a request is recorded nowhere, so a closed one names nobody.
+   *
+   * Display name only (see {@link applierName}); the merge log's email column
+   * is never read here at all.
+   */
+  private async finishedFacts(
+    row: ChangeRequestRow,
+    appliedSha: string | null,
+  ): Promise<PullRequestFinished> {
+    let appliedBy: PullRequestFinished['appliedBy'] = null;
+    if (row.state === 'merged') {
+      try {
+        const [merge] = await this.db
+          .select({ name: prMergeLog.triggeredByName })
+          .from(prMergeLog)
+          .where(and(eq(prMergeLog.prNumber, row.number), eq(prMergeLog.succeeded, true)))
+          .orderBy(desc(prMergeLog.startedAt))
+          .limit(1);
+        appliedBy = applierName(merge?.name);
+      } catch (err) {
+        // The name is a courtesy on top of what the row already says; a
+        // failed lookup reads as "no applier recorded", never as no answer.
+        log.warn(`could not read who applied change request #${row.number}:`, { err });
+      }
+    }
+    return {
+      at: row.closedAt ? row.closedAt.toISOString() : null,
+      appliedBy,
+      closedReason:
+        row.state === 'closed' && row.closedReason === 'repository-replaced'
+          ? 'repository-replaced'
+          : null,
+      appliedSha: row.state === 'merged' ? appliedSha : null,
+    };
   }
 
   private async findRow(prNumber: number): Promise<ChangeRequestRow | null> {
