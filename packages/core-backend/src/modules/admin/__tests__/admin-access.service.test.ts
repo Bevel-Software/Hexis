@@ -5,7 +5,11 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 
 /** The admin check over a clone that records its calls and a roles.yaml that names one lead. */
-function harness(branch: string, bootstrapAdmins: string[] = [], opts: { cloneFails?: boolean } = {}) {
+function harness(
+  branch: string | (() => string),
+  bootstrapAdmins: string[] = [],
+  opts: { cloneFails?: boolean; rolesFail?: boolean } = {},
+) {
   const calls: string[] = [];
   const ws = {
     getOrCreateForBranch: async (b: string) => {
@@ -17,10 +21,11 @@ function harness(branch: string, bootstrapAdmins: string[] = [], opts: { cloneFa
   const access = {
     canWrite: async (_ws: string, email: string) => {
       calls.push(`roles:${email}`);
+      if (opts.rolesFail) throw new Error('roles.yaml: bad indentation');
       return email === 'lead@acme.test';
     },
   } as unknown as IAccessControl;
-  return { service: new AdminAccessService(access, ws, () => branch, bootstrapAdmins), calls };
+  return { service: new AdminAccessService(access, ws, branch, bootstrapAdmins), calls };
 }
 
 const warned: string[] = [];
@@ -65,6 +70,26 @@ describe('AdminAccessService.isAdmin', () => {
   it('a clone that fails makes nobody an admin, and says so', async () => {
     const h = harness('main', [], { cloneFails: true });
     expect(await h.service.isAdmin('lead@acme.test')).toBe(false);
+    expect(warned).toEqual(['isAdmin resolution failed:']);
+  });
+
+  it('a roles file that cannot be read makes nobody an admin, and says so', async () => {
+    const h = harness('main', [], { rolesFail: true });
+    expect(await h.service.isAdmin('lead@acme.test')).toBe(false);
+    expect(h.calls).toEqual(['clone:main', 'roles:lead@acme.test']);
+    expect(warned).toEqual(['isAdmin resolution failed:']);
+  });
+
+  it('a branch that cannot be resolved makes nobody an admin, and says so', async () => {
+    const h = harness(
+      () => {
+        throw new Error('no branch model');
+      },
+      ['owner@acme.test'],
+    );
+    expect(await h.service.isAdmin('owner@acme.test')).toBe(true);
+    expect(await h.service.isAdmin('lead@acme.test')).toBe(false);
+    expect(h.calls).toEqual([]);
     expect(warned).toEqual(['isAdmin resolution failed:']);
   });
 });

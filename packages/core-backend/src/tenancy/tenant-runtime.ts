@@ -129,12 +129,13 @@ export class TenantRuntime {
    * Take a newer descriptor for the same tenant. A graph that runs, or is
    * being built, keeps the descriptor it was built from — its config is
    * already live, and the host's eviction is how it is retired. While
-   * nothing runs (idle, in a failure window, or evicting) the descriptor is
-   * replaced, and the activation that follows builds from it: a request
-   * that waits out an eviction already starts the tenant afresh.
+   * nothing runs (idle, or in a failure window) the descriptor is replaced,
+   * and so is it during an eviction, whatever that eviction is still
+   * waiting to stop: the activation that follows builds from it, since a
+   * request that waits out an eviction starts the tenant afresh anyway.
    */
   adopt(descriptor: TenantDescriptor): void {
-    if (this.graph || this.activation) return;
+    if (!this.eviction && (this.graph || this.activation)) return;
     this.current = descriptor;
   }
 
