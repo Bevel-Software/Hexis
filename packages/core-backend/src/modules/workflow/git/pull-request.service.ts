@@ -24,6 +24,7 @@ import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
+import { displayName } from './finished-detail.js';
 
 /**
  * The latest moment a change-request row records — its close time when it has
@@ -55,14 +56,14 @@ const LIST_PR_CACHE_TTL_MS = 30_000;
 const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
 /**
  * The applier as the finished view names them: a display name, or nobody.
- * Blank names and anything shaped like an email address (an account that
- * never set a name) are dropped — the view never shows an address, and
- * "Applied on <date>." is the honest line when no name was recorded.
+ * What counts as a name is {@link displayName}'s rule, the one the detail
+ * route applies to the author and approvers too — the view never shows an
+ * address, and "Applied on <date>." is the honest line when no name was
+ * recorded.
  */
 export function applierName(name: string | null | undefined): { name: string } | null {
-  const trimmed = name?.trim() ?? '';
-  if (!trimmed || /\S+@\S+/.test(trimmed)) return null;
-  return { name: trimmed };
+  const shown = displayName(name);
+  return shown ? { name: shown } : null;
 }
 
 /** One attempt in the merge log, as {@link lastApply} reads it. */

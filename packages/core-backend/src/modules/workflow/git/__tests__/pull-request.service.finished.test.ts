@@ -7,7 +7,7 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { prMergeLog } from '../../../database/schema.js';
 import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
-import { withoutAddresses } from '../finished-detail.js';
+import { displayName, withoutAddresses } from '../finished-detail.js';
 import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
 /**
@@ -330,6 +330,8 @@ describe('withoutAddresses — the detail the app route serves', () => {
       number: 4,
       state,
       title: 'A proposal',
+      author: { login: 'user-0123456789ab', name: 'Sam Author' },
+      appAuthor: { name: 'Sam Author' },
       finished: state === 'open' ? null : { at: null, appliedBy: { name: 'Robin Lee' }, closedReason: null, appliedSha: null },
       approvals: [
         {
@@ -360,16 +362,19 @@ describe('withoutAddresses — the detail the app route serves', () => {
     expect(json).not.toMatch(/@bevel\.software/);
     expect(json).toContain('Robin Lee');
     expect(json).toContain('Owner One');
+    expect(json).toContain('Sam Author');
   });
 
   it('blanks a name that is itself an address, as the applier\'s is', () => {
     const detail = appliedDetail('merged');
+    detail.author = { login: 'user-0123456789ab', name: 'sam@bevel.software' };
     detail.appAuthor = { name: 'sam@bevel.software' };
     detail.approvals[0].approvedBy[0].name = 'robin@bevel.software';
     detail.approvals[0].eligibleApprovers.users[0].name = 'owner@bevel.software';
     const scrubbed = withoutAddresses(detail);
     expect(JSON.stringify(scrubbed)).not.toMatch(/@/);
     expect(scrubbed.appAuthor).toEqual({ name: '' });
+    expect(scrubbed.author).toEqual({ login: 'user-0123456789ab', name: '' });
     expect(scrubbed.approvals[0].approvedBy[0].name).toBe('');
   });
 
@@ -442,5 +447,19 @@ describe('applierName', () => {
   it('drops anything shaped like an email address', () => {
     expect(applierName('robin@bevel.software')).toBeNull();
     expect(applierName('Robin <robin@bevel.software>')).toBeNull();
+  });
+});
+
+describe('displayName — one rule for every person on a finished request', () => {
+  it.each(['  Robin Lee ', '', '   ', 'robin@bevel.software', 'Robin <robin@bevel.software>', null, undefined])(
+    'the applier and the people on the detail are named alike for %j',
+    (name) => {
+      const shown = displayName(name);
+      expect(applierName(name)).toEqual(shown === null ? null : { name: shown });
+    },
+  );
+  it('keeps a display name, trimmed, and refuses an address', () => {
+    expect(displayName(' Robin Lee ')).toBe('Robin Lee');
+    expect(displayName('robin@bevel.software')).toBeNull();
   });
 });

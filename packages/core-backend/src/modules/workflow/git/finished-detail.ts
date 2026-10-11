@@ -1,11 +1,18 @@
 import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
-/** An email address anywhere in a string — what `applierName` refuses as a name, too. */
-const ADDRESS = /\S+@\S+/;
+/**
+ * A person's name as the finished view may show it, or null: a blank name and
+ * one shaped like an email address (an account that never set a name) are no
+ * name. The one rule for every person on a finished request — the applier
+ * (`applierName`), the author and the approvers.
+ */
+export function displayName(name: string | null | undefined): string | null {
+  const trimmed = name?.trim() ?? '';
+  return !trimmed || /\S+@\S+/.test(trimmed) ? null : trimmed;
+}
 
-/** A person's name as the finished view may show it: an address-shaped one is no name. */
-function nameOnly(name: string): string {
-  return ADDRESS.test(name) ? '' : name;
+function nameOnly(name: string | undefined): string {
+  return displayName(name) ?? '';
 }
 
 /**
@@ -19,8 +26,9 @@ function nameOnly(name: string): string {
  * caller. Nothing reads an address off a finished request — there is no
  * approval left to give or undo (the one thing `approvedBy[].email` is
  * compared for) — so every person goes by name alone: approvers, eligible
- * approvers and the author, with a name that is itself an address (a user
- * who never set one) blanked as `applierName` blanks the applier's. Comments
+ * approvers and the author (`author.name` and `appAuthor.name` alike), with a
+ * name that is itself an address (a user who never set one) blanked by
+ * {@link displayName}, the rule `applierName` applies to the applier. Comments
  * go entirely: the finished view shows none, and a comment's body is free
  * text an address can sit in.
  *
@@ -39,6 +47,7 @@ export function withoutAddresses(detail: PullRequestDetail): PullRequestDetail {
   if (detail.state === 'open') return detail;
   return {
     ...detail,
+    author: { ...detail.author, name: nameOnly(detail.author.name) },
     ...(detail.appAuthor && { appAuthor: { name: nameOnly(detail.appAuthor.name) } }),
     approvals: detail.approvals.map((a) => ({
       ...a,
