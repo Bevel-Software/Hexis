@@ -145,6 +145,7 @@ import { FileViewer } from '../FileViewer';
 import {
   acquireLock as acquireLockMock,
   getLock as getLockMock,
+  releaseLock as releaseLockMock,
   LockApiError,
   SELF_HOLD_MESSAGE,
 } from '../../../workflow/services/lock.api';
@@ -229,6 +230,7 @@ function ViewerHarness({
   routeState,
   routePath,
   workspaceBranch = 'main',
+  onSaveFile,
 }: {
   initialContent?: string;
   /** What git reports about itself; the history views need `'ready'`. */
@@ -267,6 +269,8 @@ function ViewerHarness({
   routePath?: string;
   /** The branch the workspace is on, as the workspace state reports it. */
   workspaceBranch?: string | null;
+  /** Observes every write the viewer asks the workspace to make. */
+  onSaveFile?: (relativePath: string, content: string) => void;
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
@@ -331,7 +335,8 @@ function ViewerHarness({
     clearUploadError: () => {},
     deleteEntry: async () => {},
     moveEntry: async () => {},
-    saveFile: async (_relativePath: string, content: string) => {
+    saveFile: async (relativePath: string, content: string) => {
+      onSaveFile?.(relativePath, content);
       setOpenFileContent(content);
       setSavedContent(content);
     },
@@ -804,6 +809,47 @@ describe('FileViewer', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Closing a tab mid-edit: the browser still warns while there is unsaved
+  // text (the page's `beforeunload` guard), and a clean editor does not
+  // warn. Once the person accepts and the page goes (`pagehide`), the hold
+  // is released at once with a keep-alive request, and the unsaved text is
+  // not written on the way out.
+  it('warns before closing a tab with unsaved text, then gives the page back without saving it', async () => {
+    const user = userEvent.setup();
+    const saved: string[] = [];
+    render(
+      <ViewerHarness
+        initialContent="Base content"
+        captureTyped
+        onSaveFile={(_path, content) => saved.push(content)}
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = await screen.findByRole('textbox');
+
+    const tryToClose = () => {
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    // Nothing typed yet: the tab closes without a warning.
+    expect(tryToClose()).toBe(false);
+
+    await user.type(textarea, ' and a new line');
+    // Unsaved text: the browser asks first, as today.
+    await waitFor(() => expect(tryToClose()).toBe(true));
+
+    vi.mocked(releaseLockMock).mockClear();
+    await act(async () => { window.dispatchEvent(new Event('pagehide')); });
+
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+    expect(releaseLockMock).toHaveBeenCalledWith(
+      'ws-1', 'alice/draft', 'knowledge-base/Knowledge/Foo.md', undefined, { keepalive: true },
+    );
+    // No write of the unsaved text happened on the way out.
+    expect(saved).toEqual([]);
   });
 
   // WP1 regression. The document column moved: the viewer pane used to be
