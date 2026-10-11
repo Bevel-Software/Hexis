@@ -124,8 +124,8 @@ export function useCreatePage(): CreatePage {
   const {
     folder: pageFolder,
     settled: pageFolderSettled,
-    current: pageFolderCurrent,
     recheck,
+    resolve,
     withdraw,
   } = useKnowledgeWriteTarget(kbDirName !== null ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null);
 
@@ -146,13 +146,17 @@ export function useCreatePage(): CreatePage {
     }
     const startedOn = liveKey;
     const moved = (): boolean => live.current !== startedOn;
-    // An answer from before a switch of branch or page may name a folder
-    // other than where the person is looking: ask again before writing.
-    let folder = pageFolderCurrent ? pageFolder : await recheck();
+    // The folder for the page and branch on screen now (`resolve`): the last
+    // answer when it is about them, else asked again — never a folder shown
+    // for a page just left during the check's debounce.
+    let folder = await resolve();
     if (moved()) return null;
     // Folders a write was refused in, this create: each refusal asks again,
     // and a fresh answer naming one of these says the refusal is not about
     // the folder.
+    // Every folder this loop writes comes from `resolve` or a refusal's
+    // `recheck`, both answered for the page and branch on screen when they
+    // return (see `useKnowledgeWriteTarget`).
     const refused = new Set<string>();
     while (folder) {
       let n = freeUntitledNumber(tree, folder);
@@ -196,7 +200,7 @@ export function useCreatePage(): CreatePage {
     }
     // Nowhere to write: the fresh answer has hidden New page, which says it.
     return null;
-  }, [knowledgeRoot, liveKey, pageFolder, pageFolderSettled, pageFolderCurrent, recheck, withdraw, tree, createFile, openWorkspacePath]);
+  }, [knowledgeRoot, liveKey, pageFolderSettled, resolve, recheck, withdraw, tree, createFile, openWorkspacePath]);
 
   return { knowledgeRoot, createPage, pageFolder, pageFolderSettled };
 }

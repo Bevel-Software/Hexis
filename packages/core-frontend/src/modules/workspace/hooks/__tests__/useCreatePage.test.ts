@@ -36,7 +36,13 @@ vi.mock('../useMergedWorkspaceTree', () => ({
   useMergedWorkspaceTree: () => ({ tree: null, suggestionOnlyPaths: new Map(), withheld: 0 }),
 }));
 vi.mock('../useKnowledgeWriteTarget', () => ({
-  useKnowledgeWriteTarget: () => ({ ...state.target, recheck, withdraw: vi.fn() }),
+  useKnowledgeWriteTarget: () => ({
+    ...state.target,
+    recheck,
+    // As the hook answers it: the last answer when current, else a recheck.
+    resolve: () => (state.target.current ? Promise.resolve(state.target.folder) : recheck()),
+    withdraw: vi.fn(),
+  }),
 }));
 
 import { useCreatePage } from '../useCreatePage';
@@ -102,6 +108,21 @@ describe('useCreatePage across a branch switch', () => {
     // Made, and its path answered, but not opened over the branch on screen now.
     expect(await created).toBe('kb/KnowledgeBase/Untitled.md');
     expect(openWorkspacePath).not.toHaveBeenCalled();
+  });
+
+  it('writes where the target resolves for the page on screen, not the folder the last answer showed', async () => {
+    // The last answer (Sales) is from before a page change; the target
+    // resolves for the page on screen now (Support).
+    state.target = { folder: 'kb/KnowledgeBase/Sales', settled: true, current: false };
+    recheck.mockResolvedValueOnce('kb/KnowledgeBase/Support');
+    const { result } = renderHook(() => useCreatePage());
+    let created!: Promise<string | null>;
+    act(() => {
+      created = result.current.createPage();
+    });
+    expect(await created).toBe('kb/KnowledgeBase/Support/Untitled.md');
+    expect(createFile).toHaveBeenCalledTimes(1);
+    expect(createFile).toHaveBeenCalledWith('kb/KnowledgeBase/Support/Untitled.md', expect.any(String), { ifAbsent: true });
   });
 
   it('opens the page as before when nothing changed', async () => {

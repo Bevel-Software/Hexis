@@ -170,6 +170,53 @@ describe('useKnowledgeWriteTarget on a protected branch', () => {
     expect(result.current.folder).toBe(`${ROOT}/Support`);
   });
 
+  it('a recheck that answers for a page left during the debounce asks again for the page on screen', async () => {
+    vi.useFakeTimers();
+    writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
+    show({ openFilePath: `${ROOT}/Sales/a.md` });
+    const { result, rerender } = renderHook(() => useKnowledgeWriteTarget(ROOT));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Top of Knowledge is not writable, so the folder follows the page on screen.
+    expect(result.current.folder).toBe(`${ROOT}/Sales`);
+
+    const pending: Array<() => void> = [];
+    batch.mockImplementation(
+      (_ws, paths) =>
+        new Promise((resolve) =>
+          pending.push(() => resolve({ results: Object.fromEntries(paths.map((p) => [p, writable.has(p)])) })),
+        ),
+    );
+    // A create asks about Sales...
+    const asked = result.current.recheck();
+    // ...the person opens a page in Support, and the Sales answer comes back
+    // inside the debounce, before any question about Support was asked.
+    show({ openFilePath: `${ROOT}/Support/b.md` });
+    rerender();
+    await act(async () => {
+      pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Not handed Sales: it asked again, about Support.
+    expect(pending).toHaveLength(1);
+    await act(async () => {
+      pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(await asked).toBe(`${ROOT}/Support`);
+    // And `resolve` answers the current folder without asking again.
+    const calls = batch.mock.calls.length;
+    expect(await result.current.resolve()).toBe(`${ROOT}/Support`);
+    expect(batch.mock.calls.length).toBe(calls);
+    // Let the debounced question the page change scheduled answer too.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      while (pending.length) pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  });
+
   it('asks at once the first time, and debounces a tree change after that', async () => {
     vi.useFakeTimers();
     show();

@@ -25,8 +25,17 @@ export interface KnowledgeWriteTarget {
   /**
    * Ask again now, past the debounce, and resolve with the new answer — what
    * a refused write does, since the refusal says the last answer is stale.
+   * The answer is for what is on screen when it resolves: if the page or the
+   * branch changed while it was out, it is asked again for the new one.
    */
   recheck(): Promise<string | null>;
+  /**
+   * The folder for what is on screen NOW: the last answer when it was asked
+   * about this page and branch, else a {@link recheck}. What a create writes
+   * to — never the folder of a page just left, which `folder` may still show
+   * during the debounce after a page change.
+   */
+  resolve(): Promise<string | null>;
   /**
    * Take New page away on this workspace and branch: a write was refused
    * where the check still says the person may write, so the refusal is not
@@ -157,19 +166,22 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
   // the answer for what is on screen now, never the folder of a branch or
   // page just left, which it would otherwise write to.
   // (`LatestRequest`, the one protocol for it.)
-  const questions = useLatestRequest<string | null>();
-  const ask = useCallback(async (): Promise<string | null> => {
-    if (!workspaceId || !kbDirName || !knowledgeRoot) return null;
+  // Each answer carries what it was asked about, so a caller can tell an
+  // answer for the page on screen from one for a page just left.
+  const questions = useLatestRequest<{ folder: string | null; askedFor: string | null }>();
+  const ask = useCallback(async (): Promise<{ folder: string | null; askedFor: string | null }> => {
+    if (!workspaceId || !kbDirName || !knowledgeRoot) return { folder: null, askedFor: null };
     return questions.run(
       async () => {
-        if (draft && !knowledgeShown) return null;
+        if (draft && !knowledgeShown) return { folder: null, askedFor: askingFor };
         try {
-          return await findKnowledgeTarget(draft ? 'read' : 'write', workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
+          const folder = await findKnowledgeTarget(draft ? 'read' : 'write', workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
+          return { folder, askedFor: askingFor };
         } catch {
-          return null;
+          return { folder: null, askedFor: askingFor };
         }
       },
-      (folder) => setAnswer({ folder, settled: true, askedFor: askingFor }),
+      ({ folder }) => setAnswer({ folder, settled: true, askedFor: askingFor }),
     );
   }, [questions, workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor, draft, knowledgeShown]);
 
@@ -193,11 +205,34 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
   const withdrawn = withdrawnFor === workspaceKey;
   const withdraw = useCallback(() => setWithdrawnFor(workspaceKey), [workspaceKey]);
 
+  // What is on screen, the question to ask about it and the last answer, as
+  // of the latest render: a create holds `recheck` / `resolve` across waits,
+  // and must ask about the page on screen when it asks, not the one it was
+  // started on.
+  const screen = useRef({ askingFor, ask, answer, withdrawn });
+  useEffect(() => {
+    screen.current = { askingFor, ask, answer, withdrawn };
+  });
+  const recheck = useCallback(async (): Promise<string | null> => {
+    for (;;) {
+      const { folder, askedFor } = await screen.current.ask();
+      // The newest answer is about where the person was, not where they are
+      // (they moved inside the debounce): ask about where they are.
+      if (askedFor === null || askedFor === screen.current.askingFor) return folder;
+    }
+  }, []);
+  const resolve = useCallback(async (): Promise<string | null> => {
+    const { answer: last, askingFor: now, withdrawn: gone } = screen.current;
+    if (last.settled && last.askedFor === now) return gone ? null : last.folder;
+    return recheck();
+  }, [recheck]);
+
   return {
     folder: withdrawn ? null : answer.folder,
     settled: answer.settled,
     current: answer.settled && answer.askedFor === askingFor,
-    recheck: ask,
+    recheck,
+    resolve,
     withdraw,
   };
 }
