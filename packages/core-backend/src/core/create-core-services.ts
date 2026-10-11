@@ -65,7 +65,7 @@ import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
-import { AccountHooks } from '../modules/auth/account-hooks.js';
+import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
@@ -308,7 +308,7 @@ export interface CoreServices {
    * the person is told (the cloud's mail, say), and the invite's answer says
    * whether somebody did. Core registers nothing.
    */
-  accountHooks: AccountHooks;
+  accountHooks: IAccountHooks;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
   gitService: GitService;
