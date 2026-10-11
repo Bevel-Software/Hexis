@@ -527,6 +527,14 @@ export interface AppRegistry {
    */
   makerLink?: string;
   /**
+   * Links under the sign-in card, on the login page only: the app behind it
+   * shows none. For a deployment whose provider must name itself to anyone
+   * who reaches it, such as the hosted cloud, which lists its Impressum and
+   * privacy policy here because German law wants them easy to recognise on
+   * every page of a commercial service. Absent or empty, there are none.
+   */
+  loginLinks?: { label: string; href: string }[];
+  /**
    * A panel inside the invite dialog, between the role choice and the footer.
    *
    * Core invites by creating accounts and knows nothing about what a place in

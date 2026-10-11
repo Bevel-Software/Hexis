@@ -2,4 +2,4 @@
 '@bevel-software/platform-core-frontend': minor
 ---
 
-A distribution can say where the maker's name in "Hexis by Bevel" leads. The registry takes an optional `makerLink`; the login page, the first-run screen and the toolbar link the name there instead of the maker's own site. The hosted cloud points it at its root domain, where the provider's Impressum and privacy policy are one click away, so they are two clicks from any workspace page. Without it, nothing changes.
+A distribution can point the login page at its provider's legal pages. The registry takes two optional fields. `makerLink` says where the maker's name in "Hexis by Bevel" leads, on the login page, the first-run screen and the toolbar, instead of the maker's own site. `loginLinks` lists links shown under the sign-in card, on the login page only. The hosted cloud uses both: "Impressum" and "Privacy" under the card, as German law wants them easy to recognise on every page of a commercial service, and the maker's name leading to its legal index. Without them, nothing changes.

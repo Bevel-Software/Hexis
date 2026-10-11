@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { LoginScreen } from '../components/LoginScreen';
 import { AuthContext, type AuthContextValue } from '../state/auth.context';
+import { AppRegistryContext, makeRegistry, type AppRegistry } from '../../../core/registry';
 import { fetchLoginProviders, startSsoLogin } from '../services/sso';
 
 vi.mock('../services/sso', () => ({
@@ -13,7 +14,7 @@ vi.mock('../services/sso', () => ({
 
 const login = vi.fn(async () => {});
 
-function renderScreen() {
+function renderScreen(registry?: Partial<AppRegistry>) {
   const value: AuthContextValue = {
     user: null,
     token: null,
@@ -22,9 +23,11 @@ function renderScreen() {
     logout: vi.fn(),
   };
   return render(
-    <AuthContext.Provider value={value}>
-      <LoginScreen />
-    </AuthContext.Provider>,
+    <AppRegistryContext.Provider value={makeRegistry(registry ?? {})}>
+      <AuthContext.Provider value={value}>
+        <LoginScreen />
+      </AuthContext.Provider>
+    </AppRegistryContext.Provider>,
   );
 }
 
@@ -35,6 +38,25 @@ beforeEach(() => {
 });
 
 describe('LoginScreen', () => {
+  it('lists the links a deployment names under the sign-in card, and none when it names none', async () => {
+    vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
+    const { unmount } = renderScreen({
+      loginLinks: [
+        { label: 'Impressum', href: '/impressum' },
+        { label: 'Privacy', href: '/privacy' },
+      ],
+    });
+    const nav = screen.getByRole('navigation', { name: 'Legal' });
+    expect(nav).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Impressum' })).toHaveAttribute('href', '/impressum');
+    expect(screen.getByRole('link', { name: 'Privacy' })).toHaveAttribute('href', '/privacy');
+    // Outside the form: they are not part of signing in.
+    expect(nav.closest('form')).toBeNull();
+    unmount();
+    renderScreen();
+    expect(screen.queryByRole('navigation', { name: 'Legal' })).toBeNull();
+  });
+
   it('renders the password form and one button per advertised SSO provider', async () => {
     vi.mocked(fetchLoginProviders).mockResolvedValue({
       password: true,

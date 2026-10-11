@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useAuth } from '../state/auth.context';
 import { ProductName } from '../../../core/ProductName';
+import { useAppRegistry } from '../../../core/registry';
 import {
   startSsoLogin,
   fetchLoginProviders,
@@ -26,6 +27,7 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
 
 export function LoginScreen() {
   const { login } = useAuth();
+  const { loginLinks } = useAppRegistry();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +73,7 @@ export function LoginScreen() {
   }
 
   return (
-    <div className="flex items-center justify-center h-full bg-white">
+    <div className="flex flex-col items-center justify-center gap-4 h-full bg-white">
       <form
         onSubmit={handleSubmit}
         className="bg-white p-8 rounded-xl border border-line w-full max-w-sm space-y-5"
@@ -145,6 +147,19 @@ export function LoginScreen() {
           </button>
         ))}
       </form>
+      {loginLinks && loginLinks.length > 0 && (
+        <nav aria-label="Legal">
+          <ul className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-ink-muted">
+            {loginLinks.map((link) => (
+              <li key={link.href}>
+                <a href={link.href} className="hover:underline">
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      )}
     </div>
   );
 }
