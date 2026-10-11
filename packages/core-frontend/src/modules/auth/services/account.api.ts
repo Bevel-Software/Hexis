@@ -12,6 +12,10 @@ export interface AccountSummary {
    * in with the environment password whether or not a hash is stored.
    */
   isEnvAdmin: boolean;
+  /** One of the deployment's owners (`ADMIN_EMAIL`): never switched off, and its password is not set here. */
+  isOwner: boolean;
+  /** An owner who can sign back in with the server's password, so their account may be deleted; false otherwise. */
+  ownerCanBeDeleted: boolean;
   /** When an admin switched the account off; null while it is on. */
   deactivatedAt: string | null;
   /** One of the accounts the platform runs its own work as: it is never switched off. */
@@ -69,6 +73,11 @@ export async function listAccounts(): Promise<AccountSummary[]> {
  * upsert). Without a password the account is for single sign-on: the person
  * finds it waiting the first time they sign in.
  *
+ * With `keepExistingPassword` (an invite's starting password) the password
+ * goes only to a new account or a switched-on one that has none; the reply's
+ * `passwordSet` says whether it did, and `deactivated` whether it did not
+ * because the account is switched off.
+ *
  * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
  * the deployment's admission rules had no place for the account.
  */
@@ -76,17 +85,37 @@ export async function createAccount(
   email: string,
   name: string,
   password?: string,
-): Promise<void> {
+  options: { keepExistingPassword?: boolean } = {},
+): Promise<{ passwordSet?: boolean; deactivated?: boolean; notified?: string[] }> {
   const res = await authFetch('/api/admin/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name: name || undefined, password: password || undefined }),
+    body: JSON.stringify({
+      email,
+      name: name || undefined,
+      password: password || undefined,
+      keepExistingPassword: options.keepExistingPassword || undefined,
+    }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
     const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
     throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
   }
+  const body = (await res.json().catch(() => ({}))) as {
+    passwordSet?: unknown;
+    deactivated?: unknown;
+    notified?: unknown;
+  };
+  // `notified`: how the deployment told a NEW account's person of the invite
+  // (`'email'`, say), as its listeners answered; empty or absent when nobody
+  // did and the admin hands over the link themselves.
+  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
+  return {
+    ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
+    ...(body.deactivated === true ? { deactivated: true } : {}),
+    ...(notified.length > 0 ? { notified } : {}),
+  };
 }
 
 /**

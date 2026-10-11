@@ -41,11 +41,13 @@ export interface CommandContext {
   /** THE invite dialog, or null where none is mounted. */
   invite: InviteDialogController | null;
   /**
-   * Create an untitled page in the Knowledge folder and open it for editing
-   * (`useCreatePage`); null until the workspace knows where that folder is.
+   * Create an untitled page in a Knowledge folder the person may write and
+   * open it for editing (`useCreatePage`); null until the workspace knows
+   * where that is, and for someone who may write no Knowledge folder.
+   * Resolves with null when a refused write found nowhere left to write.
    * Rejects with a message ready to show.
    */
-  createPage: (() => Promise<string>) | null;
+  createPage: (() => Promise<string | null>) | null;
   /** The connect-your-agent onboarding is still open for this person. */
   onboardingPending: boolean;
 }
@@ -111,7 +113,11 @@ const EDIT_PAGE: CommandAction = {
   },
 };
 
-/** Admins only, like the toolbar's Invite button: creating accounts is an admin act. */
+/**
+ * Admins only: creating accounts is an admin act. The toolbar's Invite shows to
+ * everyone and tells a non-admin whom to ask; a command menu entry that only
+ * answers "ask an admin" would be noise in a list of things you can do.
+ */
 const INVITE: CommandAction = {
   id: 'invite',
   label: 'Invite people',

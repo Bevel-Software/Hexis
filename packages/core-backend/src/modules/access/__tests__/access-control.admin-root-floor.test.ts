@@ -280,6 +280,7 @@ describe('Admin write floor at the repository root', () => {
           service(),
           { ...ws, getOrCreateForBranch: async () => ({ id: WS, kbDirName: KB }) } as unknown as WorkspaceService,
           { getUserById: async (id: string) => users[id as 'u-admin'] ?? null } as unknown as AuthService,
+          { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
           {
             getLock: async () => null,
             acquireLock: async () => ({ acquired: true, lock: {} }),
