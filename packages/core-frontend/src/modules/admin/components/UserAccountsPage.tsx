@@ -5,6 +5,7 @@ import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAuth } from '../../auth/state/auth.context';
 import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
+import { useLatestRequest } from '../../../lib/latest-request';
 import {
   createAccount,
   deactivateAccount,
@@ -178,33 +179,29 @@ export function UserAccountsPage() {
   // Only the latest read lands: an older one answering late would otherwise
   // put back a list without the people a send just invited. And a caller
   // waiting on a read that was overtaken waits on to the latest one, so
-  // "busy until the list shows the new state" still holds.
-  const accountsRequest = useRef(0);
-  const latestRead = useRef<Promise<void>>(Promise.resolve());
+  // "busy until the list shows the new state" still holds (`LatestRequest`).
+  const reads = useLatestRequest<{ rows: AccountSummary[] } | { error: string }>();
   const refresh = useCallback(async () => {
-    const requestId = ++accountsRequest.current;
-    const read = listAccounts()
-      .then((rows) => {
-        if (accountsRequest.current !== requestId) return;
-        setAccounts(rows);
-        setError(null);
-      })
-      .catch((err) => {
-        if (accountsRequest.current !== requestId) return;
-        setError(err instanceof Error ? err.message : "Couldn't load accounts.");
+    await reads.run(
+      () =>
+        listAccounts().then(
+          (rows) => ({ rows }),
+          (err: unknown) => ({ error: err instanceof Error ? err.message : "Couldn't load accounts." }),
+        ),
+      (read) => {
+        if ('rows' in read) {
+          setAccounts(read.rows);
+          setError(null);
+          return;
+        }
+        setError(read.error);
         // `accounts` is deliberately left alone. A RELOAD that fails keeps the
         // rows it already had; a FIRST load that fails stays `null`, because
         // storing `[]` would render "No user accounts." — an admin reading
         // that would take a deployment they cannot reach for one nobody is on.
-      });
-    latestRead.current = read;
-    let awaited = read;
-    await awaited;
-    while (latestRead.current !== awaited) {
-      awaited = latestRead.current;
-      await awaited;
-    }
-  }, []);
+      },
+    );
+  }, [reads]);
 
   // Again after every send from the Invite dialog, so the people just invited appear.
   useEffect(() => {

@@ -4,6 +4,7 @@ import { fetchFileAccessBatch } from '../../access/api';
 import { useWorkspace } from '../state/workspace.context';
 import { useMergedWorkspaceTree } from './useMergedWorkspaceTree';
 import { findEntryByPath } from '../utils/fileTree';
+import { useLatestRequest } from '../../../lib/latest-request';
 
 /**
  * Where New page writes for the person signed in, on the branch on screen:
@@ -155,34 +156,22 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
   // a caller that asked before a switch (`recheck` from a create) is handed
   // the answer for what is on screen now, never the folder of a branch or
   // page just left, which it would otherwise write to.
-  const asked = useRef(0);
-  const latest = useRef<Promise<string | null> | null>(null);
+  // (`LatestRequest`, the one protocol for it.)
+  const questions = useLatestRequest<string | null>();
   const ask = useCallback(async (): Promise<string | null> => {
     if (!workspaceId || !kbDirName || !knowledgeRoot) return null;
-    const n = ++asked.current;
-    const question = (async (): Promise<string | null> => {
-      if (draft && !knowledgeShown) return null;
-      try {
-        return await findKnowledgeTarget(draft ? 'read' : 'write', workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
-      } catch {
-        return null;
-      }
-    })();
-    latest.current = question;
-    let folder = await question;
-    if (n === asked.current) {
-      setAnswer({ folder, settled: true, askedFor: askingFor });
-      return folder;
-    }
-    // Superseded: wait for whichever question is the latest when each one
-    // answers, and hand back that answer.
-    let waited = question;
-    while (latest.current && latest.current !== waited) {
-      waited = latest.current;
-      folder = await waited;
-    }
-    return folder;
-  }, [workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor, draft, knowledgeShown]);
+    return questions.run(
+      async () => {
+        if (draft && !knowledgeShown) return null;
+        try {
+          return await findKnowledgeTarget(draft ? 'read' : 'write', workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
+        } catch {
+          return null;
+        }
+      },
+      (folder) => setAnswer({ folder, settled: true, askedFor: askingFor }),
+    );
+  }, [questions, workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor, draft, knowledgeShown]);
 
   const askedWorkspace = useRef<string | null>(null);
   const hasTree = tree !== null;
