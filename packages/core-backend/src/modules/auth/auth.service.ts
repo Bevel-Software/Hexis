@@ -22,6 +22,7 @@ import {
 import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
 import { takeAccountSwitchLock } from './account-switch-lock.js';
+import type { IAccountSwitchGuard } from './account-switch-guard.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -128,7 +129,7 @@ export interface SsoLoginOptions {
   admittedByProvider?: boolean;
 }
 
-export class AuthService {
+export class AuthService implements IAccountSwitchGuard {
   constructor(
     private readonly db: Database,
     private readonly config: AuthConfig,

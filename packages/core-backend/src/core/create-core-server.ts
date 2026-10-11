@@ -671,6 +671,7 @@ export async function createCoreServer(
     core.accessControl,
     core.workspaceService,
     core.authService,
+    core.authService,
     core.workflowService,
     core.eventBus,
     core.db,

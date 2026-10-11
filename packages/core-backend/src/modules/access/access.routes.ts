@@ -21,6 +21,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
+import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -86,6 +87,8 @@ export function createAccessRoutes(
   accessControl: IAccessControl,
   workspaceService: WorkspaceService,
   authService: AuthService,
+  /** Auth's switch-off coordination, for the invite's promotion (`ifActive`). */
+  switchGuard: IAccountSwitchGuard,
   workflowService: WorkflowService,
   eventBus: WorkflowEventBus,
   db: Database,
@@ -1277,7 +1280,7 @@ export function createAccessRoutes(
       // account unchanged. Inside the roles file's lock, auth reads the
       // account under the address's switch lock and keeps that transaction
       // open until roles.yaml is written and committed
-      // (`AuthService.whileSwitchedOn`). So a switch-off either committed
+      // (`IAccountSwitchGuard.whileSwitchedOn`). So a switch-off either committed
       // before the read (the promotion is refused) or waits until the
       // promotion is written (it lands after, as for any Admin switched off
       // later: the place in roles stays, the credentials stop being honoured).
@@ -1286,7 +1289,7 @@ export function createAccessRoutes(
         res.status(400).json({ error: 'ifActive must be a boolean' });
         return;
       }
-      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> => authService.whileSwitchedOn(email, write);
+      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> => switchGuard.whileSwitchedOn(email, write);
       res.json({
         roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { aroundWrite: whileSwitchedOn } : undefined),
       });

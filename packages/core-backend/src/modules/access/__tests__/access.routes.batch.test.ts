@@ -57,6 +57,7 @@ async function makeHarness(): Promise<Harness> {
       accessControl,
       workspaceService,
       authService,
+      authService,
       {} as unknown as WorkflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       usersDbDouble(),
