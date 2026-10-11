@@ -197,6 +197,15 @@ describe('an owner switched off by an earlier version', () => {
     expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
   });
 
+  it('signs in with ADMIN_PASSWORD, and the switch-off is cleared on the row', async () => {
+    // The lookup, the upsert, then the clearing update.
+    const { db, captured } = makeFakeDb([[OWNER_OFF], [OWNER_OFF], []]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }));
+    const { user } = await svc.loginWithPassword('root@example.com', 'sup3r-secret');
+    expect(user.id).toBe('owner-1');
+    expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+  });
+
   it('leaves a switched-off account that is not an owner switched off', async () => {
     const { db, captured } = makeFakeDb([[OFF]]);
     const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));

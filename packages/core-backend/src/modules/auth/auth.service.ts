@@ -242,10 +242,12 @@ export class AuthService {
       }
       // Never refused for being switched off: the environment password is
       // the deployment's way back in, and {@link deactivate} refuses this
-      // account for that reason.
+      // account for that reason. A switch-off left on the row by an earlier
+      // version is cleared here too, so the credentials that read the column
+      // directly come back with this sign-in ({@link clearOwnerSwitchOff}).
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       await this.assertAdmitted(normalizedEmail, 'bootstrap');
-      const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
+      const admin = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, defaultName));
       return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
     }
 
