@@ -24,6 +24,15 @@ describe('ProductName', () => {
     expect(link.closest('span')).toHaveTextContent('Hexis by Bevel');
   });
 
+  it("links the maker's site when the registry's place is empty, as when it is absent", () => {
+    render(
+      <AppRegistryContext.Provider value={makeRegistry({ makerLink: '' })}>
+        <ProductName />
+      </AppRegistryContext.Provider>,
+    );
+    expect(screen.getByRole('link', { name: 'Bevel' })).toHaveAttribute('href', MAKER_URL);
+  });
+
   it('is plain text where a link cannot go, wherever the registry would send it', () => {
     render(
       <AppRegistryContext.Provider value={makeRegistry({ makerLink: 'https://hexis.software' })}>

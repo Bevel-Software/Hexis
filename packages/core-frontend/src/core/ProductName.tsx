@@ -20,7 +20,7 @@ const MAKER = 'Bevel';
  */
 export const PRODUCT_NAME = `${PRODUCT} by ${MAKER}`;
 
-/** Where the maker's name leads unless the registry names another place (`makerLink`). */
+/** Where the maker's name leads when the registry names no other place (`makerLink` absent or empty). */
 export const MAKER_URL = 'https://bevel.software';
 
 /**
@@ -41,7 +41,7 @@ export function ProductName({ link = true, className }: { link?: boolean; classN
     <span className={className}>
       {PRODUCT} by{' '}
       {link ? (
-        <a href={makerLink ?? MAKER_URL} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+        <a href={makerLink || MAKER_URL} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
           {MAKER}
         </a>
       ) : (

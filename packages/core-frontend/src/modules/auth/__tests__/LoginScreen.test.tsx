@@ -53,8 +53,12 @@ describe('LoginScreen', () => {
     // Outside the form: they are not part of signing in.
     expect(nav.closest('form')).toBeNull();
     unmount();
-    renderScreen();
-    expect(screen.queryByRole('navigation', { name: 'Legal' })).toBeNull();
+    // Absent and empty both mean none: no empty landmark under the card.
+    for (const registry of [{}, { loginLinks: [] }]) {
+      const { unmount: unmountNone } = renderScreen(registry);
+      expect(screen.queryByRole('navigation', { name: 'Legal' })).toBeNull();
+      unmountNone();
+    }
   });
 
   it('renders the password form and one button per advertised SSO provider', async () => {
