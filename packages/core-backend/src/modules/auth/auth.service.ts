@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -37,6 +37,15 @@ const ACTIVE_CACHE_MS = 30_000;
 
 /** The accounts core runs its own work as. Nobody signs in with them, and nobody switches them off. */
 const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL];
+
+/**
+ * Whether an upsert's returned row was INSERTED rather than updated, from the
+ * one statement that did it: Postgres leaves `xmax` at zero on a row the
+ * statement inserted and sets it on one its `ON CONFLICT DO UPDATE` touched.
+ * So "is this account new" is answered by the write itself, never by a read
+ * before it that a concurrent create could make a lie of.
+ */
+const CREATED = sql<boolean>`(xmax = 0)`;
 
 /**
  * What every password write refuses for the accounts the platform runs its own
@@ -347,18 +356,7 @@ export class AuthService implements IAccountSwitchGuard {
     }
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
-    if (!password) {
-      await this.assertAdmitted(normalizedEmail, 'admin-create');
-      const [created] = await this.db
-        .insert(users)
-        .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
-        .onConflictDoUpdate({
-          target: users.emailBidx,
-          set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
-        })
-        .returning();
-      return this.toClientUser(created);
-    }
+    if (!password) return (await this.createAccountWithoutPassword(email, name)).user;
     // Before the policy check, so the refusal names the real reason rather
     // than sending the admin off to pick a longer password first.
     this.assertNotSystemAccount(normalizedEmail);
@@ -386,12 +384,42 @@ export class AuthService implements IAccountSwitchGuard {
   }
 
   /**
+   * An account for single sign-on, or for a password somebody sets later:
+   * created without one, and for an address that already has an account,
+   * nothing changes but an explicitly given name. `created` says which
+   * happened, from the one statement that did it (see {@link CREATED}): an
+   * invite is only an invite when the account is new.
+   */
+  async createAccountWithoutPassword(
+    email: string,
+    name: string | undefined,
+  ): Promise<{ user: AuthUser; created: boolean }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    const suppliedName = (name ?? '').trim();
+    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
+      .onConflictDoUpdate({
+        target: users.emailBidx,
+        set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
+      })
+      .returning({ ...getTableColumns(users), created: CREATED });
+    return { user: this.toClientUser(row), created: row.created === true };
+  }
+
+  /**
    * An invite's starting password: create the account with it, or give it to
    * an existing account that is switched on and has no password yet — never
    * to one that has a password of its own or is switched off. The test and
    * the write are ONE statement (the upsert's `setWhere`), so a password the
    * person sets between the admin reading the account list and sending the
-   * invite is never overwritten; `passwordSet` says which happened.
+   * invite is never overwritten; `passwordSet` says which happened, and
+   * `created` whether the account is new (see {@link CREATED}).
    *
    * The deployment admin has its own password (the environment's): it is
    * left as it is, as {@link createAccount} would refuse to store one. The
@@ -404,7 +432,7 @@ export class AuthService implements IAccountSwitchGuard {
   async createAccountWithStartingPassword(
     email: string,
     password: string,
-  ): Promise<{ user: AuthUser; passwordSet: boolean; deactivated: boolean }> {
+  ): Promise<{ user: AuthUser; created: boolean; passwordSet: boolean; deactivated: boolean }> {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
@@ -413,7 +441,7 @@ export class AuthService implements IAccountSwitchGuard {
     if (this.isEnvAdminEmail(normalizedEmail)) {
       const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
       if (existing) {
-        return { user: this.toClientUser(existing), passwordSet: false, deactivated: existing.deactivatedAt != null };
+        return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
       }
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -429,12 +457,12 @@ export class AuthService implements IAccountSwitchGuard {
         set: { passwordHash, updatedAt: new Date() },
         setWhere: and(isNull(users.passwordHash), isNull(users.deactivatedAt)),
       })
-      .returning();
-    if (row) return { user: this.toClientUser(row), passwordSet: true, deactivated: false };
+      .returning({ ...getTableColumns(users), created: CREATED });
+    if (row) return { user: this.toClientUser(row), created: row.created === true, passwordSet: true, deactivated: false };
     // The conflicting account has a password or is switched off: untouched.
     const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
     if (!existing) throw new Error('Could not set the password');
-    return { user: this.toClientUser(existing), passwordSet: false, deactivated: existing.deactivatedAt != null };
+    return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
   }
 
   /**

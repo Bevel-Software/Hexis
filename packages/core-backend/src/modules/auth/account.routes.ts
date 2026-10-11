@@ -6,6 +6,7 @@ import { printable } from '../../shared/printable.js';
 const log = logger('accounts');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthService } from './auth.service.js';
+import type { IAccountHooks } from './account-hooks.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
@@ -31,6 +32,7 @@ export function createAccountRoutes(
     AuthService,
     | 'listAccounts'
     | 'createAccount'
+    | 'createAccountWithoutPassword'
     | 'createAccountWithStartingPassword'
     | 'getUserById'
     | 'deactivate'
@@ -40,6 +42,8 @@ export function createAccountRoutes(
   >,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
+  /** Who tells an invited person (see {@link IAccountHooks}); core registers nobody. */
+  accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
   accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
 ): express.Router {
   const router = express.Router();
@@ -106,11 +110,44 @@ export function createAccountRoutes(
       return;
     }
     try {
+      // A NEW account is an invitation, and the deployment's listeners say
+      // how the person was told (`notified`): the answer the admin reads is
+      // true to what happened, so the dialog can say "emailed" or hand over
+      // the link. An account that was already there is not invited again.
+      const invited = async (account: AuthUser, created: boolean, passwordSet: boolean): Promise<string[]> => {
+        if (!created) return [];
+        // The inviting admin, by name when their account can be read. The
+        // account is already made: a failed read falls back to the identity
+        // the request carries rather than answering an error a retry could
+        // not make good (the account is not new the second time).
+        const requester = { id: req.userId ?? '', email: req.userEmail ?? '', name: '' };
+        const by = req.userId
+          ? await authService.getUserById(req.userId).catch((err: unknown) => {
+              log.warn('the inviting admin could not be read; the invite names them by address:', { err });
+              return null;
+            })
+          : null;
+        return accountHooks.runAccountInvited({
+          account: { id: account.id, email: account.email, name: account.name },
+          invitedBy: by ?? requester,
+          passwordSet,
+        });
+      };
       if (keepExistingPassword === true && typeof password === 'string') {
-        const { user, passwordSet, deactivated } = await authService.createAccountWithStartingPassword(email, password);
-        res.status(201).json({ ...user, passwordSet, deactivated });
+        const { user, created, passwordSet, deactivated } = await authService.createAccountWithStartingPassword(email, password);
+        const notified = await invited(user, created, passwordSet);
+        res.status(201).json({ ...user, passwordSet, deactivated, notified });
         return;
       }
+      if (!password) {
+        const { user, created } = await authService.createAccountWithoutPassword(email, name);
+        const notified = await invited(user, created, false);
+        res.status(201).json({ ...user, notified });
+        return;
+      }
+      // Set or reset password: an account that is here already, or one an
+      // admin makes with a password from the API. Not an invitation the
+      // listeners are told of: the dialog that invites never sends this form.
       const user = await authService.createAccount(email, name, password);
       res.status(201).json(user);
     } catch (error) {

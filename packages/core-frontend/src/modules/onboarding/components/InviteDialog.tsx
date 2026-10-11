@@ -17,6 +17,7 @@ import {
   isInvited,
   isValidEmail,
   sendInvites,
+  wasEmailed,
   splitEmails,
   type InviteOutcome,
   type InviteRole,
@@ -517,7 +518,9 @@ function outcomeDetail(outcome: InviteOutcome, idp: string, passwordGiven: boole
         : idp
           ? `signs in with ${idp}`
           : null;
-      return how ? `${as} · ${how}` : as;
+      // The deployment emailed them the invite itself (see `wasEmailed`): the
+      // row says so first, since it is what the admin no longer has to do.
+      return [wasEmailed(outcome) ? 'Emailed' : null, as, how].filter(Boolean).join(' · ');
     }
     case 'existing': {
       if (outcome.passwordError) {
@@ -586,6 +589,15 @@ function InvitedBody({
   const idp = either(methods?.sso.map((p) => p.label) ?? []);
   // Some account was given the starting password in this send.
   const passwordSet = outcomes.some(gotPassword);
+  // The deployment emailed EVERY invited person the invite itself (the
+  // cloud's mail, say): the admin has nothing to send but a password. One
+  // person it did not reach — an existing account that only got a
+  // password, a deployment with no mail — and the message is offered as
+  // before, for them.
+  // The same single-sign-on test `invited` was counted with (a provider is
+  // one whatever its label says), so the two agree on who was invited.
+  const sso = (methods?.sso.length ?? 0) > 0;
+  const allEmailed = invited > 0 && outcomes.filter((o) => isInvited(o, sso)).every(wasEmailed);
   const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
 
   return (
@@ -593,11 +605,15 @@ function InvitedBody({
       <p className="text-detail text-ink-muted">
         {invited === 0
           ? 'No accounts were created. The reason is on each row.'
-          : passwordSet
-            ? 'They can sign in now. Send them the link and the password.'
-            : idp
-              ? `They can sign in now with ${idp}. Send them the link.`
-              : 'Their accounts are ready. Send them the link so they know to sign in.'}
+          : allEmailed
+            ? passwordSet
+              ? 'They have been emailed the link. Send them the password separately.'
+              : 'They have been emailed the link and how to sign in.'
+            : passwordSet
+              ? 'They can sign in now. Send them the link and the password.'
+              : idp
+                ? `They can sign in now with ${idp}. Send them the link.`
+                : 'Their accounts are ready. Send them the link so they know to sign in.'}
       </p>
       <ul aria-label="People" className="flex flex-col divide-y divide-line">
         {user && (
@@ -624,12 +640,14 @@ function InvitedBody({
         <>
           {passwordSet && (
             <Banner tone="wait" role="status" icon={<KeyRound size={16} aria-hidden />}>
-              <span className="font-semibold">Send them the password you set, separately.</span> It isn’t in the
-              message below, so the message is safe to post in a shared channel.
+              <span className="font-semibold">Send them the password you set, separately.</span>{' '}
+              {allEmailed
+                ? 'It isn’t in the email they were sent.'
+                : 'It isn’t in the message below, so the message is safe to post in a shared channel.'}
             </Banner>
           )}
           <CopyRow label="Where they sign in" text={origin} copyLabel="Copy link" mono />
-          <CopyRow label="Or send this message" text={message} copyLabel="Copy message" />
+          {!allEmailed && <CopyRow label="Or send this message" text={message} copyLabel="Copy message" />}
         </>
       )}
     </div>

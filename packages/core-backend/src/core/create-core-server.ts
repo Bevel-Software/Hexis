@@ -760,6 +760,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.accountHooks,
     core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —
