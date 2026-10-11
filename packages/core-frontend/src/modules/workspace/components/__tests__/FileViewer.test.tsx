@@ -38,7 +38,9 @@ vi.mock('../../../access/api', () => ({
 // real endpoints. In these tests we just need the acquire to succeed so the
 // save flow can finish; lock contention paths are exercised in lock-specific
 // tests, not here.
-vi.mock('../../../workflow/services/lock.api', () => ({
+vi.mock('../../../workflow/services/lock.api', async (importOriginal) => ({
+  // The sentences (SELF_HOLD_MESSAGE, EDITING_ENDED_MESSAGE) stay real.
+  ...(await importOriginal<typeof import('../../../workflow/services/lock.api')>()),
   acquireLock: vi.fn(async () => ({
     acquired: true,
     lock: {
@@ -140,7 +142,12 @@ vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal)
 import { FileViewer } from '../FileViewer';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
-import { acquireLock as acquireLockMock, getLock as getLockMock, LockApiError } from '../../../workflow/services/lock.api';
+import {
+  acquireLock as acquireLockMock,
+  getLock as getLockMock,
+  LockApiError,
+  SELF_HOLD_MESSAGE,
+} from '../../../workflow/services/lock.api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
@@ -747,6 +754,56 @@ describe('FileViewer', () => {
     expect(banner).toHaveTextContent('Dana Lee is editing this page. You can edit it when they finish.');
     expect(screen.queryByText(/Locked/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit' })).toHaveAttribute('title', 'Dana Lee is editing this page');
+  });
+
+  // The hold is the viewer's own — another tab, a closed browser whose hold
+  // has not expired yet, their agent saving. Clicking Edit says so, never
+  // "<their own name> is editing this page", and once the hold is gone the
+  // notice leaves by itself and Edit works without a reload.
+  it('says a page held by the viewer is theirs, and gives Edit back when the hold ends', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(acquireLockMock).mockResolvedValueOnce({
+        acquired: false,
+        lock: {
+          branch: 'alice/draft',
+          path: 'knowledge-base/Knowledge/Foo.md',
+          holderUserId: 'u-juan',
+          holderName: 'Juan V.',
+          acquiredAt: new Date().toISOString(),
+          lastHeartbeatAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 10_000).toISOString(),
+        },
+      });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(
+        <ViewerHarness
+          initialContent="Base content"
+          authUser={{ id: 'u-juan', email: 'juan@example.com', name: 'Juan V.' }}
+        />,
+      );
+
+      await user.click(await screen.findByRole('button', { name: 'Edit' }));
+
+      const banner = await screen.findByText(SELF_HOLD_MESSAGE);
+      expect(banner).toHaveTextContent(
+        'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.',
+      );
+      expect(screen.queryByText(/Juan V\./)).not.toBeInTheDocument();
+      expect(screen.queryByText(/is editing this page/)).not.toBeInTheDocument();
+      const edit = screen.getByRole('button', { name: 'Edit' });
+      expect(edit).toBeDisabled();
+      expect(edit).toHaveAttribute('title', SELF_HOLD_MESSAGE);
+
+      // The hold expires; the re-check finds the page free.
+      vi.mocked(getLockMock).mockResolvedValue(null);
+      await act(async () => { await vi.advanceTimersByTimeAsync(11_500); });
+
+      await waitFor(() => expect(screen.queryByText(SELF_HOLD_MESSAGE)).not.toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // WP1 regression. The document column moved: the viewer pane used to be

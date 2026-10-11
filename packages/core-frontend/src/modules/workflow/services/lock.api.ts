@@ -38,6 +38,17 @@ export class LockApiError extends Error {
 export const EDITING_ENDED_MESSAGE =
   'Your editing session ended. Check the page and edit it again if anything is missing.';
 
+/**
+ * What a person reads when the page is held under their own user id —
+ * another of their tabs, a browser that closed without giving it back, or
+ * their agent saving. Never "<their own name> is editing this page": the
+ * server refuses their own live hold on purpose (an agent writes as the
+ * person who connected it), so the honest answer is that it is theirs and
+ * will free up.
+ */
+export const SELF_HOLD_MESSAGE =
+  'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.';
+
 async function unwrap<T>(res: Response): Promise<T> {
   if (res.ok) return (await res.json()) as T;
   let body: unknown;
@@ -119,18 +130,24 @@ export async function checkpointLockedFile(
  * Release the lock AND commit any pending edits as a final change.
  * Returns `null` when the file had no pending edits (idempotent on a
  * clean release).
+ *
+ * `keepalive` lets the request outlive the page that sends it: the release
+ * a closing or reloading tab sends on `pagehide`. Unlike `sendBeacon`, a
+ * keep-alive `fetch` still carries the bearer header.
  */
 export async function releaseLock(
   workspaceId: string,
   branch: string,
   path: string,
   summary?: string,
+  options: { keepalive?: boolean } = {},
 ): Promise<Change | null> {
   const { change } = await unwrap<{ change: Change | null }>(
     await authFetch(`/api/workspace/${workspaceId}/workflow/locks`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ branch, path, summary }),
+      ...(options.keepalive ? { keepalive: true } : {}),
     }),
   );
   return change;

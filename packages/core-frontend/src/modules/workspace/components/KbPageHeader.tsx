@@ -17,6 +17,7 @@ import { useDismissableMenu } from '../../../shared/components';
 import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
+import { SELF_HOLD_MESSAGE } from '../../workflow/services/lock.api';
 
 /**
  * The document's title, and the page's actions beside it.
@@ -102,6 +103,11 @@ export interface KbPageHeaderProps {
   titleRef?: Ref<HTMLHeadingElement>;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
+  /**
+   * The hold behind `lockedBy` is the viewer's own (another tab, their
+   * agent): the title says so instead of naming them as someone else.
+   */
+  lockedByYou?: boolean;
   historyAvailable: boolean;
   /** → "Unsaved" badge. */
   isDirty: boolean;
@@ -164,6 +170,7 @@ export function KbPageHeader({
   historyButtonRef,
   titleRef,
   lockedBy,
+  lockedByYou = false,
   historyAvailable,
   isDirty,
   waitingOnAgentUpdate,
@@ -427,7 +434,7 @@ export function KbPageHeader({
               disabled={!!lockedBy || entering}
               title={
                 lockedBy
-                  ? `${lockedBy} is editing this page`
+                  ? lockedByYou ? SELF_HOLD_MESSAGE : `${lockedBy} is editing this page`
                   : entering
                     ? 'Getting the latest version…'
                     : 'Click to edit this file'

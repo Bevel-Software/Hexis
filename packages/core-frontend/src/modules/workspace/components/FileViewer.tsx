@@ -29,7 +29,7 @@ import {
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
-import { LockApiError } from '../../workflow/services/lock.api';
+import { LockApiError, SELF_HOLD_MESSAGE } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
 import {
   knowledgeSuggestionBranchFor,
@@ -1255,6 +1255,9 @@ export function FileViewer() {
   // rule). While a mode is OPEN it shows the way out instead. The header's
   // own cluster is suppressed for prose files (`writeActionInPane`).
   const lockedBy = fileLock.externalLock?.holderName ?? null;
+  // The hold is the viewer's own (another tab, a closed browser whose hold
+  // has not expired, their agent): say so, never name them as someone else.
+  const lockedByYou = fileLock.externalLockIsMine;
   const writeAction = isReviewingPending || viewOnly ? null : proposeMode ? (
     <>
       <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
@@ -1301,7 +1304,7 @@ export function FileViewer() {
       onClick={handleEnterEditMode}
       title={
         lockedBy
-          ? `${lockedBy} is editing this page`
+          ? lockedByYou ? SELF_HOLD_MESSAGE : `${lockedBy} is editing this page`
           : isEnteringEdit
             ? 'Getting the latest version…'
             : 'Click to edit this file'
@@ -1388,6 +1391,7 @@ export function FileViewer() {
             historyButtonRef={headerClockRef}
             titleRef={titleRef}
             lockedBy={fileLock.externalLock?.holderName ?? null}
+            lockedByYou={fileLock.externalLockIsMine}
             historyAvailable={historyAvailable}
             isDirty={isManualDirty}
             waitingOnAgentUpdate={waitingOnAgentUpdate}
@@ -1559,7 +1563,9 @@ export function FileViewer() {
             </Banner>
           )}
 
-          {/* Lock-by-someone-else banner — read-only state until the holder releases. */}
+          {/* Held-page banner — read-only state until the holder releases or
+              the hold expires (the hook clears it either way). A hold under
+              the viewer's own id says so instead of naming them. */}
           {fileLock.externalLock && !fileLock.holdingLock && !isReviewingPending && !onProtectedBranch && (
             <Banner
               role="status"
@@ -1569,7 +1575,13 @@ export function FileViewer() {
               aria-atomic="true"
               className="mb-4 flex-none"
             >
-              <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
+              {fileLock.externalLockIsMine ? (
+                SELF_HOLD_MESSAGE
+              ) : (
+                <>
+                  <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
+                </>
+              )}
             </Banner>
           )}
 
