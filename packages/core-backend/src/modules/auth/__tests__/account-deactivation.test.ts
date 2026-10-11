@@ -156,6 +156,64 @@ describe('AuthService.isActive', () => {
   });
 });
 
+// An earlier version could switch off an owner without a server-held
+// password; nothing in the product can switch them back on for a workspace
+// whose only admin they are. Their way in clears it.
+describe('an owner switched off by an earlier version', () => {
+  const OWNER_OFF = { ...OFF, id: 'owner-1', email: 'root@example.com' };
+
+  for (const [label, adminPassword] of [
+    ['with ADMIN_PASSWORD', 'sup3r-secret'],
+    ['without ADMIN_PASSWORD (the cloud)', ''],
+  ] as const) {
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+
+    it(`signs in with single sign-on, and the switch-off is cleared on the row, ${label}`, async () => {
+      const { db, captured } = makeFakeDb([[OWNER_OFF], []]);
+      const { user } = await new AuthService(db, config).loginWithSso('root@example.com', 'Root');
+      expect(user.id).toBe('owner-1');
+      expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+    });
+
+    it(`is let in as an embed identity, ${label}`, async () => {
+      const { db, captured } = makeFakeDb([[OWNER_OFF], []]);
+      await expect(new AuthService(db, config).getOrCreateByEmail('root@example.com')).resolves.toMatchObject({ id: 'owner-1' });
+      expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+    });
+
+    it(`keeps a session they already hold, ${label}`, async () => {
+      const { db, captured } = makeFakeDb([[{ id: 'owner-1', email: 'root@example.com', deactivatedAt: new Date() }], []]);
+      expect(await new AuthService(db, config).isActive('owner-1')).toBe(true);
+      expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+    });
+  }
+
+  it('signs in with a password they hold on the row, without ADMIN_PASSWORD', async () => {
+    const passwordHash = await hashPassword('a-long-enough-password');
+    const { db, captured } = makeFakeDb([[{ ...OWNER_OFF, passwordHash }], []]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));
+    const { user } = await svc.loginWithPassword('root@example.com', 'a-long-enough-password');
+    expect(user.id).toBe('owner-1');
+    expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+  });
+
+  it('signs in with ADMIN_PASSWORD, and the switch-off is cleared on the row', async () => {
+    // The lookup, the upsert, then the clearing update.
+    const { db, captured } = makeFakeDb([[OWNER_OFF], [OWNER_OFF], []]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }));
+    const { user } = await svc.loginWithPassword('root@example.com', 'sup3r-secret');
+    expect(user.id).toBe('owner-1');
+    expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+  });
+
+  it('leaves a switched-off account that is not an owner switched off', async () => {
+    const { db, captured } = makeFakeDb([[OFF]]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));
+    await expect(svc.loginWithSso('alice@example.com', 'Alice')).rejects.toBeInstanceOf(AccountDeactivatedError);
+    expect(captured.set).toEqual([]);
+  });
+});
+
 describe('AuthService.deactivate', () => {
   it('records when the account was switched off', async () => {
     const { db, captured } = makeFakeDb([[ROW], []]);
@@ -168,11 +226,33 @@ describe('AuthService.deactivate', () => {
     expect(await new AuthService(db, makeConfig()).deactivate('nobody')).toBe(false);
   });
 
-  it('refuses the deployment admin, whose environment password is the way back in', async () => {
-    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+  // With a server-held owner password (self-hosted) and without one (the
+  // cloud's configuration): the owner is never switched off.
+  for (const [label, adminPassword] of [
+    ['with ADMIN_PASSWORD', 'sup3r-secret'],
+    ['without ADMIN_PASSWORD (the cloud)', ''],
+  ] as const) {
+    it(`refuses the owner, ${label}, and says why`, async () => {
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+      const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+      const refusal = new AuthService(db, config).deactivate(ROW.id);
+      await expect(refusal).rejects.toBeInstanceOf(AccountChangeRefusedError);
+      await expect(refusal).rejects.toThrow("The owner can't be switched off.");
+      expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    });
+
+    it(`still switches off an account that is not the owner, ${label}`, async () => {
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+      const { db, captured } = makeFakeDb([[ROW], []]);
+      expect(await new AuthService(db, config).deactivate(ROW.id)).toBe(true);
+      expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
+    });
+  }
+
+  it('refuses the owner even with password sign-in switched off', async () => {
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
     const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
-    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toBeInstanceOf(AccountChangeRefusedError);
-    expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toThrow("The owner can't be switched off.");
   });
 
   it('refuses the accounts the platform runs its own work as', async () => {
