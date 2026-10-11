@@ -25,27 +25,32 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
     'Your sign-in provider has not verified your email address, so it cannot be used to sign in here.',
 };
 
+/** The message for an error an SSO callback left for this screen (stored by useAuthState), if any. */
+function storedOAuthError(): string | null {
+  const code = sessionStorage.getItem(OAUTH_ERROR_KEY);
+  return code ? (OAUTH_ERROR_MESSAGES[code] ?? 'Sign-in failed.') : null;
+}
+
 export function LoginScreen() {
   const { login } = useAuth();
   const { loginLinks } = useAppRegistry();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  // An SSO callback's error is the screen's first message, read as the state
+  // is made so it shows on the first render. StrictMode runs this twice,
+  // which is why the stored error is cleared in the effect, not here.
+  const [error, setError] = useState<string | null>(storedOAuthError);
   const [submitting, setSubmitting] = useState(false);
   // Default to password-only until the probe resolves, matching fetchLoginProviders'
   // failure fallback so we never flash a button the backend can't service.
   const [passwordEnabled, setPasswordEnabled] = useState(true);
   const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([]);
 
-  // Surface an error returned by an SSO callback (stored by useAuthState),
-  // and probe which login methods this deployment offers.
+  // Clear the SSO callback's error once shown, so it is not shown again on a
+  // later visit, and probe which login methods this deployment offers.
   useEffect(() => {
     let mounted = true;
-    const oauthError = sessionStorage.getItem(OAUTH_ERROR_KEY);
-    if (oauthError) {
-      sessionStorage.removeItem(OAUTH_ERROR_KEY);
-      setError(OAUTH_ERROR_MESSAGES[oauthError] ?? 'Sign-in failed.');
-    }
+    sessionStorage.removeItem(OAUTH_ERROR_KEY);
     // Capability probe: never set state after unmount.
     fetchLoginProviders()
       .then((providers) => {
