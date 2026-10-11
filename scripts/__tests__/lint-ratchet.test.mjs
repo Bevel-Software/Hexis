@@ -105,6 +105,33 @@ describe('lint ratchet', () => {
     assert.deepEqual(result.counts['new-dirty.js'], { before: 0, now: 1 });
   });
 
+  // git C-quotes such a path in its usual output ("caf\303\251.js"); read
+  // that way the file would never look linted, and a problem it gained would
+  // pass. The old path of a rename is read back by that name too.
+  test('counts a file whose name git would quote, added or moved', async () => {
+    // Its own content, so git pairs no other file with it as a rename.
+    const cafeProblem = 'const unusedCafé = 1;\nexport const café = 1;\n';
+    write('café.js', cafeProblem);
+    commit('add, quoted name');
+    let result = await run();
+    assert.equal(result.fails, true);
+    assert.deepEqual(result.counts['café.js'], { before: 0, now: 1 });
+
+    git('checkout', '-q', 'base');
+    write('café.js', cafeProblem);
+    commit('base has it');
+    git('checkout', '-q', 'change');
+    git('merge', '-q', 'base');
+    mkdirSync(join(root, 'déplacé'));
+    git('mv', 'café.js', 'déplacé/café.js');
+    git('mv', 'has-one.js', 'déplacé/has-one.js');
+    commit('move, quoted names');
+    result = await run();
+    assert.equal(result.fails, false);
+    assert.deepEqual(result.counts['café.js -> déplacé/café.js'], { before: 1, now: 1 });
+    assert.deepEqual(result.counts['has-one.js -> déplacé/has-one.js'], { before: 1, now: 1 });
+  });
+
   test('compares a renamed file with its content under the old path', async () => {
     mkdirSync(join(root, 'moved'));
     git('mv', 'has-one.js', 'moved/has-one.js');
