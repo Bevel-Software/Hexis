@@ -55,7 +55,7 @@ vi.mock('../../../workflow/services/lock.api', async (importOriginal) => ({
   })),
   heartbeatLock: vi.fn(async () => ({})),
   checkpointLockedFile: vi.fn(async () => null),
-  releaseLock: vi.fn(async () => null),
+  releaseLock: vi.fn(async (): Promise<void> => {}),
   getLock: vi.fn(async () => null),
   LockApiError: class LockApiError extends Error {
     readonly status: number;

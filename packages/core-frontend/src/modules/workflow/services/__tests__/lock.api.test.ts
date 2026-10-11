@@ -47,7 +47,7 @@ describe('releaseLock keep-alive', () => {
   // bearer header (which `sendBeacon` cannot).
   it('sends a keep-alive DELETE with the bearer header when asked', async () => {
     setToken('t0k3n');
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ change: null }), { status: 200 }));
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ queued: true }), { status: 200 }));
     await releaseLock('ws', 'main', 'kb/Knowledge/Foo.md', undefined, { keepalive: true });
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/workspace/ws/workflow/locks');
@@ -58,8 +58,10 @@ describe('releaseLock keep-alive', () => {
   });
 
   it('is an ordinary request otherwise', async () => {
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ change: null }), { status: 200 }));
-    await releaseLock('ws', 'main', 'kb/Knowledge/Foo.md');
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ queued: true }), { status: 200 }));
+    // The server answers `{ queued: true }`: the hold is gone, the commit
+    // is queued, and there is no change to hand back.
+    await expect(releaseLock('ws', 'main', 'kb/Knowledge/Foo.md')).resolves.toBeUndefined();
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.keepalive).toBeUndefined();
   });

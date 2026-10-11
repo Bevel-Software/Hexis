@@ -127,9 +127,10 @@ export async function checkpointLockedFile(
 }
 
 /**
- * Release the lock AND commit any pending edits as a final change.
- * Returns `null` when the file had no pending edits (idempotent on a
- * clean release).
+ * Release the lock. The server drops the hold at once and queues the
+ * commit of whatever is on disk for its background worker, answering
+ * `{ queued: true }` — there is no change to return yet, so this resolves
+ * with nothing once the hold is released.
  *
  * `keepalive` lets the request outlive the page that sends it: the release
  * a closing or reloading tab sends on `pagehide`. Unlike `sendBeacon`, a
@@ -141,8 +142,8 @@ export async function releaseLock(
   path: string,
   summary?: string,
   options: { keepalive?: boolean } = {},
-): Promise<Change | null> {
-  const { change } = await unwrap<{ change: Change | null }>(
+): Promise<void> {
+  await unwrap<{ queued: true }>(
     await authFetch(`/api/workspace/${workspaceId}/workflow/locks`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
@@ -150,7 +151,6 @@ export async function releaseLock(
       ...(options.keepalive ? { keepalive: true } : {}),
     }),
   );
-  return change;
 }
 
 /**

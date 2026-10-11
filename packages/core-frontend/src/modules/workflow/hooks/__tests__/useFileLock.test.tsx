@@ -9,7 +9,7 @@ const api = vi.hoisted(() => ({
   acquireLock: vi.fn(),
   heartbeatLock: vi.fn(async () => ({})),
   checkpointLockedFile: vi.fn(async () => null),
-  releaseLock: vi.fn(async () => null),
+  releaseLock: vi.fn(async (): Promise<void> => {}),
   getLock: vi.fn(async (): Promise<FileLock | null> => null),
 }));
 vi.mock('../../services/lock.api', async (importOriginal) => ({
@@ -84,7 +84,7 @@ async function acquireHeld(result: { current: ReturnType<typeof useFileLock> }) 
 beforeEach(() => {
   vi.clearAllMocks();
   api.getLock.mockImplementation(async () => null);
-  api.releaseLock.mockImplementation(async () => null);
+  api.releaseLock.mockImplementation(async () => {});
 });
 
 afterEach(() => {
@@ -304,7 +304,7 @@ describe('useFileLock — a live hold of the viewer\'s own is shown on open', ()
 
   it('hides it while this tab\'s own release for the page is still in flight', async () => {
     let finishRelease: () => void = () => {};
-    api.releaseLock.mockImplementationOnce(() => new Promise<null>((resolve) => { finishRelease = () => resolve(null); }));
+    api.releaseLock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishRelease = () => resolve(); }));
     const first = setup({ pending: null });
     await acquireHeld(first.result);
     first.unmount();
@@ -316,7 +316,33 @@ describe('useFileLock — a live hold of the viewer\'s own is shown on open', ()
     await act(async () => {});
     expect(second.result.current.externalLock).toBeNull();
 
+    // The release lands; asked again, the server says the page is free.
+    api.getLock.mockImplementation(async () => null);
     await act(async () => { finishRelease(); });
+    expect(api.getLock).toHaveBeenCalledTimes(3); // first editor, second editor, the re-ask
+    expect(second.result.current.externalLock).toBeNull();
+  });
+
+  it('shows the self-hold notice when that release fails and the hold stays', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let failRelease: () => void = () => {};
+    api.releaseLock.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      failRelease = () => reject(new TypeError('Failed to fetch'));
+    }));
+    const first = setup({ pending: null });
+    await acquireHeld(first.result);
+    first.unmount();
+
+    api.getLock.mockImplementation(async () => lockHeldBy(ME, 'Juan'));
+    const second = setup();
+    await act(async () => {});
+    expect(second.result.current.externalLock).toBeNull();
+
+    // No lock-released will come; the re-ask finds the hold with nothing in
+    // flight and says it is the viewer's own, rather than a page that looks free.
+    await act(async () => { failRelease(); });
+    expect(second.result.current.externalLockIsMine).toBe(true);
+    warn.mockRestore();
   });
 
   it('shows the viewer\'s hold taken in another tab, live', async () => {

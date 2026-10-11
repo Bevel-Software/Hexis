@@ -39,14 +39,26 @@ const MAX_EXPIRY_RECHECK_MS = 65_000;
 
 /**
  * Lock requests this browser tab has sent and not yet heard back from,
- * across every mounted editor, keyed by `lockKey`. A hold under the viewer's
- * own id is hidden only while one of these is in flight: a release from the
- * editor that just unmounted (the server has not committed it yet) or an
- * acquire whose `lock-acquired` echo beats its response. Any other hold
- * under the viewer's id — another tab, their agent, a closed browser whose
- * hold has not expired — is shown, as the self-hold notice.
+ * across every mounted editor, keyed by `lockKey`. What the viewer sees for
+ * a hold depends on whose it is and on these:
+ *
+ *   | hold under            | request of this tab in flight | shown            |
+ *   |-----------------------|-------------------------------|------------------|
+ *   | someone else's id     | either                        | "<name> is       |
+ *   |                       |                               |  editing…"       |
+ *   | the viewer's own id   | yes (release of the editor    | nothing, then    |
+ *   |                       |  that just unmounted, or the  |  asked again     |
+ *   |                       |  echo of its own acquire)     |  once it settles |
+ *   | the viewer's own id   | no (another tab, their agent, | SELF_HOLD_MESSAGE|
+ *   |                       |  a closed browser whose hold  |  — Edit waits    |
+ *   |                       |  has not expired)             |  for it to end   |
+ *
+ * "Asked again once it settles" is what keeps the middle row honest: a
+ * release that fails leaves the hold in place, and the re-ask then finds it
+ * with nothing in flight and shows the self-hold notice.
  */
 const requestsInFlight = new Map<string, number>();
+const settleWaiters = new Map<string, Array<() => void>>();
 
 function lockKey(workspaceId: string, branch: string, path: string): string {
   return `${canonicalizeWorkspaceId(workspaceId)}\n${branch}\n${path}`;
@@ -56,13 +68,27 @@ function inFlight(key: string): boolean {
   return (requestsInFlight.get(key) ?? 0) > 0;
 }
 
-/** Count `request` as in flight for `key` until it settles. */
+/** Resolves once nothing is in flight for `key` (at once if nothing is). */
+function whenSettled(key: string): Promise<void> {
+  if (!inFlight(key)) return Promise.resolve();
+  return new Promise((resolve) => {
+    settleWaiters.set(key, [...(settleWaiters.get(key) ?? []), resolve]);
+  });
+}
+
+/** Count `request` as in flight for `key` until it settles, either way. */
 function trackInFlight<T>(key: string, request: () => Promise<T>): Promise<T> {
   requestsInFlight.set(key, (requestsInFlight.get(key) ?? 0) + 1);
   const settle = () => {
     const left = (requestsInFlight.get(key) ?? 1) - 1;
-    if (left > 0) requestsInFlight.set(key, left);
-    else requestsInFlight.delete(key);
+    if (left > 0) {
+      requestsInFlight.set(key, left);
+      return;
+    }
+    requestsInFlight.delete(key);
+    const waiters = settleWaiters.get(key) ?? [];
+    settleWaiters.delete(key);
+    waiters.forEach((resolve) => resolve());
   };
   let pending: Promise<T>;
   try {
@@ -108,7 +134,8 @@ interface UseFileLockArgs {
 
 /**
  * Result of an `acquire()` attempt. `acquired` is the success flag;
- * `contended` is true only when the failure is another user's lock (the
+ * `contended` is true only when the failure is a live hold held elsewhere —
+ * someone else's, or the viewer's own from another tab or their agent (the
  * externalLock banner covers that case); `error` carries the message for
  * every non-contention failure (access-denied 403, network, etc.).
  */
@@ -137,14 +164,16 @@ interface UseFileLockReturn {
   /** Latest acquire / heartbeat error, surfaced in the UI as a banner. */
   lockError: string | null;
   /**
-   * Acquire the lock. Idempotent — re-acquiring a lock you already hold
-   * refreshes the TTL. Resolves to an outcome the caller can act on
+   * Acquire the lock. Not a refresh: the server refuses any live hold,
+   * the caller's own included (another tab, their agent), and only takes
+   * over an expired one; the heartbeat is what extends a hold this client
+   * already has. Resolves to an outcome the caller can act on
    * WITHOUT reading `lockError`/`externalLock` off the hook return —
    * those are React state and are stale in the caller's closure right
-   * after the `await`. `contended` distinguishes "held by someone else"
-   * (surfaced by the externalLock banner) from an access-denied / network
-   * failure (`error` set, `contended` false) that the caller must surface
-   * itself.
+   * after the `await`. `contended` distinguishes "held elsewhere"
+   * (surfaced by the externalLock banner, as the self-hold notice when the
+   * hold is the viewer's own) from an access-denied / network failure
+   * (`error` set, `contended` false) that the caller must surface itself.
    */
   acquire: () => Promise<AcquireOutcome>;
   /**
@@ -154,10 +183,12 @@ interface UseFileLockReturn {
    */
   saveCheckpoint: (summary?: string) => Promise<Change | null>;
   /**
-   * Final save: write the current buffer to disk, commit it, and release
-   * the lock. Used on file-close / navigate-away / explicit "done editing".
+   * Final save: write the current buffer to disk and release the lock;
+   * the server queues the commit of what is on disk, so there is no
+   * change to return. Used on file-close / navigate-away / explicit
+   * "done editing".
    */
-  saveAndRelease: (summary?: string) => Promise<Change | null>;
+  saveAndRelease: (summary?: string) => Promise<void>;
   /**
    * Reset the idle-release timer. Callers (the editor) wire this to every
    * interaction with the file — keystrokes, scroll events. After
@@ -271,11 +302,11 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
           console.debug('[useFileLock] checkpoint ok', { workspaceId, branch, path, sha: change?.sha ?? null });
           return change;
         }
-        const change = await trackInFlight(lockKey(workspaceId, branch, path), () =>
+        await trackInFlight(lockKey(workspaceId, branch, path), () =>
           releaseLockApi(workspaceId, branch, path, summary));
-        console.debug('[useFileLock] release ok', { workspaceId, branch, path, sha: change?.sha ?? null });
+        console.debug('[useFileLock] release ok', { workspaceId, branch, path });
         setHoldingLock(false);
-        return change;
+        return null;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[useFileLock] ${mode} failed`, {
@@ -301,7 +332,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
   );
 
   const saveAndRelease = useCallback(
-    (summary?: string) => persistAndCommit('release', summary),
+    async (summary?: string): Promise<void> => { await persistAndCommit('release', summary); },
     [persistAndCommit],
   );
 
@@ -356,13 +387,25 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     // fraction of a second would be wrong; the SSE `lock-released` event
     // arrives shortly. Any other hold of theirs is live — another tab,
     // their agent — and gets the self-hold notice now, so the page does
-    // not look editable until Edit fails.
-    getLockApi(workspaceId, branch, path)
-      .then((lock) => {
-        if (cancelled) return;
-        setExternalLock(isMine(lock) && inFlight(key) ? null : lock);
-      })
-      .catch(() => { /* network blip — events will catch us up */ });
+    // not look editable until Edit fails. Hidden is never final: once the
+    // request settles we ask again, so a release that failed (and left the
+    // hold in place, with no `lock-released` to come) shows as the
+    // self-hold notice instead of a page that looks free. See the table on
+    // `requestsInFlight`.
+    const askWhoHolds = () => {
+      getLockApi(workspaceId, branch, path)
+        .then((lock) => {
+          if (cancelled) return;
+          if (isMine(lock) && inFlight(key)) {
+            setExternalLock(null);
+            void whenSettled(key).then(() => { if (!cancelled) askWhoHolds(); });
+            return;
+          }
+          setExternalLock(lock);
+        })
+        .catch(() => { /* network blip — events will catch us up */ });
+    };
+    askWhoHolds();
     if (!bus) return () => { cancelled = true; };
     // Canonicalise once; event.workspaceId from the backend is decoded
     // (`razvan-radulescu/sc`) while the `workspaceId` prop is encoded
@@ -372,9 +415,14 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
       if (e.branch !== branch || e.path !== path || canonicalizeWorkspaceId(e.workspaceId) !== workspaceCanon) return;
       // SSE echoes our own acquire too. If the event is about a lock this
       // tab is taking right now (the echo can beat the response that flips
-      // `holdingLock`), ignore it. The viewer's hold from another tab or
-      // their agent is shown, as the self-hold notice.
-      if (currentUserId && e.holderUserId === currentUserId && inFlight(key)) return;
+      // `holdingLock`), ignore it — and ask again once that acquire
+      // settles, in case it did not end with this tab holding the page.
+      // The viewer's hold from another tab or their agent is shown, as the
+      // self-hold notice.
+      if (currentUserId && e.holderUserId === currentUserId && inFlight(key)) {
+        void whenSettled(key).then(() => { if (!cancelled) askWhoHolds(); });
+        return;
+      }
       setExternalLock({
         branch: e.branch,
         path: e.path,
