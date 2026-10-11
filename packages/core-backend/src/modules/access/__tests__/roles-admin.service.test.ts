@@ -637,6 +637,18 @@ describe('Admin fixed members — the deployment admin', () => {
     expect(roster.find((r) => r.canonical === 'sales')!.fixedMembers).toEqual([]);
   });
 
+  it('sends the note with the roster, and the refusal leads with that same note', async () => {
+    // The page prints `fixedMembersNote` as sent, so this is the one copy of
+    // the wording: the note and the API refusal cannot drift apart.
+    const svc = serviceWith([OWNER]);
+    const roster = await svc.getRoster();
+    const note = roster.find((r) => r.canonical === 'admin')!.fixedMembersNote;
+    expect(note).toBe('Owner; cannot be removed here');
+    expect(roster.find((r) => r.canonical === 'sales')!.fixedMembersNote).toBeNull();
+    const refusal = await svc.addMember(ADMIN, 'admin', OWNER).catch((e: Error) => e);
+    expect((refusal as Error).message.startsWith(`${note}. `)).toBe(true);
+  });
+
   it('canonicalises the configured address and drops a blank one', async () => {
     // The composition root passes `[config.adminEmail]` unconditionally, so an
     // unset ADMIN_EMAIL arrives as [''] — that must not become a member "".
@@ -700,6 +712,7 @@ describe('Admin fixed members — the deployment admin', () => {
   it('with no ADMIN_EMAIL configured, no role has a fixed member', async () => {
     const roster = await serviceWith([]).getRoster();
     expect(roster.every((r) => r.fixedMembers.length === 0)).toBe(true);
+    expect(roster.every((r) => r.fixedMembersNote === null)).toBe(true);
     // ...and ordinary Admin membership stays editable.
     await expect(serviceWith([]).addMember(ADMIN, 'admin', OWNER)).resolves.toBeDefined();
   });

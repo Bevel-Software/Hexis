@@ -23,6 +23,13 @@ export interface RoleRosterEntry {
    * to today's behaviour instead of crashing on `undefined.map`.
    */
   fixedMembers?: string[];
+  /**
+   * The server's note for {@link fixedMembers} ("Owner; cannot be removed
+   * here"), also the sentence its refusal to add or remove one leads with.
+   * The page prints it as sent rather than keeping its own copy. Null or
+   * absent when the role has no fixed members.
+   */
+  fixedMembersNote?: string | null;
   /** Canonical names of groups assigned to this role. */
   groups: string[];
   isAdmin: boolean;

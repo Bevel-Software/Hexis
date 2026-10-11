@@ -28,15 +28,6 @@ interface SelfRemoveTarget {
 }
 
 /**
- * The note beside a fixed Admin member, and the refusal shown when someone
- * tries to add that address as a regular member. Word-for-word the sentence
- * the backend's 422 leads with (`roles-admin.service.ts`), so the two
- * surfaces say the same thing.
- */
-const FIXED_ADMIN_NOTE =
-  'Owner; cannot be removed here';
-
-/**
  * App roles (formerly Roles & Members), routed standalone at `/roles-and-members` (below the
  * persistent toolbar). Admin-gated: non-admins get a clear "Admins only"
  * state instead of the roster (the backend enforces the same gate on every
@@ -192,6 +183,10 @@ function RoleCard({
   // `ADMIN_EMAIL` renders once.
   const fixedMembers = role.fixedMembers ?? [];
   const fixedLower = new Set(fixedMembers.map((m) => m.toLowerCase()));
+  // The note beside those chips, and the lead of the refusal to add one: the
+  // server's own sentence (`roles-admin.service.ts`), sent with the roster so
+  // the page holds no copy of it to drift.
+  const fixedNote = role.fixedMembersNote ?? null;
 
   // Members shown in the UI = server members minus any optimistically-removed,
   // plus any optimistically-added not yet reflected in the server roster.
@@ -271,7 +266,7 @@ function RoleCard({
     // (422 `fixed-deployment-admin`). Mirrored here so the refusal is instant
     // and no optimistic chip flashes for a write that can never land.
     if (fixedLower.has(lower)) {
-      setError(`${FIXED_ADMIN_NOTE}. ${email} is already an Admin.`);
+      setError(`${fixedNote ? `${fixedNote}. ` : ''}${email} is already an Admin.`);
       setMemberEmail('');
       return;
     }
@@ -428,9 +423,9 @@ function RoleCard({
             // No remove control, deliberately: the server configuration owns
             // this membership. The note below the row says so, and
             // `aria-describedby` ties it to every fixed chip.
-            aria-describedby={fixedNoteId}
+            aria-describedby={fixedNote ? fixedNoteId : undefined}
             className="inline-flex max-w-full items-center gap-1.5 pl-1 pr-2 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
-            title={FIXED_ADMIN_NOTE}
+            title={fixedNote ?? undefined}
           >
             <span className="w-5 h-5 shrink-0 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
               {initials(email)}
@@ -475,9 +470,9 @@ function RoleCard({
       </div>
 
       {/* Why those chips have no X. Rendered once for the row, not per chip. */}
-      {fixedMembers.length > 0 && (
+      {fixedMembers.length > 0 && fixedNote && (
         <p id={fixedNoteId} className="mt-1.5 text-xs text-ink-muted">
-          {FIXED_ADMIN_NOTE}.
+          {fixedNote}.
         </p>
       )}
 
