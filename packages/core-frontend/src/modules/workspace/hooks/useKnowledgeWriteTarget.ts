@@ -36,17 +36,17 @@ export interface KnowledgeWriteTarget {
 }
 
 /** The access endpoint answers at most this many paths per call. */
-export const ACCESS_BATCH_LIMIT = 500;
+const ACCESS_BATCH_LIMIT = 500;
 
 /**
  * How long a change to the tree or the page on screen waits before it is
  * asked about. The tree is rebuilt on every file event, often several in a
  * row; the first check of all runs at once, so the list never waits on this.
  */
-export const WRITE_TARGET_DEBOUNCE_MS = 250;
+const WRITE_TARGET_DEBOUNCE_MS = 250;
 
 /** Every folder under `entry`, depth first in the tree's own order; dot-folders are not places for pages. */
-export function knowledgeFoldersInOrder(entry: FileTreeEntry | null, out: string[] = []): string[] {
+function knowledgeFoldersInOrder(entry: FileTreeEntry | null, out: string[] = []): string[] {
   for (const child of entry?.children ?? []) {
     if (child.type !== 'directory' || child.name.startsWith('.')) continue;
     out.push(child.relativePath);
@@ -72,7 +72,7 @@ function candidateFolders(knowledgeRoot: string, openFolder: string | null, fold
 }
 
 /** How many folders a draft's read check asks about at once. */
-export const READ_CHECK_PARALLEL = 8;
+const READ_CHECK_PARALLEL = 8;
 
 /**
  * The folder a page goes in, asked of the batch access endpoint in pages of
@@ -82,7 +82,7 @@ export const READ_CHECK_PARALLEL = 8;
  * file tree order. Stops at the first page that answers. Throws when a
  * request fails, which the hook reads as "nowhere" (see below).
  */
-export async function findKnowledgeWriteTarget(
+async function findKnowledgeWriteTarget(
   workspaceId: string,
   kbDirName: string,
   knowledgeRoot: string,
@@ -111,7 +111,7 @@ export async function findKnowledgeWriteTarget(
  * a folder shown only for what is inside it leads, depth first, straight to
  * what is. Throws when a request fails, as above.
  */
-export async function findKnowledgeReadTarget(
+async function findKnowledgeReadTarget(
   workspaceId: string,
   kbDirName: string,
   knowledgeRoot: string,

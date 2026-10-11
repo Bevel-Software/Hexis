@@ -23,7 +23,6 @@ import { SearchPalette } from '../../toolbar/components/SearchPalette';
 import { COMMAND_MENU_SHORTCUT_LABEL } from '../../toolbar/commands/command-menu';
 import { AGENT_RECHECK_MS } from '../state/agent-connection';
 import { notePluginCreated } from '../../library/state/plugins-revision';
-import { WRITE_TARGET_DEBOUNCE_MS } from '../../workspace/hooks/useKnowledgeWriteTarget';
 
 /**
  * The "Get set up" column: every tick is derived from state the app already
@@ -264,10 +263,13 @@ async function settle() {
   });
 }
 
+/** Longer than the write check's debounce (250 ms, private to the hook). */
+const PAST_WRITE_CHECK_DEBOUNCE_MS = 300;
+
 /** Wait past the write check's debounce, so a tree change has been asked about. */
 async function settleRecheck() {
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, WRITE_TARGET_DEBOUNCE_MS + 20));
+    await new Promise((resolve) => setTimeout(resolve, PAST_WRITE_CHECK_DEBOUNCE_MS));
   });
   await settle();
 }

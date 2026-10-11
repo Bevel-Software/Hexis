@@ -262,10 +262,11 @@ export function GetStartedColumn() {
   /**
    * "New page": create a Markdown page in a Knowledge folder the person may
    * write and open it already in the editor (`useCreatePage`, shared with the
-   * command menu). The failure is kept here and shown on the step
-   * because nothing else would say it — toasts only speak inside the
-   * Library, and a refusal (a protected branch's write gate) is exactly what
-   * the person needs to read.
+   * command menu). A refused write never reaches here: `useCreatePage`
+   * takes every 403 quietly, moving to the next folder the person may write
+   * or withdrawing New page, and resolves null. Any other failure is kept
+   * here and shown on the step, because nothing else would say it — toasts
+   * only speak inside the Library.
    */
   const [newPage, setNewPage] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const createFirstPage = async () => {
