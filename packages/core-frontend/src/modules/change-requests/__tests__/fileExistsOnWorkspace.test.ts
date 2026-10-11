@@ -21,10 +21,12 @@ function answers(res: Response | Error) {
 describe('fileExistsOnWorkspace', () => {
   it('asks with a HEAD on the raw route, and a 200 is "there"', async () => {
     const fetchMock = answers(new Response(null, { status: 200 }));
-    await expect(fileExistsOnWorkspace('ws-7', 'knowledge-base/Docs/pricing.yaml')).resolves.toBe(true);
+    await expect(fileExistsOnWorkspace('ws-7', 'knowledge-base/Docs/Price list.yaml')).resolves.toBe(true);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(init.method).toBe('HEAD');
-    expect(url).toContain('ws-7');
+    // The raw route of that workspace and that file, path encoded, and nothing
+    // else: no ref (today's page) and no download.
+    expect(url).toBe('/api/workspace/ws-7/file/raw?path=knowledge-base%2FDocs%2FPrice%20list.yaml');
   });
 
   it('a 404 is "deleted"', async () => {
