@@ -518,6 +518,33 @@ export interface AppRegistry {
    */
   welcomeExit?: { path: string; label: string };
   /**
+   * Where the maker's name in "Hexis by Bevel" leads (see `ProductName`):
+   * the login page, the first-run screen and the toolbar, where a wide
+   * toolbar links the name beside the apps and a compact one, whose name
+   * sits inside the menu's trigger, links it at the foot of the app menu.
+   * Absent or empty, it is the maker's own site. A distribution with a front
+   * door of its own points it there: the hosted cloud sends it to its
+   * Impressum, so the provider's details are one click from any workspace
+   * page on a wide toolbar and two on a compact one.
+   */
+  makerLink?: string;
+  /**
+   * What the app menu's own entry for `makerLink` says, where the name is
+   * not on screen as a link: the compact toolbar, and a wide one with more
+   * than three apps. Absent or empty, it says "Hexis by Bevel". The hosted
+   * cloud says "Impressum", so a page in the app names its Impressum as one
+   * a visitor recognises, not only behind the maker's name.
+   */
+  makerLinkLabel?: string;
+  /**
+   * Links under the sign-in card, on the login page only: the app behind it
+   * shows none. For a deployment whose provider must name itself to anyone
+   * who reaches it, such as the hosted cloud, which lists its Impressum and
+   * privacy policy here because German law wants them easy to recognise on
+   * every page of a commercial service. Absent or empty, there are none.
+   */
+  loginLinks?: { label: string; href: string }[];
+  /**
    * A panel inside the invite dialog, between the role choice and the footer.
    *
    * Core invites by creating accounts and knows nothing about what a place in
