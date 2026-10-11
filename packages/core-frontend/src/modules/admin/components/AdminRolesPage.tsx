@@ -211,6 +211,10 @@ function RoleCard({
   // the email is no longer in role.members, so drop it from pendingRemovals.
   // Without this, a no-op remove would hide a still-present member forever.
   useEffect(() => {
+    // Intentional reconcile-on-roster-change: the updaters return `prev`
+    // unchanged unless the server roster settled a pending entry, so this
+    // re-renders at most once per new roster.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingRemovals((prev) => {
       if (prev.size === 0) return prev;
       const present = new Set(role.members.map((m) => m.toLowerCase()));
