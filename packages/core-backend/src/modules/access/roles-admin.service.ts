@@ -103,6 +103,13 @@ export interface RoleRosterEntry {
    * email once, as fixed.
    */
   fixedMembers: string[];
+  /**
+   * The note the page prints beside {@link fixedMembers}, and the sentence
+   * both Admin-membership refusals lead with. Sent with the roster so the
+   * page keeps no copy of the wording. Null when the role has no fixed
+   * members.
+   */
+  fixedMembersNote: string | null;
   /** Canonical names of groups this role is assigned to (`group:` members). */
   groups: string[];
   isAdmin: boolean;
@@ -165,11 +172,12 @@ export class RolesAdminService {
   private readonly fixedAdminEmails: readonly string[];
   /**
    * The one explanation both Admin-role refusals carry, verbatim: the note the
-   * page prints beside a fixed member. Kept as a named constant so the refusal
-   * an API caller reads and the note a UI reader sees cannot drift apart.
+   * page prints beside a fixed member, which it reads from the roster's
+   * `fixedMembersNote`. One constant, so the refusal an API caller reads and
+   * the note a UI reader sees cannot drift apart.
    */
   private static readonly FIXED_ADMIN_NOTE =
-    'Deployment admin, set in the server configuration; cannot be removed here';
+    'Owner; cannot be removed here';
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
@@ -326,6 +334,8 @@ export class RolesAdminService {
         // Only Admin has fixed members: `deploymentOwners` is an Admin rescue
         // in the resolver, never a general grant, so no other role gains one.
         fixedMembers: isAdmin ? [...this.fixedAdminEmails] : [],
+        fixedMembersNote:
+          isAdmin && this.fixedAdminEmails.length > 0 ? RolesAdminService.FIXED_ADMIN_NOTE : null,
         groups: role.members
           .filter(isGroupRefMember)
           .map((m) => canonicalRoleName(m.slice(GROUP_REF_PREFIX.length))),

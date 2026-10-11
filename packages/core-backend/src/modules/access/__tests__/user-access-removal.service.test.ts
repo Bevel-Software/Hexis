@@ -329,11 +329,11 @@ describe('UserAccessRemovalService', () => {
     }
   });
 
-  it('refuses the deployment owner and the last Admin, writing nothing', async () => {
+  it('refuses the owner and the last Admin, writing nothing', async () => {
     const { service, workflow } = build(stubWorkflow(), ['Lee@x.io']);
     const report = await service.report(LEE);
     expect(report.removable).toBe(false);
-    expect(report.blockedReason).toMatch(/deployment owner/);
+    expect(report.blockedReason).toBe('The owner stays in roles and access rules.');
     await expect(service.remove(ADMIN, LEE, 'deleted-1')).rejects.toMatchObject({ status: 409 });
 
     const other = build(stubWorkflow(), []);
