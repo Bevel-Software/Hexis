@@ -120,7 +120,11 @@ export class TenantRuntime {
     return this.openResponses;
   }
 
-  /** What the next activation builds from; while a graph runs, what it was built from. */
+  /**
+   * What the next activation builds from. While a graph runs it is what
+   * that graph was built from, except during its eviction: the graph being
+   * retired may already be behind a newer descriptor (see {@link adopt}).
+   */
   get descriptor(): TenantDescriptor {
     return this.current;
   }

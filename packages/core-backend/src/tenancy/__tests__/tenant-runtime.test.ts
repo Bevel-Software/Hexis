@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { TenantConfig } from '../../core-config.js';
-import { TenantRuntime, type TenantGraph } from '../tenant-runtime.js';
-import type { TenantDescriptor } from '../tenant-source.contract.js';
+import { TenantRuntime, type TenantGraph } from '../index.js';
+import type { TenantDescriptor } from '../index.js';
 
 const descriptor: TenantDescriptor = { slug: 'acme', hosts: ['acme.test'], config: {} as TenantConfig };
 

@@ -3,9 +3,9 @@ import express from 'express';
 import http from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import type { TenantConfig } from '../../core-config.js';
-import { createTenantHost, isLoopbackAddress, selectTenant, type TenantHost } from '../tenant-host.js';
-import type { TenantGraph } from '../tenant-runtime.js';
-import type { TenantDescriptor, TenantSource } from '../tenant-source.contract.js';
+import { createTenantHost, isLoopbackAddress, selectTenant, type TenantHost } from '../index.js';
+import type { TenantGraph } from '../index.js';
+import type { TenantDescriptor, TenantSource } from '../index.js';
 
 /**
  * Two tenants behind one host, with a tiny app standing in for each graph:
