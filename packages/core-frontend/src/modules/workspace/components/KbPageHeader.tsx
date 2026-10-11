@@ -17,7 +17,7 @@ import { useDismissableMenu } from '../../../shared/components';
 import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
-import { SELF_HOLD_MESSAGE } from '../../workflow/services/lock.api';
+import { SELF_HOLD_MESSAGE } from '../../workflow';
 
 /**
  * The document's title, and the page's actions beside it.

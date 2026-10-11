@@ -28,8 +28,7 @@ import {
   type OpenComparisonDetail,
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
-import { useFileLock } from '../../workflow/hooks/useFileLock';
-import { LockApiError, SELF_HOLD_MESSAGE } from '../../workflow/services/lock.api';
+import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../workflow';
 import { useAuth } from '../../auth/state/auth.context';
 import {
   knowledgeSuggestionBranchFor,
