@@ -369,4 +369,42 @@ describe('createTenantHost', () => {
     await host!.stop();
     expect(host!.runtimes().get('acme')?.state).toBe('idle');
   });
+
+  it('builds a tenant whose record changed while its graph was stopped from the record as it is now', async () => {
+    const events: string[] = [];
+    let current: TenantDescriptor = {
+      slug: 'acme',
+      hosts: ['acme.test'],
+      config: { adminEmail: 'first@acme.test' } as TenantConfig,
+    };
+    const changing: TenantSource = {
+      resolveByHost: async (h) => (current.hosts.includes(h) ? current : null),
+      describe: async (s) => (s === current.slug ? current : null),
+    };
+    const port = await listen(
+      createTenantHost({
+        source: changing,
+        process: { port: 0, nodeEnv: 'test', trustProxy: '' },
+        runtime: {
+          activate: async (d) => {
+            events.push(`activate:${d.config.adminEmail}`);
+            return { core: {}, app: tenantApp(d.slug) } as unknown as TenantGraph;
+          },
+          stop: async () => undefined,
+          busy: async () => false,
+        },
+      }),
+    );
+    await request(port, '/api/whoami', 'acme.test');
+    // The record changes while the graph runs: the running graph keeps the
+    // config it was built from.
+    current = { ...current, config: { adminEmail: 'second@acme.test' } as TenantConfig };
+    await request(port, '/api/whoami', 'acme.test');
+    expect(events).toEqual(['activate:first@acme.test']);
+    // Stopped — deleted and set up again under the same name, or restarted
+    // by the operator — and asked for again: built from the record as it is now.
+    await host!.runtimes().get('acme')!.evict();
+    await request(port, '/api/whoami', 'acme.test');
+    expect(events).toEqual(['activate:first@acme.test', 'activate:second@acme.test']);
+  });
 });

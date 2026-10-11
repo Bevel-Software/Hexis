@@ -144,6 +144,46 @@ describe('TenantRuntime', () => {
     expect(h.events).toEqual(['activate:1', 'stop:1', 'activate:2']);
   });
 
+  it('takes a newer descriptor while nothing runs, and the activation that follows builds from it', async () => {
+    const built: string[] = [];
+    let release: (() => void) | null = null;
+    const runtime = new TenantRuntime(descriptor, {
+      activate: async (d) => {
+        built.push(d.hosts.join(','));
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { core: {} } as unknown as TenantGraph;
+      },
+      stop: async () => undefined,
+      busy: async () => false,
+    });
+    const moved: TenantDescriptor = { ...descriptor, hosts: ['acme.example'] };
+
+    // While the graph is being built, and while it runs, the descriptor it
+    // was built from stays: its config is live.
+    const first = runtime.handle();
+    await settle();
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(descriptor);
+    release!();
+    await first;
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(descriptor);
+
+    // Evicted: taken, and the request that waits out the eviction starts
+    // the tenant from it.
+    const evicting = runtime.evict();
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(moved);
+    const second = runtime.handle();
+    await evicting;
+    await settle();
+    release!();
+    await second;
+    expect(built).toEqual(['acme.test', 'acme.example']);
+  });
+
   it('an eviction that lands during an activation waits for it and stops what it built', async () => {
     const h = harness();
     const pending = h.runtime.handle();
