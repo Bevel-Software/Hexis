@@ -464,7 +464,7 @@ export class RolesAdminService {
    * is handed the edit itself (read, check, write, commit) to run. What it
    * does around that call brackets the whole write: the invite holds the
    * address's account-switch lock (a transaction-scoped advisory lock keyed
-   * on the canonical email, see `auth/account-switch-lock.ts`) across it, so
+   * on the canonical email, see `AuthService.whileSwitchedOn`) across it, so
    * a switch-off cannot commit in between, whether or not the account exists
    * yet (see the members route). It may throw instead of calling `write`;
    * nothing is written then.

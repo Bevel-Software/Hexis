@@ -52,7 +52,6 @@ import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { takeAccountSwitchLock } from '../auth/account-switch-lock.js';
 import '../auth/auth.middleware.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
@@ -1275,32 +1274,19 @@ export function createAccessRoutes(
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
       // `ifActive`: the invite's promotion, which leaves a switched-off
-      // account unchanged. Inside the roles file's lock, a transaction takes
-      // the address's switch lock (account-switch-lock), reads the account
-      // and stays open until roles.yaml is written and committed. Every write
-      // that switches an account off, or creates one switched off, takes the
-      // same lock first, whether or not the account existed when the
-      // promotion began. So a switch-off either committed before the read
-      // (the promotion is refused) or waits until the promotion is written
-      // (it lands after, as for any Admin switched off later: the place in
-      // roles stays, the credentials stop being honoured).
+      // account unchanged. Inside the roles file's lock, auth reads the
+      // account under the address's switch lock and keeps that transaction
+      // open until roles.yaml is written and committed
+      // (`AuthService.whileSwitchedOn`). So a switch-off either committed
+      // before the read (the promotion is refused) or waits until the
+      // promotion is written (it lands after, as for any Admin switched off
+      // later: the place in roles stays, the credentials stop being honoured).
       const ifActive = (req.body ?? {}).ifActive;
       if (ifActive !== undefined && typeof ifActive !== 'boolean') {
         res.status(400).json({ error: 'ifActive must be a boolean' });
         return;
       }
-      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> =>
-        db.transaction(async (tx) => {
-          await takeAccountSwitchLock(tx, email);
-          const [account] = await tx
-            .select({ deactivatedAt: users.deactivatedAt })
-            .from(users)
-            .where(inArray(users.emailBidx, [canonicalEmail(email)]));
-          if (account?.deactivatedAt) {
-            throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
-          }
-          await write();
-        });
+      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> => authService.whileSwitchedOn(email, write);
       res.json({
         roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { aroundWrite: whileSwitchedOn } : undefined),
       });

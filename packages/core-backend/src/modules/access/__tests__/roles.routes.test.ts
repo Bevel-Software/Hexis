@@ -11,7 +11,7 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
@@ -107,8 +107,6 @@ async function makeHarness(
     }),
   } as unknown as WorkspaceService;
 
-  const authService = { getUserById: vi.fn(async () => ADMIN) } as unknown as AuthService;
-
   // Lock holder tracked so the service's getLock pre-check passes; the single-
   // file write itself lands on disk via LockingFilesystem → LocalFilesystem.
   // Strict per-path locks — a live row is contended even for the same user,
@@ -172,6 +170,11 @@ async function makeHarness(
       }
     },
   } as unknown as typeof before;
+
+  // The real auth service over the same double, so the promotion's switch
+  // lock and read run as they do in production (`whileSwitchedOn`).
+  const authService = new AuthService(db, { jwtSecret: 'test', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+  vi.spyOn(authService, 'getUserById').mockImplementation(async () => ADMIN);
 
   const app = express();
   app.use(express.json());

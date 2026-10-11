@@ -22,6 +22,7 @@ import {
 import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
 import { takeAccountSwitchLock } from './account-switch-lock.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -664,6 +665,30 @@ export class AuthService {
     const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
     this.activeCache.set(userId, { active, at: now });
     return active;
+  }
+
+  /**
+   * Run `write` only while `email` is not switched off, and keep it so until
+   * `write` has finished: a transaction takes the address's switch lock (see
+   * account-switch-lock), reads the account and stays open across `write`.
+   * Every write that switches an account off, or creates one switched off,
+   * takes the same lock first, so it either committed before the read (and
+   * `write` is refused) or waits until `write` is done. An address with no
+   * account yet counts as switched on. A switched-off account throws a 409
+   * `deactivated` and `write` never runs.
+   */
+  async whileSwitchedOn(email: string, write: () => Promise<void>): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await takeAccountSwitchLock(tx, email);
+      const [account] = await tx
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.emailBidx, canonicalEmail(email)));
+      if (account?.deactivatedAt) {
+        throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
+      }
+      await write();
+    });
   }
 
   /**
