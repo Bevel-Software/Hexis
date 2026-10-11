@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import userEvent from '@testing-library/user-event';
 import { LoginScreen } from '../components/LoginScreen';
 import { AuthContext, type AuthContextValue } from '../state/auth.context';
@@ -14,7 +15,8 @@ vi.mock('../services/sso', () => ({
 
 const login = vi.fn(async () => {});
 
-function renderScreen(registry?: Partial<AppRegistry>) {
+/** The login screen inside the contexts it reads. */
+function loginTree(registry?: Partial<AppRegistry>) {
   const value: AuthContextValue = {
     user: null,
     token: null,
@@ -22,13 +24,17 @@ function renderScreen(registry?: Partial<AppRegistry>) {
     login,
     logout: vi.fn(),
   };
-  return render(
+  return (
     <AppRegistryContext.Provider value={makeRegistry(registry ?? {})}>
       <AuthContext.Provider value={value}>
         <LoginScreen />
       </AuthContext.Provider>
-    </AppRegistryContext.Provider>,
+    </AppRegistryContext.Provider>
   );
+}
+
+function renderScreen(registry?: Partial<AppRegistry>) {
+  return render(loginTree(registry));
 }
 
 beforeEach(() => {
@@ -81,7 +87,19 @@ describe('LoginScreen', () => {
     expect(column.classList).toContain('justify-center');
   });
 
-  it("shows an SSO callback's error at once, and clears it so a later visit does not show it again", async () => {
+  // Rendered to markup, which runs no effect: what the first render holds.
+  // Testing Library's render flushes the mount effects before it returns, so
+  // it would not tell a first-render message from one an effect sets.
+  it("shows an SSO callback's error on the first render, before any effect has run", () => {
+    sessionStorage.setItem('bevel_oauth_error', 'not_invited');
+    try {
+      expect(renderToStaticMarkup(loginTree())).toContain('You do not have an account in this workspace yet.');
+    } finally {
+      sessionStorage.removeItem('bevel_oauth_error');
+    }
+  });
+
+  it("clears an SSO callback's error once shown, so a later visit does not show it again", async () => {
     vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
     sessionStorage.setItem('bevel_oauth_error', 'not_invited');
     const { unmount } = renderScreen();
