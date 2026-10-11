@@ -61,6 +61,26 @@ describe('LoginScreen', () => {
     }
   });
 
+  it('scrolls on a screen too short for the card, and centres a card that fits', () => {
+    // happy-dom resolves no styles, so the layout is read off the utilities
+    // that make it (see SidebarFooterGrid.test.tsx). The root never scrolls
+    // (index.css), so the page must: otherwise a card taller than the screen,
+    // such as on a phone held sideways, is cut off with no way to reach it.
+    vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
+    const { container } = renderScreen({ loginLinks: [{ label: 'Impressum', href: '/impressum' }] });
+    const page = container.firstElementChild as HTMLElement;
+    expect(page.classList).toContain('h-full');
+    expect(page.classList).toContain('overflow-y-auto');
+    // The column with the card and its links grows past the page rather than
+    // overflowing it, and is centred while it fits.
+    const column = screen.getByRole('navigation', { name: 'Legal' }).parentElement as HTMLElement;
+    expect(column.parentElement).toBe(page);
+    expect(column).toContainElement(container.querySelector('form'));
+    expect(column.classList).toContain('min-h-full');
+    expect(column.classList).not.toContain('h-full');
+    expect(column.classList).toContain('justify-center');
+  });
+
   it('renders the password form and one button per advertised SSO provider', async () => {
     vi.mocked(fetchLoginProviders).mockResolvedValue({
       password: true,
