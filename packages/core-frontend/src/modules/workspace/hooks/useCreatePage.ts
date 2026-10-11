@@ -75,8 +75,11 @@ export interface CreatePage {
    * The Knowledge folder New page writes to (`useKnowledgeWriteTarget`): the
    * Knowledge folder itself when the person may write it, else the folder of
    * the page on screen, else the first they may write in file tree order.
-   * Null while the check runs and when there is nowhere — everything that
-   * offers New page hides it while this is null.
+   * Null until the first check answers and when there is nowhere —
+   * everything that offers New page hides it while this is null. A later
+   * check (a tree or page change, a switch) keeps the last folder up until
+   * it answers, so nothing flickers; `createPage` asks again before writing
+   * when that answer is not for the page and branch on screen.
    */
   pageFolder: string | null;
   /** Whether that check has answered, so a list can wait for it rather than flash. */

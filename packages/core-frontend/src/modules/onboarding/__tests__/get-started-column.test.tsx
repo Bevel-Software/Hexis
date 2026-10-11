@@ -46,21 +46,20 @@ vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
  * The repo-relative folders the person may write, as the batch access
  * endpoint answers them. The top of Knowledge by default — what an admin
  * may, and what every test before this ticket assumed. `readable` is what a
- * draft branch asks instead, one folder at a time: there the server's only
- * gate on a new page is that its author may read where it lands.
+ * draft branch asks the same endpoint instead: there the server's only gate
+ * on a new page is that its author may read where it lands.
  */
+type AccessVerb = 'write' | 'owner' | 'read';
 const { access } = vi.hoisted(() => ({
   access: {
     writable: new Set<string>(),
     readable: new Set<string>(),
-    batch: vi.fn<(workspaceId: string, paths: string[]) => Promise<{ results: Record<string, boolean> }>>(),
-    single: vi.fn<(workspaceId: string, path: string, kind?: 'folder' | 'file') => Promise<{ canRead: boolean }>>(),
+    batch: vi.fn<(workspaceId: string, paths: string[], verb?: AccessVerb) => Promise<{ results: Record<string, boolean> }>>(),
   },
 }));
 vi.mock('../../access/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../access/api')>()),
   fetchFileAccessBatch: access.batch,
-  fetchFileAccess: access.single,
 }));
 vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
 const { fetchStarterPacksMock } = vi.hoisted(() => ({
@@ -307,12 +306,14 @@ beforeEach(() => {
   fetchAgentConnectionMock.mockReset().mockResolvedValue({ connected: false });
   authFetchMock.mockClear();
   access.writable = new Set(['KnowledgeBase']);
-  access.batch.mockReset().mockImplementation(async (_ws, paths) => ({
-    results: Object.fromEntries(paths.map((p) => [p, access.writable.has(p)])),
-  }));
   access.readable = new Set(['KnowledgeBase']);
-  access.single.mockReset().mockImplementation(async (_ws, path) => ({ canRead: access.readable.has(path) }));
+  access.batch.mockReset().mockImplementation(async (_ws, paths, verb = 'write') => ({
+    results: Object.fromEntries(paths.map((p) => [p, (verb === 'read' ? access.readable : access.writable).has(p)])),
+  }));
 });
+
+/** The verb every access check so far asked: `read` on a draft, `write` anywhere else. */
+const accessVerbsAsked = () => new Set(access.batch.mock.calls.map((c) => c[2] ?? 'write'));
 
 /** Calls to the onboarding write — the one `markDone` makes. */
 const doneWrites = () =>
@@ -670,11 +671,11 @@ describe('GetStartedColumn: where New page writes', () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const real = access.batch.getMockImplementation()!;
-    access.batch.mockImplementation(async (ws, paths) => {
+    access.batch.mockImplementation(async (ws, paths, verb) => {
       await gate;
-      return real(ws, paths);
+      return real(ws, paths, verb);
     });
-    // The other protected branch: a draft takes no access check at all.
+    // The other protected branch: a draft asks about reading instead.
     rerender(columnUi({ createFile, files: FOLDERS_TREE, workspaceBranch: 'current-company-state' }));
     await userEvent.click(newPage());
     await settle();
@@ -694,8 +695,8 @@ describe('GetStartedColumn: where New page writes', () => {
     await mount({ createFile, files: FOLDERS_TREE, workspaceBranch: 'alice/draft' });
     await userEvent.click(newPage());
     expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
-    expect(access.batch).not.toHaveBeenCalled();
-    expect(access.single).toHaveBeenCalledWith('ws-1', 'KnowledgeBase', 'folder');
+    expect(access.batch.mock.calls[0]![1]).toContain('KnowledgeBase');
+    expect(accessVerbsAsked()).toEqual(new Set(['read']));
   });
 
   // Local Testing at db782b2f: the tree shows Knowledge because Product is
@@ -709,7 +710,7 @@ describe('GetStartedColumn: where New page writes', () => {
     await userEvent.click(newPage());
     expect(createFile).toHaveBeenCalledWith(`${SALES}/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(createFile).toHaveBeenCalledTimes(1);
-    expect(access.batch).not.toHaveBeenCalled();
+    expect(accessVerbsAsked()).toEqual(new Set(['read']));
   });
 
   it('on a draft branch prefers the folder of the page on screen when they may read it', async () => {
@@ -735,7 +736,6 @@ describe('GetStartedColumn: where New page writes', () => {
     await screen.findByRole('complementary', { name: 'Get set up' });
     expect(row(STEP)).toBeNull();
     expect(access.batch).not.toHaveBeenCalled();
-    expect(access.single).not.toHaveBeenCalled();
   });
 
   it('a refusal whose recheck answers after a switch of branch withdraws nothing there or back', async () => {
@@ -744,9 +744,9 @@ describe('GetStartedColumn: where New page writes', () => {
     let held = false;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const real = access.batch.getMockImplementation()!;
-    access.batch.mockImplementation(async (ws, paths) => {
+    access.batch.mockImplementation(async (ws, paths, verb) => {
       if (held) await gate;
-      return real(ws, paths);
+      return real(ws, paths, verb);
     });
     const createFile = vi.fn(async (path: string) => {
       // Refused although the check keeps saying Sales may be written; the

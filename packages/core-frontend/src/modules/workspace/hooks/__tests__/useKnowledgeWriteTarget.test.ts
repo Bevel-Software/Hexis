@@ -5,14 +5,13 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 /**
  * Where New page writes, through the hook alone: the top of Knowledge, else
  * the folder on screen, else the first folder the person may write in file
- * tree order — asked of the batch access endpoint (at most 500 paths a call)
- * on a protected branch, and of the read check, a few folders at a time, on
- * a draft.
+ * tree order — asked of the batch access endpoint (at most 500 paths a call):
+ * who may write on a protected branch, who may read on a draft.
  */
 
-const { batch, single, workspace, merged } = vi.hoisted(() => ({
-  batch: vi.fn<(workspaceId: string, paths: string[]) => Promise<{ results: Record<string, boolean> }>>(),
-  single: vi.fn<(workspaceId: string, path: string, kind?: 'folder' | 'file') => Promise<{ canRead: boolean }>>(),
+type Verb = 'write' | 'owner' | 'read';
+const { batch, workspace, merged } = vi.hoisted(() => ({
+  batch: vi.fn<(workspaceId: string, paths: string[], verb?: Verb) => Promise<{ results: Record<string, boolean> }>>(),
   workspace: {
     current: {
       workspaceId: 'ws-1',
@@ -26,7 +25,6 @@ const { batch, single, workspace, merged } = vi.hoisted(() => ({
 vi.mock('../../../access/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../access/api')>()),
   fetchFileAccessBatch: batch,
-  fetchFileAccess: single,
 }));
 vi.mock('../../state/workspace.context', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../state/workspace.context')>()),
@@ -82,11 +80,13 @@ beforeEach(() => {
   readable = new Set();
   workspace.current = { workspaceId: 'ws-1', workspaceBranch: 'target-company-state', kbDirName: 'kb', openFilePath: null };
   merged.tree = FOLDERS;
-  single.mockReset().mockImplementation(async (_ws, path) => ({ canRead: readable.has(path) }));
-  batch.mockReset().mockImplementation(async (_ws, paths) => ({
-    results: Object.fromEntries(paths.map((p) => [p, writable.has(p)])),
+  batch.mockReset().mockImplementation(async (_ws, paths, verb = 'write') => ({
+    results: Object.fromEntries(paths.map((p) => [p, (verb === 'read' ? readable : writable).has(p)])),
   }));
 });
+
+/** The verb every batch call so far asked — one question per branch kind. */
+const verbsAsked = () => new Set(batch.mock.calls.map((c) => c[2] ?? 'write'));
 
 afterEach(() => {
   vi.useRealTimers();
@@ -103,14 +103,12 @@ describe('useKnowledgeWriteTarget on a protected branch', () => {
     writable = new Set(['KnowledgeBase/Sales', 'KnowledgeBase/Support']);
     const { result } = await settledTarget({ openFilePath: `${ROOT}/Support/FAQ.md` });
     expect(result.current.folder).toBe(`${ROOT}/Support`);
-    expect(batch).toHaveBeenCalledWith('ws-1', [
-      'KnowledgeBase',
-      'KnowledgeBase/Support',
-      'KnowledgeBase/Product',
-      'KnowledgeBase/Sales',
-      'KnowledgeBase/Sales/Team',
-    ]);
-    expect(single).not.toHaveBeenCalled();
+    expect(batch).toHaveBeenCalledWith(
+      'ws-1',
+      ['KnowledgeBase', 'KnowledgeBase/Support', 'KnowledgeBase/Product', 'KnowledgeBase/Sales', 'KnowledgeBase/Sales/Team'],
+      'write',
+    );
+    expect(verbsAsked()).toEqual(new Set(['write']));
   });
 
   it('else the first folder in tree order', async () => {
@@ -169,15 +167,20 @@ describe('useKnowledgeWriteTarget on a protected branch', () => {
 /**
  * A draft branch: no write grant is needed, only read where the page lands,
  * and the tree shows folders the person may not read when something inside
- * them is shared — so each candidate is asked, in the same order.
+ * them is shared — so every candidate is asked, in the same order and the
+ * same pages, about reading.
  */
 describe('useKnowledgeWriteTarget on a draft branch', () => {
   it('takes the top of Knowledge when it may be read, asking no write check', async () => {
     readable = new Set(['KnowledgeBase', 'KnowledgeBase/Support']);
     const { result } = await settledTarget({ workspaceBranch: DRAFT, openFilePath: `${ROOT}/Support/FAQ.md` });
     expect(result.current.folder).toBe(ROOT);
-    expect(single).toHaveBeenCalledWith('ws-1', 'KnowledgeBase', 'folder');
-    expect(batch).not.toHaveBeenCalled();
+    expect(batch).toHaveBeenCalledWith(
+      'ws-1',
+      ['KnowledgeBase', 'KnowledgeBase/Support', 'KnowledgeBase/Product', 'KnowledgeBase/Sales', 'KnowledgeBase/Sales/Team'],
+      'read',
+    );
+    expect(verbsAsked()).toEqual(new Set(['read']));
   });
 
   it('passes over a top shown only for what is inside it, to the folder on screen, else the first in tree order', async () => {
@@ -194,24 +197,25 @@ describe('useKnowledgeWriteTarget on a draft branch', () => {
     expect(result.current.folder).toBeNull();
   });
 
-  it('asks a few at a time, stopping at the first group that answers', async () => {
-    const many = Array.from({ length: 24 }, (_, i) => dir(`${ROOT}/F${i}`));
-    readable = new Set(['KnowledgeBase/F8']);
+  it('asks in the pages the endpoint accepts, stopping at the first that answers', async () => {
+    const many = Array.from({ length: 1010 }, (_, i) => dir(`${ROOT}/F${i}`));
+    readable = new Set(['KnowledgeBase/F503', 'KnowledgeBase/F1005']);
     const { result } = await settledTarget({ workspaceBranch: DRAFT }, tree(...many));
-    expect(result.current.folder).toBe(`${ROOT}/F8`);
-    // The top and F0…F6, then F7…F14: two groups of eight, never the third.
-    expect(single).toHaveBeenCalledTimes(16);
+    expect(result.current.folder).toBe(`${ROOT}/F503`);
+    // The top and F0…F498, then F499…F998: two pages, never the third.
+    expect(batch).toHaveBeenCalledTimes(2);
+    for (const call of batch.mock.calls) expect(call[1].length).toBeLessThanOrEqual(500);
+    expect(verbsAsked()).toEqual(new Set(['read']));
   });
 
   it('asks nothing when the tree shows no Knowledge folder', async () => {
     const { result } = await settledTarget({ workspaceBranch: DRAFT }, dir('kb', [dir('kb/Skills')]));
     expect(result.current.folder).toBeNull();
-    expect(single).not.toHaveBeenCalled();
     expect(batch).not.toHaveBeenCalled();
   });
 
-  it('settles on nothing when a request fails', async () => {
-    single.mockRejectedValue(new Error('HTTP 500'));
+  it('settles on nothing when the request fails', async () => {
+    batch.mockRejectedValue(new Error('HTTP 500'));
     const { result } = await settledTarget({ workspaceBranch: DRAFT });
     expect(result.current.folder).toBeNull();
   });
