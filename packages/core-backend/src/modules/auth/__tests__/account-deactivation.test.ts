@@ -252,6 +252,8 @@ describe('AuthService.deactivate', () => {
     await new AuthService(db, makeConfig()).deactivate(ROW.id);
     expect(captured.order).toEqual([
       'begin',
+      // The wait for the lock is bounded, inside the transaction.
+      `tx:select set_config('lock_timeout', $1, true) ["15000"]`,
       'tx:select pg_advisory_xact_lock(hashtext($1)) ["account-switch:alice@example.com"]',
       'tx:update',
       'commit',
@@ -343,6 +345,7 @@ describe('a first sign-in the port would rather keep waiting', () => {
     // Created switched off, so under the address's switch lock.
     expect(captured.order).toEqual([
       'begin',
+      `tx:select set_config('lock_timeout', $1, true) ["15000"]`,
       'tx:select pg_advisory_xact_lock(hashtext($1)) ["account-switch:new@example.com"]',
       'tx:insert',
       'commit',

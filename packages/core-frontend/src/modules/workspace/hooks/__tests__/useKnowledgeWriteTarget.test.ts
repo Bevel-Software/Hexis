@@ -137,6 +137,39 @@ describe('useKnowledgeWriteTarget on a protected branch', () => {
     expect(result.current.folder).toBeNull();
   });
 
+  it('a recheck overtaken by a newer question answers with the newer answer, never a folder of what was left', async () => {
+    vi.useFakeTimers();
+    writable = new Set(['KnowledgeBase/Sales']);
+    show({ openFilePath: `${ROOT}/Sales/a.md` });
+    const { result, rerender } = renderHook(() => useKnowledgeWriteTarget(ROOT));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.folder).toBe(`${ROOT}/Sales`);
+
+    // Every later question answers only when told to, in any order.
+    const pending: Array<(r: { results: Record<string, boolean> }) => void> = [];
+    batch.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    // A create asks again (first question)...
+    const asked = result.current.recheck();
+    // ...and the person moves to a page in Support before it answers (second question, after the debounce).
+    show({ openFilePath: `${ROOT}/Support/b.md` });
+    rerender();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(pending).toHaveLength(2);
+    // The first answers: Sales, where they were. Then the second: Support.
+    await act(async () => {
+      pending[0]!({ results: { 'KnowledgeBase/Sales': true } });
+      await vi.advanceTimersByTimeAsync(0);
+      pending[1]!({ results: { 'KnowledgeBase/Support': true } });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(await asked).toBe(`${ROOT}/Support`);
+    expect(result.current.folder).toBe(`${ROOT}/Support`);
+  });
+
   it('asks at once the first time, and debounces a tree change after that', async () => {
     vi.useFakeTimers();
     show();

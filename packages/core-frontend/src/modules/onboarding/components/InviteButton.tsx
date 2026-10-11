@@ -46,12 +46,20 @@ export function InviteButton({ compact = false }: { compact?: boolean }) {
   });
   if (!invite) return null;
 
-  // While the admin check is still out, a click does nothing rather than
-  // show an admin the ask-an-admin popover.
-  const onClick = isAdmin ? () => invite.open() : isAdminLoading ? () => {} : () => setAsking((a) => !a);
+  // While the admin check is still out the button is disabled, visibly,
+  // rather than showing an admin the ask-an-admin popover or answering a
+  // click with nothing.
+  const onClick = isAdmin ? () => invite.open() : () => setAsking((a) => !a);
   const expanded = isAdmin || isAdminLoading ? undefined : asking;
   const trigger = compact ? (
-    <IconButton ref={triggerRef} aria-label="Invite" title="Invite" aria-expanded={expanded} onClick={onClick}>
+    <IconButton
+      ref={triggerRef}
+      aria-label="Invite"
+      title="Invite"
+      aria-expanded={expanded}
+      disabled={isAdminLoading}
+      onClick={onClick}
+    >
       <Users size={16} aria-hidden />
     </IconButton>
   ) : (
@@ -60,6 +68,7 @@ export function InviteButton({ compact = false }: { compact?: boolean }) {
       size="sm"
       leadingIcon={<Users size={14} aria-hidden />}
       aria-expanded={expanded}
+      disabled={isAdminLoading}
       onClick={onClick}
     >
       Invite
@@ -101,7 +110,9 @@ function AskAnAdmin() {
   }, []);
   const origin = window.location.origin;
   return (
-    <MenuPanel role="group" aria-label="Ask an admin to invite people" className="w-[320px] p-3">
+    // Never wider than the window: on a narrow toolbar the panel hangs off
+    // the button's right edge, and a fixed width would run off screen.
+    <MenuPanel role="group" aria-label="Ask an admin to invite people" className="w-80 max-w-[calc(100vw-1rem)] p-3">
       <p className="text-strong font-semibold text-ink">Ask an admin to invite people</p>
       <p className="mt-1 text-ui text-ink-muted">Only admins can add people to this workspace.</p>
       {admins && admins.length > 0 && (

@@ -151,22 +151,36 @@ export function useKnowledgeWriteTarget(knowledgeRoot: string | null): Knowledge
   const askingFor = `${workspaceKey}\n${openFolder}`;
 
   // Only the latest question's answer lands: a slow reply to an older tree
-  // must not overwrite a newer one.
+  // must not overwrite a newer one. And only the latest answer is RETURNED:
+  // a caller that asked before a switch (`recheck` from a create) is handed
+  // the answer for what is on screen now, never the folder of a branch or
+  // page just left, which it would otherwise write to.
   const asked = useRef(0);
+  const latest = useRef<Promise<string | null> | null>(null);
   const ask = useCallback(async (): Promise<string | null> => {
     if (!workspaceId || !kbDirName || !knowledgeRoot) return null;
     const n = ++asked.current;
-    let folder: string | null;
-    if (draft && !knowledgeShown) {
-      folder = null;
-    } else {
+    const question = (async (): Promise<string | null> => {
+      if (draft && !knowledgeShown) return null;
       try {
-        folder = await findKnowledgeTarget(draft ? 'read' : 'write', workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
+        return await findKnowledgeTarget(draft ? 'read' : 'write', workspaceId, kbDirName, knowledgeRoot, openFolder, folders);
       } catch {
-        folder = null;
+        return null;
       }
+    })();
+    latest.current = question;
+    let folder = await question;
+    if (n === asked.current) {
+      setAnswer({ folder, settled: true, askedFor: askingFor });
+      return folder;
     }
-    if (n === asked.current) setAnswer({ folder, settled: true, askedFor: askingFor });
+    // Superseded: wait for whichever question is the latest when each one
+    // answers, and hand back that answer.
+    let waited = question;
+    while (latest.current && latest.current !== waited) {
+      waited = latest.current;
+      folder = await waited;
+    }
     return folder;
   }, [workspaceId, kbDirName, knowledgeRoot, openFolder, folders, askingFor, draft, knowledgeShown]);
 

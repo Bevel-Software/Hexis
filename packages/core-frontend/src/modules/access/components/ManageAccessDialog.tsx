@@ -897,7 +897,11 @@ export function ManageAccessDialog({
   // `NO_ACCOUNT_HELP_ADMIN`). Single sign-on, or an answer we could not get:
   // today's words. Optional context: the dialog is mounted bare in tests.
   const signIn = useSignInMethods();
-  const noSso = signIn.status === 'ready' && signIn.methods.sso.length === 0;
+  // Password sign-in and no single sign-on: an invite (which gives a
+  // password) is what lets this person in. With password sign-in off as
+  // well nobody could sign in and an invite would not change that, so that
+  // deployment keeps today's words rather than promising one.
+  const noSso = signIn.status === 'ready' && signIn.methods.sso.length === 0 && signIn.methods.password;
   const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   const invite = useInviteDialog();
   const noAccountHelp = noSso ? (isAdmin ? NO_ACCOUNT_HELP_ADMIN : NO_ACCOUNT_HELP_MEMBER) : NO_ACCOUNT_HELP;

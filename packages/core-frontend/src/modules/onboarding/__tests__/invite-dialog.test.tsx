@@ -582,7 +582,9 @@ describe('InviteDialog: a starting password', () => {
 
   it('says to send the password separately, and the message says to change it — without ever holding it', async () => {
     await sendFive();
-    const reminder = screen.getByText('Send them the password you set, separately.');
+    // Four were invited and three got the password (sam kept their own), so
+    // the reminder names who it is for rather than "them".
+    const reminder = screen.getByText('Send the password you set, separately, to the 3 people whose row says they use it.');
     expect(reminder.parentElement).toHaveTextContent(
       'It isn’t in the message below, so the message is safe to post in a shared channel.',
     );
@@ -661,7 +663,7 @@ describe('InviteDialog: a starting password', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite 2 people' }));
     await screen.findByRole('dialog', { name: '2 people are invited' });
     expect(createAccountMock.mock.calls).toEqual([['lena@acme.com', '']]);
-    expect(screen.queryByText('Send them the password you set, separately.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/password you set, separately/)).not.toBeInTheDocument();
   });
 
   it('when setting it on an existing account fails, leaves that account as it was and gives the server’s reason', async () => {
@@ -710,7 +712,7 @@ describe('InviteDialog: a starting password', () => {
     await screen.findByRole('dialog', { name: '1 person is invited' });
     expect(createAccountMock).toHaveBeenCalledWith('priya@acme.com', '', SECRET, KEEP);
     expect(within(rowOf('priya@acme.com')).getByText('Signs in with their own password (unchanged)')).toBeInTheDocument();
-    expect(screen.queryByText('Send them the password you set, separately.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/password you set, separately/)).not.toBeInTheDocument();
   });
 
   it('when the account list cannot be read, sends nothing and offers Retry, keeping what was typed', async () => {

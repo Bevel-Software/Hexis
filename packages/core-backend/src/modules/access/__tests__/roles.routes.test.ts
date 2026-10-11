@@ -363,6 +363,7 @@ describe('/api/access/roles routes', () => {
       expect((await addAdmin(h.baseUrl, { email, ifActive: true })).status).toBe(200);
       expect(h.txLog).toEqual([
         'begin',
+        `select set_config('lock_timeout', $1, true) ["15000"]`,
         `select pg_advisory_xact_lock(hashtext($1)) ["account-switch:${canonical}"]`,
         `end: ${canonical}`,
       ]);

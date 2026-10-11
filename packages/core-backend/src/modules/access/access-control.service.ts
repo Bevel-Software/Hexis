@@ -2168,9 +2168,14 @@ export class AccessControlService implements IAccessControl {
     let model: AccessModel;
     try {
       model = await this.loadModel(workspaceId);
-    } catch {
+    } catch (err) {
       // As canRestorePlatformFile: with no model to ask, the deployment owners
-      // are the only admins left.
+      // are the only admins left. A `roles.yaml` that does not parse is that
+      // by design; anything else (a clone being read, the disk) is said, so a
+      // list that names fewer admins than there are is diagnosable.
+      if (!(err instanceof AccessConfigError)) {
+        log.warn('the access model could not be loaded; the admins list names the deployment owners only:', { err });
+      }
       return [...this.deploymentOwners];
     }
     const candidates = new Set<string>(model.deploymentOwners);

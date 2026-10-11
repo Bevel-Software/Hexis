@@ -587,8 +587,11 @@ function InvitedBody({
   const { user } = useAuth();
   const origin = window.location.origin;
   const idp = either(methods?.sso.map((p) => p.label) ?? []);
-  // Some account was given the starting password in this send.
-  const passwordSet = outcomes.some(gotPassword);
+  // Who was given the starting password in this send: the reminder names
+  // them when it was not everyone invited, since a person who kept their own
+  // password cannot use it.
+  const gotIt = outcomes.filter(gotPassword).length;
+  const passwordSet = gotIt > 0;
   // The deployment emailed EVERY invited person the invite itself (the
   // cloud's mail, say): the admin has nothing to send but a password. One
   // person it did not reach — an existing account that only got a
@@ -640,7 +643,11 @@ function InvitedBody({
         <>
           {passwordSet && (
             <Banner tone="wait" role="status" icon={<KeyRound size={16} aria-hidden />}>
-              <span className="font-semibold">Send them the password you set, separately.</span>{' '}
+              <span className="font-semibold">
+                {gotIt === invited
+                  ? 'Send them the password you set, separately.'
+                  : `Send the password you set, separately, to the ${gotIt === 1 ? 'person' : `${gotIt} people`} whose row says they use it.`}
+              </span>{' '}
               {allEmailed
                 ? 'It isn’t in the email they were sent.'
                 : 'It isn’t in the message below, so the message is safe to post in a shared channel.'}

@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { KNOWLEDGE_BASE_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
@@ -129,13 +129,27 @@ export function useCreatePage(): CreatePage {
     withdraw,
   } = useKnowledgeWriteTarget(kbDirName !== null ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null);
 
+  // What a create was started on. A switch of branch while it waits (for a
+  // recheck, for a refused attempt) would otherwise let it write to the
+  // workspace it captured and open the page back on the branch just left;
+  // after every wait it checks it is still where it started, and stops if
+  // not. The page it may have made by then stays where it was made.
+  const liveKey = `${workspaceBranch}\n${destination}`;
+  const live = useRef(liveKey);
+  useEffect(() => {
+    live.current = liveKey;
+  }, [liveKey]);
+
   const createPage = useCallback(async (): Promise<string | null> => {
     if (!knowledgeRoot || !pageFolderSettled) {
       throw new Error('Couldn’t create the page: the workspace is still loading.');
     }
+    const startedOn = liveKey;
+    const moved = (): boolean => live.current !== startedOn;
     // An answer from before a switch of branch or page may name a folder
     // other than where the person is looking: ask again before writing.
     let folder = pageFolderCurrent ? pageFolder : await recheck();
+    if (moved()) return null;
     // Folders a write was refused in, this create: each refusal asks again,
     // and a fresh answer naming one of these says the refusal is not about
     // the folder.
@@ -144,8 +158,11 @@ export function useCreatePage(): CreatePage {
       let n = freeUntitledNumber(tree, folder);
       let path = untitledPagePath(folder, n);
       for (let attempt = 1; ; attempt++) {
+        if (moved()) return null;
         try {
           await createFile(path, NEW_PAGE_CONTENT, { ifAbsent: true });
+          // Made, but the person has moved on: it is not opened over them.
+          if (moved()) return path;
           openWorkspacePath(path, { edit: true });
           return path;
         } catch (err) {
@@ -160,6 +177,7 @@ export function useCreatePage(): CreatePage {
           if (isRefused(err)) {
             refused.add(folder);
             const next = await recheck();
+            if (moved()) return null;
             if (next && !refused.has(next)) {
               folder = next;
               break;
@@ -178,7 +196,7 @@ export function useCreatePage(): CreatePage {
     }
     // Nowhere to write: the fresh answer has hidden New page, which says it.
     return null;
-  }, [knowledgeRoot, pageFolder, pageFolderSettled, pageFolderCurrent, recheck, withdraw, tree, createFile, openWorkspacePath]);
+  }, [knowledgeRoot, liveKey, pageFolder, pageFolderSettled, pageFolderCurrent, recheck, withdraw, tree, createFile, openWorkspacePath]);
 
   return { knowledgeRoot, createPage, pageFolder, pageFolderSettled };
 }

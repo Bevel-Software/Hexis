@@ -75,8 +75,9 @@ beforeEach(() => {
 });
 
 describe('InviteButton while the admin check is still out', () => {
-  it('does nothing on a click: no ask-an-admin popover for someone who may be an admin', async () => {
+  it('is visibly disabled, so a click opens nothing: no ask-an-admin popover for someone who may be an admin', async () => {
     const invite = mountWithController(false, false, true);
+    expect(screen.getByRole('button', { name: 'Invite' })).toBeDisabled();
     await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
     expect(popover()).toBeNull();
     expect(fetchAdminsMock).not.toHaveBeenCalled();

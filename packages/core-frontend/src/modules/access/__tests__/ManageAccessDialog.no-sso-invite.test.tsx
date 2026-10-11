@@ -186,6 +186,16 @@ describe('ManageAccessDialog, no single sign-on', () => {
 });
 
 describe('ManageAccessDialog keeps today’s note', () => {
+  it('on a deployment with password sign-in off and no single sign-on, where an invite would not let anyone in', async () => {
+    providersMock.mockResolvedValue({ password: false, sso: [] });
+    mount(true);
+    await waitFor(() => expect(providersMock).toHaveBeenCalled());
+    const row = await rowFor(UNKNOWN.name);
+    await waitFor(() => expect(within(row).getByText(TODAY_NOTE)).toHaveAttribute('title', TODAY_HELP));
+    expect(within(row).queryByText(ADMIN_HELP)).toBeNull();
+    expect(within(row).queryByRole('button', { name: /^Invite/ })).toBeNull();
+  });
+
   it('on a deployment with single sign-on', async () => {
     providersMock.mockResolvedValue({
       password: true,
