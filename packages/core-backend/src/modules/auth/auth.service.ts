@@ -314,7 +314,10 @@ export class AuthService {
    * Password sign-in refuses it until a password is set. For an address that
    * already has an account it changes nothing but an explicitly given name.
    *
-   * WITH a password, the deployment admin is the one target this refuses, for the reason
+   * WITH a password, this refuses two kinds of target. The accounts the
+   * platform runs its own work as are refused first
+   * ({@link assertNotSystemAccount}): a password would make them able to sign
+   * in. The deployment admin is refused for the reason
    * {@link changePassword} refuses it: that account's password is the
    * environment's, so a stored hash would not replace it but ADD a second
    * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
