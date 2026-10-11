@@ -77,6 +77,25 @@ jobs:
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
 
+      # Lint ratchet, for pull requests: ESLint over the TS/TSX files the pull
+      # request changes, so it cannot add a finding. Not `pnpm lint` over the
+      # whole tree — dev still carries findings from before lint was checked
+      # anywhere, and a repo-wide run would fail every pull request on them.
+      # Touching a file means owning its findings, as `ds:check` means for
+      # off-system classes. The base commit is fetched by SHA (the checkout is
+      # the shallow merge commit), and diffing that merge commit against it is
+      # exactly the pull request's change.
+      - name: Lint the files this pull request changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD -- '*.ts' '*.tsx')
+          if [ "${#files[@]}" -eq 0 ]; then echo "No TS/TSX files changed."; exit 0; fi
+          printf 'Linting %s\n' "${files[@]}"
+          pnpm exec eslint --no-warn-ignored -- "${files[@]}"
+
       # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
       # child line with its package ("packages/core-backend test: …"). Vitest's
       # built-in GitHub Actions reporter prints `::error file=…` annotations,
