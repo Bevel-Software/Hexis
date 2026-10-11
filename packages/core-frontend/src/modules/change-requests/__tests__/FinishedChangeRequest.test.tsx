@@ -611,17 +611,33 @@ describe('ChangeRequestDialog: a closed request', () => {
     expect(screen.queryByText(/Affected owners/)).not.toBeInTheDocument();
   });
 
-  it("drops Hexis's hidden markers but keeps a comment the author wrote", async () => {
+  it('prints no HTML comment, an author\'s or Hexis\'s, as the view did before', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailOf('closed', [], {}, {
-        body: 'Why. <!-- TODO: ask Robin -->\n<!--hexis:author-id:abc-->\n<!-- bevel/marker -->',
+        body: 'Why. <!-- note from the author: keep this short -->\n<!--hexis:author-id:abc-->\n<!-- bevel/marker -->',
       }),
     );
     renderDialog({ cr: { ...CR, state: 'closed' } });
     await screen.findByRole('status');
-    expect(screen.getByText(/<!-- TODO: ask Robin -->/)).toBeInTheDocument();
+    expect(screen.getByText('Why.')).toBeInTheDocument();
+    expect(screen.queryByText(/<!--/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/keep this short/)).not.toBeInTheDocument();
     expect(screen.queryByText(/hexis:author-id/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/bevel\/marker/)).not.toBeInTheDocument();
+  });
+
+  it('an OPEN request\'s description prints no HTML comment either (unchanged by this ticket)', async () => {
+    crApi.readFileOnBranch.mockResolvedValue('tier: premium\n');
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('open', [file('Docs/pricing.yaml')], null, {
+        needsUpdate: false,
+        behind: false,
+        body: 'Why. <!-- note from the author: keep this short -->',
+      }),
+    );
+    renderDialog({ cr: CR });
+    expect(await screen.findByText('Why.')).toBeInTheDocument();
+    expect(screen.queryByText(/<!--/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/keep this short/)).not.toBeInTheDocument();
   });
 
   it('names the move of the knowledge base when that is why it closed', async () => {
