@@ -136,7 +136,7 @@ function harness(
   } as unknown as GitService;
   const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
   const svc = new PullRequestService(db, workspace, access, git);
-  return { svc, mergeLogWhere, appliedChangeShas, changedFilesOfProposalHead };
+  return { svc, row, mergeLogWhere, appliedChangeShas, changedFilesOfProposalHead };
 }
 
 describe('PullRequestService.getPrDetail — how a finished request ended', () => {
@@ -216,15 +216,12 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
 
   it('a warm read of an applied request with its own commit reads no merge log', async () => {
     const h = harness({}, { mergeLog: [{ name: 'Robin Lee' }] });
-    const cachedValue = { state: 'merged', number: 4 };
-    (h.svc as unknown as { detailCache: Map<string, unknown> }).detailCache.set('ws:anon:4', {
-      at: Date.now(),
-      headSha: HEAD_SHA,
-      baseSha: BASE_SHA,
-      value: cachedValue,
-    });
-    expect(await h.svc.getPrDetail(4)).toBe(cachedValue);
-    expect(h.mergeLogWhere).not.toHaveBeenCalled();
+    // The cold read asks for the applier once, and caches its answer.
+    const cold = await h.svc.getPrDetail(4);
+    expect(h.mergeLogWhere).toHaveBeenCalledTimes(1);
+    // The warm read is that answer, with no further query.
+    expect(await h.svc.getPrDetail(4)).toBe(cold);
+    expect(h.mergeLogWhere).toHaveBeenCalledTimes(1);
   });
 
   it('a closed request says when, names nobody, and reads no merge log', async () => {
@@ -266,15 +263,12 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
   it('a cached OPEN detail never answers for the same request once it is applied', async () => {
     // The merge commit's parents are the two tips the open detail was read
     // at, so only the state tells the two answers apart.
-    const row: Record<string, unknown> = {};
-    const h = harness(row, { mergeLog: [{ name: 'Robin Lee' }] });
-    const svc = h.svc as unknown as { detailCache: Map<string, unknown> };
-    svc.detailCache.set('ws:anon:4', {
-      at: Date.now(),
-      headSha: HEAD_SHA,
-      baseSha: BASE_SHA,
-      value: { state: 'open', number: 4 },
-    });
+    const h = harness({ state: 'open', mergedSha: null, closedAt: null }, { mergeLog: [{ name: 'Robin Lee' }] });
+    const open = await h.svc.getPrDetail(4);
+    expect(open?.state).toBe('open');
+    expect([open?.headSha, open?.baseSha]).toEqual([HEAD_SHA, BASE_SHA]);
+    // Applied: same two shas, as the merge commit's parents.
+    Object.assign(h.row, { state: 'merged', mergedSha: MERGE_SHA, closedAt: CLOSED_AT });
     const detail = await h.svc.getPrDetail(4);
     expect(detail?.state).toBe('merged');
     expect(detail?.finished?.appliedBy).toEqual({ name: 'Robin Lee' });
@@ -361,12 +355,34 @@ describe('withoutAddresses — the detail the app route serves', () => {
     } as unknown as PullRequestDetail;
   }
 
-  it('sends no email address anywhere on an applied request, and keeps the names', () => {
+  it('sends no email address of any person on an applied request, and keeps the names', () => {
     const json = JSON.stringify(withoutAddresses(appliedDetail('merged')));
     expect(json).not.toMatch(/@bevel\.software/);
     expect(json).toContain('Robin Lee');
     expect(json).toContain('Owner One');
-    expect(json).toContain('Dana Admin');
+  });
+
+  it('blanks a name that is itself an address, as the applier\'s is', () => {
+    const detail = appliedDetail('merged');
+    detail.appAuthor = { name: 'sam@bevel.software' };
+    detail.approvals[0].approvedBy[0].name = 'robin@bevel.software';
+    detail.approvals[0].eligibleApprovers.users[0].name = 'owner@bevel.software';
+    const scrubbed = withoutAddresses(detail);
+    expect(JSON.stringify(scrubbed)).not.toMatch(/@/);
+    expect(scrubbed.appAuthor).toEqual({ name: '' });
+    expect(scrubbed.approvals[0].approvedBy[0].name).toBe('');
+  });
+
+  it('drops the comments: none is shown, and their free text can carry an address', () => {
+    const detail = appliedDetail('merged');
+    detail.comments[0].body = 'ping dana@bevel.software';
+    expect(withoutAddresses(detail).comments).toEqual([]);
+  });
+
+  it("keeps the author's own title and description as written", () => {
+    const detail = appliedDetail('merged');
+    detail.body = 'Questions to sales@bevel.software.';
+    expect(withoutAddresses(detail).body).toBe('Questions to sales@bevel.software.');
   });
 
   it('nor on a closed one', () => {

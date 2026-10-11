@@ -4,8 +4,7 @@ import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
-import type { DiffLine } from '../../../change-requests/utils/diff';
-import { MarkedLines } from '../../../change-requests/components/MarkedLines';
+import { MarkedLines, type DiffLine } from '../../../change-requests';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
 const NOOP_SAVE = async () => {};

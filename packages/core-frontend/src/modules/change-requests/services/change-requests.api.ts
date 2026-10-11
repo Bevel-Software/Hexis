@@ -140,24 +140,23 @@ export async function readFileAtCommit(
 /**
  * Whether a file exists on a branch's workspace NOW — the "Open page" or
  * "This page has since been deleted." question of a finished request's file.
- * A HEAD on the raw route: no bytes, binary files included. `false` only for
- * a 404. A refusal (403) rejects as one, so the file shows locked as any
- * refused read does; any other failure answers `true` and leaves the page
- * itself to say what is wrong, rather than calling a page deleted that may
- * well be there.
+ * A HEAD on the raw route: no bytes, binary files included. `true` for a
+ * 2xx, `false` only for a 404. Every other answer rejects as a failed read
+ * would: a refusal (403) as a `WorkspaceApiError` so the file shows locked,
+ * any other status as a `WorkspaceApiError` carrying it and a network drop
+ * as the error `fetch` threw, so the file says it couldn't be read, with Try
+ * again — never "Open page" to a page nobody could confirm, and never
+ * "deleted" for a page that may well be there.
  */
 export async function fileExistsOnWorkspace(
   workspaceId: string,
   workspacePath: string,
 ): Promise<boolean> {
-  let res: Response;
-  try {
-    res = await authFetch(rawFileUrl(workspaceId, workspacePath), { method: 'HEAD' });
-  } catch {
-    return true;
-  }
-  if (res.status === 403) throw new WorkspaceApiError(403);
-  return res.status !== 404;
+  // A HEAD answer has no body, so the status is all there is to say.
+  const res = await authFetch(rawFileUrl(workspaceId, workspacePath), { method: 'HEAD' });
+  if (res.status === 404) return false;
+  if (!res.ok) throw new WorkspaceApiError(res.status);
+  return true;
 }
 
 async function errorMessage(res: Response): Promise<string> {

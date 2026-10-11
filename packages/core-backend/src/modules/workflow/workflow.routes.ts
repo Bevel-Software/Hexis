@@ -787,8 +787,8 @@ export function createWorkflowRoutes(
         }
       }
       const [scoped] = await scopeApplyFailures(req, [detail]);
-      // A finished request carries no email address: its approvals would
-      // otherwise send the applier's (see `withoutAddresses`).
+      // A finished request carries no person's email address: its approvals
+      // would otherwise send the applier's (see `withoutAddresses`).
       res.json(withoutAddresses(scoped));
     } catch (err) {
       const { status, body } = toHttpError(err);

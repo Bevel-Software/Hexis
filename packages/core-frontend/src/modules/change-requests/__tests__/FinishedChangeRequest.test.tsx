@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type {
@@ -393,6 +393,45 @@ describe('ChangeRequestDialog: an applied request', () => {
     expect(await screen.findByText('This page has since been deleted.')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Open page' })).not.toBeInTheDocument();
     expect(screen.getByText('tier: premium')).toBeInTheDocument();
+  });
+
+  describe('with the real existence check behind Open page', () => {
+    // The helper itself, not a mock of it: only `fetch` is stubbed, so what
+    // the HEAD answers is what the view is told.
+    beforeEach(async () => {
+      const actual = await vi.importActual<typeof import('../services/change-requests.api')>(
+        '../services/change-requests.api',
+      );
+      crApi.fileExistsOnWorkspace.mockImplementation(actual.fileExistsOnWorkspace);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    it.each([
+      ['a 500', () => Promise.resolve(new Response(null, { status: 500 })), 'HTTP 500'],
+      ['a network drop', () => Promise.reject(new TypeError('Failed to fetch')), 'Failed to fetch'],
+    ])('%s is a failed read with Try again, never "Open page" or "deleted"', async (_name, failure, reason) => {
+      const fetchMock = vi.fn().mockImplementationOnce(failure).mockResolvedValue(new Response(null, { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+      detailMock.fetchPrDetail.mockResolvedValue(detailOf('merged', FILES));
+      renderDialog();
+      expect(await screen.findByText(new RegExp(`couldn't be read right now \\(${reason}\\)`))).toBeInTheDocument();
+      expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'HEAD' });
+      expect(screen.queryByRole('link', { name: 'Open page' })).not.toBeInTheDocument();
+      expect(screen.queryByText('This page has since been deleted.')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      expect(await screen.findByRole('link', { name: 'Open page' })).toHaveAttribute(
+        'href',
+        kbFileUrl('main', 'knowledge-base/Docs/pricing.yaml'),
+      );
+    });
+
+    it('a 404 is the page deleted since', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
+      detailMock.fetchPrDetail.mockResolvedValue(detailOf('merged', FILES));
+      renderDialog();
+      expect(await screen.findByText('This page has since been deleted.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    });
   });
 
   it('a file the request itself deleted shows neither, and its text as removed', async () => {

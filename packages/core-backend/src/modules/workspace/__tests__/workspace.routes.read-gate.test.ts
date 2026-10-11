@@ -179,7 +179,7 @@ describe('read-permission gates on human read routes', () => {
     expect(h.workspaceService.isFile).not.toHaveBeenCalledWith(WS, `${KB}/Secret/x.zip`);
   });
 
-  it('HEAD /file/raw: a stat that fails for any reason but absence is a 500, never "deleted"', async () => {
+  it('HEAD /file/raw: a generic stat failure is a 500, never "deleted"', async () => {
     h = await makeHarness();
     const res = await fetch(
       `${h.baseUrl}/api/workspace/${WS}/file/raw?path=${encodeURIComponent(`${KB}/Open/Broken.zip`)}`,

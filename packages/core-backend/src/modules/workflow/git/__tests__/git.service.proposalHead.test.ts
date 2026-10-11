@@ -5,6 +5,7 @@ import os from 'node:os';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
+import { NodeGitRunner } from '../node-git-runner.js';
 import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { mergeCommitSubject } from '../merge-commit.js';
 import { runGit, gitOut, stubWorkspaceService } from './git-test-helpers.js';
@@ -21,6 +22,14 @@ describe('GitService.changedFilesOfProposalHead', () => {
   let root: string;
   let repo: string;
   let git: GitService;
+  // The runner the service is given, so a test can see every git command it
+  // runs — fetches above all — without reaching into the service.
+  let runner: NodeGitRunner;
+
+  /** The `git fetch` argument lists the service ran since `runs` began watching. */
+  function fetchesOf(runs: { mock: { calls: unknown[][] } }): string[][] {
+    return runs.mock.calls.map(([, args]) => args as string[]).filter((args) => args[0] === 'fetch');
+  }
 
   async function seed(): Promise<{ headOf8: string; headOf7: string }> {
     repo = path.join(root, workspaceId, 'knowledge-base');
@@ -53,10 +62,14 @@ describe('GitService.changedFilesOfProposalHead', () => {
     // Both branches retire with their requests.
     await runGit(repo, ['branch', '-D', 'robin/seven', 'robin/eight']);
 
+    runner = new NodeGitRunner();
     git = new GitService(
       stubWorkspaceService({ [workspaceId]: path.dirname(repo) }),
       new WorkflowHooks(),
       testKbContext(),
+      undefined,
+      null,
+      runner,
     );
     return { headOf8, headOf7 };
   }
@@ -89,9 +102,13 @@ describe('GitService.changedFilesOfProposalHead', () => {
 
   it('refuses a head this clone does not hold, rather than reaching for it', async () => {
     await seed();
-    await expect(
-      git.changedFilesOfProposalHead(workspaceId, 'main', 'e'.repeat(40)),
-    ).rejects.toBeInstanceOf(WorkflowValidationError);
+    const runs = vi.spyOn(runner, 'run');
+    const missing = 'e'.repeat(40);
+    await expect(git.changedFilesOfProposalHead(workspaceId, 'main', missing)).rejects.toBeInstanceOf(
+      WorkflowValidationError,
+    );
+    // Not a fetch that was tried and failed: no fetch ever names the head.
+    expect(fetchesOf(runs).flat().join(' ')).not.toContain(missing);
   });
 
   /**
@@ -121,10 +138,10 @@ describe('GitService.changedFilesOfProposalHead', () => {
 
   it('refreshes the target before reading, so its later work is not the request\'s', async () => {
     const { headOf9 } = await seedStaleTarget();
-    const runs = vi.spyOn(git as unknown as { git(cwd: string, args: string[]): Promise<unknown> }, 'git');
+    const runs = vi.spyOn(runner, 'run');
     const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
     // One fetch, of the target alone: never the head, its sha or its branch.
-    const fetches = runs.mock.calls.map(([, args]) => args).filter((args) => args[0] === 'fetch');
+    const fetches = fetchesOf(runs);
     expect(fetches).toEqual([
       ['fetch', '--no-write-fetch-head', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
     ]);
