@@ -2164,6 +2164,25 @@ export class AccessControlService implements IAccessControl {
     return isAdminEmail(model, canonicalEmail(userEmail));
   }
 
+  async adminEmails(workspaceId: string): Promise<string[]> {
+    let model: AccessModel;
+    try {
+      model = await this.loadModel(workspaceId);
+    } catch (err) {
+      // As canRestorePlatformFile: with no model to ask, the deployment owners
+      // are the only admins left. A `roles.yaml` that does not parse is that
+      // by design; anything else (a clone being read, the disk) is said, so a
+      // list that names fewer admins than there are is diagnosable.
+      if (!(err instanceof AccessConfigError)) {
+        log.warn('the access model could not be loaded; the admins list names the deployment owners only:', { err });
+      }
+      return [...this.deploymentOwners];
+    }
+    const candidates = new Set<string>(model.deploymentOwners);
+    for (const email of model.roles.byEmail.keys()) candidates.add(email);
+    return [...candidates].filter((email) => isAdminEmail(model, email));
+  }
+
   async canRestorePlatformFile(
     workspaceId: string,
     userEmail: string,

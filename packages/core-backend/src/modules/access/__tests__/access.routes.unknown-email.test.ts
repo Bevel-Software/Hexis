@@ -105,6 +105,7 @@ async function makeHarness(opts: {
       accessControl,
       workspaceService,
       authService,
+      authService,
       workflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       opts.db ?? usersDbDouble(opts.accounts ?? []),

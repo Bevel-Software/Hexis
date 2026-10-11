@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Users } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAuth } from '../../auth/state/auth.context';
+import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
+import { useLatestRequest } from '../../../lib/latest-request';
 import {
   createAccount,
   deactivateAccount,
@@ -20,7 +23,7 @@ import {
  * can be true, and the environment credential is the one that survives.
  */
 function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
-  if (account.isEnvAdmin) return 'Password (deployment admin)';
+  if (account.isEnvAdmin) return 'Password (owner)';
   if (account.hasPassword) return 'Password';
   return 'No password — signs in with single sign-on';
 }
@@ -32,13 +35,21 @@ function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvA
 function signInAfterDelete(account: AccountSummary): string {
   const label = signInMethodLabel(account);
   if (account.isEnvAdmin) {
-    return `${label}: they can still sign in with the deployment admin password, but will start fresh.`;
+    return `${label}: they can still sign in with the owner password set on the server, but will start fresh.`;
   }
   if (account.hasPassword) {
     return `${label}: to sign in again they will need an admin to create a new account for them.`;
   }
   return `${label}: they can sign in again later with single sign-on, but will start fresh.`;
 }
+
+/**
+ * Why an owner's address is never removed from access files, said where the
+ * delete dialog would offer it, until the server's own reason
+ * (`user-access-removal.service.ts`) has arrived, or when it could not be
+ * fetched. The server's words win once they are here.
+ */
+const OWNER_ACCESS_NOTE = 'The owner stays in roles and access rules.';
 
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -109,18 +120,27 @@ function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordA
  * per-user passwords can't sign in until an admin sets one) or reset the one
  * they have — two acts the page names apart, see {@link PasswordAction} —
  * permanently delete an account (the GDPR erasure path — overlays contribute
- * their data slices via erasure participants), and add a new account. Set,
- * reset and create all go through `POST /api/admin/accounts`, an
- * upsert-by-email that preserves an existing display name when none is
- * supplied. The signed-in admin's own row offers neither action — the backend
+ * their data slices via erasure participants). New accounts come from the
+ * Invite dialog, the one way to create an account: the list ends with an
+ * "Invite new users" row that opens it, and is read again after each send.
+ * Set and reset go through `POST /api/admin/accounts`, an upsert-by-email
+ * that preserves an existing display name when none is supplied. The signed-in admin's own row offers neither action — the backend
  * refuses self-erasure, and their own password lives on the Account page. The
  * deployment admin's row offers no password action either, from any admin:
  * that account's password is set in the deployment environment, and the
  * backend refuses to store one for it.
+ *
+ * An owner's row (`ADMIN_EMAIL`; on the cloud, whoever created the
+ * workspace) is labelled "Owner" and offers no password action and no Switch
+ * off, from any admin, and Delete account only where the owner could sign
+ * back in with the server's password (`ownerCanBeDeleted`). The server
+ * refuses the same, so this hides only controls that could never work.
  */
 export function UserAccountsPage() {
   const { isAdmin } = useAdmin();
   const { user: me } = useAuth();
+  const invite = useInviteDialog();
+  const invitedRevision = invite?.invitedRevision ?? 0;
   const [accounts, setAccounts] = useState<AccountSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The account awaiting delete confirmation; non-null drives the confirm
@@ -151,35 +171,42 @@ export function UserAccountsPage() {
     email: string;
     action: PasswordAction;
   } | null>(null);
-  // Add-account form.
-  const [addEmail, setAddEmail] = useState('');
-  const [addName, setAddName] = useState('');
-  const [addPassword, setAddPassword] = useState('');
-  const [addError, setAddError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
   // The account being switched off or on, while the request and the refresh after it are in flight.
   const [switching, setSwitching] = useState<string | null>(null);
   // The account awaiting confirmation before it is switched off; non-null drives that Dialog.
   const [pendingDeactivate, setPendingDeactivate] = useState<AccountSummary | null>(null);
 
-  const refresh = useCallback(() => {
-    return listAccounts()
-      .then((rows) => {
-        setAccounts(rows);
-        setError(null);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Couldn't load accounts.");
+  // Only the latest read lands: an older one answering late would otherwise
+  // put back a list without the people a send just invited. And a caller
+  // waiting on a read that was overtaken waits on to the latest one, so
+  // "busy until the list shows the new state" still holds (`LatestRequest`).
+  const reads = useLatestRequest<{ rows: AccountSummary[] } | { error: string }>();
+  const refresh = useCallback(async () => {
+    await reads.run(
+      () =>
+        listAccounts().then(
+          (rows) => ({ rows }),
+          (err: unknown) => ({ error: err instanceof Error ? err.message : "Couldn't load accounts." }),
+        ),
+      (read) => {
+        if ('rows' in read) {
+          setAccounts(read.rows);
+          setError(null);
+          return;
+        }
+        setError(read.error);
         // `accounts` is deliberately left alone. A RELOAD that fails keeps the
         // rows it already had; a FIRST load that fails stays `null`, because
         // storing `[]` would render "No user accounts." — an admin reading
         // that would take a deployment they cannot reach for one nobody is on.
-      });
-  }, []);
+      },
+    );
+  }, [reads]);
 
+  // Again after every send from the Invite dialog, so the people just invited appear.
   useEffect(() => {
     if (isAdmin) refresh();
-  }, [isAdmin, refresh]);
+  }, [isAdmin, refresh, invitedRevision]);
 
   function openDeleteDialog(account: AccountSummary) {
     setPendingDelete(account);
@@ -199,7 +226,9 @@ export function UserAccountsPage() {
       });
   }
 
-  const removalBlocked = references !== null && !references.removable;
+  // An owner is never removed from access files; the server refuses it, so
+  // the option is off from the start rather than after the count arrives.
+  const removalBlocked = pendingDelete?.isOwner === true || (references !== null && !references.removable);
   // Files naming them that this admin may not write: the cleanup skips those,
   // so say it before the delete rather than only in the outcome. `unwritable`
   // is null when that could not be judged — which is not "none".
@@ -290,24 +319,6 @@ export function UserAccountsPage() {
     }
   }
 
-  async function handleAdd(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (adding) return;
-    setAdding(true);
-    setAddError(null);
-    try {
-      await createAccount(addEmail.trim(), addName.trim(), addPassword);
-      setAddEmail('');
-      setAddName('');
-      setAddPassword('');
-      refresh();
-    } catch (err) {
-      setAddError(err instanceof Error ? err.message : "Couldn't add the account.");
-    } finally {
-      setAdding(false);
-    }
-  }
-
   if (!isAdmin) {
     return (
       <PageShell title="User accounts">
@@ -392,6 +403,11 @@ export function UserAccountsPage() {
                         {isSelf && (
                           <span className="ml-1.5 text-meta font-normal text-ink-muted">(you)</span>
                         )}
+                        {account.isOwner && (
+                          <span className="ml-1.5 rounded-sm border border-line px-1 text-meta font-normal text-ink-muted">
+                            Owner
+                          </span>
+                        )}
                         {account.deactivatedAt && (
                           <span className="ml-1.5 text-meta font-normal text-ink-muted">(switched off)</span>
                         )}
@@ -412,7 +428,10 @@ export function UserAccountsPage() {
                         <span className="text-meta text-ink-muted text-right max-w-[13rem]">
                           Password set in the deployment environment
                         </span>
-                      ) : (
+                      ) : account.isOwner ? null : (
+                        // Nor for any other owner: another admin setting the
+                        // owner's password could then sign in as them. The
+                        // owner sets their own on the Account page.
                         <button
                           onClick={() => openPasswordDialog(account)}
                           className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
@@ -422,12 +441,14 @@ export function UserAccountsPage() {
                           {passwordAction(account).label}
                         </button>
                       ))}
-                    {!isSelf && !account.isEnvAdmin && !account.isSystem && (
+                    {!isSelf && (!account.isOwner || account.deactivatedAt) && !account.isSystem && (
                       // Not for your own account (the backend refuses it, so
-                      // an admin always remains who can sign in), nor the
-                      // deployment admin's (its environment password is the
-                      // way back in), nor one the platform runs its own work
-                      // as. Switching off asks first; switching on does not.
+                      // an admin always remains who can sign in), nor an
+                      // owner's (switching them off locks them out of their
+                      // own workspace; one switched off before the server
+                      // refused it can still be switched back on), nor one
+                      // the platform runs its own work as. Switching off asks
+                      // first; switching on does not.
                       <button
                         onClick={() => (account.deactivatedAt ? toggleActive(account) : setPendingDeactivate(account))}
                         disabled={switching !== null}
@@ -442,7 +463,9 @@ export function UserAccountsPage() {
                         {account.deactivatedAt ? 'Switch on' : 'Switch off'}
                       </button>
                     )}
-                    {!isSelf && (
+                    {!isSelf && (!account.isOwner || account.ownerCanBeDeleted) && (
+                      // An owner only where they can sign back in with the
+                      // server's password; elsewhere the server refuses it.
                       <button
                         onClick={() => openDeleteDialog(account)}
                         className="text-xs px-2 py-1 rounded-sm text-red-700 hover:bg-red-50 border border-red-200"
@@ -455,63 +478,21 @@ export function UserAccountsPage() {
                   </li>
                 );
               })}
+              {invite && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => invite.open()}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-sm text-accent hover:bg-hover"
+                  >
+                    <Users size={14} aria-hidden />
+                    Invite new users
+                  </button>
+                </li>
+              )}
             </ul>
           )}
 
-          <form onSubmit={handleAdd} className="border-t border-line pt-3 space-y-2 max-w-md">
-            <div className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
-              Add account
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">Email</span>
-                <input
-                  type="email"
-                  required
-                  value={addEmail}
-                  onChange={(e) => setAddEmail(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">
-                  Name <span className="text-ink-faint">(optional)</span>
-                </span>
-                <input
-                  type="text"
-                  value={addName}
-                  onChange={(e) => setAddName(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-            </div>
-            <label className="block space-y-1">
-              <span className="text-xs text-ink-muted">Password</span>
-              <input
-                type="password"
-                autoComplete="new-password"
-                aria-describedby="add-account-password-hint"
-                value={addPassword}
-                onChange={(e) => setAddPassword(e.target.value)}
-                className={inputClass}
-              />
-            </label>
-            <p id="add-account-password-hint" className="text-meta text-ink-faint">
-              Optional. Leave it empty and they sign in with single sign-on.
-            </p>
-            {addError && (
-              <div className="text-xs text-red-600" role="alert">
-                {addError}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={adding}
-              className="rounded-md bg-accent text-white text-sm font-medium px-3 py-1.5 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {adding ? 'Adding…' : 'Add account'}
-            </button>
-          </form>
         </div>
       </PageShell>
 
@@ -620,8 +601,11 @@ export function UserAccountsPage() {
             />
             <span>Also remove them from roles, groups and access rules</span>
           </label>
-          {removalBlocked && references?.blockedReason && (
-            <p className="text-ink-muted">{references.blockedReason}</p>
+          {removalBlocked && pendingDelete?.isOwner ? (
+            <p className="text-ink-muted">{references?.blockedReason ?? OWNER_ACCESS_NOTE}</p>
+          ) : (
+            removalBlocked &&
+            references?.blockedReason && <p className="text-ink-muted">{references.blockedReason}</p>
           )}
           {!removalBlocked && removeFromAccess && unwritableCount > 0 && (
             <p className="text-ink-muted">
@@ -635,7 +619,7 @@ export function UserAccountsPage() {
               keep the address, and are listed afterwards.
             </p>
           )}
-          {(!removeFromAccess || removalBlocked) && (
+          {(!removeFromAccess || removalBlocked) && !pendingDelete?.isOwner && (
             <p className="text-ink-muted">
               Their address will remain in those files.
             </p>
