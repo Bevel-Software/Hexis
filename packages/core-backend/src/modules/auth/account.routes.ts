@@ -29,7 +29,14 @@ import './auth.middleware.js'; // Express Request augmentation
 export function createAccountRoutes(
   authService: Pick<
     AuthService,
-    'listAccounts' | 'createAccount' | 'getUserById' | 'deactivate' | 'reactivate' | 'isOwnerEmail' | 'assertDeletable'
+    | 'listAccounts'
+    | 'createAccount'
+    | 'createAccountWithStartingPassword'
+    | 'getUserById'
+    | 'deactivate'
+    | 'reactivate'
+    | 'isOwnerEmail'
+    | 'assertDeletable'
   >,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
@@ -56,11 +63,16 @@ export function createAccountRoutes(
   // (or reset the password of an existing one; upsert-by-email is deliberate,
   // see AuthService.createAccount). Without a password the account is for
   // single sign-on: the person finds it waiting when they first sign in.
+  // With `keepExistingPassword: true` (an invite's starting password) the
+  // password goes only to a new account or a switched-on one with none; the
+  // reply's `passwordSet` says whether it did, and `deactivated` whether a
+  // refusal was because the account is switched off.
   router.post('/admin/accounts', requireAdmin, async (req, res) => {
-    const { email, name, password } = req.body as {
+    const { email, name, password, keepExistingPassword } = req.body as {
       email?: string;
       name?: string;
       password?: unknown;
+      keepExistingPassword?: unknown;
     };
     if (!email) {
       res.status(400).json({ error: 'email is required' });
@@ -71,10 +83,20 @@ export function createAccountRoutes(
       res.status(400).json({ error: 'password must be a string' });
       return;
     }
+    // Fail closed: anything but a boolean is a mistake, never "overwrite".
+    if (keepExistingPassword !== undefined && typeof keepExistingPassword !== 'boolean') {
+      res.status(400).json({ error: 'keepExistingPassword must be a boolean' });
+      return;
+    }
+    if (keepExistingPassword === true && typeof password !== 'string') {
+      res.status(400).json({ error: 'keepExistingPassword needs a password' });
+      return;
+    }
     // Another admin setting an owner's password could then sign in as the
     // owner. The owner sets their own on the Account page; an owner account
     // without a password (restoring one, say; an empty one counts as none,
-    // as in createAccount) is still created here.
+    // as in createAccount) is still created here. An invite's starting
+    // password is a password too: the owner is invited by nobody.
     if (
       password &&
       authService.isOwnerEmail(email) &&
@@ -84,6 +106,11 @@ export function createAccountRoutes(
       return;
     }
     try {
+      if (keepExistingPassword === true && typeof password === 'string') {
+        const { user, passwordSet, deactivated } = await authService.createAccountWithStartingPassword(email, password);
+        res.status(201).json({ ...user, passwordSet, deactivated });
+        return;
+      }
       const user = await authService.createAccount(email, name, password);
       res.status(201).json(user);
     } catch (error) {

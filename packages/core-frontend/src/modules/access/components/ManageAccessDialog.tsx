@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -34,6 +35,9 @@ import {
 } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
+import { useSignInMethods } from '../../auth/state/use-sign-in-methods';
+import { AdminContext } from '../../admin/state/admin.context';
+import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
 import {
   fetchFileAccess,
   grantAccess,
@@ -344,13 +348,24 @@ const NO_ACCOUNT_NOTE = "hasn't signed in yet";
 const NO_ACCOUNT_HELP =
   'No account for this email yet. The grant is saved and takes effect the moment they first sign in — if you did not expect this, check the spelling.';
 
+/**
+ * On a deployment with no single sign-on, no sign-in creates the account:
+ * until someone invites them (and gives them a password), they cannot get in
+ * at all, and "takes effect the moment they first sign in" would be a promise
+ * nobody keeps. So there the help says so — to an admin, who can invite them
+ * from the row, and to anyone else, who has to ask one. The grant itself
+ * saves exactly as before.
+ */
+const NO_ACCOUNT_HELP_ADMIN = "No account yet. They can't sign in until you invite them.";
+const NO_ACCOUNT_HELP_MEMBER = "No account yet. They can't sign in until an admin invites them.";
+
 /** The note itself — muted and small, the same weight as a row's second line. */
-function NoAccountNote() {
+function NoAccountNote({ help = NO_ACCOUNT_HELP }: { help?: string }) {
   return (
     <span
       className="shrink-0 whitespace-nowrap text-detail italic text-ink-faint"
-      title={NO_ACCOUNT_HELP}
-      aria-description={NO_ACCOUNT_HELP}
+      title={help}
+      aria-description={help}
     >
       {NO_ACCOUNT_NOTE}
     </span>
@@ -878,6 +893,14 @@ export function ManageAccessDialog({
       : null
     : (workspaceIdProp ?? ctxWorkspaceId);
   const { user } = useAuth();
+  // How people sign in here decides what "no account yet" means (see
+  // `NO_ACCOUNT_HELP_ADMIN`). Single sign-on, or an answer we could not get:
+  // today's words. Optional context: the dialog is mounted bare in tests.
+  const signIn = useSignInMethods();
+  const noSso = signIn.status === 'ready' && signIn.methods.sso.length === 0;
+  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
+  const invite = useInviteDialog();
+  const noAccountHelp = noSso ? (isAdmin ? NO_ACCOUNT_HELP_ADMIN : NO_ACCOUNT_HELP_MEMBER) : NO_ACCOUNT_HELP;
   const [data, setData] = useState<AccessResponse | null>(null);
   const [loading, setLoading] = useState(!proposalBranchMissing);
   const [error, setError] = useState<string | null>(
@@ -1660,6 +1683,20 @@ export function ManageAccessDialog({
     </span>
   );
 
+  // An admin, on a deployment with no single sign-on, can turn a grant to an
+  // address with no account into a way in: Invite opens the Invite dialog on
+  // top of this one with the address filled in. Nothing about the grant changes.
+  const inviteAction = (p: PrincipalRow) => {
+    if (!noSso || !isAdmin || !invite || p.kind !== 'user' || p.hasAccount !== false) return null;
+    if (p.principal.kind !== 'user') return null;
+    const email = p.principal.email;
+    return (
+      <Button variant="outline" size="sm" aria-label={`Invite ${email}`} onClick={() => invite.open({ emails: [email] })}>
+        Invite
+      </Button>
+    );
+  };
+
   // One grantee row. Direct rows get the inline verb editor and a Remove that
   // revokes in place; inherited rows are read-only with a Remove that opens the
   // cascade flow; external rows are read-only with no action.
@@ -1690,7 +1727,7 @@ export function ManageAccessDialog({
             {/* Granted, but nobody has signed in as this address yet. Beside
                 the name, where the chip put it before the grant was saved —
                 and gone by itself once they do sign in. */}
-            {p.kind === 'user' && p.hasAccount === false && <NoAccountNote />}
+            {p.kind === 'user' && p.hasAccount === false && !noSso && <NoAccountNote />}
             {p.kind !== 'user' && (
               // The same chip vocabulary as the suggest menu's trailing tags:
               // a role is a capability, a group is an audience — badge which.
@@ -1705,7 +1742,17 @@ export function ManageAccessDialog({
               </Badge>
             )}
           </div>
-          {p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>}
+          {noSso && p.kind === 'user' && p.hasAccount === false ? (
+            // Without single sign-on the reason takes the second line, readable
+            // without hovering: it is why this person is not in yet. The address
+            // a display name hides stays visible, so Invite's target is plain.
+            <>
+              <div className="text-detail italic text-ink-faint">{noAccountHelp}</div>
+              {p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>}
+            </>
+          ) : (
+            p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>
+          )}
         </div>
         {canManage ? (
           // ONE set of controls for every row the caller can manage — direct,
@@ -1714,6 +1761,7 @@ export function ManageAccessDialog({
           // thing the sheet could describe but not do; the menu below does it, by
           // writing the restriction in the background.
           <div className="ml-auto flex max-w-full shrink-0 items-center gap-2">
+            {inviteAction(p)}
             {p.manage === 'inherited' && (
               // Leaf folder name only (full path on hover) — where the entries
               // naming this principal live, when none of them is here.
@@ -1829,7 +1877,8 @@ export function ManageAccessDialog({
             {removeSlot(p.manage === 'external' ? null : p)}
           </div>
         ) : (
-          <span className="ml-auto shrink-0 text-detail text-ink-muted">
+          <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
+            {inviteAction(p)}
             {summarizeVerbs(p.verbs)}
           </span>
         )}
@@ -1921,7 +1970,7 @@ export function ManageAccessDialog({
                         <span className="min-w-0 truncate" title={label}>
                           {label}
                         </span>
-                        {noAccount && <NoAccountNote />}
+                        {noAccount && <NoAccountNote help={noAccountHelp} />}
                         <button
                           type="button"
                           onClick={() => removeChip(c)}

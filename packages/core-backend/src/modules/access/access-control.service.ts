@@ -2164,6 +2164,20 @@ export class AccessControlService implements IAccessControl {
     return isAdminEmail(model, canonicalEmail(userEmail));
   }
 
+  async adminEmails(workspaceId: string): Promise<string[]> {
+    let model: AccessModel;
+    try {
+      model = await this.loadModel(workspaceId);
+    } catch {
+      // As canRestorePlatformFile: with no model to ask, the deployment owners
+      // are the only admins left.
+      return [...this.deploymentOwners];
+    }
+    const candidates = new Set<string>(model.deploymentOwners);
+    for (const email of model.roles.byEmail.keys()) candidates.add(email);
+    return [...candidates].filter((email) => isAdminEmail(model, email));
+  }
+
   async canRestorePlatformFile(
     workspaceId: string,
     userEmail: string,

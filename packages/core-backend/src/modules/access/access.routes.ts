@@ -21,6 +21,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
+import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -51,6 +52,7 @@ import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import '../auth/auth.middleware.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
@@ -85,6 +87,8 @@ export function createAccessRoutes(
   accessControl: IAccessControl,
   workspaceService: WorkspaceService,
   authService: AuthService,
+  /** Auth's switch-off coordination, for the invite's promotion (`ifActive`). */
+  switchGuard: IAccountSwitchGuard,
   workflowService: WorkflowService,
   eventBus: WorkflowEventBus,
   db: Database,
@@ -1236,6 +1240,39 @@ export function createAccessRoutes(
     }
   });
 
+  // Who the admins are, for anyone signed in: the top bar tells someone who
+  // is not an admin to ask one, and names them. Names and emails ONLY — the
+  // roster above (every role, its members, groups and references) stays
+  // admin-only. Names come from the accounts table; an admin with no account
+  // yet (a deployment admin before first sign-in, say) is named by address.
+  // A role member whose account is switched off cannot sign in to invite
+  // anyone, so is left out; a deployment admin is not (it signs in with the
+  // environment's password regardless).
+  router.get('/access/admins', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const emails = await rolesAdmin.getAdminEmails();
+      const rows =
+        emails.length === 0
+          ? []
+          : await db
+              .select({ email: users.email, name: users.name, deactivatedAt: users.deactivatedAt })
+              .from(users)
+              .where(inArray(users.emailBidx, emails));
+      const names = new Map(rows.map((r) => [canonicalEmail(r.email), r.name?.trim() ?? '']));
+      const off = new Set(rows.filter((r) => r.deactivatedAt).map((r) => canonicalEmail(r.email)));
+      const admins = emails
+        .filter((email) => !off.has(email) || rolesAdmin.isFixedAdmin(email))
+        .map((email) => ({ name: names.get(email) || email, email }))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.email.localeCompare(b.email));
+      res.json({ admins });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   // NOTE: POST /access/roles (create), PATCH /access/roles/:canonical
   // (rename), and DELETE /access/roles/:canonical are GONE — roles are
   // app-defined capabilities, not user-editable objects.
@@ -1247,7 +1284,23 @@ export function createAccessRoutes(
       await assertRolesAdmin(user.email);
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
-      res.json({ roles: await rolesAdmin.addMember(user, canonical, email) });
+      // `ifActive`: the invite's promotion, which leaves a switched-off
+      // account unchanged. Inside the roles file's lock, auth reads the
+      // account under the address's switch lock and keeps that transaction
+      // open until roles.yaml is written and committed
+      // (`IAccountSwitchGuard.whileSwitchedOn`). So a switch-off either committed
+      // before the read (the promotion is refused) or waits until the
+      // promotion is written (it lands after, as for any Admin switched off
+      // later: the place in roles stays, the credentials stop being honoured).
+      const ifActive = (req.body ?? {}).ifActive;
+      if (ifActive !== undefined && typeof ifActive !== 'boolean') {
+        res.status(400).json({ error: 'ifActive must be a boolean' });
+        return;
+      }
+      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> => switchGuard.whileSwitchedOn(email, write);
+      res.json({
+        roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { aroundWrite: whileSwitchedOn } : undefined),
+      });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

@@ -13,6 +13,11 @@ const authService = {
     { id: 'u1', email: 'a@example.com', name: 'A', hasPassword: true, createdAt: new Date() },
   ]),
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
+  createAccountWithStartingPassword: vi.fn(async (email: string) => ({
+    user: { id: 'u2', email, name: 'B' },
+    passwordSet: false,
+    deactivated: false,
+  })),
   deactivate: vi.fn(async (userId: string) => userId !== 'missing'),
   reactivate: vi.fn(async (userId: string) => userId !== 'missing'),
   getUserById: vi.fn(async (id: string) => (id === 'missing' ? null : { id, email: `${id}@example.com`, name: id })),
@@ -89,6 +94,44 @@ describe('account routes — admin gate', () => {
     });
     expect(create.status).toBe(201);
     expect(authService.createAccount).toHaveBeenCalledWith('b@example.com', 'B', 'long-enough-pw');
+  });
+
+  it('gives an invite\'s starting password through the keep-existing path, and says whether it was set', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    const create = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'b@example.com', password: 'long-enough-pw', keepExistingPassword: true }),
+    });
+    expect(create.status).toBe(201);
+    expect(await create.json()).toEqual({
+      id: 'u2',
+      email: 'b@example.com',
+      name: 'B',
+      passwordSet: false,
+      deactivated: false,
+    });
+    expect(authService.createAccountWithStartingPassword).toHaveBeenCalledWith('b@example.com', 'long-enough-pw');
+    expect(authService.createAccount).not.toHaveBeenCalled();
+
+    const without = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'b@example.com', keepExistingPassword: true }),
+    });
+    expect(without.status).toBe(400);
+
+    // Anything but a boolean fails closed — never the overwriting path.
+    for (const keepExistingPassword of ['true', 1, null, {}]) {
+      const odd = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'b@example.com', password: 'long-enough-pw', keepExistingPassword }),
+      });
+      expect(odd.status).toBe(400);
+      expect(await odd.json()).toEqual({ error: 'keepExistingPassword must be a boolean' });
+    }
+    expect(authService.createAccount).not.toHaveBeenCalled();
   });
 
   it('list reports hasPassword + isEnvAdmin and never carries a hash or password', async () => {
@@ -432,7 +475,12 @@ describe('account routes — the owner cannot be locked out', () => {
   };
   const OTHER_ROW = { ...OWNER_ROW, id: 'u2', email: 'lee@example.com', name: 'Lee' };
 
-  /** Every read answers with `row`; every write is recorded. */
+  /**
+   * Every read answers with `row`; every write is recorded. A switch-off runs
+   * in a transaction that first takes the address's switch lock (see
+   * account-switch-lock), so the handle a transaction hands out reads, locks
+   * and writes like the plain one.
+   */
   function fakeDb(row: typeof OWNER_ROW) {
     const updates: unknown[] = [];
     const chain = (result: unknown): Record<string, unknown> => {
@@ -441,12 +489,17 @@ describe('account routes — the owner cannot be locked out', () => {
       c.then = (ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) => Promise.resolve(result).then(ok, ko);
       return c;
     };
-    const db = {
+    const handle = {
       select: () => chain([row]),
       update: () => {
         updates.push(row.id);
         return chain([]);
       },
+      execute: async () => [],
+    };
+    const db = {
+      ...handle,
+      transaction: async <T,>(cb: (tx: typeof handle) => Promise<T>) => cb(handle),
     } as unknown as Database;
     return { db, updates };
   }
