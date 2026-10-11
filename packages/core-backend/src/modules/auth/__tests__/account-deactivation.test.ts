@@ -168,11 +168,33 @@ describe('AuthService.deactivate', () => {
     expect(await new AuthService(db, makeConfig()).deactivate('nobody')).toBe(false);
   });
 
-  it('refuses the deployment admin, whose environment password is the way back in', async () => {
-    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+  // With a server-held owner password (self-hosted) and without one (the
+  // cloud's configuration): the owner is never switched off.
+  for (const [label, adminPassword] of [
+    ['with ADMIN_PASSWORD', 'sup3r-secret'],
+    ['without ADMIN_PASSWORD (the cloud)', ''],
+  ] as const) {
+    it(`refuses the owner, ${label}, and says why`, async () => {
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+      const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+      const refusal = new AuthService(db, config).deactivate(ROW.id);
+      await expect(refusal).rejects.toBeInstanceOf(AccountChangeRefusedError);
+      await expect(refusal).rejects.toThrow("The owner can't be switched off.");
+      expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    });
+
+    it(`still switches off an account that is not the owner, ${label}`, async () => {
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+      const { db, captured } = makeFakeDb([[ROW], []]);
+      expect(await new AuthService(db, config).deactivate(ROW.id)).toBe(true);
+      expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
+    });
+  }
+
+  it('refuses the owner even with password sign-in switched off', async () => {
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
     const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
-    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toBeInstanceOf(AccountChangeRefusedError);
-    expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toThrow("The owner can't be switched off.");
   });
 
   it('refuses the accounts the platform runs its own work as', async () => {

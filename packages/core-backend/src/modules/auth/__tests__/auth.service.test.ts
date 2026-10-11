@@ -539,7 +539,7 @@ describe('AuthService.listAccounts', () => {
     expect(json).not.toContain('sup3r-secret');
     for (const account of [...withHash, ...withoutHash]) {
       expect(Object.keys(account).sort()).toEqual(
-        ['createdAt', 'deactivatedAt', 'email', 'hasPassword', 'id', 'isEnvAdmin', 'isSystem', 'name'],
+        ['createdAt', 'deactivatedAt', 'email', 'hasPassword', 'id', 'isEnvAdmin', 'isOwner', 'isSystem', 'name', 'ownerCanBeDeleted'],
       );
     }
   });
@@ -549,6 +549,62 @@ describe('AuthService.listAccounts', () => {
     const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
     const accounts = await new AuthService(makeFakeDb([rows]).db, config).listAccounts();
     expect(accounts[0].isEnvAdmin).toBe(false);
+  });
+});
+
+describe('AuthService — the owner', () => {
+  // A deployment with a server-held owner password (self-hosted) and one
+  // without (the cloud's configuration: `adminPassword: ''`).
+  const WITH_PASSWORD = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+  const WITHOUT_PASSWORD = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
+
+  it('recognises the owner by address alone, with or without ADMIN_PASSWORD, compared canonically', () => {
+    for (const config of [WITH_PASSWORD, WITHOUT_PASSWORD]) {
+      const svc = new AuthService(makeFakeDb([]).db, config);
+      expect(svc.isOwnerEmail('root@example.com')).toBe(true);
+      expect(svc.isOwnerEmail('  Root@Example.COM ')).toBe(true);
+      expect(svc.isOwnerEmail('alice@example.com')).toBe(false);
+      expect(svc.isOwnerEmail('')).toBe(false);
+    }
+  });
+
+  it('has no owner when ADMIN_EMAIL is unset, so a blank address is never one', () => {
+    const svc = new AuthService(makeFakeDb([]).db, makeConfig({ adminEmail: '', adminPassword: '' }));
+    expect(svc.isOwnerEmail('')).toBe(false);
+    expect(svc.isOwnerEmail('root@example.com')).toBe(false);
+  });
+
+  it("refuses to delete the owner's account unless they can sign back in with the server's password", () => {
+    const refusal = "The owner's account can't be deleted: they would have no way to sign in.";
+    // The cloud: no server-held password.
+    expect(() => new AuthService(makeFakeDb([]).db, WITHOUT_PASSWORD).assertDeletable('root@example.com')).toThrow(refusal);
+    // A password the server holds, but password sign-in is switched off.
+    const passwordOff = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
+    expect(() => new AuthService(makeFakeDb([]).db, passwordOff).assertDeletable('Root@example.com')).toThrow(refusal);
+    // Self-hosted with ADMIN_PASSWORD and password sign-in on: allowed, as today.
+    expect(() => new AuthService(makeFakeDb([]).db, WITH_PASSWORD).assertDeletable('root@example.com')).not.toThrow();
+    // Anyone else, on either deployment.
+    for (const config of [WITH_PASSWORD, WITHOUT_PASSWORD]) {
+      expect(() => new AuthService(makeFakeDb([]).db, config).assertDeletable('alice@example.com')).not.toThrow();
+    }
+  });
+
+  it('the accounts list says who the owner is and whether their account may be deleted', async () => {
+    const rows = [
+      { ...ROW, email: 'root@example.com', passwordHash: null, createdAt: new Date() },
+      { ...ROW, id: 'user-2', email: 'alice@example.com', passwordHash: null, createdAt: new Date() },
+    ];
+    const pick = (a: { email: string; isOwner: boolean; ownerCanBeDeleted: boolean }) => [a.email, a.isOwner, a.ownerCanBeDeleted];
+    const withPassword = await new AuthService(makeFakeDb([rows]).db, WITH_PASSWORD).listAccounts();
+    expect(withPassword.map(pick)).toEqual([
+      ['alice@example.com', false, false],
+      ['root@example.com', true, true],
+    ]);
+    const withoutPassword = await new AuthService(makeFakeDb([rows]).db, WITHOUT_PASSWORD).listAccounts();
+    expect(withoutPassword.map(pick)).toEqual([
+      ['alice@example.com', false, false],
+      ['root@example.com', true, false],
+    ]);
   });
 });
 

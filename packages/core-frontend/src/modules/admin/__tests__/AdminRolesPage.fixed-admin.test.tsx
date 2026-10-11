@@ -32,7 +32,7 @@ vi.mock('../../access/api', async (importOriginal) => {
 import { suggestPrincipals } from '../../access/api';
 
 const OWNER = 'owner@bevel.software';
-const NOTE = 'Deployment admin, set in the server configuration; cannot be removed here';
+const NOTE = 'Owner; cannot be removed here';
 
 /** Admin as the backend now reports it: a fixed member plus editable ones. */
 function adminRole(over: Partial<RoleRosterEntry> = {}): RoleRosterEntry {

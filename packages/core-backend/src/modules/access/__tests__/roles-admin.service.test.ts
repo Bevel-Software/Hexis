@@ -665,7 +665,7 @@ describe('Admin fixed members — the deployment admin', () => {
       status: 422,
       payload: { kind: 'fixed-deployment-admin' },
       message: expect.stringContaining(
-        'Deployment admin, set in the server configuration; cannot be removed here',
+        'Owner; cannot be removed here',
       ),
     });
     // Nothing written: the file is byte-identical.
@@ -685,7 +685,7 @@ describe('Admin fixed members — the deployment admin', () => {
       status: 422,
       payload: { kind: 'fixed-deployment-admin' },
       message: expect.stringContaining(
-        'Deployment admin, set in the server configuration; cannot be removed here',
+        'Owner; cannot be removed here',
       ),
     });
     expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toContain(OWNER);

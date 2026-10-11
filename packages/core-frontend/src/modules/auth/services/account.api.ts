@@ -12,6 +12,10 @@ export interface AccountSummary {
    * in with the environment password whether or not a hash is stored.
    */
   isEnvAdmin: boolean;
+  /** One of the deployment's owners (`ADMIN_EMAIL`): never switched off, and its password is not set here. */
+  isOwner: boolean;
+  /** An owner who can sign back in with the server's password, so their account may be deleted; false otherwise. */
+  ownerCanBeDeleted: boolean;
   /** When an admin switched the account off; null while it is on. */
   deactivatedAt: string | null;
   /** One of the accounts the platform runs its own work as: it is never switched off. */
