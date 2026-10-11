@@ -70,8 +70,13 @@ function renderSwitcher(opts?: {
   /** Registry apps past the two core ones. */
   extraApps?: AppDef[];
   shellActiveId?: string;
+  /** Where the maker's name leads, as a distribution sets it. */
+  makerLink?: string;
 }) {
-  const registry = makeRegistry({ apps: [...coreLikeApps, ...(opts?.extraApps ?? [])] });
+  const registry = makeRegistry({
+    apps: [...coreLikeApps, ...(opts?.extraApps ?? [])],
+    ...(opts?.makerLink !== undefined ? { makerLink: opts.makerLink } : {}),
+  });
   const tree = (
     <MemoryRouter initialEntries={[opts?.path ?? '/']}>
       <AppSwitcher />
@@ -187,6 +192,19 @@ describe('AppSwitcher as a segmented toggle (few apps, wide toolbar)', () => {
     expect(screen.queryByRole('navigation', { name: 'Apps' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Switch app' })).toHaveTextContent('Knowledge');
   });
+
+  // The trigger holds the name as text, since a link cannot sit inside a
+  // button, so the menu carries the link: without it a page in the app on a
+  // phone would have no way to where the registry sends the maker's name,
+  // which for the hosted cloud is its Impressum.
+  it("links the maker's name at the foot of the compact menu, where the registry says", async () => {
+    setViewportWidth(600);
+    renderSwitcher({ path: '/workspace', makerLink: '/impressum' });
+    await userEvent.click(screen.getByRole('button', { name: 'Switch app' }));
+    const link = within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Hexis by Bevel' });
+    expect(link).toHaveAttribute('href', '/impressum');
+    expect(link).toHaveAttribute('target', '_blank');
+  });
 });
 
 /**
@@ -268,7 +286,10 @@ describe('AppSwitcher as a menu (more than three apps)', () => {
       expect.stringContaining('Skills & Tools'),
       expect.stringContaining('Assistant'),
       expect.stringContaining('Insights'),
+      // Then the maker's link, to the maker's site unless the registry says otherwise.
+      'Hexis by Bevel',
     ]);
+    expect(items.at(-1)).toHaveAttribute('href', 'https://bevel.software');
   });
 
   it('marks the app matching the current location as current', async () => {

@@ -519,11 +519,13 @@ export interface AppRegistry {
   welcomeExit?: { path: string; label: string };
   /**
    * Where the maker's name in "Hexis by Bevel" leads (see `ProductName`):
-   * the login page, the first-run screen and the toolbar. Absent or empty,
-   * it is the maker's own site. A distribution with a front door of its own
-   * points it there: the hosted cloud sends it to its root domain, where the
-   * provider's Impressum and privacy policy are one click away, so they are
-   * two clicks from any workspace page, its login page included.
+   * the login page, the first-run screen and the toolbar, where a wide
+   * toolbar links the name beside the apps and a compact one, whose name
+   * sits inside the menu's trigger, links it at the foot of the app menu.
+   * Absent or empty, it is the maker's own site. A distribution with a front
+   * door of its own points it there: the hosted cloud sends it to its
+   * Impressum, so the provider's details are one click from any workspace
+   * page on a wide toolbar and two on a compact one.
    */
   makerLink?: string;
   /**

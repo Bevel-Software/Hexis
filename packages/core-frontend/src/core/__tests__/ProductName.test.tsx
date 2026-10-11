@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { MAKER_URL, ProductName } from '../ProductName';
+import { ProductName } from '../ProductName';
+import { MAKER_URL } from '../maker-url';
 import { AppRegistryContext, makeRegistry } from '../registry';
 
 afterEach(cleanup);
