@@ -518,6 +518,15 @@ export interface AppRegistry {
    */
   welcomeExit?: { path: string; label: string };
   /**
+   * Where the maker's name in "Hexis by Bevel" leads (see `ProductName`):
+   * the login page, the first-run screen and the toolbar. Absent, it is the
+   * maker's own site. A distribution with a front door of its own points it
+   * there: the hosted cloud sends it to its root domain, where the
+   * provider's Impressum and privacy policy are one click away, so they are
+   * two clicks from any workspace page, its login page included.
+   */
+  makerLink?: string;
+  /**
    * A panel inside the invite dialog, between the role choice and the footer.
    *
    * Core invites by creating accounts and knows nothing about what a place in

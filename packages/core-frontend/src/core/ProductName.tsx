@@ -5,6 +5,8 @@
  * this is the one thing in the frontend that says which product this is.
  */
 
+import { useAppRegistry } from './registry';
+
 /** The product's own name, before its maker's: the first half of {@link PRODUCT_NAME}. */
 const PRODUCT = 'Hexis';
 
@@ -18,7 +20,7 @@ const MAKER = 'Bevel';
  */
 export const PRODUCT_NAME = `${PRODUCT} by ${MAKER}`;
 
-/** Where the maker's name leads. */
+/** Where the maker's name leads unless the registry names another place (`makerLink`). */
 export const MAKER_URL = 'https://bevel.software';
 
 /**
@@ -34,11 +36,12 @@ export const MAKER_URL = 'https://bevel.software';
  * {@link PRODUCT_NAME}.
  */
 export function ProductName({ link = true, className }: { link?: boolean; className?: string }) {
+  const { makerLink } = useAppRegistry();
   return (
     <span className={className}>
       {PRODUCT} by{' '}
       {link ? (
-        <a href={MAKER_URL} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+        <a href={makerLink ?? MAKER_URL} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
           {MAKER}
         </a>
       ) : (
