@@ -848,11 +848,20 @@ export function createWorkspaceRoutes(
         res.setHeader('Cache-Control', 'private, no-cache');
         res.status((await workspaceService.isFile(id, filePath)) ? 200 : 404).end();
       } catch (error) {
-        if (error instanceof PathTraversalError) {
+        // `isFile` already answers absence (ENOENT/ENOTDIR) as `false`, so
+        // anything thrown here is a refusal (said as itself) or OUR failure —
+        // never "not there": a 404 would tell a finished request's reader the
+        // page had been deleted.
+        if (error instanceof PathTraversalError || error instanceof WorkflowDomainError) {
           sendError(res, error);
           return;
         }
-        res.status(404).end();
+        log.error(
+          `could not stat ${printable(filePath)}: ${printable(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+        res.status(500).end();
       }
       return;
     }

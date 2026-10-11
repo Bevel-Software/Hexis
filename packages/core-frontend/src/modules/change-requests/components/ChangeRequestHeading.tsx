@@ -108,7 +108,8 @@ export function AuthorsReason({ body }: { body: string | undefined }) {
  * presents a routing table as the reason someone wants this change. The body is
  * cut at the LAST line that is exactly `## Affected owners` — the block is
  * always appended last, and the author's own `##` headings stay — as the
- * agent tools' `authorsDescription` cuts it; what survives is quoted only if
+ * agent tools' `authorsDescription` cuts it, dropping only Hexis's own
+ * `<!-- hexis:… -->` / `<!-- bevel:… -->` markers; what survives is quoted only if
  * a human actually wrote it.
  */
 function authorsReason(body: string | undefined): string | null {
@@ -117,7 +118,8 @@ function authorsReason(body: string | undefined): string | null {
   const generated = lines.map((l) => l.trimEnd()).lastIndexOf('## Affected owners');
   const human = (generated === -1 ? lines : lines.slice(0, generated))
     .join('\n')
-    .replace(/<!--[\s\S]*?-->/g, '')
+    // Only Hexis's own hidden markers; a comment the author wrote is theirs.
+    .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
     .trim();
   return human.length > 0 ? human : null;
 }

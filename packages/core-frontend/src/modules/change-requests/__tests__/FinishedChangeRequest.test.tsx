@@ -611,6 +611,19 @@ describe('ChangeRequestDialog: a closed request', () => {
     expect(screen.queryByText(/Affected owners/)).not.toBeInTheDocument();
   });
 
+  it("drops Hexis's hidden markers but keeps a comment the author wrote", async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('closed', [], {}, {
+        body: 'Why. <!-- TODO: ask Robin -->\n<!--hexis:author-id:abc-->\n<!-- bevel/marker -->',
+      }),
+    );
+    renderDialog({ cr: { ...CR, state: 'closed' } });
+    await screen.findByRole('status');
+    expect(screen.getByText(/<!-- TODO: ask Robin -->/)).toBeInTheDocument();
+    expect(screen.queryByText(/hexis:author-id/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/bevel\/marker/)).not.toBeInTheDocument();
+  });
+
   it('names the move of the knowledge base when that is why it closed', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detailOf('closed', [], { closedReason: 'repository-replaced' }));
     renderDialog({ cr: { ...CR, state: 'closed' } });

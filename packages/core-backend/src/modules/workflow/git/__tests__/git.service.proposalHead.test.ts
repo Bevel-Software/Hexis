@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -121,7 +121,14 @@ describe('GitService.changedFilesOfProposalHead', () => {
 
   it('refreshes the target before reading, so its later work is not the request\'s', async () => {
     const { headOf9 } = await seedStaleTarget();
+    const runs = vi.spyOn(git as unknown as { git(cwd: string, args: string[]): Promise<unknown> }, 'git');
     const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
+    // One fetch, of the target alone: never the head, its sha or its branch.
+    const fetches = runs.mock.calls.map(([, args]) => args).filter((args) => args[0] === 'fetch');
+    expect(fetches).toEqual([
+      ['fetch', '--no-write-fetch-head', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+    ]);
+    expect(fetches.flat().join(' ')).not.toContain(headOf9);
     expect(files.map((f) => f.path)).toEqual(['Pricing.md']);
     expect(await gitOut(repo, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
       await gitOut(repo, ['rev-parse', 'main']),
