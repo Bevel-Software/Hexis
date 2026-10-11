@@ -72,10 +72,13 @@ function renderSwitcher(opts?: {
   shellActiveId?: string;
   /** Where the maker's name leads, as a distribution sets it. */
   makerLink?: string;
+  /** What the menu's entry for that place says, as a distribution sets it. */
+  makerLinkLabel?: string;
 }) {
   const registry = makeRegistry({
     apps: [...coreLikeApps, ...(opts?.extraApps ?? [])],
     ...(opts?.makerLink !== undefined ? { makerLink: opts.makerLink } : {}),
+    ...(opts?.makerLinkLabel !== undefined ? { makerLinkLabel: opts.makerLinkLabel } : {}),
   });
   const tree = (
     <MemoryRouter initialEntries={[opts?.path ?? '/']}>
@@ -204,6 +207,27 @@ describe('AppSwitcher as a segmented toggle (few apps, wide toolbar)', () => {
     const link = within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Hexis by Bevel' });
     expect(link).toHaveAttribute('href', '/impressum');
     expect(link).toHaveAttribute('target', '_blank');
+  });
+
+  // The hosted cloud's Impressum must be recognisable as one from a page in
+  // the app, not only behind the maker's name.
+  it("names the maker's link in the compact menu as the registry says", async () => {
+    setViewportWidth(600);
+    renderSwitcher({ path: '/workspace', makerLink: '/impressum', makerLinkLabel: 'Impressum' });
+    await userEvent.click(screen.getByRole('button', { name: 'Switch app' }));
+    const link = within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Impressum' });
+    expect(link).toHaveAttribute('href', '/impressum');
+    expect(within(screen.getByRole('menu')).queryByRole('menuitem', { name: 'Hexis by Bevel' })).toBeNull();
+  });
+
+  it("names it after the product when the registry's label is blank, as when it is absent", async () => {
+    setViewportWidth(600);
+    renderSwitcher({ path: '/workspace', makerLink: '/impressum', makerLinkLabel: '  ' });
+    await userEvent.click(screen.getByRole('button', { name: 'Switch app' }));
+    expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Hexis by Bevel' })).toHaveAttribute(
+      'href',
+      '/impressum',
+    );
   });
 });
 

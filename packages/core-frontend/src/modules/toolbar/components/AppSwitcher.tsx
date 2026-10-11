@@ -6,7 +6,7 @@ import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 import { cn } from '../../../lib/utils';
 import { PRODUCT_NAME, ProductName } from '../../../core/ProductName';
-import { useMakerUrl } from '../../../core/maker-url';
+import { useMakerLinkLabel, useMakerUrl } from '../../../core/maker-url';
 
 const MENU_ID = 'app-switcher-menu';
 
@@ -118,6 +118,7 @@ function AppToggle({ apps, activeId }: SwitcherProps) {
 function AppMenu({ apps, activeId }: SwitcherProps) {
   const navigate = useNavigate();
   const makerUrl = useMakerUrl();
+  const makerLabel = useMakerLinkLabel(PRODUCT_NAME);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -213,7 +214,8 @@ function AppMenu({ apps, activeId }: SwitcherProps) {
           {/* The maker's link, which the trigger cannot carry: a link inside a
               button is not allowed. On a compact toolbar this is the only way
               from a page in the app to the maker's site, or to wherever the
-              registry sends it, such as the hosted cloud's Impressum. */}
+              registry sends it, such as the hosted cloud's Impressum, under
+              the registry's own label for it when it names one. */}
           <div role="separator" className="my-1 border-t border-line" />
           <a
             role="menuitem"
@@ -223,7 +225,7 @@ function AppMenu({ apps, activeId }: SwitcherProps) {
             onClick={close}
             className="block px-3 py-2 text-xs text-ink-muted hover:bg-hover hover:text-ink"
           >
-            {PRODUCT_NAME}
+            {makerLabel}
           </a>
         </div>
       )}

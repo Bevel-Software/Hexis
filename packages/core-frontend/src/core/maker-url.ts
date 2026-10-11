@@ -19,3 +19,12 @@ export function useMakerUrl(): string {
   const { makerLink } = useAppRegistry();
   return makerLink || MAKER_URL;
 }
+
+/**
+ * What the app menu's entry for that place says: the registry's
+ * `makerLinkLabel`, absent or empty `fallback` (the product's name).
+ */
+export function useMakerLinkLabel(fallback: string): string {
+  const { makerLinkLabel } = useAppRegistry();
+  return makerLinkLabel?.trim() || fallback;
+}

@@ -529,6 +529,14 @@ export interface AppRegistry {
    */
   makerLink?: string;
   /**
+   * What the app menu's own entry for `makerLink` says, where the name is
+   * not on screen as a link: the compact toolbar, and a wide one with more
+   * than three apps. Absent or empty, it says "Hexis by Bevel". The hosted
+   * cloud says "Impressum", so a page in the app names its Impressum as one
+   * a visitor recognises, not only behind the maker's name.
+   */
+  makerLinkLabel?: string;
+  /**
    * Links under the sign-in card, on the login page only: the app behind it
    * shows none. For a deployment whose provider must name itself to anyone
    * who reaches it, such as the hosted cloud, which lists its Impressum and
