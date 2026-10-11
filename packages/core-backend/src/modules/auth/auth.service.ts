@@ -44,6 +44,12 @@ const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_
 const ENV_ADMIN_PASSWORD_REFUSAL =
   "This account's password is set in the deployment environment and cannot be changed here";
 
+/** What an admin is told when they try to switch an owner off. */
+export const OWNER_SWITCH_OFF_REFUSAL = "The owner can't be switched off.";
+
+/** What an admin is told when deleting an owner's account would leave them no way to sign in. */
+export const OWNER_DELETE_REFUSAL = "The owner's account can't be deleted: they would have no way to sign in.";
+
 /**
  * Decoy hash verified when the email is unknown or has no password set, so
  * those paths cost the same scrypt work as a real wrong-password attempt —
@@ -381,6 +387,41 @@ export class AuthService {
   }
 
   /**
+   * Is `email` an owner of this deployment — an address it is configured
+   * with as its owner (`ADMIN_EMAIL`; on Hexis by Bevel cloud, whoever
+   * created the workspace)? Unlike {@link isEnvAdminEmail} this asks nothing
+   * of `ADMIN_PASSWORD`: the cloud never sets one, and its owner must be
+   * protected all the same. Behind {@link deactivate} (which always refuses
+   * an owner) and {@link assertDeletable} (which refuses one who could not
+   * sign back in). Canonicalises both sides, so `email` may be raw.
+   */
+  isOwnerEmail(email: string): boolean {
+    const candidate = canonicalEmail(email ?? '');
+    return candidate.length > 0 && this.ownerEmails().includes(candidate);
+  }
+
+  /**
+   * The configured owner addresses, canonical, blanks dropped. One today
+   * (`ADMIN_EMAIL` is a single string); a list so that every owner is
+   * treated alike should the configuration ever carry more.
+   */
+  private ownerEmails(): string[] {
+    return [this.config.adminEmail].map((e) => canonicalEmail(e ?? '')).filter((e) => e.length > 0);
+  }
+
+  /**
+   * Refuse to delete `email`'s account when it is an owner who could not
+   * sign back in afterwards: only an owner whose password the server holds,
+   * with password sign-in on (exactly {@link reportsAsEnvAdmin}), still has a
+   * way in once the row is gone. Anyone else's account passes.
+   */
+  assertDeletable(email: string): void {
+    if (this.isOwnerEmail(email) && !this.reportsAsEnvAdmin(canonicalEmail(email ?? ''))) {
+      throw new AccountChangeRefusedError(OWNER_DELETE_REFUSAL);
+    }
+  }
+
+  /**
    * Whether a client is told `email` is the deployment admin — behind
    * {@link toClientUser} and {@link listAccounts}. The identity is
    * {@link isEnvAdminEmail}; the switch is password sign-in: with
@@ -461,6 +502,10 @@ export class AuthService {
       name: string;
       hasPassword: boolean;
       isEnvAdmin: boolean;
+      /** One of the deployment's owners (`ADMIN_EMAIL`), with or without a server-held password. */
+      isOwner: boolean;
+      /** An owner whose account may be deleted, since they can sign back in (see {@link assertDeletable}); false for everyone else. */
+      ownerCanBeDeleted: boolean;
       /** When an admin switched the account off; null while it is on. */
       deactivatedAt: Date | null;
       /** One of the accounts the platform runs its own work as: never switched off, nobody signs in with it. */
@@ -472,16 +517,22 @@ export class AuthService {
     // would sort by IV noise. The table is one row per team member.
     const rows = await this.db.select().from(users);
     return rows
-      .map((row) => ({
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        hasPassword: row.passwordHash != null,
-        isEnvAdmin: this.reportsAsEnvAdmin(row.email),
-        deactivatedAt: row.deactivatedAt,
-        isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
-        createdAt: row.createdAt,
-      }))
+      .map((row) => {
+        const isEnvAdmin = this.reportsAsEnvAdmin(row.email);
+        const isOwner = this.isOwnerEmail(row.email);
+        return {
+          id: row.id,
+          email: row.email,
+          name: row.name,
+          hasPassword: row.passwordHash != null,
+          isEnvAdmin,
+          isOwner,
+          ownerCanBeDeleted: isOwner && isEnvAdmin,
+          deactivatedAt: row.deactivatedAt,
+          isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
+          createdAt: row.createdAt,
+        };
+      })
       .sort((a, b) => a.email.localeCompare(b.email));
   }
 
@@ -596,9 +647,10 @@ export class AuthService {
    * {@link isActive}). Idempotent: an account already off keeps the moment
    * it was first switched off.
    *
-   * The deployment admin is refused: the environment password is the way
-   * back into a deployment whose every other admin is gone, and switching
-   * it off would close that door from inside. So are the machine accounts
+   * An owner is refused, on every deployment, whether or not the server
+   * holds a password for them: switching the owner off locks them out of
+   * their own workspace (and, where `ADMIN_PASSWORD` is set, closes the
+   * way back into a deployment whose every other admin is gone). So are the machine accounts
    * core runs its own work as. Refusing an admin's own account is the
    * route's concern, since it knows who is asking.
    *
@@ -607,8 +659,8 @@ export class AuthService {
   async deactivate(userId: string): Promise<boolean> {
     const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!row) return false;
-    if (this.isEnvAdminEmail(row.email)) {
-      throw new AccountChangeRefusedError('The deployment admin cannot be switched off: its password in the environment is the way back in.');
+    if (this.isOwnerEmail(row.email)) {
+      throw new AccountChangeRefusedError(OWNER_SWITCH_OFF_REFUSAL);
     }
     if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
       throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');

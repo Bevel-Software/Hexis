@@ -46,6 +46,8 @@ function account(email: string): AccountSummary {
     name: email,
     hasPassword: false,
     isEnvAdmin: false,
+    isOwner: false,
+    ownerCanBeDeleted: false,
     deactivatedAt: null,
     isSystem: false,
     createdAt: '2026-01-01T00:00:00Z',

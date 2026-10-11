@@ -169,7 +169,7 @@ export class RolesAdminService {
    * an API caller reads and the note a UI reader sees cannot drift apart.
    */
   private static readonly FIXED_ADMIN_NOTE =
-    'Deployment admin, set in the server configuration; cannot be removed here';
+    'Owner; cannot be removed here';
 
   constructor(
     private readonly workspaceService: IWorkspaceService,

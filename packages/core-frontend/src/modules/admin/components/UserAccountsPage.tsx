@@ -20,7 +20,7 @@ import {
  * can be true, and the environment credential is the one that survives.
  */
 function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
-  if (account.isEnvAdmin) return 'Password (deployment admin)';
+  if (account.isEnvAdmin) return 'Password (owner)';
   if (account.hasPassword) return 'Password';
   return 'No password — signs in with single sign-on';
 }
@@ -32,13 +32,20 @@ function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvA
 function signInAfterDelete(account: AccountSummary): string {
   const label = signInMethodLabel(account);
   if (account.isEnvAdmin) {
-    return `${label}: they can still sign in with the deployment admin password, but will start fresh.`;
+    return `${label}: they can still sign in with the owner password set on the server, but will start fresh.`;
   }
   if (account.hasPassword) {
     return `${label}: to sign in again they will need an admin to create a new account for them.`;
   }
   return `${label}: they can sign in again later with single sign-on, but will start fresh.`;
 }
+
+/**
+ * Why an owner's address is never removed from access files, said where the
+ * delete dialog would offer it — the same sentence the server gives as the
+ * option's reason (`user-access-removal.service.ts`).
+ */
+const OWNER_ACCESS_NOTE = 'The owner stays in roles and access rules.';
 
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -117,6 +124,12 @@ function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordA
  * deployment admin's row offers no password action either, from any admin:
  * that account's password is set in the deployment environment, and the
  * backend refuses to store one for it.
+ *
+ * An owner's row (`ADMIN_EMAIL`; on the cloud, whoever created the
+ * workspace) is labelled "Owner" and offers no password action and no Switch
+ * off, from any admin, and Delete account only where the owner could sign
+ * back in with the server's password (`ownerCanBeDeleted`). The server
+ * refuses the same, so this hides only controls that could never work.
  */
 export function UserAccountsPage() {
   const { isAdmin } = useAdmin();
@@ -199,7 +212,9 @@ export function UserAccountsPage() {
       });
   }
 
-  const removalBlocked = references !== null && !references.removable;
+  // An owner is never removed from access files; the server refuses it, so
+  // the option is off from the start rather than after the count arrives.
+  const removalBlocked = pendingDelete?.isOwner === true || (references !== null && !references.removable);
   // Files naming them that this admin may not write: the cleanup skips those,
   // so say it before the delete rather than only in the outcome. `unwritable`
   // is null when that could not be judged — which is not "none".
@@ -392,6 +407,11 @@ export function UserAccountsPage() {
                         {isSelf && (
                           <span className="ml-1.5 text-meta font-normal text-ink-muted">(you)</span>
                         )}
+                        {account.isOwner && (
+                          <span className="ml-1.5 rounded-sm border border-line px-1 text-meta font-normal text-ink-muted">
+                            Owner
+                          </span>
+                        )}
                         {account.deactivatedAt && (
                           <span className="ml-1.5 text-meta font-normal text-ink-muted">(switched off)</span>
                         )}
@@ -412,7 +432,10 @@ export function UserAccountsPage() {
                         <span className="text-meta text-ink-muted text-right max-w-[13rem]">
                           Password set in the deployment environment
                         </span>
-                      ) : (
+                      ) : account.isOwner ? null : (
+                        // Nor for any other owner: another admin setting the
+                        // owner's password could then sign in as them. The
+                        // owner sets their own on the Account page.
                         <button
                           onClick={() => openPasswordDialog(account)}
                           className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
@@ -422,12 +445,14 @@ export function UserAccountsPage() {
                           {passwordAction(account).label}
                         </button>
                       ))}
-                    {!isSelf && !account.isEnvAdmin && !account.isSystem && (
+                    {!isSelf && (!account.isOwner || account.deactivatedAt) && !account.isSystem && (
                       // Not for your own account (the backend refuses it, so
-                      // an admin always remains who can sign in), nor the
-                      // deployment admin's (its environment password is the
-                      // way back in), nor one the platform runs its own work
-                      // as. Switching off asks first; switching on does not.
+                      // an admin always remains who can sign in), nor an
+                      // owner's (switching them off locks them out of their
+                      // own workspace; one switched off before the server
+                      // refused it can still be switched back on), nor one
+                      // the platform runs its own work as. Switching off asks
+                      // first; switching on does not.
                       <button
                         onClick={() => (account.deactivatedAt ? toggleActive(account) : setPendingDeactivate(account))}
                         disabled={switching !== null}
@@ -442,7 +467,9 @@ export function UserAccountsPage() {
                         {account.deactivatedAt ? 'Switch on' : 'Switch off'}
                       </button>
                     )}
-                    {!isSelf && (
+                    {!isSelf && (!account.isOwner || account.ownerCanBeDeleted) && (
+                      // An owner only where they can sign back in with the
+                      // server's password; elsewhere the server refuses it.
                       <button
                         onClick={() => openDeleteDialog(account)}
                         className="text-xs px-2 py-1 rounded-sm text-red-700 hover:bg-red-50 border border-red-200"
@@ -620,8 +647,11 @@ export function UserAccountsPage() {
             />
             <span>Also remove them from roles, groups and access rules</span>
           </label>
-          {removalBlocked && references?.blockedReason && (
-            <p className="text-ink-muted">{references.blockedReason}</p>
+          {removalBlocked && pendingDelete?.isOwner ? (
+            <p className="text-ink-muted">{OWNER_ACCESS_NOTE}</p>
+          ) : (
+            removalBlocked &&
+            references?.blockedReason && <p className="text-ink-muted">{references.blockedReason}</p>
           )}
           {!removalBlocked && removeFromAccess && unwritableCount > 0 && (
             <p className="text-ink-muted">
@@ -635,7 +665,7 @@ export function UserAccountsPage() {
               keep the address, and are listed afterwards.
             </p>
           )}
-          {(!removeFromAccess || removalBlocked) && (
+          {(!removeFromAccess || removalBlocked) && !pendingDelete?.isOwner && (
             <p className="text-ink-muted">
               Their address will remain in those files.
             </p>

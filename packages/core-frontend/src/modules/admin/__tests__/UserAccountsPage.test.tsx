@@ -42,6 +42,8 @@ const ALICE = {
   name: 'Alice',
   hasPassword: false,
   isEnvAdmin: false,
+  isOwner: false,
+  ownerCanBeDeleted: false,
   createdAt: '2026-01-01T00:00:00Z',
   deactivatedAt: null,
   isSystem: false,
@@ -52,18 +54,22 @@ const BOB = {
   name: 'Bob',
   hasPassword: true,
   isEnvAdmin: false,
+  isOwner: false,
+  ownerCanBeDeleted: false,
   createdAt: '2026-01-01T00:00:00Z',
   deactivatedAt: null,
   isSystem: false,
 };
-// The deployment admin (ADMIN_EMAIL) — a different account from the signed-in
-// admin, so its row offers the actions. No hash stored yet.
+// The owner (ADMIN_EMAIL) on a self-hosted deployment with ADMIN_PASSWORD set
+// — a different account from the signed-in admin. No hash stored yet.
 const ROOT = {
   id: 'u-root',
   email: 'root@example.com',
   name: 'Root',
   hasPassword: false,
   isEnvAdmin: true,
+  isOwner: true,
+  ownerCanBeDeleted: true,
   createdAt: '2026-01-01T00:00:00Z',
   deactivatedAt: null,
   isSystem: false,
@@ -108,7 +114,7 @@ beforeEach(() => {
   vi.mocked(listAccounts)
     .mockReset()
     .mockResolvedValue([
-      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
+      { ...ME, hasPassword: true, isEnvAdmin: false, isOwner: false, ownerCanBeDeleted: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
       ALICE,
     ]);
   vi.mocked(deleteAccount).mockReset().mockResolvedValue(null);
@@ -155,8 +161,8 @@ describe('UserAccountsPage', () => {
     expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
     expect(row('Bob')).toHaveTextContent(/· Password$/);
     // The deployment admin reads the same with or without a stored hash.
-    expect(row('Root')).toHaveTextContent(/· Password \(deployment admin\)$/);
-    expect(row('Root Hashed')).toHaveTextContent(/· Password \(deployment admin\)$/);
+    expect(row('Root')).toHaveTextContent(/· Password \(owner\)$/);
+    expect(row('Root Hashed')).toHaveTextContent(/· Password \(owner\)$/);
     expect(screen.queryByText(/Single sign-on only/)).not.toBeInTheDocument();
   });
 
@@ -167,7 +173,7 @@ describe('UserAccountsPage', () => {
     const cases: Array<[string, RegExp]> = [
       ['alice@example.com', /No password — signs in with single sign-on: they can sign in again later with single sign-on/],
       ['bob@example.com', /Password: to sign in again they will need an admin/],
-      ['root@example.com', /Password \(deployment admin\): they can still sign in with the deployment admin password/],
+      ['root@example.com', /Password \(owner\): they can still sign in with the owner password set on the server, but will start fresh\./],
     ];
     for (const [email, wording] of cases) {
       await userEvent.click(screen.getByRole('button', { name: `Delete account ${email}` }));
@@ -653,5 +659,95 @@ describe('UserAccountsPage — switching accounts off and on', () => {
     await user.type(screen.getByLabelText('Email'), 'new@example.com');
     await user.click(screen.getByRole('button', { name: 'Add account' }));
     expect(createAccount).toHaveBeenCalledWith('new@example.com', '', '');
+  });
+});
+
+/**
+ * The owner (`ADMIN_EMAIL`), on a self-hosted deployment with a server-held
+ * owner password (ROOT) and on one without (the cloud's configuration).
+ */
+describe('UserAccountsPage — the owner', () => {
+  // The cloud: the owner signs in with single sign-on, the server holds no password for them.
+  const CLOUD_OWNER = {
+    ...ALICE,
+    id: 'u-owner',
+    email: 'owner@example.com',
+    name: 'Olive',
+    isOwner: true,
+    ownerCanBeDeleted: false,
+  };
+
+  for (const [label, owner] of [
+    ['with a server-held owner password', ROOT],
+    ['without one (the cloud)', CLOUD_OWNER],
+  ] as const) {
+    it(`labels the owner's row "Owner" and offers no Switch off or password action, ${label}`, async () => {
+      vi.mocked(listAccounts).mockResolvedValue([ALICE, owner]);
+      renderPage();
+      await waitFor(() => screen.getByText(owner.name));
+      const li = screen.getByText(owner.name).closest('li')!;
+      expect(within(li).getByText('Owner')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Switch off ${owner.email}` })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Set password for ${owner.email}` })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Reset password for ${owner.email}` })).not.toBeInTheDocument();
+      // The account beside it keeps every control, and no label.
+      const alice = screen.getByText('Alice').closest('li')!;
+      expect(within(alice).queryByText('Owner')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Switch off alice@example.com' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Set password for alice@example.com' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete account alice@example.com' })).toBeInTheDocument();
+    });
+  }
+
+  it('offers Delete account for the owner only where the server allows it', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT, CLOUD_OWNER]);
+    renderPage();
+    await waitFor(() => screen.getByText('Olive'));
+    expect(screen.getByRole('button', { name: 'Delete account root@example.com' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete account owner@example.com' })).not.toBeInTheDocument();
+    // No controls at all on the cloud owner's row.
+    expect(within(screen.getByText('Olive').closest('li')!).queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('the delete dialog for the owner says they keep their place in roles and access rules', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT]);
+    vi.mocked(getAccountReferences).mockResolvedValue({
+      ...REFS,
+      removable: false,
+      blockedReason: 'The owner stays in roles and access rules.',
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Root'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account root@example.com' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(
+      'Password (owner): they can still sign in with the owner password set on the server, but will start fresh.',
+    );
+    expect(dialog).toHaveTextContent('The owner stays in roles and access rules.');
+    expect(dialog).not.toHaveTextContent('ADMIN_EMAIL');
+    expect(dialog).not.toHaveTextContent('deployment admin');
+    const option = within(dialog).getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' });
+    expect(option).toBeDisabled();
+    expect(option).not.toBeChecked();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith('u-root', { removeFromAccess: false }));
+  });
+
+  it('the owner viewing their own row sees "(you)" and "Owner", and no buttons', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([{ ...CLOUD_OWNER, id: ME.id, email: ME.email, name: ME.name }, ALICE]);
+    renderPage();
+    await waitFor(() => screen.getByText('Admin'));
+    const li = screen.getByText('Admin').closest('li')!;
+    expect(li).toHaveTextContent('(you)');
+    expect(within(li).getByText('Owner')).toBeInTheDocument();
+    expect(within(li).queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('an owner switched off before the server refused it can still be switched back on', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([{ ...CLOUD_OWNER, deactivatedAt: '2026-10-10T00:00:00Z' }]);
+    renderPage();
+    await waitFor(() => screen.getByText('Olive'));
+    await userEvent.click(screen.getByRole('button', { name: 'Switch on owner@example.com' }));
+    expect(reactivateAccount).toHaveBeenCalledWith('u-owner');
   });
 });

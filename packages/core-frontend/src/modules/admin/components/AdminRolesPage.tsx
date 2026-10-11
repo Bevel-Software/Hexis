@@ -34,7 +34,7 @@ interface SelfRemoveTarget {
  * surfaces say the same thing.
  */
 const FIXED_ADMIN_NOTE =
-  'Deployment admin, set in the server configuration; cannot be removed here';
+  'Owner; cannot be removed here';
 
 /**
  * App roles (formerly Roles & Members), routed standalone at `/roles-and-members` (below the

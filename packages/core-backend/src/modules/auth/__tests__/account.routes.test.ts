@@ -15,6 +15,9 @@ const authService = {
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
   deactivate: vi.fn(async (userId: string) => userId !== 'missing'),
   reactivate: vi.fn(async (userId: string) => userId !== 'missing'),
+  getUserById: vi.fn(async (id: string) => (id === 'missing' ? null : { id, email: `${id}@example.com`, name: id })),
+  isOwnerEmail: vi.fn((email: string) => email.trim().toLowerCase() === 'root@example.com'),
+  assertDeletable: vi.fn(() => {}),
 } as unknown as AuthService;
 
 // Satisfies the route's narrow Pick<IAccountErasureService, 'eraseUser'>
@@ -375,12 +378,12 @@ describe('account routes — switching an account off and on', () => {
     expect(await res.json()).toEqual({ error: 'All 3 seats are taken', kind: 'admission' });
   });
 
-  it('answers a refused deactivation (the deployment admin, say) with 400 and the reason', async () => {
-    vi.mocked(authService.deactivate).mockRejectedValueOnce(new AccountChangeRefusedError('The deployment admin cannot be switched off'));
+  it('answers a refused deactivation (the owner, say) with 400 and the reason', async () => {
+    vi.mocked(authService.deactivate).mockRejectedValueOnce(new AccountChangeRefusedError("The owner can't be switched off."));
     const base = await listen(makeApp({ admin: true }));
     const res = await post(base, 'u2/deactivate');
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain('deployment admin');
+    expect(((await res.json()) as { error: string }).error).toBe("The owner can't be switched off.");
   });
 
   it('answers an unexpected failure with a 500 that names nothing of it', async () => {
@@ -407,5 +410,168 @@ describe('account routes — switching an account off and on', () => {
       expect(res.status).toBe(400);
     }
     expect(authService.createAccount).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The owner (`ADMIN_EMAIL`) through the accounts API, against a real
+ * AuthService, on a deployment with a server-held owner password
+ * (self-hosted) and one without (the cloud's configuration). The refusals
+ * live on the server, so they hold for every caller, not only the page.
+ */
+describe('account routes — the owner cannot be locked out', () => {
+  const OWNER_ROW = {
+    id: 'owner',
+    email: 'root@example.com',
+    name: 'Root',
+    avatarUrl: null,
+    onboardingDone: true,
+    passwordHash: null,
+    deactivatedAt: null,
+    createdAt: new Date(),
+  };
+  const OTHER_ROW = { ...OWNER_ROW, id: 'u2', email: 'lee@example.com', name: 'Lee' };
+
+  /** Every read answers with `row`; every write is recorded. */
+  function fakeDb(row: typeof OWNER_ROW) {
+    const updates: unknown[] = [];
+    const chain = (result: unknown): Record<string, unknown> => {
+      const c: Record<string, unknown> = {};
+      for (const k of ['from', 'where', 'limit', 'set', 'values', 'returning', 'onConflictDoUpdate']) c[k] = () => c;
+      c.then = (ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) => Promise.resolve(result).then(ok, ko);
+      return c;
+    };
+    const db = {
+      select: () => chain([row]),
+      update: () => {
+        updates.push(row.id);
+        return chain([]);
+      },
+    } as unknown as Database;
+    return { db, updates };
+  }
+
+  function makeOwnerApp(adminPassword: string, row: typeof OWNER_ROW, opts: { loginPasswordEnabled?: boolean } = {}) {
+    const { db, updates } = fakeDb(row);
+    const realAuth = new AuthService(db, {
+      jwtSecret: 'test-jwt-secret',
+      adminEmail: 'root@example.com',
+      adminPassword,
+      allowedEmailDomains: [],
+      loginPasswordEnabled: opts.loginPasswordEnabled,
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.userId = 'second-admin';
+      req.userEmail = 'second-admin@example.com';
+      next();
+    });
+    app.use('/api', createAccountRoutes(realAuth, { isAdmin: async () => true }, accountErasure));
+    return { app, updates };
+  }
+
+  const CONFIGS = [
+    ['with a server-held owner password', 'sup3r-secret'],
+    ['without one (the cloud)', ''],
+  ] as const;
+
+  for (const [label, adminPassword] of CONFIGS) {
+    it(`refuses to switch the owner off, ${label}, and says why`, async () => {
+      const { app, updates } = makeOwnerApp(adminPassword, OWNER_ROW);
+      const base = await listen(app);
+      const res = await fetch(`${base}/api/admin/accounts/owner/deactivate`, { method: 'POST' });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "The owner can't be switched off." });
+      expect(updates).toEqual([]);
+    });
+
+    it(`switches off an account that is not the owner as today, ${label}`, async () => {
+      const { app, updates } = makeOwnerApp(adminPassword, OTHER_ROW);
+      const base = await listen(app);
+      const res = await fetch(`${base}/api/admin/accounts/u2/deactivate`, { method: 'POST' });
+      expect(res.status).toBe(204);
+      expect(updates).toEqual(['u2']);
+    });
+
+    it(`deletes an account that is not the owner as today, ${label}`, async () => {
+      const { app } = makeOwnerApp(adminPassword, OTHER_ROW);
+      const base = await listen(app);
+      const res = await fetch(`${base}/api/admin/accounts/u2`, { method: 'DELETE' });
+      expect(res.status).toBe(204);
+      expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('u2');
+    });
+
+    it(`lists the owner as one, ${label}`, async () => {
+      const { app } = makeOwnerApp(adminPassword, OWNER_ROW);
+      const base = await listen(app);
+      const body = (await (await fetch(`${base}/api/admin/accounts`)).json()) as {
+        accounts: Array<{ isOwner: boolean; ownerCanBeDeleted: boolean }>;
+      };
+      expect(body.accounts[0]).toMatchObject({ isOwner: true, ownerCanBeDeleted: adminPassword !== '' });
+    });
+
+    it(`refuses another admin setting the owner's password, ${label}`, async () => {
+      const { app } = makeOwnerApp(adminPassword, OWNER_ROW);
+      const base = await listen(app);
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'Root@Example.com', password: 'long-enough-pw' }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/^The owner's password can't be set by another admin/);
+    });
+  }
+
+  it("refuses to delete the owner's account where they could not sign back in (the cloud): nothing is erased", async () => {
+    const { app } = makeOwnerApp('', OWNER_ROW);
+    const base = await listen(app);
+    for (const query of ['', '?removeFromAccess=1']) {
+      const res = await fetch(`${base}/api/admin/accounts/owner${query}`, { method: 'DELETE' });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "The owner's account can't be deleted: they would have no way to sign in." });
+    }
+    expect(accountErasure.eraseUser).not.toHaveBeenCalled();
+  });
+
+  it('refuses it too where the server holds a password but password sign-in is off', async () => {
+    const { app } = makeOwnerApp('sup3r-secret', OWNER_ROW, { loginPasswordEnabled: false });
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/owner`, { method: 'DELETE' });
+    expect(res.status).toBe(400);
+    expect(accountErasure.eraseUser).not.toHaveBeenCalled();
+  });
+
+  it("deletes the owner's account as today where they can sign back in with the server's password", async () => {
+    const { app } = makeOwnerApp('sup3r-secret', OWNER_ROW);
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/owner`, { method: 'DELETE' });
+    expect(res.status).toBe(204);
+    expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('owner');
+  });
+
+  it("still lets the owner's account be (re)created without a password, so an admin can restore it", async () => {
+    vi.mocked(authService.createAccount).mockClear();
+    const base = await listen(makeApp({ admin: true }));
+    const res = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'root@example.com', name: 'Root' }),
+    });
+    expect(res.status).toBe(201);
+    expect(authService.createAccount).toHaveBeenCalledWith('root@example.com', 'Root', undefined);
+  });
+
+  it('leaves the owner setting their own password through the same call to the service', async () => {
+    vi.mocked(authService.createAccount).mockClear();
+    const base = await listen(makeApp({ admin: true, email: 'root@example.com' }));
+    const res = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'root@example.com', password: 'long-enough-pw' }),
+    });
+    expect(res.status).toBe(201);
+    expect(authService.createAccount).toHaveBeenCalledWith('root@example.com', undefined, 'long-enough-pw');
   });
 });
