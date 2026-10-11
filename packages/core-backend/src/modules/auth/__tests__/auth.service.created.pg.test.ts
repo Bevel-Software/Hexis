@@ -1,64 +1,39 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import pg from 'pg';
 import { closeDb, createDb, type Database } from '../../database/connection.js';
 import { runCoreMigrations } from '../../database/migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
 import { AuthService } from '../auth.service.js';
 
 /**
  * Whether an account is NEW is answered by the upsert's own returned row,
  * through Postgres's `xmax = 0` (see `CREATED` in auth.service.ts): zero on
  * a row the statement inserted, set on one its `ON CONFLICT DO UPDATE`
- * touched. No stub can stand in for that, so this crosses a real Postgres:
- * the invite's notification hangs on the answer, and a wrong one would
- * either tell nobody or tell the same person twice.
- *
- * Runs where `TEST_DATABASE_URL` names a server this role may create
- * databases on (CI carries one as a service container); skipped elsewhere.
- * The test works in a scratch database of its own and drops it.
+ * touched. No stub can stand in for that, so this crosses a real Postgres
+ * (see `pg-scratch.ts`): the invite's notification hangs on the answer, and
+ * a wrong one would either tell nobody or tell the same person twice.
  */
-const ADMIN_URL = process.env.TEST_DATABASE_URL;
-const TIMEOUT = 120_000;
 const KEY = randomBytes(32).toString('base64');
-
-const created: string[] = [];
 const open: Database[] = [];
 
-async function withAdmin<T>(fn: (admin: pg.Client) => Promise<T>): Promise<T> {
-  const admin = new pg.Client({ connectionString: ADMIN_URL });
-  await admin.connect();
-  try {
-    return await fn(admin);
-  } finally {
-    await admin.end();
-  }
-}
-
-async function scratchDatabase(): Promise<Database> {
-  const name = `hexis_created_${randomBytes(6).toString('hex')}`;
-  await withAdmin((admin) => admin.query(`create database ${name}`));
-  created.push(name);
-  const url = new URL(ADMIN_URL!);
-  url.pathname = `/${name}`;
-  const db = createDb(url.toString(), { piiKey: KEY });
+async function migratedDatabase(): Promise<Database> {
+  const db = createDb(await scratchDatabaseUrl('hexis_created'), { piiKey: KEY });
   open.push(db);
   await runCoreMigrations(db, coreMigrationsDir());
   return db;
 }
 
-describe.skipIf(!ADMIN_URL)('whether an account is new, on a real Postgres', () => {
+describe.skipIf(!PG_ADMIN_URL)('whether an account is new, on a real Postgres', () => {
   afterAll(async () => {
     for (const db of open) await closeDb(db);
-    await withAdmin(async (admin) => {
-      for (const name of created) await admin.query(`drop database if exists ${name} with (force)`);
-    });
-  });
+    await dropScratchDatabases();
+  }, PG_TEST_TIMEOUT);
 
   it(
     'says created once per address: the insert, and never the conflict-update after it',
     async () => {
-      const db = await scratchDatabase();
+      const db = await migratedDatabase();
       const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
 
       // Without a password: the first write inserts, the second only updates.
@@ -89,6 +64,6 @@ describe.skipIf(!ADMIN_URL)('whether an account is new, on a real Postgres', () 
         ['tom@acme.test', true],
       ]);
     },
-    TIMEOUT,
+    PG_TEST_TIMEOUT,
   );
 });
