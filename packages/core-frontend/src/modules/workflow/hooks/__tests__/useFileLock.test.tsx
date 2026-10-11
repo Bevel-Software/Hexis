@@ -345,6 +345,67 @@ describe('useFileLock — a live hold of the viewer\'s own is shown on open', ()
     warn.mockRestore();
   });
 
+  it('keeps asking when that re-ask itself fails, until the hold shows', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let failRelease: () => void = () => {};
+    api.releaseLock.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      failRelease = () => reject(new TypeError('Failed to fetch'));
+    }));
+    const first = setup({ pending: null });
+    await acquireHeld(first.result);
+    first.unmount();
+
+    api.getLock.mockImplementation(async () => lockHeldBy(ME, 'Juan'));
+    const second = setup();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(second.result.current.externalLock).toBeNull();
+
+    // The release fails, and so do the next two questions to the server.
+    api.getLock.mockClear();
+    api.getLock
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await act(async () => { failRelease(); await vi.advanceTimersByTimeAsync(0); });
+    expect(api.getLock).toHaveBeenCalledTimes(1);
+    expect(second.result.current.externalLock).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getLock).toHaveBeenCalledTimes(2);
+    expect(second.result.current.externalLock).toBeNull();
+
+    // Third time, 10 s later, the server answers: the hold is still there.
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.getLock).toHaveBeenCalledTimes(3);
+    expect(second.result.current.externalLockIsMine).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('stops asking once the editor has gone', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let failRelease: () => void = () => {};
+    api.releaseLock.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      failRelease = () => reject(new TypeError('Failed to fetch'));
+    }));
+    const first = setup({ pending: null });
+    await acquireHeld(first.result);
+    first.unmount();
+
+    api.getLock.mockImplementation(async () => lockHeldBy(ME, 'Juan'));
+    const second = setup();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    api.getLock.mockClear();
+    api.getLock.mockImplementation(async () => { throw new TypeError('Failed to fetch'); });
+    await act(async () => { failRelease(); await vi.advanceTimersByTimeAsync(0); });
+    expect(api.getLock).toHaveBeenCalledTimes(1);
+    second.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(200_000); });
+    expect(api.getLock).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
   it('shows the viewer\'s hold taken in another tab, live', async () => {
     const { bus, publish } = makeBus();
     const { result } = setup({ bus });

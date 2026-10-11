@@ -233,12 +233,19 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
   useEffect(() => { holdingLockRef.current = holdingLock; }, [holdingLock]);
 
   // Reset state when the (workspace, branch, path) tuple changes — opening
-  // a different file is a fresh lock context, not a continuation.
-  useEffect(() => {
+  // a different file is a fresh lock context, not a continuation. Done while
+  // rendering (React's "adjusting state when a prop changes"), not in an
+  // effect, so no effect of the new file ever runs with the old file's
+  // state. `holdingLockRef` still follows in its effect, after the old
+  // file's unmount cleanup has read it and released.
+  const lockContext = `${workspaceId ?? ''}\n${branch ?? ''}\n${path ?? ''}`;
+  const [stateContext, setStateContext] = useState(lockContext);
+  if (stateContext !== lockContext) {
+    setStateContext(lockContext);
     setHoldingLock(false);
     setExternalLock(null);
     setLockError(null);
-  }, [workspaceId, branch, path]);
+  }
 
   const isMine = useCallback(
     (lock: FileLock | null): boolean => !!lock && !!currentUserId && lock.holderUserId === currentUserId,
@@ -390,23 +397,43 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     // not look editable until Edit fails. Hidden is never final: once the
     // request settles we ask again, so a release that failed (and left the
     // hold in place, with no `lock-released` to come) shows as the
-    // self-hold notice instead of a page that looks free. See the table on
-    // `requestsInFlight`.
-    const askWhoHolds = () => {
+    // self-hold notice instead of a page that looks free. That re-ask is
+    // retried until it gets an answer (5 s, 10 s, 20 s, 40 s, then every
+    // 65 s): a hold was seen and hidden, and if the release failed no event
+    // will ever correct the page. See the table on `requestsInFlight`.
+    let retryTimer: number | undefined;
+    const reask = (failures = 0) => {
+      if (cancelled) return;
       getLockApi(workspaceId, branch, path)
-        .then((lock) => {
+        .then(onAnswer)
+        .catch(() => {
           if (cancelled) return;
-          if (isMine(lock) && inFlight(key)) {
-            setExternalLock(null);
-            void whenSettled(key).then(() => { if (!cancelled) askWhoHolds(); });
-            return;
-          }
-          setExternalLock(lock);
-        })
-        .catch(() => { /* network blip — events will catch us up */ });
+          retryTimer = window.setTimeout(
+            () => reask(failures + 1),
+            Math.min(MIN_EXPIRY_RECHECK_MS * 2 ** failures, MAX_EXPIRY_RECHECK_MS),
+          );
+        });
     };
-    askWhoHolds();
-    if (!bus) return () => { cancelled = true; };
+    const reaskOnceSettled = () => {
+      void whenSettled(key).then(() => { if (!cancelled) reask(); });
+    };
+    const onAnswer = (lock: FileLock | null) => {
+      if (cancelled) return;
+      if (isMine(lock) && inFlight(key)) {
+        setExternalLock(null);
+        reaskOnceSettled();
+        return;
+      }
+      setExternalLock(lock);
+    };
+    getLockApi(workspaceId, branch, path)
+      .then(onAnswer)
+      .catch(() => { /* network blip, nothing seen yet — events will catch us up */ });
+    const stop = () => {
+      cancelled = true;
+      window.clearTimeout(retryTimer);
+    };
+    if (!bus) return stop;
     // Canonicalise once; event.workspaceId from the backend is decoded
     // (`razvan-radulescu/sc`) while the `workspaceId` prop is encoded
     // (`razvan-radulescu%2Fsc`). See `canonicalizeWorkspaceId` doc.
@@ -420,7 +447,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
       // The viewer's hold from another tab or their agent is shown, as the
       // self-hold notice.
       if (currentUserId && e.holderUserId === currentUserId && inFlight(key)) {
-        void whenSettled(key).then(() => { if (!cancelled) askWhoHolds(); });
+        reaskOnceSettled();
         return;
       }
       setExternalLock({
@@ -444,7 +471,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
       setLockError(null);
     });
     return () => {
-      cancelled = true;
+      stop();
       offAcquired();
       offReleased();
     };
