@@ -28,11 +28,14 @@ interface Harness {
   baseUrl: string;
   canWriteBatch: ReturnType<typeof vi.fn>;
   canOwnerBatch: ReturnType<typeof vi.fn>;
+  canReadBatch: ReturnType<typeof vi.fn>;
 }
 
-// Alice WRITES both skills but is named in the `owner:` grant of one.
+// Alice WRITES both skills but is named in the `owner:` grant of one, and
+// READS a folder she may not write.
 const WRITABLE = new Set(['Skills/a/SKILL.md', 'Skills/b/SKILL.md']);
 const OWNED = new Set(['Skills/a/SKILL.md']);
+const READABLE = new Set(['Skills/a/SKILL.md', 'Skills/b/SKILL.md', 'KnowledgeBase/Sales']);
 
 const verdicts = (set: Set<string>) =>
   vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, set.has(p)])));
@@ -40,7 +43,8 @@ const verdicts = (set: Set<string>) =>
 async function makeHarness(): Promise<Harness> {
   const canWriteBatch = verdicts(WRITABLE);
   const canOwnerBatch = verdicts(OWNED);
-  const accessControl = { canWriteBatch, canOwnerBatch } as unknown as IAccessControl;
+  const canReadBatch = verdicts(READABLE);
+  const accessControl = { canWriteBatch, canOwnerBatch, canReadBatch } as unknown as IAccessControl;
 
   const workspaceService = {} as unknown as WorkspaceService;
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
@@ -68,7 +72,7 @@ async function makeHarness(): Promise<Harness> {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, canWriteBatch, canOwnerBatch };
+  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, canWriteBatch, canOwnerBatch, canReadBatch };
 }
 
 function close(s: Server): Promise<void> {
@@ -119,16 +123,31 @@ describe('POST /access/batch', () => {
     expect(h.canWriteBatch).not.toHaveBeenCalled();
   });
 
+  it('answers READ for `verb: read` — a folder the caller may read but not write gets true', async () => {
+    h = await makeHarness();
+
+    const paths = [...PATHS, 'KnowledgeBase/Sales'];
+    const res = await post({ paths, verb: 'read' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      results: { 'Skills/a/SKILL.md': true, 'Skills/b/SKILL.md': true, 'KnowledgeBase/Sales': true },
+    });
+    expect(h.canReadBatch).toHaveBeenCalledWith(WS, USER.email, paths);
+    expect(h.canWriteBatch).not.toHaveBeenCalled();
+    expect(h.canOwnerBatch).not.toHaveBeenCalled();
+  });
+
   it('400s a verb it does not dispatch, resolving nothing', async () => {
     h = await makeHarness();
 
-    for (const verb of ['read', 'admin', 42, null]) {
+    for (const verb of ['download', 'admin', 42, null]) {
       const res = await post({ paths: PATHS, verb });
       expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({ error: 'verb must be "write" or "owner"' });
+      expect(await res.json()).toEqual({ error: 'verb must be "write", "owner" or "read"' });
     }
     expect(h.canWriteBatch).not.toHaveBeenCalled();
     expect(h.canOwnerBatch).not.toHaveBeenCalled();
+    expect(h.canReadBatch).not.toHaveBeenCalled();
   });
 
   it('keeps the paths validation ahead of the verb', async () => {
