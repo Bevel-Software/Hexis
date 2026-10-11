@@ -23,10 +23,12 @@ export interface AccountInvitedEvent {
 }
 
 /**
- * A listener answers how it reached the person — `'email'`, say — or null
- * when it did not (nothing configured, the send failed). It is awaited: the
- * admin's answer says who was notified, truthfully, so a listener bounds its
- * own wait. A throw is logged and counts as null; it never fails the invite.
+ * A listener answers how it reached the person — a non-empty channel name,
+ * `'email'` say — or null when it did not (nothing configured, the send
+ * failed). It is awaited: the admin's answer says who was notified,
+ * truthfully, so a listener bounds its own wait. A throw is logged and
+ * counts as null; it never fails the invite. An empty name is no channel and
+ * counts as null too.
  */
 export type AccountInvitedHook = (event: AccountInvitedEvent) => Promise<string | null>;
 
@@ -55,7 +57,7 @@ export class AccountHooks implements IAccountHooks {
     for (const hook of this.invited) {
       try {
         const channel = await hook(event);
-        if (channel) notified.push(channel);
+        if (channel !== null && channel !== '') notified.push(channel);
       } catch (err) {
         // The account exists whether or not the person was told: the admin's
         // answer says they were not, and the admin sends the link themselves.

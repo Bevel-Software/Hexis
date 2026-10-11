@@ -594,7 +594,10 @@ function InvitedBody({
   // person it did not reach — an existing account that only got a
   // password, a deployment with no mail — and the message is offered as
   // before, for them.
-  const allEmailed = invited > 0 && outcomes.filter((o) => isInvited(o, Boolean(idp))).every(wasEmailed);
+  // The same single-sign-on test `invited` was counted with (a provider is
+  // one whatever its label says), so the two agree on who was invited.
+  const sso = (methods?.sso.length ?? 0) > 0;
+  const allEmailed = invited > 0 && outcomes.filter((o) => isInvited(o, sso)).every(wasEmailed);
   const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
 
   return (
@@ -637,8 +640,10 @@ function InvitedBody({
         <>
           {passwordSet && (
             <Banner tone="wait" role="status" icon={<KeyRound size={16} aria-hidden />}>
-              <span className="font-semibold">Send them the password you set, separately.</span> It isn’t in the
-              message below, so the message is safe to post in a shared channel.
+              <span className="font-semibold">Send them the password you set, separately.</span>{' '}
+              {allEmailed
+                ? 'It isn’t in the email they were sent.'
+                : 'It isn’t in the message below, so the message is safe to post in a shared channel.'}
             </Banner>
           )}
           <CopyRow label="Where they sign in" text={origin} copyLabel="Copy link" mono />

@@ -40,8 +40,18 @@ describe('AccountHooks: an account was invited', () => {
       });
       hooks.onAccountInvited(async () => 'email');
       expect(await hooks.runAccountInvited(EVENT)).toEqual(['email']);
+      // Logged, so a failing mailer is diagnosable from the server's log.
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(String(error.mock.calls[0]![0])).toContain('an account-invited listener failed');
     } finally {
       error.mockRestore();
     }
+  });
+
+  it('an empty channel name is no channel: it counts as not having notified', async () => {
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async () => '');
+    hooks.onAccountInvited(async () => 'email');
+    expect(await hooks.runAccountInvited(EVENT)).toEqual(['email']);
   });
 });

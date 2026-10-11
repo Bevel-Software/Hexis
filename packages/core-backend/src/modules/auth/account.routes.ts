@@ -116,10 +116,20 @@ export function createAccountRoutes(
       // the link. An account that was already there is not invited again.
       const invited = async (account: AuthUser, created: boolean, passwordSet: boolean): Promise<string[]> => {
         if (!created) return [];
-        const by = req.userId ? await authService.getUserById(req.userId) : null;
+        // The inviting admin, by name when their account can be read. The
+        // account is already made: a failed read falls back to the identity
+        // the request carries rather than answering an error a retry could
+        // not make good (the account is not new the second time).
+        const requester = { id: req.userId ?? '', email: req.userEmail ?? '', name: '' };
+        const by = req.userId
+          ? await authService.getUserById(req.userId).catch((err: unknown) => {
+              log.warn('the inviting admin could not be read; the invite names them by address:', { err });
+              return null;
+            })
+          : null;
         return accountHooks.runAccountInvited({
           account: { id: account.id, email: account.email, name: account.name },
-          invitedBy: by ?? { id: req.userId ?? '', email: req.userEmail ?? '', name: '' },
+          invitedBy: by ?? requester,
           passwordSet,
         });
       };

@@ -755,7 +755,9 @@ describe('InviteDialog: when the deployment emails the invite itself', () => {
     expect(within(rowOf('lena@acme.com')).getByText('Emailed · Member · signs in with the password you set')).toBeInTheDocument();
     expect(within(rowOf('tom@acme.com')).getByText('Emailed · Member · signs in with the password you set')).toBeInTheDocument();
     expect(screen.getByText('They have been emailed the link. Send them the password separately.')).toBeInTheDocument();
-    expect(screen.getByText(/Send them the password you set, separately/)).toBeInTheDocument();
+    expect(screen.getByText(/Send them the password you set, separately/).closest('[role="status"]')).toHaveTextContent(
+      'Send them the password you set, separately. It isn’t in the email they were sent.',
+    );
     // The link is still there to copy; the message is not, the mail was it.
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Copy message' })).not.toBeInTheDocument();

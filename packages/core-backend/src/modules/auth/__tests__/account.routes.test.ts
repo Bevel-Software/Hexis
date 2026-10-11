@@ -186,6 +186,27 @@ describe('account routes — admin gate', () => {
       expect(JSON.stringify(event)).not.toContain('long-enough-pw');
     });
 
+    it('when the inviting admin cannot be read, the invite still goes out, naming them by address', async () => {
+      vi.mocked(authService.getUserById).mockRejectedValueOnce(new Error('users table is away'));
+      vi.mocked(accountHooks.runAccountInvited).mockResolvedValueOnce(['email']);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const base = await listen(makeApp({ admin: true }));
+        const res = await fetch(`${base}/api/admin/accounts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'b@example.com' }),
+        });
+        expect(res.status).toBe(201);
+        expect(await res.json()).toEqual({ id: 'u2', email: 'b@example.com', name: 'B', notified: ['email'] });
+        expect(accountHooks.runAccountInvited).toHaveBeenCalledWith(
+          expect.objectContaining({ invitedBy: { id: 'u1', email: 'caller@example.com', name: '' } }),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('a NEW account for single sign-on (no password) goes through the same seam, with passwordSet false', async () => {
       vi.mocked(accountHooks.runAccountInvited).mockResolvedValueOnce(['email', 'chat']);
       const base = await listen(makeApp({ admin: true }));
