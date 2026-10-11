@@ -17,8 +17,9 @@ vi.mock('../../services/lock.api', async (importOriginal) => ({
   ...api,
 }));
 
-import { useFileLock } from '../useFileLock';
-import { SELF_HOLD_MESSAGE } from '../../services/lock.api';
+// The hook and its sentence come through workflow's public entry point, as
+// other modules see them.
+import { useFileLock, SELF_HOLD_MESSAGE } from '../..';
 import { EventBusContext, type EventBusContextValue } from '../../state/event-bus.context';
 
 const ME = 'u-juan';
