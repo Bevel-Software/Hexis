@@ -255,7 +255,107 @@ describe('useFileLock — the notice clears when the hold ends', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(5_500); });
     expect(result.current.externalLock).not.toBeNull();
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_500); });
+    // The retry waits twice the shortest wait.
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(result.current.externalLock).toBeNull();
+  });
+
+  it('backs off while the server stays unreachable, rather than asking every few seconds', async () => {
+    vi.useFakeTimers();
+    api.acquireLock.mockResolvedValueOnce({ acquired: false, lock: lockHeldBy(ME, 'Juan', 0) });
+    const { result } = setup();
+    await act(async () => { await result.current.acquire(); });
+
+    api.getLock.mockClear();
+    api.getLock.mockImplementation(async () => { throw new TypeError('Failed to fetch'); });
+    const askedAfter = async (ms: number) => {
+      await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+      return api.getLock.mock.calls.length;
+    };
+
+    expect(await askedAfter(5_100)).toBe(1); // at the expiry
+    expect(await askedAfter(9_800)).toBe(1); // not yet 10 s later
+    expect(await askedAfter(300)).toBe(2); // 10 s
+    expect(await askedAfter(19_800)).toBe(2);
+    expect(await askedAfter(300)).toBe(3); // 20 s
+    expect(await askedAfter(40_100)).toBe(4); // 40 s
+    expect(await askedAfter(64_800)).toBe(4);
+    expect(await askedAfter(300)).toBe(5); // then every 65 s at most
+    expect(await askedAfter(65_100)).toBe(6);
+    expect(result.current.externalLock).not.toBeNull();
+
+    // Once the server answers again, the notice clears.
+    api.getLock.mockImplementation(async () => null);
+    expect(await askedAfter(65_100)).toBe(7);
+    expect(result.current.externalLock).toBeNull();
+  });
+});
+
+describe('useFileLock — a live hold of the viewer\'s own is shown on open', () => {
+  it('shows the self-hold notice as soon as the page opens, before any Edit', async () => {
+    api.getLock.mockImplementation(async () => lockHeldBy(ME, 'Juan'));
+    const { result } = setup();
+    await act(async () => {});
+
+    expect(result.current.externalLock?.holderUserId).toBe(ME);
+    expect(result.current.externalLockIsMine).toBe(true);
+    expect(api.acquireLock).not.toHaveBeenCalled();
+  });
+
+  it('hides it while this tab\'s own release for the page is still in flight', async () => {
+    let finishRelease: () => void = () => {};
+    api.releaseLock.mockImplementationOnce(() => new Promise<null>((resolve) => { finishRelease = () => resolve(null); }));
+    const first = setup({ pending: null });
+    await acquireHeld(first.result);
+    first.unmount();
+    expect(api.releaseLock).toHaveBeenCalledTimes(1);
+
+    // The server has not committed the release yet: it still answers "you".
+    api.getLock.mockImplementation(async () => lockHeldBy(ME, 'Juan'));
+    const second = setup();
+    await act(async () => {});
+    expect(second.result.current.externalLock).toBeNull();
+
+    await act(async () => { finishRelease(); });
+  });
+
+  it('shows the viewer\'s hold taken in another tab, live', async () => {
+    const { bus, publish } = makeBus();
+    const { result } = setup({ bus });
+    await act(async () => {});
+    expect(result.current.externalLock).toBeNull();
+
+    await act(async () => {
+      publish({
+        kind: 'lock-acquired', workspaceId: 'ws', branch: 'main', path: 'kb/Knowledge/Foo.md',
+        holderUserId: ME, holderName: 'Juan',
+      } as WorkflowEvent);
+    });
+
+    expect(result.current.externalLockIsMine).toBe(true);
+  });
+
+  it('ignores the echo of its own acquire that beats the response', async () => {
+    const { bus, publish } = makeBus();
+    let finishAcquire: () => void = () => {};
+    api.acquireLock.mockImplementationOnce(() => new Promise((resolve) => {
+      finishAcquire = () => resolve({ acquired: true, lock: lockHeldBy(ME, 'Juan') });
+    }));
+    const { result } = setup({ bus });
+    await act(async () => {});
+
+    let acquiring: Promise<unknown> = Promise.resolve();
+    act(() => { acquiring = result.current.acquire(); });
+    await act(async () => {
+      publish({
+        kind: 'lock-acquired', workspaceId: 'ws', branch: 'main', path: 'kb/Knowledge/Foo.md',
+        holderUserId: ME, holderName: 'Juan',
+      } as WorkflowEvent);
+    });
+    expect(result.current.externalLock).toBeNull();
+
+    await act(async () => { finishAcquire(); await acquiring; });
+    expect(result.current.holdingLock).toBe(true);
     expect(result.current.externalLock).toBeNull();
   });
 });

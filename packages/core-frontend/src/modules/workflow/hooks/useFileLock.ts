@@ -37,6 +37,43 @@ const EXPIRY_RECHECK_MARGIN_MS = 1_000;
 const MIN_EXPIRY_RECHECK_MS = 5_000;
 const MAX_EXPIRY_RECHECK_MS = 65_000;
 
+/**
+ * Lock requests this browser tab has sent and not yet heard back from,
+ * across every mounted editor, keyed by `lockKey`. A hold under the viewer's
+ * own id is hidden only while one of these is in flight: a release from the
+ * editor that just unmounted (the server has not committed it yet) or an
+ * acquire whose `lock-acquired` echo beats its response. Any other hold
+ * under the viewer's id — another tab, their agent, a closed browser whose
+ * hold has not expired — is shown, as the self-hold notice.
+ */
+const requestsInFlight = new Map<string, number>();
+
+function lockKey(workspaceId: string, branch: string, path: string): string {
+  return `${canonicalizeWorkspaceId(workspaceId)}\n${branch}\n${path}`;
+}
+
+function inFlight(key: string): boolean {
+  return (requestsInFlight.get(key) ?? 0) > 0;
+}
+
+/** Count `request` as in flight for `key` until it settles. */
+function trackInFlight<T>(key: string, request: () => Promise<T>): Promise<T> {
+  requestsInFlight.set(key, (requestsInFlight.get(key) ?? 0) + 1);
+  const settle = () => {
+    const left = (requestsInFlight.get(key) ?? 1) - 1;
+    if (left > 0) requestsInFlight.set(key, left);
+    else requestsInFlight.delete(key);
+  };
+  let pending: Promise<T>;
+  try {
+    pending = request();
+  } catch (err) {
+    settle();
+    throw err;
+  }
+  return pending.finally(settle);
+}
+
 interface UseFileLockArgs {
   /** The workspace id of the branch we're editing on. Null disables the hook. */
   workspaceId: string | null;
@@ -185,7 +222,8 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     if (!workspaceId || !branch || !path) return { acquired: false, contended: false, error: null };
     console.debug('[useFileLock] acquire start', { workspaceId, branch, path });
     try {
-      const result = await acquireLockApi(workspaceId, branch, path);
+      const result = await trackInFlight(lockKey(workspaceId, branch, path), () =>
+        acquireLockApi(workspaceId, branch, path));
       if (result.acquired) {
         console.debug('[useFileLock] acquire ok', { workspaceId, branch, path });
         setHoldingLock(true);
@@ -233,7 +271,8 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
           console.debug('[useFileLock] checkpoint ok', { workspaceId, branch, path, sha: change?.sha ?? null });
           return change;
         }
-        const change = await releaseLockApi(workspaceId, branch, path, summary);
+        const change = await trackInFlight(lockKey(workspaceId, branch, path), () =>
+          releaseLockApi(workspaceId, branch, path, summary));
         console.debug('[useFileLock] release ok', { workspaceId, branch, path, sha: change?.sha ?? null });
         setHoldingLock(false);
         return change;
@@ -310,16 +349,18 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
   useEffect(() => {
     if (holdingLock || !workspaceId || !branch || !path) return;
     let cancelled = false;
-    // "Lock held by me" means the previous tab's cleanup hasn't finished
-    // committing the release on the backend yet — we just switched away
-    // and back fast enough that the persist+release is still in flight.
-    // We don't want to render an amber "[you] is editing this page" banner
-    // for that fraction of a second; the SSE `lock-released` event
-    // will arrive shortly and we'll be back to a clean state.
+    const key = lockKey(workspaceId, branch, path);
+    // A hold under the viewer's own id while this tab still has a request
+    // in flight for the page is the previous editor's save+release not yet
+    // committed (we switched away and back fast enough). A notice for that
+    // fraction of a second would be wrong; the SSE `lock-released` event
+    // arrives shortly. Any other hold of theirs is live — another tab,
+    // their agent — and gets the self-hold notice now, so the page does
+    // not look editable until Edit fails.
     getLockApi(workspaceId, branch, path)
       .then((lock) => {
         if (cancelled) return;
-        setExternalLock(isMine(lock) ? null : lock);
+        setExternalLock(isMine(lock) && inFlight(key) ? null : lock);
       })
       .catch(() => { /* network blip — events will catch us up */ });
     if (!bus) return () => { cancelled = true; };
@@ -329,11 +370,11 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     const workspaceCanon = canonicalizeWorkspaceId(workspaceId);
     const offAcquired = bus.subscribe('lock-acquired', (e) => {
       if (e.branch !== branch || e.path !== path || canonicalizeWorkspaceId(e.workspaceId) !== workspaceCanon) return;
-      // SSE echoes our own acquire too. If the event is about a lock
-      // we just took on this client (rare — we'd already be in the
-      // `holdingLock=true` branch and not subscribed — but cover it
-      // for safety against state races), ignore it.
-      if (currentUserId && e.holderUserId === currentUserId) return;
+      // SSE echoes our own acquire too. If the event is about a lock this
+      // tab is taking right now (the echo can beat the response that flips
+      // `holdingLock`), ignore it. The viewer's hold from another tab or
+      // their agent is shown, as the self-hold notice.
+      if (currentUserId && e.holderUserId === currentUserId && inFlight(key)) return;
       setExternalLock({
         branch: e.branch,
         path: e.path,
@@ -361,6 +402,12 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     };
   }, [holdingLock, workspaceId, branch, path, bus, currentUserId, isMine]);
 
+  // Consecutive failed expiry re-checks. Each doubles the next wait, so an
+  // unreachable server is not asked every few seconds for as long as a
+  // notice stays on screen.
+  const recheckFailuresRef = useRef(0);
+  useEffect(() => { recheckFailuresRef.current = 0; }, [workspaceId, branch, path]);
+
   // Re-check at expiry. A hold whose tab crashed, slept or lost the
   // network as it closed sends no `lock-released`; it simply expires on the
   // server. While its notice is on screen, ask again just after the expiry:
@@ -370,17 +417,21 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
   useEffect(() => {
     if (holdingLock || !externalLock || !workspaceId || !branch || !path) return;
     const expiresAtMs = Date.parse(externalLock.expiresAt);
-    const delay = Number.isNaN(expiresAtMs)
-      ? MAX_EXPIRY_RECHECK_MS
-      : Math.min(
-        Math.max(expiresAtMs - Date.now() + EXPIRY_RECHECK_MARGIN_MS, MIN_EXPIRY_RECHECK_MS),
-        MAX_EXPIRY_RECHECK_MS,
-      );
+    const failures = recheckFailuresRef.current;
+    const delay = failures > 0
+      ? Math.min(MIN_EXPIRY_RECHECK_MS * 2 ** failures, MAX_EXPIRY_RECHECK_MS)
+      : Number.isNaN(expiresAtMs)
+        ? MAX_EXPIRY_RECHECK_MS
+        : Math.min(
+          Math.max(expiresAtMs - Date.now() + EXPIRY_RECHECK_MARGIN_MS, MIN_EXPIRY_RECHECK_MS),
+          MAX_EXPIRY_RECHECK_MS,
+        );
     let cancelled = false;
     const id = window.setTimeout(() => {
       getLockApi(workspaceId, branch, path)
         .then((lock) => {
           if (cancelled) return;
+          recheckFailuresRef.current = 0;
           if (lock) {
             setExternalLock(lock);
             setLockError(heldMessage(lock));
@@ -390,10 +441,12 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
           setLockError(null);
         })
         .catch(() => {
-          // Network blip: ask again after the shortest wait. A fresh object
-          // re-runs this effect; the expiry has passed, so the delay clamps
-          // to the minimum.
-          if (!cancelled) setExternalLock((current) => (current ? { ...current } : current));
+          // Network blip: ask again, waiting twice as long as last time
+          // (10 s, 20 s, 40 s, then every 65 s). A fresh object re-runs
+          // this effect with the longer wait.
+          if (cancelled) return;
+          recheckFailuresRef.current += 1;
+          setExternalLock((current) => (current ? { ...current } : current));
         });
     }, delay);
     return () => {
@@ -494,7 +547,8 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
       // re-acquires on Edit rather than believing it still holds.
       holdingLockRef.current = false;
       setHoldingLock(false);
-      releaseLockApi(workspaceId, branch, path, undefined, { keepalive: true }).catch((err) => {
+      trackInFlight(lockKey(workspaceId, branch, path), () =>
+        releaseLockApi(workspaceId, branch, path, undefined, { keepalive: true })).catch((err) => {
         console.warn('[useFileLock] release on pagehide failed:', err);
       });
     };
@@ -513,12 +567,15 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     return () => {
       if (!holdingLockRef.current || !workspaceId || !branch || !path) return;
       const pending = readPendingContentRef.current();
+      const key = lockKey(workspaceId, branch, path);
       const release = () =>
-        releaseLockApi(workspaceId, branch, path).catch((err) => {
+        trackInFlight(key, () => releaseLockApi(workspaceId, branch, path)).catch((err) => {
           console.warn('[useFileLock] release on unmount failed:', err);
         });
       if (pending !== null) {
-        persistToDiskRef.current(pending).then(release, (err) => {
+        // Counted from the save, not the release: the editor that mounts
+        // next asks who holds the page while the save is still running.
+        trackInFlight(key, () => persistToDiskRef.current(pending)).then(release, (err) => {
           console.warn('[useFileLock] persist on unmount failed:', err);
           // Release anyway so the lock doesn't get stuck; whatever was
           // last successfully written to disk will be what the release-
