@@ -129,7 +129,11 @@ export function FinishedChangeRequest({
       : null;
 
   let pane;
-  if (appliedSha === null) {
+  if (failure !== null && failure.kind === 'denied') {
+    // Refused, with or without a commit to read: the sentence and the lock,
+    // never the content.
+    pane = <MarkedFile diff={null} raw={null} failure={failure} onRetry={() => retry(selected)} />;
+  } else if (appliedSha === null) {
     pane = (
       <p className="py-6 text-center text-detail text-ink-faint">
         Everything this request proposed was already there when it was applied, so it made no

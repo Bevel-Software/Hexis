@@ -330,6 +330,20 @@ export interface IGitService {
   ): Promise<PullRequestFile[]>;
 
   /**
+   * The files an applied change request PROPOSED, from the source head its
+   * own apply recorded, against the target's published tip (three dots) —
+   * for an applied request whose apply made no merge commit of its own, so
+   * nothing on the target holds its files. No network: a head this clone
+   * does not hold rejects with `WorkflowValidationError`.
+   */
+  changedFilesOfProposalHead(
+    workspaceId: string,
+    targetBranch: string,
+    headSha: string,
+    opts?: { patchCap?: number },
+  ): Promise<PullRequestFile[]>;
+
+  /**
    * The same applied change as the two path views a change-request SUMMARY
    * needs, out of one `git diff` — `changedPathsAndPairsForPr` for an applied
    * request instead of a branch pair, with the same verification and the same

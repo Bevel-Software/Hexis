@@ -5,7 +5,9 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { prMergeLog } from '../../../database/schema.js';
-import { AppliedChangeMismatchError } from '../../../../shared/domain-errors.js';
+import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
+import { withoutAddresses } from '../finished-detail.js';
+import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
 /**
  * A finished request's detail says how it ended (hx-finished-request-says-so):
@@ -20,11 +22,19 @@ const CLOSED_AT = new Date('2026-10-10T09:30:00Z');
 
 interface MergeLogRow {
   name: string;
+  headSha?: string;
 }
+
+const PROPOSAL_HEAD = '9'.repeat(40);
 
 function harness(
   over: Record<string, unknown> = {},
-  opts: { mergeLog?: MergeLogRow[]; mismatch?: boolean; mergeLogThrows?: boolean } = {},
+  opts: {
+    mergeLog?: MergeLogRow[];
+    mismatch?: boolean;
+    mergeLogThrows?: boolean;
+    headNotInClone?: boolean;
+  } = {},
 ) {
   const row = {
     number: 4,
@@ -52,9 +62,9 @@ function harness(
     select: (cols?: Record<string, unknown>) => ({
       from: (table: unknown) => {
         if (table === prMergeLog) {
-          // Only the name column may be asked for: the email beside it is
-          // never read by the finished facts.
-          expect(Object.keys(cols ?? {})).toEqual(['name']);
+          // Only the name and the applied head may be asked for: the email
+          // beside them is never read by the finished facts.
+          expect(Object.keys(cols ?? {})).toEqual(['name', 'headSha']);
           return {
             where: (...args: unknown[]) => {
               mergeLogWhere(...args);
@@ -83,7 +93,23 @@ function harness(
     }
     return { baseSha: BASE_SHA, headSha: HEAD_SHA };
   });
+  const changedFilesOfProposalHead = vi.fn(async () => {
+    if (opts.headNotInClone) throw new WorkflowValidationError('commit is not in this clone');
+    return [
+      {
+        path: 'Knowledge/Proposed.md',
+        status: 'modified' as const,
+        additions: 3,
+        deletions: 2,
+        patch: '@@',
+        isBinary: false,
+        sha: '',
+        rawUrl: '',
+      },
+    ];
+  });
   const git = {
+    changedFilesOfProposalHead,
     appliedChangeShas,
     changedFilesOfAppliedChange: async () => [
       {
@@ -104,7 +130,7 @@ function harness(
   } as unknown as GitService;
   const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
   const svc = new PullRequestService(db, workspace, access, git);
-  return { svc, mergeLogWhere, appliedChangeShas };
+  return { svc, mergeLogWhere, appliedChangeShas, changedFilesOfProposalHead };
 }
 
 describe('PullRequestService.getPrDetail — how a finished request ended', () => {
@@ -143,6 +169,8 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
     const { svc } = harness({}, { mergeLog: [{ name: 'Robin Lee' }], mismatch: true });
     const detail = await svc.getPrDetail(4);
     expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
+    // No recorded head to read its own proposal from: no files, never the
+    // other request's.
     expect(detail?.files).toEqual([]);
     expect(JSON.stringify(detail)).not.toContain(MERGE_SHA);
   });
@@ -204,6 +232,104 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
     const detail = await h.svc.getPrDetail(4);
     expect(detail?.state).toBe('merged');
     expect(detail?.finished?.appliedBy).toEqual({ name: 'Robin Lee' });
+  });
+});
+
+describe('PullRequestService.getPrDetail — an apply that made no commit of its own', () => {
+  it('lists the files it proposed, from the head its own apply recorded, with no sha to diff', async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      { mergedSha: null },
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] },
+    );
+    const detail = await svc.getPrDetail(4);
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, {});
+    expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
+    expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
+  });
+
+  it("does the same when the recorded sha is another request's commit, and never reads that commit", async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      {},
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }], mismatch: true },
+    );
+    const detail = await svc.getPrDetail(4);
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, {});
+    expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
+    expect(detail?.finished?.appliedSha).toBeNull();
+    expect(JSON.stringify(detail)).not.toContain(MERGE_SHA);
+  });
+
+  it('answers no files when that head is no longer in the clone', async () => {
+    const { svc } = harness(
+      { mergedSha: null },
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }], headNotInClone: true },
+    );
+    const detail = await svc.getPrDetail(4);
+    expect(detail?.files).toEqual([]);
+    expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
+  });
+
+  it('does not reach for the head when the request has its own verified merge commit', async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      {},
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] },
+    );
+    const detail = await svc.getPrDetail(4);
+    expect(changedFilesOfProposalHead).not.toHaveBeenCalled();
+    expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/A.md']);
+  });
+});
+
+describe('withoutAddresses — the detail the app route serves', () => {
+  /**
+   * The ordinary apply: the applier approves every file, then applies. Their
+   * approval is on the answer, and so would be their address.
+   */
+  function appliedDetail(state: 'merged' | 'closed' | 'open'): PullRequestDetail {
+    return {
+      number: 4,
+      state,
+      title: 'A proposal',
+      finished: state === 'open' ? null : { at: null, appliedBy: { name: 'Robin Lee' }, closedReason: null, appliedSha: null },
+      approvals: [
+        {
+          path: 'Knowledge/A.md',
+          eligibleApprovers: { roles: ['Admin'], users: [{ name: 'Owner One', email: 'owner@bevel.software' }] },
+          approvedBy: [
+            {
+              email: 'robin@bevel.software',
+              name: 'Robin Lee',
+              approvedAt: '2026-10-10T09:00:00Z',
+              isStale: false,
+              isSelfApproval: false,
+            },
+          ],
+          isApproved: true,
+          inMergeGate: true,
+          viewerCanApprove: true,
+        },
+      ],
+      comments: [
+        { id: 'c1', author: { email: 'dana@bevel.software', name: 'Dana Admin' }, body: 'looks good' },
+      ],
+    } as unknown as PullRequestDetail;
+  }
+
+  it('sends no email address anywhere on an applied request, and keeps the names', () => {
+    const json = JSON.stringify(withoutAddresses(appliedDetail('merged')));
+    expect(json).not.toMatch(/@bevel\.software/);
+    expect(json).toContain('Robin Lee');
+    expect(json).toContain('Owner One');
+    expect(json).toContain('Dana Admin');
+  });
+
+  it('nor on a closed one', () => {
+    expect(JSON.stringify(withoutAddresses(appliedDetail('closed')))).not.toMatch(/@/);
+  });
+
+  it('leaves an open request untouched: its Undo compares the viewer with its approvers', () => {
+    const open = appliedDetail('open');
+    expect(withoutAddresses(open)).toBe(open);
   });
 });
 

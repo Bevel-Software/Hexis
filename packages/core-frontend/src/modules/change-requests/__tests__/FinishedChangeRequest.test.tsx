@@ -439,14 +439,39 @@ describe('ChangeRequestDialog: an applied request', () => {
     expect(await screen.findByText('tier: premium')).toBeInTheDocument();
   });
 
-  it('without a verified merge commit of its own, shows no "as applied" diff and reads nothing', async () => {
-    detailMock.fetchPrDetail.mockResolvedValue(detailOf('merged', [file('Docs/pricing.yaml')], { appliedSha: null }));
+  it('without a merge commit of its own, lists its files with Open page and no "as applied" diff', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Docs/pricing.yaml', { additions: 2, deletions: 1 }), file('Docs/new.yaml', { status: 'added', deletions: 0 })], {
+        appliedSha: null,
+      }),
+    );
     renderDialog();
     expect(await screen.findByText(/made no change of its own to show/)).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('Applied by Robin Lee');
-    expect(screen.getByRole('treeitem')).toHaveTextContent('pricing.yaml');
+    // The file list and its scale, as the ticket asks.
+    expect(screen.getByText(/2 files ·/)).toHaveTextContent('2 files · +3 −1');
+    expect(screen.getAllByRole('treeitem').map((r) => r.textContent)).toEqual(['pricing.yaml', 'new.yaml']);
+    expect(await screen.findByRole('link', { name: 'Open page' })).toHaveAttribute(
+      'href',
+      kbFileUrl('main', 'knowledge-base/Docs/pricing.yaml'),
+    );
+    expect(screen.queryByText(/· as applied/)).not.toBeInTheDocument();
+    // Never a diff, so never a read of any commit.
     expect(crApi.readFileAtCommit).not.toHaveBeenCalled();
     expectNoReviewControls();
+  });
+
+  it('without a merge commit of its own, still locks a file the reader may not read', async () => {
+    crApi.fileExistsOnWorkspace.mockRejectedValue(new WorkspaceApiError(403));
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Finance/Payment terms.yaml')], { appliedSha: null }),
+    );
+    renderDialog();
+    expect(await screen.findByText(/You don't have access to read this file/)).toBeInTheDocument();
+    const row = screen.getByRole('treeitem');
+    expect(within(row).getByRole('img', { name: /You don't have access/ })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open page' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/made no change of its own/)).not.toBeInTheDocument();
   });
 
   it('with no files and no commit of its own, is the status line in a compact dialog', async () => {

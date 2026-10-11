@@ -827,6 +827,34 @@ export class PullRequestService implements IPullRequestService {
       appliedSha = null;
     }
 
+    // An APPLIED request with no verified merge commit of its own — the
+    // target already held everything it proposed, so the apply wrote none
+    // (or the row records a sha that is another request's). Nothing on the
+    // target records its files, but its own merge-log row recorded the
+    // source head it applied, and that head against the target is exactly
+    // what it proposed: the file list the finished view shows, with no "as
+    // applied" diff (`finished.appliedSha` stays null). Never another
+    // request's change — the head is this request's. A head this clone no
+    // longer holds answers no files, as before.
+    const merge = row.state === 'merged' ? await this.lastSucceededMerge(row.number) : null;
+    if (row.state === 'merged' && appliedSha === null && workspaceId && merge?.headSha) {
+      try {
+        files = await this.gitService.changedFilesOfProposalHead(
+          workspaceId,
+          row.targetBranch,
+          merge.headSha,
+          opts.patches === false ? { patchCap: 0 } : {},
+        );
+        headSha = merge.headSha;
+      } catch (err) {
+        if (err instanceof WorkflowValidationError) {
+          log.debug(`change request #${prNumber}'s applied head is not readable here; answering no files:`, { err });
+        } else {
+          log.warn(`could not read the files change request #${prNumber} proposed:`, { err });
+        }
+      }
+    }
+
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
     const cached = this.detailCache.get(cacheKey);
     if (
@@ -950,7 +978,7 @@ export class PullRequestService implements IPullRequestService {
       viewerCanBypassMerge,
     });
 
-    const finished = row.state === 'open' ? null : await this.finishedFacts(row, appliedSha);
+    const finished = row.state === 'open' ? null : await this.finishedFacts(row, appliedSha, merge);
 
     const detail: PullRequestDetail = {
       ...summary,
@@ -1027,32 +1055,42 @@ export class PullRequestService implements IPullRequestService {
   private async finishedFacts(
     row: ChangeRequestRow,
     appliedSha: string | null,
+    merge: { name: string; headSha: string } | null,
   ): Promise<PullRequestFinished> {
-    let appliedBy: PullRequestFinished['appliedBy'] = null;
-    if (row.state === 'merged') {
-      try {
-        const [merge] = await this.db
-          .select({ name: prMergeLog.triggeredByName })
-          .from(prMergeLog)
-          .where(and(eq(prMergeLog.prNumber, row.number), eq(prMergeLog.succeeded, true)))
-          .orderBy(desc(prMergeLog.startedAt))
-          .limit(1);
-        appliedBy = applierName(merge?.name);
-      } catch (err) {
-        // The name is a courtesy on top of what the row already says; a
-        // failed lookup reads as "no applier recorded", never as no answer.
-        log.warn(`could not read who applied change request #${row.number}:`, { err });
-      }
-    }
     return {
       at: row.closedAt ? row.closedAt.toISOString() : null,
-      appliedBy,
+      appliedBy: row.state === 'merged' ? applierName(merge?.name) : null,
       closedReason:
         row.state === 'closed' && row.closedReason === 'repository-replaced'
           ? 'repository-replaced'
           : null,
       appliedSha: row.state === 'merged' ? appliedSha : null,
     };
+  }
+
+  /**
+   * The request's newest SUCCEEDED apply in the merge log: the applier's
+   * display name and the source head it applied. Only those two columns —
+   * the log's email column is never read here. `null` when none is recorded
+   * (a request applied before the log, or by a path that writes none) and
+   * when the lookup fails: both are courtesies on top of what the row says,
+   * so a failure reads as "not recorded", never as no answer.
+   */
+  private async lastSucceededMerge(
+    prNumber: number,
+  ): Promise<{ name: string; headSha: string } | null> {
+    try {
+      const [merge] = await this.db
+        .select({ name: prMergeLog.triggeredByName, headSha: prMergeLog.headShaAtMerge })
+        .from(prMergeLog)
+        .where(and(eq(prMergeLog.prNumber, prNumber), eq(prMergeLog.succeeded, true)))
+        .orderBy(desc(prMergeLog.startedAt))
+        .limit(1);
+      return merge ?? null;
+    } catch (err) {
+      log.warn(`could not read who applied change request #${prNumber}:`, { err });
+      return null;
+    }
   }
 
   private async findRow(prNumber: number): Promise<ChangeRequestRow | null> {

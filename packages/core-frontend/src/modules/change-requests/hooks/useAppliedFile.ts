@@ -16,6 +16,10 @@ import type { ReadFailure } from '../utils/readFailure';
  * through the raw route's read gate, so a file the viewer may not read is
  * refused exactly as on an open request, and shows locked.
  *
+ * With no merge commit of its own (`appliedSha` null: the target already held
+ * everything) there is nothing to read as applied, and only the question
+ * below is asked.
+ *
  * Plus one question about today: is the page still on the target branch?
  * That decides between "Open page" and "This page has since been deleted."
  * A file the request itself deleted asks nothing of the kind.
@@ -71,7 +75,7 @@ export function useAppliedFile(
   const { readText } = opts;
 
   useEffect(() => {
-    if (!appliedSha || !path || asked.current.has(key)) return;
+    if (!path || asked.current.has(key)) return;
     const token = {};
     asked.current.set(key, token);
     const land = (read: AppliedFileRead) => {
@@ -84,14 +88,17 @@ export function useAppliedFile(
       try {
         const { workspace } = await getOrCreateWorkspace(targetBranch);
         const at = (p: string) => `${workspace.kbDirName}/${p}`;
-        const [before, after] = readText
+        // No merge commit of its own: nothing to read "as applied" — only
+        // whether the page is still there (which is also the read gate).
+        const sha = appliedSha;
+        const [before, after] = readText && sha
           ? await Promise.all([
               added
                 ? Promise.resolve(null)
-                : readFileAtCommit(workspace.id, at(previousPath || path), appliedSha, 'before'),
+                : readFileAtCommit(workspace.id, at(previousPath || path), sha, 'before'),
               removed
                 ? Promise.resolve(null)
-                : readFileAtCommit(workspace.id, at(path), appliedSha, 'after'),
+                : readFileAtCommit(workspace.id, at(path), sha, 'after'),
             ])
           : [null, null];
         const pageNow: AppliedFileRead['pageNow'] = removed
@@ -127,6 +134,6 @@ export function useAppliedFile(
     [keyOf],
   );
 
-  const read = !appliedSha || !path ? null : (settled.get(key) ?? PENDING);
+  const read = !path ? null : (settled.get(key) ?? PENDING);
   return { read, failureOf, retry };
 }

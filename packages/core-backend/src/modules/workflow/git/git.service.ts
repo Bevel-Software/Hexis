@@ -3089,6 +3089,42 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The files a change request PROPOSED, read from the source head its apply
+   * recorded (`pr_merge_log.head_sha_at_merge`) against the target's
+   * published tip, three dots: the changes on that head since it and the
+   * target last met. What an applied request that made NO merge commit of its
+   * own still has to show — the target already held everything it proposed,
+   * so nothing on the target records its files, and its branch is retired.
+   *
+   * The head is this request's own (its own merge-log row recorded it), so
+   * the answer can never be another request's change: when the head is
+   * already part of the target the three-dot diff is simply empty. No fetch:
+   * the retired branch cannot be fetched, so the head is in this clone's
+   * object store or this rejects with a `WorkflowValidationError`.
+   */
+  async changedFilesOfProposalHead(
+    workspaceId: string,
+    targetBranch: string,
+    headSha: string,
+    opts: { patchCap?: number } = {},
+  ): Promise<PullRequestFile[]> {
+    assertValidBranchName(targetBranch);
+    if (!/^[0-9a-f]{40,64}$/.test(headSha)) {
+      throw new WorkflowValidationError(`invalid commit sha: ${headSha}`);
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${headSha}^{commit}`]);
+      } catch {
+        throw new WorkflowValidationError(`commit ${headSha} is not in this clone`);
+      }
+      const baseRef = await this.resolvePublishedBranchRef(cwd, targetBranch);
+      return this.prFilesForRange(cwd, `${baseRef}...${headSha}`, opts.patchCap ?? 400);
+    });
+  }
+
+  /**
    * The same applied change as the two path views a change-request SUMMARY needs
    * — the flat touched-path list and the rename-aware pairs — out of one
    * `git diff`, exactly as {@link changedPathsAndPairsForPr} does for a branch

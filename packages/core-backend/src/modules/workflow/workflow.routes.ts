@@ -19,6 +19,7 @@
 
 import express from 'express';
 import { logger } from '../../shared/logging.js';
+import { withoutAddresses } from './git/finished-detail.js';
 
 const log = logger('workflow.routes');
 const crLog = logger('cr');
@@ -786,7 +787,9 @@ export function createWorkflowRoutes(
         }
       }
       const [scoped] = await scopeApplyFailures(req, [detail]);
-      res.json(scoped);
+      // A finished request carries no email address: its approvals would
+      // otherwise send the applier's (see `withoutAddresses`).
+      res.json(withoutAddresses(scoped));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
