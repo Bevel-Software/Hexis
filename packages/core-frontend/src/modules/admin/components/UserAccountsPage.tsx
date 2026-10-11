@@ -42,8 +42,9 @@ function signInAfterDelete(account: AccountSummary): string {
 
 /**
  * Why an owner's address is never removed from access files, said where the
- * delete dialog would offer it — the same sentence the server gives as the
- * option's reason (`user-access-removal.service.ts`).
+ * delete dialog would offer it, until the server's own reason
+ * (`user-access-removal.service.ts`) has arrived, or when it could not be
+ * fetched. The server's words win once they are here.
  */
 const OWNER_ACCESS_NOTE = 'The owner stays in roles and access rules.';
 
@@ -648,7 +649,7 @@ export function UserAccountsPage() {
             <span>Also remove them from roles, groups and access rules</span>
           </label>
           {removalBlocked && pendingDelete?.isOwner ? (
-            <p className="text-ink-muted">{OWNER_ACCESS_NOTE}</p>
+            <p className="text-ink-muted">{references?.blockedReason ?? OWNER_ACCESS_NOTE}</p>
           ) : (
             removalBlocked &&
             references?.blockedReason && <p className="text-ink-muted">{references.blockedReason}</p>

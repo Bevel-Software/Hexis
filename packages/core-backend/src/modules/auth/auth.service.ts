@@ -260,8 +260,9 @@ export class AuthService {
     }
     // Only now, with the password proven: telling a stranger that an address
     // is switched off would tell them it has an account.
-    if (user.deactivatedAt) throw new AccountDeactivatedError();
-    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
+    const signedIn = await this.clearOwnerSwitchOff(user);
+    if (signedIn.deactivatedAt) throw new AccountDeactivatedError();
+    return { token: this.signToken(signedIn.id, signedIn.email), user: this.toClientUser(signedIn) };
   }
 
   /**
@@ -291,7 +292,7 @@ export class AuthService {
     if (!opts.admittedByProvider) this.assertAllowedDomain(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
@@ -396,8 +397,31 @@ export class AuthService {
    * sign back in). Canonicalises both sides, so `email` may be raw.
    */
   isOwnerEmail(email: string): boolean {
-    const candidate = canonicalEmail(email ?? '');
+    // Not trusted to be text: the accounts API passes a request body's value
+    // in before validating it, and a non-string is simply not an owner.
+    const candidate = typeof email === 'string' ? canonicalEmail(email) : '';
     return candidate.length > 0 && this.ownerEmails().includes(candidate);
+  }
+
+  /**
+   * An owner is never switched off, but an earlier version did switch off an
+   * owner without a server-held password, and no admin can undo that for a
+   * workspace's only owner. So wherever an owner's row is read to let them
+   * in, a switch-off left on it is cleared — on the row itself, so that the
+   * credentials that read the column directly (API keys, MCP tokens) are
+   * honoured again too. Returns `row` as it now stands; anyone else's row
+   * unchanged.
+   */
+  private async clearOwnerSwitchOff<T extends { id: string; email: string; deactivatedAt: Date | null }>(
+    row: T,
+  ): Promise<T> {
+    if (!row.deactivatedAt || !this.isOwnerEmail(row.email)) return row;
+    await this.db
+      .update(users)
+      .set({ deactivatedAt: null, updatedAt: new Date() })
+      .where(and(eq(users.id, row.id), isNotNull(users.deactivatedAt)));
+    this.activeCache.delete(row.id);
+    return { ...row, deactivatedAt: null };
   }
 
   /**
@@ -562,7 +586,7 @@ export class AuthService {
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { id: user.id, email: user.email, name: user.name };
   }
@@ -625,17 +649,20 @@ export class AuthService {
    * environment password signs it in regardless (see `loginWithPassword`),
    * and a session that sign-in mints must then be usable too, or the way
    * back into a deployment would lead nowhere. {@link deactivate} refuses
-   * the account, but a host may write the column itself.
+   * the account, but a host may write the column itself. Any owner's
+   * leftover switch-off is cleared here, as at sign-in
+   * ({@link clearOwnerSwitchOff}).
    */
   async isActive(userId: string): Promise<boolean> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
     if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit.active;
-    const [row] = await this.db
-      .select({ email: users.email, deactivatedAt: users.deactivatedAt })
+    const [found] = await this.db
+      .select({ id: users.id, email: users.email, deactivatedAt: users.deactivatedAt })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
+    const row = found && (await this.clearOwnerSwitchOff(found));
     const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
     this.activeCache.set(userId, { active, at: now });
     return active;

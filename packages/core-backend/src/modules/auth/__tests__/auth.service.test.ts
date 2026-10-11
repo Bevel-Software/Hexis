@@ -565,6 +565,8 @@ describe('AuthService — the owner', () => {
       expect(svc.isOwnerEmail('  Root@Example.COM ')).toBe(true);
       expect(svc.isOwnerEmail('alice@example.com')).toBe(false);
       expect(svc.isOwnerEmail('')).toBe(false);
+      expect(svc.isOwnerEmail({ evil: true } as unknown as string)).toBe(false);
+      expect(svc.isOwnerEmail(undefined as unknown as string)).toBe(false);
     }
   });
 

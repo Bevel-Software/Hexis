@@ -522,7 +522,29 @@ describe('account routes — the owner cannot be locked out', () => {
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toMatch(/^The owner's password can't be set by another admin/);
     });
+
+    it(`answers an email that is not text with a 400, not a crash, ${label}`, async () => {
+      const { app } = makeOwnerApp(adminPassword, OWNER_ROW);
+      const base = await listen(app);
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: { evil: true }, password: 'long-enough-pw' }),
+      });
+      expect(res.status).toBe(400);
+    });
   }
+
+  it("lets another admin create the owner's account with an empty password, which means none", async () => {
+    const base = await listen(makeApp({ admin: true }));
+    const res = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'root@example.com', password: '' }),
+    });
+    expect(res.status).toBe(201);
+    expect(authService.createAccount).toHaveBeenCalledWith('root@example.com', undefined, '');
+  });
 
   it("refuses to delete the owner's account where they could not sign back in (the cloud): nothing is erased", async () => {
     const { app } = makeOwnerApp('', OWNER_ROW);

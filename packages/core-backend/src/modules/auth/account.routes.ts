@@ -73,9 +73,10 @@ export function createAccountRoutes(
     }
     // Another admin setting an owner's password could then sign in as the
     // owner. The owner sets their own on the Account page; an owner account
-    // without a password (restoring one, say) is still created here.
+    // without a password (restoring one, say; an empty one counts as none,
+    // as in createAccount) is still created here.
     if (
-      password !== undefined &&
+      password &&
       authService.isOwnerEmail(email) &&
       canonicalEmail(email) !== canonicalEmail(req.userEmail ?? '')
     ) {

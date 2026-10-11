@@ -733,6 +733,22 @@ describe('UserAccountsPage — the owner', () => {
     await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith('u-root', { removeFromAccess: false }));
   });
 
+  it("the owner's note is the server's reason once it has arrived, and the same sentence when it cannot be fetched", async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT]);
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, removable: false, blockedReason: 'Reason from the server.' });
+    renderPage();
+    await waitFor(() => screen.getByText('Root'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account root@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('Reason from the server.'));
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('The owner stays in roles and access rules.');
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+
+    vi.mocked(getAccountReferences).mockRejectedValue(new Error('offline'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account root@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('offline'));
+    expect(screen.getByRole('dialog')).toHaveTextContent('The owner stays in roles and access rules.');
+  });
+
   it('the owner viewing their own row sees "(you)" and "Owner", and no buttons', async () => {
     vi.mocked(listAccounts).mockResolvedValue([{ ...CLOUD_OWNER, id: ME.id, email: ME.email, name: ME.name }, ALICE]);
     renderPage();
