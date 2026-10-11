@@ -333,10 +333,12 @@ export interface IGitService {
    * The files an applied change request PROPOSED, from the source head its
    * own apply recorded, against the target's published tip (three dots) —
    * for an applied request whose apply made no merge commit of its own, so
-   * nothing on the target holds its files. Network for the TARGET alone:
-   * its branch is fetched first, best-effort (an unreachable origin reads
-   * the clone's last-seen tip). The head is never fetched — its branch is
-   * retired — so a head this clone does not hold rejects with
+   * nothing on the target holds its files. Network for the TARGET alone,
+   * and required: its branch is fetched first, and when that fetch fails this
+   * rejects with a plain (retryable) error rather than read the clone's
+   * last-seen tip, which may predate the head's fork and so report the
+   * target's own later work as the request's. The head is never fetched —
+   * its branch is retired — so a head this clone does not hold rejects with
    * `WorkflowValidationError`.
    */
   changedFilesOfProposalHead(

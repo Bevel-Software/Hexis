@@ -61,13 +61,13 @@ const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
  * address, and "Applied on <date>." is the honest line when no name was
  * recorded.
  */
-export function applierName(name: string | null | undefined): { name: string } | null {
+function applierName(name: string | null | undefined): { name: string } | null {
   const shown = displayName(name);
   return shown ? { name: shown } : null;
 }
 
 /** One attempt in the merge log, as {@link lastApply} reads it. */
-export interface MergeLogAttempt {
+interface MergeLogAttempt {
   name: string;
   headSha: string;
   succeeded: boolean;
@@ -85,7 +85,7 @@ export interface MergeLogAttempt {
  * succeeded, no error) — and nobody when there is none. `null` when the
  * request has no succeeded attempt at all.
  */
-export function lastApply(
+function lastApply(
   attempts: MergeLogAttempt[],
 ): { name: string | null; headSha: string } | null {
   const newestFirst = [...attempts].sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
@@ -871,7 +871,9 @@ export class PullRequestService implements IPullRequestService {
     // what it proposed: the file list the finished view shows, with no "as
     // applied" diff (`finished.appliedSha` stays null). Never another
     // request's change — the head is this request's. A head this clone no
-    // longer holds answers no files, as before.
+    // longer holds answers no files, as before, and so does a target that
+    // cannot be refreshed: a stale tip could put other people's work in the
+    // list, so the read fails closed and the next one tries again.
     //
     // The merge-log lookup runs only when something reads it — this fallback,
     // or the finished facts past the cache — so a warm read of an applied

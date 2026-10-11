@@ -10,6 +10,7 @@ import {
   getOrCreateWorkspace,
   rawFileUrl,
   readFile,
+  toApiError,
 } from '../../workspace/services/workspace.api';
 import { BranchUnavailableError } from '../utils/readFailure';
 
@@ -133,7 +134,7 @@ export async function readFileAtCommit(
   side: 'after' | 'before',
 ): Promise<string> {
   const res = await authFetch(rawFileUrl(workspaceId, workspacePath, { ref: sha, side }));
-  if (!res.ok) throw new WorkspaceApiError(res.status, await errorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.text();
 }
 
@@ -157,14 +158,4 @@ export async function fileExistsOnWorkspace(
   if (res.status === 404) return false;
   if (!res.ok) throw new WorkspaceApiError(res.status);
   return true;
-}
-
-async function errorMessage(res: Response): Promise<string> {
-  try {
-    const body = (await res.json()) as { error?: unknown };
-    if (typeof body?.error === 'string') return body.error;
-  } catch {
-    // Not JSON: the status says it.
-  }
-  return `HTTP ${res.status}`;
 }

@@ -159,9 +159,10 @@ export async function writeFile(
  * "Couldn't add X" banner showed an opaque status code instead of the real
  * reason (e.g. "You don't have permission to write to …"). Shared by every
  * mutating route so the whole workspace API surfaces the backend message
- * uniformly.
+ * uniformly — and the change-request reads that go through this surface
+ * (`readFileAtCommit`) map their failures with it too.
  */
-async function toApiError(res: Response): Promise<WorkspaceApiError> {
+export async function toApiError(res: Response): Promise<WorkspaceApiError> {
   let msg = `HTTP ${res.status}`;
   try {
     const body = await res.json();

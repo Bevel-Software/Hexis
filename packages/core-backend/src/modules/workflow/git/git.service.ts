@@ -3099,11 +3099,14 @@ export class GitService implements IGitService {
    * The head is this request's own (its own merge-log row recorded it), so
    * the answer can never be another request's change: when the head is
    * already part of the target the three-dot diff is simply empty. The
-   * TARGET is refreshed first, best-effort as for an open request: a stale
-   * target tip older than the head's fork point would put the target's own
-   * later work into the diff. The head is never fetched — the retired branch
-   * cannot be — so it is in this clone's object store or this rejects with a
-   * `WorkflowValidationError`.
+   * TARGET is refreshed first, and that refresh is REQUIRED: a stale target
+   * tip older than the head's fork point would put the target's own later
+   * work — other people's files — into the diff, and nothing local can prove
+   * the tip it has is not that old. So when the target cannot be fetched this
+   * fails closed with a plain `Error` (retryable: the next read fetches
+   * again), never answering from the last-seen tip. The head is never
+   * fetched — the retired branch cannot be — so it is in this clone's object
+   * store or this rejects with a `WorkflowValidationError`.
    */
   async changedFilesOfProposalHead(
     workspaceId: string,
@@ -3116,7 +3119,9 @@ export class GitService implements IGitService {
       throw new WorkflowValidationError(`invalid commit sha: ${headSha}`);
     }
     const cwd = await this.repoDir(workspaceId);
-    await this.fetchPublishedRefs(cwd, [targetBranch]);
+    if (!(await this.fetchPublishedRefs(cwd, [targetBranch]))) {
+      throw new Error(`could not refresh ${targetBranch} to read commit ${headSha} against it`);
+    }
     return this.mutex.run(workspaceId, async () => {
       try {
         await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${headSha}^{commit}`]);
@@ -3511,8 +3516,12 @@ export class GitService implements IGitService {
     await this.fetchPublishedRefs(cwd, [baseBranch, headBranch]);
   }
 
-  /** {@link fetchPrRefs} for any set of published branches, same contract. */
-  private async fetchPublishedRefs(cwd: string, branches: string[]): Promise<void> {
+  /**
+   * {@link fetchPrRefs} for any set of published branches, same contract.
+   * Answers whether the fetch succeeded, for the one caller that must not
+   * read a stale tip (`changedFilesOfProposalHead`).
+   */
+  private async fetchPublishedRefs(cwd: string, branches: string[]): Promise<boolean> {
     // Best-effort: a branch may be local-only (rare) or origin briefly
     // unreachable; `resolveBranchRef` still falls back to whatever is local.
     // `--no-write-fetch-head` — this runs on the CR-detail path (polled around
@@ -3524,12 +3533,18 @@ export class GitService implements IGitService {
     // "reflect the latest push" is exactly what a drifted `remote.origin.fetch`
     // silently stops delivering, and the CR diff would then be computed against
     // a stale head. Every caller `assertValidBranchName`s every branch.
-    await this.git(cwd, [
+    return this.git(cwd, [
       'fetch', '--no-write-fetch-head', 'origin',
       ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`),
     ]).then(
-      () => void this.prFetchFailureLoggedAt.delete(cwd),
-      (err: unknown) => this.notePrFetchFailure(cwd, err),
+      () => {
+        this.prFetchFailureLoggedAt.delete(cwd);
+        return true;
+      },
+      (err: unknown) => {
+        this.notePrFetchFailure(cwd, err);
+        return false;
+      },
     );
   }
 

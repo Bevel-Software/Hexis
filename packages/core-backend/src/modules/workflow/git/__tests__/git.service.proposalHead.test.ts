@@ -31,6 +31,9 @@ describe('GitService.changedFilesOfProposalHead', () => {
     return runs.mock.calls.map(([, args]) => args as string[]).filter((args) => args[0] === 'fetch');
   }
 
+  /** The bare repository the clone fetches its target from. */
+  let origin: string;
+
   async function seed(): Promise<{ headOf8: string; headOf7: string }> {
     repo = path.join(root, workspaceId, 'knowledge-base');
     await fs.mkdir(repo, { recursive: true });
@@ -61,6 +64,11 @@ describe('GitService.changedFilesOfProposalHead', () => {
     await runGit(repo, ['commit', '-m', 'unrelated work on the target']);
     // Both branches retire with their requests.
     await runGit(repo, ['branch', '-D', 'robin/seven', 'robin/eight']);
+    // Origin holds the target, and neither retired branch.
+    origin = path.join(root, 'origin.git');
+    await runGit(root, ['init', '--bare', '-b', 'main', 'origin.git']);
+    await runGit(repo, ['remote', 'add', 'origin', origin]);
+    await runGit(repo, ['push', 'origin', 'main']);
 
     runner = new NodeGitRunner();
     git = new GitService(
@@ -117,7 +125,7 @@ describe('GitService.changedFilesOfProposalHead', () => {
    * the request's. The target is refreshed from origin first; the head's
    * branch is gone from origin and is never asked for.
    */
-  async function seedStaleTarget(): Promise<{ headOf9: string; origin: string }> {
+  async function seedStaleTarget(): Promise<{ headOf9: string }> {
     await seed();
     const init = await gitOut(repo, ['rev-list', '--max-parents=0', 'main']);
     await runGit(repo, ['checkout', '-b', 'robin/nine', 'main']);
@@ -127,13 +135,10 @@ describe('GitService.changedFilesOfProposalHead', () => {
     const headOf9 = await gitOut(repo, ['rev-parse', 'robin/nine']);
     await runGit(repo, ['checkout', 'main']);
     await runGit(repo, ['branch', '-D', 'robin/nine']);
-    const origin = path.join(root, 'origin.git');
-    await runGit(root, ['init', '--bare', '-b', 'main', 'origin.git']);
-    await runGit(repo, ['remote', 'add', 'origin', origin]);
-    await runGit(repo, ['push', 'origin', 'main']);
-    // The clone last saw the target before any of its later work.
+    // The clone last saw the target before any of its later work — before
+    // even the commit robin/nine forked from.
     await runGit(repo, ['update-ref', 'refs/remotes/origin/main', init]);
-    return { headOf9, origin };
+    return { headOf9 };
   }
 
   it('refreshes the target before reading, so its later work is not the request\'s', async () => {
@@ -152,11 +157,26 @@ describe('GitService.changedFilesOfProposalHead', () => {
     );
   });
 
-  it('still answers from the clone when origin cannot be reached', async () => {
-    const { headOf9, origin } = await seedStaleTarget();
-    // Bring the ref up to date by hand, then take origin away.
-    await runGit(repo, ['update-ref', 'refs/remotes/origin/main', await gitOut(repo, ['rev-parse', 'main'])]);
+  it("fails closed when origin cannot be reached and the clone's target predates the fork", async () => {
+    const { headOf9 } = await seedStaleTarget();
     await fs.rm(origin, { recursive: true, force: true });
+    // Read against the stale tip, Other.md (the target's own later work)
+    // would show as this request's. No answer at all is the honest one.
+    const err = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    // Retryable, not "this head is not readable here".
+    expect(err).not.toBeInstanceOf(WorkflowValidationError);
+    // And the read against the same stale tip is exactly what it refused.
+    const stale = await gitOut(repo, ['diff', '--name-only', `refs/remotes/origin/main...${headOf9}`]);
+    expect(stale.split('\n')).toContain('Other.md');
+  });
+
+  it('reads again once origin answers again', async () => {
+    const { headOf9 } = await seedStaleTarget();
+    const moved = path.join(root, 'origin-away.git');
+    await fs.rename(origin, moved);
+    await expect(git.changedFilesOfProposalHead(workspaceId, 'main', headOf9)).rejects.toBeInstanceOf(Error);
+    await fs.rename(moved, origin);
     const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
     expect(files.map((f) => f.path)).toEqual(['Pricing.md']);
   });

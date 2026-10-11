@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { PullRequestService, applierName, lastApply } from '../pull-request.service.js';
+import { PullRequestService } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
@@ -38,6 +38,7 @@ function harness(
     mismatch?: boolean;
     mergeLogThrows?: boolean;
     headNotInClone?: boolean;
+    targetUnreachable?: boolean;
   } = {},
 ) {
   const row = {
@@ -101,6 +102,7 @@ function harness(
   });
   const changedFilesOfProposalHead = vi.fn(async () => {
     if (opts.headNotInClone) throw new WorkflowValidationError('commit is not in this clone');
+    if (opts.targetUnreachable) throw new Error('could not refresh main');
     return [
       {
         path: 'Knowledge/Proposed.md',
@@ -309,6 +311,16 @@ describe('PullRequestService.getPrDetail — an apply that made no commit of its
     expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
   });
 
+  it('answers no files, never a stale diff, when the target cannot be refreshed', async () => {
+    const { svc } = harness(
+      { mergedSha: null },
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }], targetUnreachable: true },
+    );
+    const detail = await svc.getPrDetail(4);
+    expect(detail?.files).toEqual([]);
+    expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
+  });
+
   it('does not reach for the head when the request has its own verified merge commit', async () => {
     const { svc, changedFilesOfProposalHead } = harness(
       {},
@@ -400,7 +412,7 @@ describe('withoutAddresses — the detail the app route serves', () => {
   });
 });
 
-describe('lastApply', () => {
+describe('PullRequestService.getPrDetail — which merge-log attempt was the apply', () => {
   const at = (minute: number) => new Date(Date.UTC(2026, 9, 10, 9, minute));
   const attempt = (name: string, minute: number, succeeded: boolean, hasError: boolean) => ({
     name,
@@ -409,57 +421,80 @@ describe('lastApply', () => {
     hasError,
     startedAt: at(minute),
   });
+  /**
+   * The applier the detail names and the head it reads the proposal from —
+   * with no merge commit of its own, the head the apply recorded is what the
+   * request's files are read from, so the head it chose is observable.
+   */
+  async function applyOf(mergeLog: MergeLogRow[]) {
+    const { svc, changedFilesOfProposalHead } = harness({ mergedSha: null }, { mergeLog });
+    const detail = await svc.getPrDetail(4);
+    const calls = changedFilesOfProposalHead.mock.calls as unknown as unknown[][];
+    return { appliedBy: detail?.finished?.appliedBy ?? null, head: calls[0]?.[2] ?? null };
+  }
 
-  it('is nobody without a succeeded attempt', () => {
-    expect(lastApply([])).toBeNull();
-    expect(lastApply([attempt('A', 1, false, true), attempt('B', 2, false, false)])).toBeNull();
-  });
-  it('takes the newest succeeded attempt, whatever order the rows come in', () => {
-    expect(lastApply([attempt('Old', 1, true, false), attempt('New', 3, true, false), attempt('Bad', 4, false, true)]))
-      .toEqual({ name: 'New', headSha: attempt('New', 3, true, false).headSha });
-  });
-  it('a finalization names the begun attempt before it, with that attempt\'s head', () => {
-    const pushed = attempt('Robin', 2, false, false);
-    expect(lastApply([attempt('Dana', 5, true, true), pushed, attempt('Failed', 1, false, true)])).toEqual({
-      name: 'Robin',
-      headSha: pushed.headSha,
+  it('is nobody, and no head, without a succeeded attempt', async () => {
+    expect(await applyOf([])).toEqual({ appliedBy: null, head: null });
+    expect(await applyOf([attempt('A', 1, false, true), attempt('B', 2, false, false)])).toEqual({
+      appliedBy: null,
+      head: null,
     });
   });
-  it('a finalization with no begun attempt behind it names nobody', () => {
-    const fin = attempt('Dana', 5, true, true);
-    expect(lastApply([fin, attempt('Failed', 1, false, true)])).toEqual({ name: null, headSha: fin.headSha });
+  it('takes the newest succeeded attempt, whatever order the rows come in', async () => {
+    const latest = attempt('New', 3, true, false);
+    expect(await applyOf([attempt('Old', 1, true, false), latest, attempt('Bad', 4, false, true)])).toEqual({
+      appliedBy: { name: 'New' },
+      head: latest.headSha,
+    });
   });
-  it('a begun attempt newer than the finalization is not the one it finalized', () => {
-    expect(lastApply([attempt('Dana', 5, true, true), attempt('Later', 6, false, false)])).toMatchObject({ name: null });
+  it("a finalization names the begun attempt before it, with that attempt's head", async () => {
+    const pushed = attempt('Robin', 2, false, false);
+    expect(await applyOf([attempt('Dana', 5, true, true), pushed, attempt('Failed', 1, false, true)])).toEqual({
+      appliedBy: { name: 'Robin' },
+      head: pushed.headSha,
+    });
+  });
+  it('a finalization with no begun attempt behind it names nobody, and reads its own head', async () => {
+    const fin = attempt('Dana', 5, true, true);
+    expect(await applyOf([fin, attempt('Failed', 1, false, true)])).toEqual({ appliedBy: null, head: fin.headSha });
+  });
+  it('a begun attempt newer than the finalization is not the one it finalized', async () => {
+    expect((await applyOf([attempt('Dana', 5, true, true), attempt('Later', 6, false, false)])).appliedBy).toBeNull();
   });
 });
 
-describe('applierName', () => {
-  it('keeps a display name, trimmed', () => {
-    expect(applierName('  Robin Lee ')).toEqual({ name: 'Robin Lee' });
+describe('PullRequestService.getPrDetail — how the applier is named', () => {
+  async function appliedBy(name: string) {
+    const { svc } = harness({}, { mergeLog: [{ name }] });
+    return (await svc.getPrDetail(4))?.finished?.appliedBy ?? null;
+  }
+
+  it('keeps a display name, trimmed', async () => {
+    expect(await appliedBy('  Robin Lee ')).toEqual({ name: 'Robin Lee' });
   });
-  it('drops a blank or missing name', () => {
-    expect(applierName('')).toBeNull();
-    expect(applierName('   ')).toBeNull();
-    expect(applierName(null)).toBeNull();
-    expect(applierName(undefined)).toBeNull();
+  it('drops a blank name', async () => {
+    expect(await appliedBy('')).toBeNull();
+    expect(await appliedBy('   ')).toBeNull();
   });
-  it('drops anything shaped like an email address', () => {
-    expect(applierName('robin@bevel.software')).toBeNull();
-    expect(applierName('Robin <robin@bevel.software>')).toBeNull();
+  it('drops anything shaped like an email address', async () => {
+    expect(await appliedBy('robin@bevel.software')).toBeNull();
+    expect(await appliedBy('Robin <robin@bevel.software>')).toBeNull();
   });
 });
 
 describe('displayName — one rule for every person on a finished request', () => {
-  it.each(['  Robin Lee ', '', '   ', 'robin@bevel.software', 'Robin <robin@bevel.software>', null, undefined])(
+  it.each(['  Robin Lee ', '', '   ', 'robin@bevel.software', 'Robin <robin@bevel.software>'])(
     'the applier and the people on the detail are named alike for %j',
-    (name) => {
+    async (name) => {
+      const { svc } = harness({}, { mergeLog: [{ name }] });
       const shown = displayName(name);
-      expect(applierName(name)).toEqual(shown === null ? null : { name: shown });
+      expect((await svc.getPrDetail(4))?.finished?.appliedBy).toEqual(shown === null ? null : { name: shown });
     },
   );
   it('keeps a display name, trimmed, and refuses an address', () => {
     expect(displayName(' Robin Lee ')).toBe('Robin Lee');
     expect(displayName('robin@bevel.software')).toBeNull();
+    expect(displayName(null)).toBeNull();
+    expect(displayName(undefined)).toBeNull();
   });
 });
