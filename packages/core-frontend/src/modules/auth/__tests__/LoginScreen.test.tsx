@@ -81,6 +81,17 @@ describe('LoginScreen', () => {
     expect(column.classList).toContain('justify-center');
   });
 
+  it("shows an SSO callback's error at once, and clears it so a later visit does not show it again", async () => {
+    vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
+    sessionStorage.setItem('bevel_oauth_error', 'not_invited');
+    const { unmount } = renderScreen();
+    expect(screen.getByRole('alert')).toHaveTextContent('You do not have an account in this workspace yet.');
+    expect(sessionStorage.getItem('bevel_oauth_error')).toBeNull();
+    unmount();
+    renderScreen();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('renders the password form and one button per advertised SSO provider', async () => {
     vi.mocked(fetchLoginProviders).mockResolvedValue({
       password: true,
