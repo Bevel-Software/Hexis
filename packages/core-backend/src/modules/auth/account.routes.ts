@@ -187,6 +187,14 @@ export function createAccountRoutes(
         res.status(400).json({ error: error.message });
         return;
       }
+      // The address's switch lock is held by a change still being saved (an
+      // invite's promotion committing roles.yaml, say): the 409 the lock
+      // promises, with its words, so the admin tries again rather than
+      // reading an outage.
+      if (error instanceof WorkflowDomainError) {
+        res.status(error.status).json({ error: error.message, ...(error.payload ?? {}) });
+        return;
+      }
       log.error('switching an account off failed:', { err: error });
       res.status(500).json({ error: 'Could not switch this account off' });
     }

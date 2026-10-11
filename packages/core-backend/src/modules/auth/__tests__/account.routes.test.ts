@@ -5,6 +5,7 @@ import { createAccountRoutes } from '../account.routes.js';
 import type { AccountInvitedEvent } from '../account-hooks.js';
 import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
+import { WorkflowDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -538,6 +539,21 @@ describe('account routes — switching an account off and on', () => {
     const res = await post(base, 'u2/reactivate');
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'All 3 seats are taken', kind: 'admission' });
+  });
+
+  it('answers a switch lock that timed out with the 409 account-busy the lock promises, not a 500', async () => {
+    vi.mocked(authService.deactivate).mockRejectedValueOnce(
+      new WorkflowDomainError('Another change to this account is still being saved; try again in a moment.', 409, {
+        kind: 'account-busy',
+      }),
+    );
+    const base = await listen(makeApp({ admin: true }));
+    const res = await post(base, 'u2/deactivate');
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'Another change to this account is still being saved; try again in a moment.',
+      kind: 'account-busy',
+    });
   });
 
   it('answers a refused deactivation (the owner, say) with 400 and the reason', async () => {
