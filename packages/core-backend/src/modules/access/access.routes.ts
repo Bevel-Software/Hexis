@@ -435,12 +435,15 @@ export function createAccessRoutes(
 
   /**
    * POST /api/workspace/:id/access/batch
-   * Body: `{ paths: string[], verb?: 'write' | 'owner' }`. Returns
+   * Body: `{ paths: string[], verb?: 'write' | 'owner' | 'read' }`. Returns
    * `{ results: { [path]: boolean } }`.
    *
    * `verb` defaults to `write`, the question every existing caller asks.
    * `owner` answers from the `owner:` lists alone — no admin rescue, and a
-   * writer is not an owner — which is what an Owner pill has to mean.
+   * writer is not an owner — which is what an Owner pill has to mean. `read`
+   * is the verdict the single lookup's `canRead` gives, for many paths at
+   * once: what New page asks on a draft branch, where a page may go wherever
+   * its author may read, of every Knowledge folder in one request.
    */
   router.post('/workspace/:id/access/batch', async (req, res) => {
     const user = await requireUser(req, res);
@@ -455,13 +458,18 @@ export function createAccessRoutes(
       res.status(400).json({ error: 'paths cannot exceed 500 entries per request' });
       return;
     }
-    if (verb !== 'write' && verb !== 'owner') {
-      res.status(400).json({ error: 'verb must be "write" or "owner"' });
+    if (verb !== 'write' && verb !== 'owner' && verb !== 'read') {
+      res.status(400).json({ error: 'verb must be "write", "owner" or "read"' });
       return;
     }
 
     try {
-      const batch = verb === 'owner' ? accessControl.canOwnerBatch : accessControl.canWriteBatch;
+      const batch =
+        verb === 'owner'
+          ? accessControl.canOwnerBatch
+          : verb === 'read'
+            ? accessControl.canReadBatch
+            : accessControl.canWriteBatch;
       const result = await batch.call(
         accessControl,
         req.params.id,

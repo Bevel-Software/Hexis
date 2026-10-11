@@ -355,15 +355,16 @@ export async function fetchFileAccess(
 
 /**
  * Batch lookup — one round trip resolves one verb for multiple paths: write
- * permission by default, or `owner` — membership in an `owner:` grant, which
- * a writer (an Admin included) does not have by writing.
+ * permission by default, `owner` — membership in an `owner:` grant, which
+ * a writer (an Admin included) does not have by writing — or `read`, the
+ * verdict `fetchFileAccess` gives as `canRead`.
  * Caller-supplied path strings are the keys of the returned record. Throws if
  * any path is rejected by the backend.
  */
 export async function fetchFileAccessBatch(
   workspaceId: string,
   relativePaths: string[],
-  verb: 'write' | 'owner' = 'write',
+  verb: 'write' | 'owner' | 'read' = 'write',
 ): Promise<{ results: Record<string, boolean> }> {
   return handleApiResponse(
     await authFetch(`/api/workspace/${workspaceId}/access/batch`, {

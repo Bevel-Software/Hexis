@@ -12,6 +12,7 @@ import type { IAdminAccessService } from '../admin/admin.interface.js';
 import type { UserAccessRemovalService } from '../access/user-access-removal.service.js';
 import { sendError } from '../access/admin-route-helpers.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import './auth.middleware.js'; // Express Request augmentation
 
 /**
@@ -26,7 +27,17 @@ import './auth.middleware.js'; // Express Request augmentation
  * bootstrap admin (always-admin, see AdminAccessService).
  */
 export function createAccountRoutes(
-  authService: Pick<AuthService, 'listAccounts' | 'createAccount' | 'createAccountWithStartingPassword' | 'getUserById' | 'deactivate' | 'reactivate'>,
+  authService: Pick<
+    AuthService,
+    | 'listAccounts'
+    | 'createAccount'
+    | 'createAccountWithStartingPassword'
+    | 'getUserById'
+    | 'deactivate'
+    | 'reactivate'
+    | 'isOwnerEmail'
+    | 'assertDeletable'
+  >,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
   accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
@@ -42,7 +53,8 @@ export function createAccountRoutes(
   };
 
   // GET /api/admin/accounts — id, email, name, whether a password hash is
-  // stored, and whether the account is the env bootstrap admin.
+  // stored, whether the account is the env bootstrap admin, and whether it is
+  // an owner (and, if so, whether it may be deleted).
   router.get('/admin/accounts', requireAdmin, async (_req, res) => {
     res.json({ accounts: await authService.listAccounts() });
   });
@@ -78,6 +90,19 @@ export function createAccountRoutes(
     }
     if (keepExistingPassword === true && typeof password !== 'string') {
       res.status(400).json({ error: 'keepExistingPassword needs a password' });
+      return;
+    }
+    // Another admin setting an owner's password could then sign in as the
+    // owner. The owner sets their own on the Account page; an owner account
+    // without a password (restoring one, say; an empty one counts as none,
+    // as in createAccount) is still created here. An invite's starting
+    // password is a password too: the owner is invited by nobody.
+    if (
+      password &&
+      authService.isOwnerEmail(email) &&
+      canonicalEmail(email) !== canonicalEmail(req.userEmail ?? '')
+    ) {
+      res.status(400).json({ error: "The owner's password can't be set by another admin; the owner sets it on their Account page." });
       return;
     }
     try {
@@ -200,14 +225,27 @@ export function createAccountRoutes(
     // for the removal below — never logged, never returned.
     let email: string | null = null;
     let actor: AuthUser | null = null;
-    if (removeFromAccess) {
+    try {
+      const user = await authService.getUserById(userId);
+      if (!user) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      // An owner who could not sign back in afterwards is refused for every
+      // caller, whether or not the access option is ticked.
+      authService.assertDeletable(user.email);
+      if (removeFromAccess) email = user.email;
+    } catch (err) {
+      if (err instanceof AccountChangeRefusedError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      log.error('looking up the account to erase failed:', { err });
+      res.status(500).json({ error: 'Failed to erase user' });
+      return;
+    }
+    if (removeFromAccess && email !== null) {
       try {
-        const user = await authService.getUserById(userId);
-        if (!user) {
-          res.status(404).json({ error: 'No such user' });
-          return;
-        }
-        email = user.email;
         // The existing guards: the deployment owner and the last Admin are
         // refused up front, before anything is erased.
         await accessRemoval!.assertRemovable(email);

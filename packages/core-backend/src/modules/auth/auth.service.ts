@@ -54,6 +54,12 @@ const SYSTEM_ACCOUNT_PASSWORD_REFUSAL = 'System accounts cannot be given a passw
 const ENV_ADMIN_PASSWORD_REFUSAL =
   "This account's password is set in the deployment environment and cannot be changed here";
 
+/** What an admin is told when they try to switch an owner off. */
+export const OWNER_SWITCH_OFF_REFUSAL = "The owner can't be switched off.";
+
+/** What an admin is told when deleting an owner's account would leave them no way to sign in. */
+export const OWNER_DELETE_REFUSAL = "The owner's account can't be deleted: they would have no way to sign in.";
+
 /**
  * Decoy hash verified when the email is unknown or has no password set, so
  * those paths cost the same scrypt work as a real wrong-password attempt —
@@ -250,10 +256,12 @@ export class AuthService implements IAccountSwitchGuard {
       }
       // Never refused for being switched off: the environment password is
       // the deployment's way back in, and {@link deactivate} refuses this
-      // account for that reason.
+      // account for that reason. A switch-off left on the row by an earlier
+      // version is cleared here too, so the credentials that read the column
+      // directly come back with this sign-in ({@link clearOwnerSwitchOff}).
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       await this.assertAdmitted(normalizedEmail, 'bootstrap');
-      const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
+      const admin = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, defaultName));
       return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
     }
 
@@ -268,8 +276,9 @@ export class AuthService implements IAccountSwitchGuard {
     }
     // Only now, with the password proven: telling a stranger that an address
     // is switched off would tell them it has an account.
-    if (user.deactivatedAt) throw new AccountDeactivatedError();
-    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
+    const signedIn = await this.clearOwnerSwitchOff(user);
+    if (signedIn.deactivatedAt) throw new AccountDeactivatedError();
+    return { token: this.signToken(signedIn.id, signedIn.email), user: this.toClientUser(signedIn) };
   }
 
   /**
@@ -299,7 +308,7 @@ export class AuthService implements IAccountSwitchGuard {
     if (!opts.admittedByProvider) this.assertAllowedDomain(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
@@ -451,6 +460,64 @@ export class AuthService implements IAccountSwitchGuard {
   }
 
   /**
+   * Is `email` an owner of this deployment — an address it is configured
+   * with as its owner (`ADMIN_EMAIL`; on Hexis by Bevel cloud, whoever
+   * created the workspace)? Unlike {@link isEnvAdminEmail} this asks nothing
+   * of `ADMIN_PASSWORD`: the cloud never sets one, and its owner must be
+   * protected all the same. Behind {@link deactivate} (which always refuses
+   * an owner) and {@link assertDeletable} (which refuses one who could not
+   * sign back in). Canonicalises both sides, so `email` may be raw.
+   */
+  isOwnerEmail(email: string): boolean {
+    // Not trusted to be text: the accounts API passes a request body's value
+    // in before validating it, and a non-string is simply not an owner.
+    const candidate = typeof email === 'string' ? canonicalEmail(email) : '';
+    return candidate.length > 0 && this.ownerEmails().includes(candidate);
+  }
+
+  /**
+   * An owner is never switched off, but an earlier version did switch off an
+   * owner without a server-held password, and no admin can undo that for a
+   * workspace's only owner. So wherever an owner's row is read to let them
+   * in, a switch-off left on it is cleared — on the row itself, so that the
+   * credentials that read the column directly (API keys, MCP tokens) are
+   * honoured again too. Returns `row` as it now stands; anyone else's row
+   * unchanged.
+   */
+  private async clearOwnerSwitchOff<T extends { id: string; email: string; deactivatedAt: Date | null }>(
+    row: T,
+  ): Promise<T> {
+    if (!row.deactivatedAt || !this.isOwnerEmail(row.email)) return row;
+    await this.db
+      .update(users)
+      .set({ deactivatedAt: null, updatedAt: new Date() })
+      .where(and(eq(users.id, row.id), isNotNull(users.deactivatedAt)));
+    this.activeCache.delete(row.id);
+    return { ...row, deactivatedAt: null };
+  }
+
+  /**
+   * The configured owner addresses, canonical, blanks dropped. One today
+   * (`ADMIN_EMAIL` is a single string); a list so that every owner is
+   * treated alike should the configuration ever carry more.
+   */
+  private ownerEmails(): string[] {
+    return [this.config.adminEmail].map((e) => canonicalEmail(e ?? '')).filter((e) => e.length > 0);
+  }
+
+  /**
+   * Refuse to delete `email`'s account when it is an owner who could not
+   * sign back in afterwards: only an owner whose password the server holds,
+   * with password sign-in on (exactly {@link reportsAsEnvAdmin}), still has a
+   * way in once the row is gone. Anyone else's account passes.
+   */
+  assertDeletable(email: string): void {
+    if (this.isOwnerEmail(email) && !this.reportsAsEnvAdmin(canonicalEmail(email ?? ''))) {
+      throw new AccountChangeRefusedError(OWNER_DELETE_REFUSAL);
+    }
+  }
+
+  /**
    * Whether a client is told `email` is the deployment admin — behind
    * {@link toClientUser} and {@link listAccounts}. The identity is
    * {@link isEnvAdminEmail}; the switch is password sign-in: with
@@ -532,6 +599,10 @@ export class AuthService implements IAccountSwitchGuard {
       name: string;
       hasPassword: boolean;
       isEnvAdmin: boolean;
+      /** One of the deployment's owners (`ADMIN_EMAIL`), with or without a server-held password. */
+      isOwner: boolean;
+      /** An owner whose account may be deleted, since they can sign back in (see {@link assertDeletable}); false for everyone else. */
+      ownerCanBeDeleted: boolean;
       /** When an admin switched the account off; null while it is on. */
       deactivatedAt: Date | null;
       /** One of the accounts the platform runs its own work as: never switched off, nobody signs in with it. */
@@ -543,16 +614,22 @@ export class AuthService implements IAccountSwitchGuard {
     // would sort by IV noise. The table is one row per team member.
     const rows = await this.db.select().from(users);
     return rows
-      .map((row) => ({
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        hasPassword: row.passwordHash != null,
-        isEnvAdmin: this.reportsAsEnvAdmin(row.email),
-        deactivatedAt: row.deactivatedAt,
-        isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
-        createdAt: row.createdAt,
-      }))
+      .map((row) => {
+        const isEnvAdmin = this.reportsAsEnvAdmin(row.email);
+        const isOwner = this.isOwnerEmail(row.email);
+        return {
+          id: row.id,
+          email: row.email,
+          name: row.name,
+          hasPassword: row.passwordHash != null,
+          isEnvAdmin,
+          isOwner,
+          ownerCanBeDeleted: isOwner && isEnvAdmin,
+          deactivatedAt: row.deactivatedAt,
+          isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
+          createdAt: row.createdAt,
+        };
+      })
       .sort((a, b) => a.email.localeCompare(b.email));
   }
 
@@ -589,7 +666,7 @@ export class AuthService implements IAccountSwitchGuard {
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { id: user.id, email: user.email, name: user.name };
   }
@@ -652,17 +729,20 @@ export class AuthService implements IAccountSwitchGuard {
    * environment password signs it in regardless (see `loginWithPassword`),
    * and a session that sign-in mints must then be usable too, or the way
    * back into a deployment would lead nowhere. {@link deactivate} refuses
-   * the account, but a host may write the column itself.
+   * the account, but a host may write the column itself. Any owner's
+   * leftover switch-off is cleared here, as at sign-in
+   * ({@link clearOwnerSwitchOff}).
    */
   async isActive(userId: string): Promise<boolean> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
     if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit.active;
-    const [row] = await this.db
-      .select({ email: users.email, deactivatedAt: users.deactivatedAt })
+    const [found] = await this.db
+      .select({ id: users.id, email: users.email, deactivatedAt: users.deactivatedAt })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
+    const row = found && (await this.clearOwnerSwitchOff(found));
     const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
     this.activeCache.set(userId, { active, at: now });
     return active;
@@ -698,9 +778,10 @@ export class AuthService implements IAccountSwitchGuard {
    * {@link isActive}). Idempotent: an account already off keeps the moment
    * it was first switched off.
    *
-   * The deployment admin is refused: the environment password is the way
-   * back into a deployment whose every other admin is gone, and switching
-   * it off would close that door from inside. So are the machine accounts
+   * An owner is refused, on every deployment, whether or not the server
+   * holds a password for them: switching the owner off locks them out of
+   * their own workspace (and, where `ADMIN_PASSWORD` is set, closes the
+   * way back into a deployment whose every other admin is gone). So are the machine accounts
    * core runs its own work as. Refusing an admin's own account is the
    * route's concern, since it knows who is asking.
    *
@@ -709,8 +790,8 @@ export class AuthService implements IAccountSwitchGuard {
   async deactivate(userId: string): Promise<boolean> {
     const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!row) return false;
-    if (this.isEnvAdminEmail(row.email)) {
-      throw new AccountChangeRefusedError('The deployment admin cannot be switched off: its password in the environment is the way back in.');
+    if (this.isOwnerEmail(row.email)) {
+      throw new AccountChangeRefusedError(OWNER_SWITCH_OFF_REFUSAL);
     }
     if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
       throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');
