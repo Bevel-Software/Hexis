@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { pgErrorCode } from '../database/pg-error.js';
 
 /** The handle `db.transaction` hands its callback. */
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -39,12 +40,17 @@ export const ACCOUNT_BUSY_MESSAGE = 'Another change to this account is still bei
  * ({@link ACCOUNT_SWITCH_LOCK_WAIT_MS}), which the transaction's end reverts
  * with everything else; running out of it is answered as a 409 `account-busy`.
  */
-export async function takeAccountSwitchLock(tx: Pick<Tx, 'execute'>, email: string): Promise<void> {
-  await tx.execute(sql`select set_config('lock_timeout', ${String(ACCOUNT_SWITCH_LOCK_WAIT_MS)}, true)`);
+export async function takeAccountSwitchLock(
+  tx: Pick<Tx, 'execute'>,
+  email: string,
+  waitMs: number = ACCOUNT_SWITCH_LOCK_WAIT_MS,
+): Promise<void> {
+  await tx.execute(sql`select set_config('lock_timeout', ${String(waitMs)}, true)`);
   try {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`account-switch:${canonicalEmail(email)}`}))`);
   } catch (err) {
-    if ((err as { code?: unknown } | null)?.code === LOCK_NOT_AVAILABLE) {
+    // Drizzle wraps the driver's error, so the SQLSTATE is on its cause.
+    if (pgErrorCode(err) === LOCK_NOT_AVAILABLE) {
       throw new WorkflowDomainError(ACCOUNT_BUSY_MESSAGE, 409, { kind: 'account-busy' });
     }
     throw err;
