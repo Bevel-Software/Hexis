@@ -943,16 +943,24 @@ describe('AccessControlService', () => {
       expect(await svc.canRead(workspaceId, 'sara@example.com', 'Knowledge/Foo.md')).toBe(true);
     });
 
-    it('no admin rescue for read — admins read a restricted node only if listed', async () => {
+    it('the root floor gives admins read (write implies it) whatever the root says; a nearer scope can still exclude them', async () => {
       const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
-      // Write/read restricted to Product Manager — Admin is neither listed nor a
-      // writer here, so there's no rescue path to read (unlike write on access.md).
+      // Write/read restricted to Product Manager — Admin is not named at the
+      // root, but the floor gives Admin write there and write implies read, so
+      // an admin who could create anything under the root can also see it.
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Product Manager\nread:\n  - Product Manager\n---\n');
+      // A subfolder is an ordinary scope: it takes Admin's read away as it would anyone's.
+      await writeFile(repo, 'Knowledge/Board/access.md', '---\nread:\n  - deny Admin\n---\n');
 
       const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
-      // razvan is Admin but not a Product Manager — restricted read denies him.
-      expect(await svc.canRead(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
+      // razvan is Admin but not a Product Manager.
+      expect(await svc.canRead(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
+      expect(await svc.canRead(workspaceId, 'razvan@bevel.software', 'Knowledge/Board/Minutes.md')).toBe(false);
+      // The floor is write and read, not download.
+      expect(await svc.canDownload(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
+      // Nobody else gains anything from it.
+      expect(await svc.canRead(workspaceId, 'ali@bevel.software', 'Knowledge/Foo.md')).toBe(false);
     });
 
     it("a node's own read: frontmatter grants just that file", async () => {
@@ -1002,17 +1010,24 @@ describe('AccessControlService', () => {
     });
 
     describe('eligibleReaders', () => {
-      it('reports restricted=true with no readers for a default-denied node', async () => {
+      it('reports restricted=true, with Admin as the one reader, for a default-denied node', async () => {
         const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
         await writeFile(repo, 'roles.yaml', ROLES_YAML);
         // The only line in the tree is a DENIAL — a denial grants nobody, and
         // no verb that folds into read grants anyone either, so the node is
-        // default-denied with no readers to name.
+        // default-denied. Admin still reads it through the root floor, and the
+        // list says so: the banner must name who can actually open it.
         await writeFile(repo, 'access.md', '---\nread:\n  - deny everyone\n---\n');
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
-        expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [], publicVia: [] });
+        expect(e).toEqual({
+          restricted: true,
+          principals: [{ name: 'Admin', kind: 'role' }],
+          roles: ['Admin'],
+          users: [],
+          publicVia: [],
+        });
       });
 
       it('reports restricted=false when read: everyone applies', async () => {
@@ -1047,10 +1062,15 @@ describe('AccessControlService', () => {
         // node really is readable by everyone — not restricted.
         expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Open/Foo.md')).toBe(true);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Open/Foo.md');
+        // Admin is listed beside everyone, as it is for write: the floor holds
+        // wherever no nearer scope excludes it.
         expect(e).toEqual({
           restricted: false,
-          principals: [{ name: 'everyone', kind: 'role' }],
-          roles: ['everyone'],
+          principals: [
+            { name: 'Admin', kind: 'role' },
+            { name: 'everyone', kind: 'role' },
+          ],
+          roles: ['Admin', 'everyone'],
           users: [],
           publicVia: [],
         });
@@ -1133,19 +1153,36 @@ describe('AccessControlService', () => {
     });
 
     /**
-     * Beyond the two rescue files, the owner gets exactly what the Admin role
-     * gets: the root write floor, and nothing a nearer rule takes away. Read
-     * and download still answer to the access tree.
+     * Beyond the two rescue files, the owner IS the Admin role: the root floor
+     * (write, and the read it implies), every grant and denial that names
+     * Admin along the way, and nothing more. An owner the file does not name
+     * used to hold write everywhere and read nowhere, so the read-before-write
+     * gate refused them the very file the floor let them create.
      */
-    it('gets write only through the root floor, never past a subfolder that excludes Admin', async () => {
+    it('is bound by the Admin rules for every verb, as a member of the role would be', async () => {
       const ws = await seeded();
       const { repo } = await seedWorkspace(root, workspaceId);
       await writeFile(repo, 'HR/access.md', '---\nwrite:\n  - deny Admin\n---\n');
+      await writeFile(repo, 'Board/access.md', '---\nread:\n  - deny Admin\n---\n');
+      await writeFile(repo, 'Vault/access.md', '---\ndownload:\n  - Admin\n---\n');
       const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), [OWNER]);
+      // The floor: write and read under the root, not download.
       expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(true);
-      expect(await svc.canWrite(workspaceId, OWNER, 'HR/Salaries.md')).toBe(false);
-      expect(await svc.canRead(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+      expect(await svc.canRead(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+      // A nearer rule naming Admin binds the owner too, each verb on its own.
+      expect(await svc.canWrite(workspaceId, OWNER, 'HR/Salaries.md')).toBe(false);
+      expect(await svc.canRead(workspaceId, OWNER, 'HR/Salaries.md')).toBe(true);
+      expect(await svc.canRead(workspaceId, OWNER, 'Board/Minutes.md')).toBe(false);
+      expect(await svc.canWrite(workspaceId, OWNER, 'Board/Minutes.md')).toBe(false);
+      // A grant to Admin is a grant to the owner — the role's keys are theirs.
+      expect(await svc.canDownload(workspaceId, OWNER, 'Vault/Keys.md')).toBe(true);
+      // The explorer's batch asks the same question and gets the same answer.
+      const batch = await svc.canReadBatch(workspaceId, OWNER, ['Knowledge/Foo.md', 'Board/Minutes.md']);
+      expect([...batch.entries()]).toEqual([
+        ['Knowledge/Foo.md', true],
+        ['Board/Minutes.md', false],
+      ]);
     });
 
     it('is matched case-insensitively, like every other email here', async () => {
