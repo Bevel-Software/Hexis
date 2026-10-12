@@ -641,17 +641,20 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
- * One floor for `write`, applied during the walk: an admin (same definition)
- * always holds `write` at the repository root. When the walk reaches the root
- * `access.md` (or the own frontmatter of a file directly in the root) — or runs
- * out of scopes without a verdict — an admin is granted,
- * whatever the root file says, so no root rule can lock the deployment out of
- * its own tree. A NEARER scope still decides first: a subfolder that denies
- * Admin (or denies `everyone` without naming Admin) excludes admins there like
- * anyone else. The root file's own entries are not rewritten — the floor is a
- * verdict, not a grant line — so `grantSources` stays file-backed.
+ * One floor for `write` and the `read` it implies (`holdsAdminFloor`), applied
+ * during the walk: an admin (same definition) always holds both at the
+ * repository root. When the walk reaches the root `access.md` (or the own
+ * frontmatter of a file directly in the root) — or runs out of scopes without
+ * a verdict — an admin is granted, whatever the root file says, so no root
+ * rule can lock the deployment out of its own tree, and nobody who may change
+ * everything under the root is refused the sight of it. A NEARER scope still
+ * decides first: a subfolder that denies Admin (or denies `everyone` without
+ * naming Admin) excludes admins there like anyone else. The root file's own
+ * entries are not rewritten — the floor is a verdict, not a grant line — so
+ * `grantSources` stays file-backed.
  *
- * No special-cases for `read`/`download` — they fall through to scope resolution.
+ * No special-case for `download` (or `owner`) — they fall through to scope
+ * resolution; write implies read, not download.
  */
 function hasPermissionResolved(
   model: AccessModel,
