@@ -1112,12 +1112,11 @@ function canEveryoneReadResolved(
   // Every *named* principal must also still read. A collapsed deny may have
   // been shadowed by a closer-scope `everyone` grant, so re-resolve each
   // candidate through the closeness-first gate rather than trusting the
-  // collapsed deny state. (Role members live in roles.yaml; inline-named users
-  // come from `byEmail`.)
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
-  for (const email of candidates) {
+  // collapsed deny state. The candidates are the same set the eligible-email
+  // lists enumerate — roles.yaml members, inline-named users, and the
+  // deployment owner, whom a `deny Admin` carves out like any member of the
+  // role whether or not roles.yaml names them.
+  for (const email of namedCandidateEmails(model, byEmail)) {
     if (!hasPermissionResolved(model, 'read', email, relativePath, fileOwn)) return false;
   }
   return true;
@@ -1258,8 +1257,8 @@ function eligibleHoldersResolved(
 
 /**
  * Every individual the model names: `roles.yaml` members, emails named inline
- * at this path's scope, and the deployment owner (Admin for the write floor
- * even when `roles.yaml` does not list them).
+ * at this path's scope, and the deployment owner (bound by every rule that
+ * names Admin even when `roles.yaml` does not list them).
  */
 function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
   const candidates = new Set<string>(model.deploymentOwners);

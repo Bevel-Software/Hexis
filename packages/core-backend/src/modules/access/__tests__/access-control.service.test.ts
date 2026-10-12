@@ -1185,6 +1185,30 @@ describe('AccessControlService', () => {
       ]);
     });
 
+    it('is counted when the share dialog asks whether everyone can read: a public folder that denies Admin is restricted for them', async () => {
+      const ws = await seeded();
+      const { repo } = await seedWorkspace(root, workspaceId);
+      // Everyone reads, Admin is carved out, and the role's one member is let
+      // back in by name (a direct entry outranks the role's denial). The only
+      // person the denial still reaches is the owner, whom roles.yaml does not
+      // name — so a check that enumerates roles.yaml alone sees nobody denied.
+      await writeFile(
+        repo,
+        'Open/access.md',
+        '---\nread:\n  - everyone\n  - deny Admin\n  - Someone Else <someone-else@example.com>\n---\n',
+      );
+      await writeFile(repo, 'Public/access.md', '---\nread:\n  - everyone\n---\n');
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), [OWNER]);
+      expect(await svc.canRead(workspaceId, 'someone-else@example.com', 'Open/Notes.md')).toBe(true);
+      // The denial reaches the owner, so the folder is not readable by
+      // everyone and the dialog must not say it is.
+      expect(await svc.canRead(workspaceId, OWNER, 'Open/Notes.md')).toBe(false);
+      expect((await svc.eligibleReaders(workspaceId, 'Open/Notes.md')).restricted).toBe(true);
+      // Without the carve-out the same owner reads, and the folder is public.
+      expect(await svc.canRead(workspaceId, OWNER, 'Public/Notes.md')).toBe(true);
+      expect((await svc.eligibleReaders(workspaceId, 'Public/Notes.md')).restricted).toBe(false);
+    });
+
     it('is matched case-insensitively, like every other email here', async () => {
       const ws = await seeded();
       const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), ['OWNER@Bevel.Software']);
