@@ -149,8 +149,11 @@ export type AccessDecisionSource = {
  * `via` names the tier that matched and `principal` the display name of the
  * group, role or plugin principal it matched on (the caller's own email for
  * `person`, `everyone` for the built-in). `admin-floor` is Admin's write at
- * the repository root, which no rule there can take away; its source is the
- * root's rules, or null when the root has none.
+ * the repository root, and the read that write implies, which no rule there
+ * can take away; its source is the scope the floor decided at — the root's
+ * rules (`folder`), or the own `frontmatter` of a file directly in the root,
+ * whose entries are part of the root and cannot take the floor away either —
+ * or null when the walk found no scope at all.
  */
 export interface AccessDecision {
   allowed: boolean;
