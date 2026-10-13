@@ -36,6 +36,8 @@ import {
   COMMAND_MENU_SHORTCUT_LABEL,
   isCommandMenuShortcut,
   onCommandMenuRequest,
+  shortcutHint,
+  shortcutKeycapWidth,
 } from '../commands/command-menu';
 import { useSetupChecklist } from '../../onboarding/state/onboarding';
 
@@ -71,9 +73,6 @@ type PaletteRow =
 
 const actionRow = (action: CommandAction): PaletteRow => ({ key: `action:${action.id}`, action });
 const resultRow = (result: SearchResult): PaletteRow => ({ key: result.key, result });
-
-/** A shortcut as a screen reader should hear it: "C", "G then K". */
-const spokenShortcut = (keys: readonly string[]) => keys.join(' then ');
 
 interface CatalogState {
   /** A load is in flight. The previous catalog, if any, stays on screen meanwhile. */
@@ -210,8 +209,8 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     [openRef],
   );
 
-  // The commands are read here, not in the panel, because the single-key
-  // shortcuts (C, G K, G S) run them while the palette is shut.
+  // The commands are read here, not in the panel, because their shortcuts
+  // (C, ⇧I, ⇧K, ⇧S) run them while the palette is shut.
   const { actions, ctx } = useCommandActions();
   useCommandShortcuts({ actions, ctx, enabled: !open, run: runAction });
 
@@ -332,7 +331,7 @@ function SearchPanel({
   const [query, setQuery] = useState('');
   /**
    * The highlighted row. An EMPTY query highlights nothing until ↑/↓ or the
-   * pointer picks a row: its first row is a suggested command (New page), and
+   * pointer picks a row: its first row is a suggested command (Create new page), and
    * Ctrl+K then Enter must never make a page nobody asked for. Once something
    * is typed, the best match is highlighted and Enter takes it.
    */
@@ -434,7 +433,7 @@ function SearchPanel({
         {rows.map((r, i) => {
           const index = offset + i;
           const selected = index === active;
-          const shortcut = r.action?.shortcut;
+          const hint = r.action?.shortcut ? shortcutHint(r.action.shortcut) : null;
           const location = r.action ? r.action.group : r.result.location;
           return (
             <div
@@ -462,21 +461,21 @@ function SearchPanel({
                   {location}
                 </span>
               )}
-              {shortcut && shortcut.length > 0 && (
+              {hint && (
                 <>
-                  {/* Drawn as keys for the eye, said as words for the ear:
-                      `aria-keyshortcuts` cannot express a sequence like G K. */}
-                  <span aria-hidden className={cn('flex flex-none items-center gap-1 pl-2', !location && 'ml-auto')}>
-                    {shortcut.map((key, k) => (
-                      <kbd
-                        key={k}
-                        className="rounded-xs border border-line-strong px-[5px] font-mono text-meta text-ink-faint"
-                      >
-                        {key}
-                      </kbd>
-                    ))}
-                  </span>
-                  <span className="sr-only"> (shortcut {spokenShortcut(shortcut)})</span>
+                  {/* Drawn as one key for the eye, every cap one width so the
+                      keys line up; said as words for the ear. */}
+                  <kbd
+                    aria-hidden
+                    className={cn(
+                      'inline-flex flex-none justify-center rounded-xs border border-line-strong font-mono text-meta text-ink-faint',
+                      shortcutKeycapWidth(),
+                      location ? 'ml-2' : 'ml-auto',
+                    )}
+                  >
+                    {hint.label}
+                  </kbd>
+                  <span className="sr-only"> (shortcut {hint.spoken})</span>
                 </>
               )}
             </div>

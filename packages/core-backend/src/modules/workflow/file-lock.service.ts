@@ -23,6 +23,28 @@
  * never be keyed on a path no file verb would accept. See
  * `canonicalFileIdentity`.
  *
+ * Workspace identity works the same way. The lock routes pass the `:id`
+ * path param, which Express URL-decodes, so a slashed branch's workspace
+ * arrives as `alice/feature`; the deletion gate and the git status probe ask
+ * with the encoded `alice%2Ffeature`. Every method keys rows on
+ * `canonicalWorkspaceId`, so both spellings are one workspace and a held file
+ * is seen whichever spelling asks.
+ *
+ * Unlike raw path spellings (below), rows written under the decoded workspace id before this
+ * landed are still honoured until they go: every read, heartbeat and release
+ * also matches that spelling, and an acquire is refused while a live row
+ * under it holds the same file. Otherwise a lock held across the upgrade
+ * would be invisible for up to its TTL — to the deletion gate and to a second
+ * editor alike. Nothing new is ever written under it, so once the last such
+ * row has expired or been released the extra spelling matches nothing.
+ *
+ * This covers rows LEFT by the previous version, not rows it is still
+ * writing: a previous-version process never looks at a canonical row, so no
+ * check here could make the two contend while both run. They never do — one
+ * server process owns the workspaces directory (see `branchLifecycle` in the
+ * workflow service; this service's deletion gate is in-process for the same
+ * reason), and an upgrade stops the old process before the new one starts.
+ *
  * There is no transition handling for rows written under a raw spelling
  * before this landed: such a row is now unreachable by name and expires on
  * its own TTL. For one deploy an in-flight edit's lock can linger up to the
@@ -35,12 +57,13 @@
  * bounded by concurrent editors, not history, so lazy GC is fine.
  */
 
-import { and, eq, gt, lte } from 'drizzle-orm';
+import { and, eq, gt, inArray, lte } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { fileLocks } from '../database/schema.js';
 import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/platform-shared';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
+import { branchForWorkspaceId, canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
 /**
  * Lock lifetime without a heartbeat. The client is expected to heartbeat
@@ -50,6 +73,17 @@ import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
  * blips" — 60s is a balance.
  */
 const LOCK_TTL_MS = 60_000;
+
+/**
+ * The workspace ids a lock row of canonical workspace `workspaceId` can sit
+ * under: the canonical one every write uses, then — for a slashed branch —
+ * the decoded one rows were written under before workspace ids were
+ * canonicalised. See the module comment.
+ */
+function workspaceSpellings(workspaceId: string): string[] {
+  const legacy = branchForWorkspaceId(workspaceId);
+  return legacy === workspaceId ? [workspaceId] : [workspaceId, legacy];
+}
 
 function rowToFileLock(row: typeof fileLocks.$inferSelect): FileLock {
   return {
@@ -125,13 +159,14 @@ export class FileLockService {
    * (or vice versa).
    */
   async acquire(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
     user: AuthUser,
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     if (this.closing.has(branch)) {
       throw new WorkflowValidationError(`"${branch}" is being deleted, so "${targetPath}" cannot be held for editing.`, {
         kind: 'branch-being-deleted',
@@ -190,6 +225,25 @@ export class FileLockService {
     // `heartbeat()` (which has its own same-user UPDATE), and the
     // editor's save flow detects "I already hold it" via `getLock` in
     // `workspace.routes.withLock` rather than re-acquiring.
+    // A live row under the pre-canonical spelling holds this file as surely
+    // as one under the canonical id; the upsert below cannot see it.
+    const legacy = workspaceSpellings(workspaceId).slice(1);
+    if (legacy.length > 0) {
+      const [held] = await this.db
+        .select()
+        .from(fileLocks)
+        .where(
+          and(
+            inArray(fileLocks.workspaceId, legacy),
+            eq(fileLocks.branch, branch),
+            eq(fileLocks.path, targetPath),
+            gt(fileLocks.expiresAt, now),
+          ),
+        )
+        .limit(1);
+      if (held) return { acquired: false, lock: rowToFileLock(held) };
+    }
+
     const mode = opts?.coordination ? 'coordination' : 'edit';
     const upsertResult = await this.db
       .insert(fileLocks)
@@ -255,12 +309,13 @@ export class FileLockService {
    * current holder.
    */
   async heartbeat(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
     user: AuthUser,
   ): Promise<FileLock> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
     // The expiry guard (`expiresAt > now`) matters because an expired
@@ -279,7 +334,7 @@ export class FileLockService {
       .set({ lastHeartbeatAt: now, expiresAt })
       .where(
         and(
-          eq(fileLocks.workspaceId, workspaceId),
+          inArray(fileLocks.workspaceId, workspaceSpellings(workspaceId)),
           eq(fileLocks.branch, branch),
           eq(fileLocks.path, targetPath),
           eq(fileLocks.holderUserId, user.id),
@@ -302,17 +357,18 @@ export class FileLockService {
    * over by someone else — that's not an error from the caller's POV).
    */
   async release(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
     user: AuthUser,
   ): Promise<void> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     await this.db
       .delete(fileLocks)
       .where(
         and(
-          eq(fileLocks.workspaceId, workspaceId),
+          inArray(fileLocks.workspaceId, workspaceSpellings(workspaceId)),
           eq(fileLocks.branch, branch),
           eq(fileLocks.path, targetPath),
           eq(fileLocks.holderUserId, user.id),
@@ -326,25 +382,30 @@ export class FileLockService {
    * are purged here lazily.
    */
   async get(
-    workspaceId: string,
+    rawWorkspaceId: string,
     branch: string,
     rawPath: string,
   ): Promise<FileLock | null> {
     const targetPath = canonicalFileIdentity(rawPath);
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     const rows = await this.db
       .select()
       .from(fileLocks)
       .where(
         and(
-          eq(fileLocks.workspaceId, workspaceId),
+          inArray(fileLocks.workspaceId, workspaceSpellings(workspaceId)),
           eq(fileLocks.branch, branch),
           eq(fileLocks.path, targetPath),
         ),
-      )
-      .limit(1);
-    if (rows.length === 0) return null;
-    const row = rows[0];
-    if (row.expiresAt.getTime() <= Date.now()) {
+      );
+    // At most one row per spelling; the canonical one first.
+    rows.sort((x, y) => Number(x.workspaceId !== workspaceId) - Number(y.workspaceId !== workspaceId));
+    let live: (typeof rows)[number] | null = null;
+    for (const row of rows) {
+      if (row.expiresAt.getTime() > Date.now()) {
+        live ??= row;
+        continue;
+      }
       // Lazy GC — drop the stale row so the next `acquire` doesn't have
       // to bypass it. Bind the delete to this exact row's `expiresAt` so
       // a concurrent acquire that wrote a fresh row in the gap between
@@ -356,15 +417,14 @@ export class FileLockService {
         .delete(fileLocks)
         .where(
           and(
-            eq(fileLocks.workspaceId, workspaceId),
+            eq(fileLocks.workspaceId, row.workspaceId),
             eq(fileLocks.branch, branch),
             eq(fileLocks.path, targetPath),
             eq(fileLocks.expiresAt, row.expiresAt),
           ),
         );
-      return null;
     }
-    return rowToFileLock(row);
+    return live ? rowToFileLock(live) : null;
   }
 
   /**
@@ -406,11 +466,12 @@ export class FileLockService {
    * the "missed lock-release commit" the loud warning is for. Expired rows
    * don't count (their holder is gone; they explain nothing).
    */
-  async hasAnyActive(workspaceId: string): Promise<boolean> {
+  async hasAnyActive(rawWorkspaceId: string): Promise<boolean> {
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
     const rows = await this.db
       .select({ path: fileLocks.path })
       .from(fileLocks)
-      .where(and(eq(fileLocks.workspaceId, workspaceId), gt(fileLocks.expiresAt, new Date())))
+      .where(and(inArray(fileLocks.workspaceId, workspaceSpellings(workspaceId)), gt(fileLocks.expiresAt, new Date())))
       .limit(1);
     return rows.length > 0;
   }
