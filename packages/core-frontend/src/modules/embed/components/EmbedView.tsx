@@ -332,8 +332,8 @@ export function EmbedView() {
       // it — when the distribution registered where the embed reads it from.
       ...(graphSource ? { loadKbGraph: () => graphSource.inEmbed(token) } : {}),
       // A host that sizes its frame to the content is told so: a renderer
-      // that draws inside its own frame then grows with its page instead of
-      // scrolling inside a pane nobody gave it.
+      // that draws inside its own frame then gives it a standard height the
+      // reader can drag, instead of filling a pane nobody gave it.
       sizesToContent: fitContent,
     };
   }, [view, token, graphSource, fitContent]);

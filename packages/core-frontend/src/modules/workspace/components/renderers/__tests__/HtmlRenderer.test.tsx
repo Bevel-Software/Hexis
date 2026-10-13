@@ -42,82 +42,90 @@ async function frameOf(container: HTMLElement): Promise<HTMLIFrameElement> {
   });
 }
 
-/** What the page inside the frame posts, as the frame's window. */
-function frameSays(iframe: HTMLIFrameElement, data: unknown) {
-  window.dispatchEvent(new MessageEvent('message', { data, source: iframe.contentWindow }));
+const STORED = 'bevel.htmlFrame.height';
+
+/** The handle under the frame. */
+const handle = () => screen.getByRole('separator', { name: 'Resize the page' });
+
+/** A drag of the handle by `dy`, as the pointer reports it. */
+function drag(dy: number) {
+  const el = handle();
+  fireEvent.pointerDown(el, { button: 0, clientY: 100, pointerId: 1 });
+  fireEvent.pointerMove(el, { clientY: 100 + dy, pointerId: 1 });
+  fireEvent.pointerUp(el, { clientY: 100 + dy, pointerId: 1 });
 }
 
 describe('HtmlRenderer on a surface', () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    window.localStorage.removeItem(STORED);
+  });
 
-  it('sizes its frame to the height the page reports where the host grows with the content', async () => {
+  it('gives its frame the standard height, as a content box, with a handle to resize it, where the host grows with the content', async () => {
     const { container } = mount(surface({ sizesToContent: true }));
     const iframe = await frameOf(container);
     expect(iframe.className).toContain('shrink-0');
     expect(iframe.className).not.toContain('flex-1');
-    expect(iframe.style.height).toBe('');
-
-    frameSays(iframe, { type: 'bevel.height', height: 640.2 });
-    await waitFor(() => expect(iframe.style.height).toBe('641px'));
-    // The content box, so the viewport is the reported height and the
-    // border is not taken out of the page; and never below a short pane.
+    // The content box, so the page's viewport is exactly the height and the
+    // border is not taken out of it.
+    expect(iframe.style.height).toBe('480px');
     expect(iframe.style.boxSizing).toBe('content-box');
-    expect(iframe.className).toContain('min-h-60');
-
-    // Something that is not a height, or not from the frame, changes nothing.
-    frameSays(iframe, { type: 'bevel.height', height: -5 });
-    frameSays(iframe, { type: 'bevel.navigate', href: 'Other.html' });
-    window.dispatchEvent(new MessageEvent('message', { data: { type: 'bevel.height', height: 99 }, source: window }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(iframe.style.height).toBe('641px');
-
-    frameSays(iframe, { type: 'bevel.height', height: 1200 });
-    await waitFor(() => expect(iframe.style.height).toBe('1200px'));
+    expect(handle().getAttribute('aria-valuenow')).toBe('480');
+    expect(handle().getAttribute('aria-valuemin')).toBe('160');
   });
 
-  it('starts a rebuilt page from the frame\'s own height, never the previous page\'s', async () => {
-    const s = surface({ sizesToContent: true });
-    const { container, rerender } = mount(s, '<h1>Board</h1><p>a long report</p>');
-    const tall = await frameOf(container);
-    frameSays(tall, { type: 'bevel.height', height: 900 });
-    await waitFor(() => expect(tall.style.height).toBe('900px'));
+  it('the reader drags the handle to make the frame taller or shorter, and the choice is kept in this browser', async () => {
+    const { container, unmount } = mount(surface({ sizesToContent: true }));
+    const iframe = await frameOf(container);
+    const el = handle();
+    fireEvent.pointerDown(el, { button: 0, clientY: 100, pointerId: 1 });
+    // While the drag lasts the frame takes no pointer, so the drag can cross it.
+    fireEvent.pointerMove(el, { clientY: 160, pointerId: 1 });
+    await waitFor(() => expect(iframe.style.height).toBe('540px'));
+    expect(el.getAttribute('data-dragging')).toBe('true');
+    expect(iframe.style.pointerEvents).toBe('none');
+    fireEvent.pointerMove(el, { clientY: 220, pointerId: 1 });
+    fireEvent.pointerUp(el, { clientY: 220, pointerId: 1 });
+    await waitFor(() => expect(iframe.style.height).toBe('600px'));
+    expect(el.hasAttribute('data-dragging')).toBe(false);
+    expect(iframe.style.pointerEvents).toBe('');
+    expect(window.localStorage.getItem(STORED)).toBe('600');
 
-    // A shorter page arrives: its frame carries no height until it reports
-    // its own, so the host is never told the old page's height for the new.
-    rerender(page(s, '<h1>Board</h1>'));
-    const short = await waitFor(() => {
-      const el = container.querySelector('iframe')!;
-      if (el.style.height !== '') throw new Error('still the old height');
-      return el;
-    });
-    frameSays(short, { type: 'bevel.height', height: 120 });
-    await waitFor(() => expect(short.style.height).toBe('120px'));
+    // Shorter, and never below the least: a page is still a page at 160.
+    drag(-1000);
+    await waitFor(() => expect(iframe.style.height).toBe('160px'));
+    expect(window.localStorage.getItem(STORED)).toBe('160');
+
+    // The next frame in this browser starts where this one was left.
+    unmount();
+    const again = mount(surface({ sizesToContent: true }));
+    expect((await frameOf(again.container)).style.height).toBe('160px');
   });
 
-  it('starts a refreshed page from the frame\'s own height too, though its text is the same', async () => {
+  it('the arrow keys nudge the frame by a step, and a drag that is not the main button is ignored', async () => {
     const { container } = mount(surface({ sizesToContent: true }));
-    const first = await frameOf(container);
-    frameSays(first, { type: 'bevel.height', height: 900 });
-    await waitFor(() => expect(first.style.height).toBe('900px'));
+    const iframe = await frameOf(container);
+    fireEvent.keyDown(handle(), { key: 'ArrowDown' });
+    await waitFor(() => expect(iframe.style.height).toBe('504px'));
+    fireEvent.keyDown(handle(), { key: 'ArrowUp' });
+    fireEvent.keyDown(handle(), { key: 'ArrowUp' });
+    await waitFor(() => expect(iframe.style.height).toBe('456px'));
+    fireEvent.keyDown(handle(), { key: 'Enter' });
+    expect(iframe.style.height).toBe('456px');
 
-    // Refresh remounts the same document as a new frame: no height until
-    // that frame has reported its own.
-    fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
-    const refreshed = await waitFor(() => {
-      const el = container.querySelector('iframe')!;
-      if (el === first || el.style.height !== '') throw new Error('still the old frame, or its height');
-      return el;
-    });
-    frameSays(refreshed, { type: 'bevel.height', height: 120 });
-    await waitFor(() => expect(refreshed.style.height).toBe('120px'));
+    const el = handle();
+    fireEvent.pointerDown(el, { button: 2, clientY: 100, pointerId: 2 });
+    fireEvent.pointerMove(el, { clientY: 300, pointerId: 2 });
+    fireEvent.pointerUp(el, { clientY: 300, pointerId: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(iframe.style.height).toBe('456px');
   });
 
-  it('keeps filling its pane, and ignores the reported height, where the host gives it one', async () => {
+  it('keeps filling its pane, with no handle, where the host gives it one', async () => {
     const { container } = mount(surface({}));
     const iframe = await frameOf(container);
     expect(iframe.className).toContain('flex-1');
-    frameSays(iframe, { type: 'bevel.height', height: 640 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(iframe.style.height).toBe('');
+    expect(screen.queryByRole('separator')).toBeNull();
   });
 });

@@ -80,10 +80,10 @@ export interface RendererSurface {
   /**
    * Whether this surface's host grows with the content rather than giving
    * the page a fixed pane to scroll in. A renderer that draws inside its own
-   * frame (the sandboxed HTML view) cannot be measured from outside, so
-   * where this is true it sizes its frame to the height the frame reports,
-   * and the host sees the page whole; where it is false or absent, the frame
-   * fills its pane and scrolls inside it as it does in the app.
+   * frame (the sandboxed HTML view) has no pane to fill there, so where this
+   * is true it gives its frame a standard height the reader can drag taller
+   * or shorter, and the host follows the frame; where it is false or absent,
+   * the frame fills its pane and scrolls inside it as it does in the app.
    */
   sizesToContent?: boolean;
 }

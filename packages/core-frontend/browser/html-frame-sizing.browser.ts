@@ -1,262 +1,116 @@
-import { expect, test, type Frame, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { buildSandboxedHtml } from '../src/modules/workspace/components/renderers/htmlSandbox';
+import { attachFrameResizeHandle } from '../src/modules/workspace/components/renderers/frameResizeHandle';
 
 /**
- * The HTML frame's height, round-tripped through the real browser.
+ * The handle under an HTML page's frame, driven by a real pointer in a real
+ * browser, over a real sandboxed `srcdoc` frame.
  *
- * The frame's runtime (`htmlSandbox.ts`, `HEIGHT_BRIDGE`) measures the page
- * and posts `bevel.height`; the renderer (`HtmlRenderer.tsx`) sets the
- * frame's content box to it where the host grows with the page. The two
- * are a pair written by one hand across a boundary owned by the browser —
- * layout, a sandboxed `srcdoc` frame, `postMessage` — and the unit suites
- * cross only stand-ins for it. This suite crosses the real thing: the real
- * runtime in a real sandboxed frame, each report applied to the frame
- * exactly as the renderer applies it, and the assertion read off the
- * frame's own document afterwards — the page is shown whole, the frame is
- * no taller than the page, and the pair settles instead of chasing itself.
+ * The one thing a stand-in document cannot answer: a frame is its own
+ * document, and the moment a drag crosses into it the frame would take every
+ * pointer event from then on — unless the handle captured the pointer. The
+ * unit suite proves the handle's arithmetic; this proves the capture, with
+ * the handle's own code (`attachFrameResizeHandle`, loaded into the page
+ * from its source — it closes over nothing) and the renderer's rule for the
+ * frame while a drag lasts (no pointer events), applied as the renderer
+ * applies them.
  */
 
-/** The renderer's floor for a frame whose host grows with the page (`min-h-60`). */
-const FLOOR = 240;
+const STANDARD = 480;
+const MIN = 160;
 
-/**
- * The host page, standing in for the renderer: one sandboxed frame, sized
- * the way `HtmlRenderer` sizes it where the host grows with the content —
- * the content box set to every `bevel.height` the frame posts, a border,
- * the floor — and every report kept for the assertions.
- */
+/** A host page standing in for the renderer: the frame, the handle, and the renderer's rules. */
 const HOST = `<!doctype html>
 <html><body style="margin:0">
-<iframe id="f" sandbox="allow-scripts" style="display:block;width:640px;min-height:${FLOOR}px;box-sizing:content-box;border:1px solid #000"></iframe>
+<iframe id="f" sandbox="allow-scripts" style="display:block;width:640px;height:${STANDARD}px;box-sizing:content-box;border:1px solid #000"></iframe>
+<div id="h" role="separator" tabindex="0" style="height:8px;margin-top:4px;background:#ccc;cursor:row-resize"></div>
 <script>
-  window.reports = [];
-  window.addEventListener('message', (event) => {
+  window.settled = [];
+  window.ready = (attach) => {
     const frame = document.getElementById('f');
-    if (event.source !== frame.contentWindow) return;
-    const data = event.data;
-    if (!data || data.type !== 'bevel.height' || typeof data.height !== 'number') return;
-    window.reports.push(data.height);
-    frame.style.height = data.height + 'px';
-  });
+    const handle = document.getElementById('h');
+    attach(handle, {
+      current: () => parseInt(frame.style.height, 10),
+      apply: (height) => {
+        frame.style.height = height + 'px';
+        frame.style.pointerEvents = 'none';
+      },
+      settle: (height) => {
+        frame.style.height = height + 'px';
+        frame.style.pointerEvents = '';
+        window.settled.push(height);
+      },
+      min: ${MIN},
+      step: 24,
+    });
+  };
 </script>
 </body></html>`;
 
-interface Host {
-  page: Page;
-  /** The sandboxed frame's own document. */
-  frame: () => Frame;
-  /** Every height the frame has posted so far. */
-  reports: () => Promise<number[]>;
-  /** The reports once nothing new has arrived for a while. */
-  settled: () => Promise<number[]>;
-  /** The frame element's inner height — what the page gets to draw in. */
-  frameHeight: () => Promise<number>;
-}
-
-/**
- * Load `bodyHtml` as the knowledge-base page, through the real sandbox build.
- * The body goes in as written: the sanitizer that precedes the build in the
- * renderer parses with the browser's `DOMParser`, which this runner (Node)
- * has not, and it is not what is under test here — the runtime the build
- * injects is. Every body below is the test's own.
- */
-async function load(page: Page, bodyHtml: string, opts: { frameHeight?: number } = {}): Promise<Host> {
+async function host(page: Page) {
   await page.setContent(HOST);
-  if (opts.frameHeight !== undefined) {
-    await page.evaluate((h) => {
-      document.getElementById('f')!.style.height = `${h}px`;
-    }, opts.frameHeight);
-  }
-  const srcdoc = buildSandboxedHtml({ title: 'page', libModuleSources: [], bodyHtml });
+  const srcdoc = buildSandboxedHtml({
+    title: 'page',
+    libModuleSources: [],
+    bodyHtml: '<div style="height:2000px;background:linear-gradient(#eee,#999)">a long page</div>',
+  });
   await page.evaluate((doc) => {
     (document.getElementById('f') as HTMLIFrameElement).srcdoc = doc;
   }, srcdoc);
-  const reports = () => page.evaluate(() => (window as unknown as { reports: number[] }).reports.slice());
-  await expect.poll(async () => (await reports()).length, { timeout: 10_000 }).toBeGreaterThan(0);
-  const frameOf = () => {
-    const frame = page.frames().find((f) => f.parentFrame() === page.mainFrame());
-    if (!frame) throw new Error('the sandboxed frame is not there');
-    return frame;
-  };
-  return {
-    page,
-    frame: frameOf,
-    reports,
-    settled: async () => {
-      let last = (await reports()).length;
-      for (;;) {
-        await page.waitForTimeout(300);
-        const now = (await reports()).length;
-        if (now !== last) {
-          last = now;
-          continue;
-        }
-        // Quiet — and the frame has had a rendering opportunity since, which
-        // is when its `resize` event for the last applied height is
-        // dispatched. Changing the page before that would land in the same
-        // instant as the frame's resize, which the runtime reads as growth
-        // with the viewport (see `HEIGHT_BRIDGE`), and a starved browser
-        // can take longer than the quiet above to get there.
-        await frameOf().evaluate(
-          () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
-        );
-        return reports();
-      }
-    },
-    frameHeight: () => page.evaluate(() => document.getElementById('f')!.clientHeight),
-  };
+  // The handle's own code, as the browser sees it after the test runner's
+  // transform; it closes over nothing, so its source is all of it.
+  await page.addScriptTag({ content: `window.ready(${attachFrameResizeHandle.toString()});` });
+  const frameHeight = () => page.evaluate(() => (document.getElementById('f') as HTMLIFrameElement).clientHeight);
+  const settled = () => page.evaluate(() => (window as unknown as { settled: number[] }).settled.slice());
+  const handleBox = async () => (await page.locator('#h').boundingBox())!;
+  return { frameHeight, settled, handleBox };
 }
 
-/** How far the page overflows the frame it was given: 0 when it is shown whole. */
-async function overflow(host: Host): Promise<number> {
-  return host.frame().evaluate(() => {
-    const doc = document.documentElement;
-    return Math.max(0, doc.scrollHeight - doc.clientHeight);
-  });
-}
+test('a drag that crosses into the frame keeps resizing it: the handle holds the pointer', async ({ page }) => {
+  const h = await host(page);
+  expect(await h.frameHeight()).toBe(STANDARD);
+  const box = await h.handleBox();
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
 
-/** The lowest edge of the page's content, measured by the test itself, as the browser lays it out. */
-async function contentBottom(host: Host): Promise<number> {
-  return host.frame().evaluate(() => {
-    const range = document.createRange();
-    range.selectNodeContents(document.body);
-    return Math.ceil(range.getBoundingClientRect().bottom + window.pageYOffset);
-  });
-}
+  // Down on the handle, then up across the frame — the pointer is over the
+  // frame's document for the rest of the drag.
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y - 100, { steps: 5 });
+  expect(await h.frameHeight()).toBe(STANDARD - 100);
+  await page.mouse.move(x, y - 250, { steps: 5 });
+  expect(await h.frameHeight()).toBe(STANDARD - 250);
+  // Nothing settled yet: the reader is still dragging.
+  expect(await h.settled()).toEqual([]);
+  await page.mouse.up();
+  expect(await h.settled()).toEqual([STANDARD - 250]);
+  expect(await h.frameHeight()).toBe(STANDARD - 250);
 
-test.describe('an HTML page in a frame whose host grows with the content', () => {
-  test('reports the height the browser laid the page out at, and the frame sized to it shows the page whole, once', async ({ page }) => {
-    const host = await load(page, '<div style="height:1000px;background:#eee">tall</div>');
-    const reports = await host.settled();
-    // One value, posted once: the frame sized to the report measures the
-    // same page again and says nothing twice.
-    expect(new Set(reports).size).toBe(1);
-    const [height] = reports;
-    expect(height).toBeGreaterThanOrEqual(1000);
-    expect(height).toBeLessThanOrEqual(1000 + 32);
-    expect(height).toBeGreaterThanOrEqual(await contentBottom(host));
-    // The content box took the report: the page's own viewport is the
-    // height it asked for, the border is not taken out of it, and nothing
-    // scrolls inside the frame.
-    expect(await host.frameHeight()).toBe(height);
-    expect(await overflow(host)).toBe(0);
-  });
+  // And taller again, past where it started.
+  const again = await h.handleBox();
+  await page.mouse.move(again.x + 10, again.y + again.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(again.x + 10, again.y + again.height / 2 + 400, { steps: 8 });
+  await page.mouse.up();
+  expect(await h.frameHeight()).toBe(STANDARD - 250 + 400);
+  expect(await h.settled()).toEqual([STANDARD - 250, STANDARD + 150]);
+});
 
-  test('a page shorter than its frame reports its own height, not the frame\'s, and the frame comes down to it', async ({ page }) => {
-    const host = await load(page, '<div style="height:200px">short</div>', { frameHeight: 900 });
-    const reports = await host.settled();
-    const height = reports[reports.length - 1]!;
-    expect(height).toBeLessThan(400);
-    expect(height).toBeGreaterThanOrEqual(200);
-    // Not the 900 the frame was given, and the frame follows the page down
-    // — to the floor, which is the least a frame here is.
-    expect(await host.frameHeight()).toBe(Math.max(height, FLOOR));
-    expect(await overflow(host)).toBe(0);
-  });
+test('never shorter than the least, and the keys nudge it', async ({ page }) => {
+  const h = await host(page);
+  const box = await h.handleBox();
+  await page.mouse.move(box.x + 5, box.y + 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 5, 0, { steps: 4 });
+  await page.mouse.up();
+  expect(await h.frameHeight()).toBe(MIN);
 
-  test('a page that grows reports more, one that shrinks back reports less, and each time the frame fits', async ({ page }) => {
-    const host = await load(page, '<div id="top" style="height:300px">top</div>');
-    const [first] = await host.settled();
-    await host.frame().evaluate(() => {
-      const more = document.createElement('div');
-      more.id = 'more';
-      more.style.height = '600px';
-      document.body.appendChild(more);
-    });
-    await expect.poll(async () => (await host.reports()).length).toBeGreaterThan(1);
-    const grown = await host.settled();
-    const taller = grown[grown.length - 1]!;
-    expect(taller - first!).toBeGreaterThanOrEqual(598);
-    expect(taller - first!).toBeLessThanOrEqual(602);
-    expect(await overflow(host)).toBe(0);
-
-    await host.frame().evaluate(() => document.getElementById('more')!.remove());
-    await expect.poll(async () => (await host.reports()).length).toBeGreaterThan(grown.length);
-    const shrunk = await host.settled();
-    expect(Math.abs(shrunk[shrunk.length - 1]! - first!)).toBeLessThanOrEqual(1);
-  });
-
-  test('text written straight into the body is measured, though the body\'s only element is the runtime\'s script', async ({ page }) => {
-    const words = Array.from({ length: 900 }, (_, i) => `word${i}`).join(' ');
-    const host = await load(page, words);
-    const reports = await host.settled();
-    const height = reports[reports.length - 1]!;
-    // Nine hundred words at 640px wide run well past the floor; the report
-    // is the text's own extent, and the frame sized to it shows all of it.
-    expect(height).toBeGreaterThan(FLOOR);
-    expect(height).toBeGreaterThanOrEqual(await contentBottom(host));
-    expect(await overflow(host)).toBe(0);
-  });
-
-  test('measuring leaves the page as written: no child is added, the author\'s :last-child still names theirs, and the body\'s inline style is untouched', async ({ page }) => {
-    const host = await load(
-      page,
-      '<style>p { height: 100px; margin: 0 } body > p:last-child { margin-bottom: 50px }</style>' +
-        '<p id="a">a</p><p id="b">b</p>',
-      { frameHeight: 900 },
-    );
-    const reports = await host.settled();
-    const height = reports[reports.length - 1]!;
-    const seen = await host.frame().evaluate(() => ({
-      lastChild: document.querySelector('body > p:last-child')?.id ?? null,
-      bodyStyle: document.body.getAttribute('style'),
-      elements: document.body.children.length,
-    }));
-    // The last child is still the author's second paragraph, so its rule
-    // applies — and the report includes the 50px it adds, which collapses
-    // through the body and so lies past the body's own box: 8 of body
-    // margin, two paragraphs of 100, then the 50.
-    expect(seen.lastChild).toBe('b');
-    expect(seen.bodyStyle).toBeNull();
-    // The runtime's script, the style, the two paragraphs: nothing else.
-    expect(seen.elements).toBe(4);
-    expect(height).toBe(258);
-    expect(await overflow(host)).toBe(0);
-  });
-
-  // Sized to a report, the frame IS the viewport, so a page in viewport
-  // units measures anew on every round trip: at 100vh it is the viewport
-  // and 16 more (the body's margins), and without a guard the next report
-  // would be 16 taller, and the next, without end; at 200vh it is twice the
-  // viewport and 16, and the frame would double each time. Those two are
-  // held after the first report. A page that moves LESS than the viewport
-  // settles on its own and must be allowed to: 50vh and 90vh start from a
-  // tall frame, so each report really resizes the viewport, and come down
-  // report by report to the height they ask for — the floor, here.
-  for (const [units, start, reportsExpected] of [
-    ['100vh', undefined, (n: number) => n <= 2],
-    ['200vh', undefined, (n: number) => n <= 2],
-    ['50vh', 900, (n: number) => n > 1 && n <= 8],
-    ['90vh', 900, (n: number) => n > 1 && n <= 40],
-  ] as const) {
-    test(`a page in viewport units settles: a ${units} child with the body's margins (${start ? `from a ${start}px frame` : 'from the floor'})`, async ({ page }) => {
-      const host = await load(page, `<div style="height:${units};background:#eee">sized to the viewport</div>`, {
-        frameHeight: start,
-      });
-      const reports = await host.settled();
-      expect(reportsExpected(reports.length)).toBe(true);
-      const final = reports[reports.length - 1]!;
-      expect(await host.frameHeight()).toBe(Math.max(final, FLOOR));
-      // Still nothing new a second later: the frame has settled for good.
-      await page.waitForTimeout(1000);
-      expect(await host.reports()).toEqual(reports);
-      expect(await host.frameHeight()).toBe(Math.max(final, FLOOR));
-    });
-  }
-
-  test('a page sized to its viewport settles at its content instead of chasing the frame', async ({ page }) => {
-    const host = await load(
-      page,
-      '<style>html, body { height: 100%; margin: 0; }</style><div style="height:300px">fills</div>',
-    );
-    const reports = await host.settled();
-    // At most one correction after the first report, and it ends at the
-    // content's height: never a report per border's worth, never a collapse.
-    expect(reports.length).toBeLessThanOrEqual(2);
-    const final = reports[reports.length - 1]!;
-    expect(final).toBeGreaterThanOrEqual(300);
-    expect(final).toBeLessThanOrEqual(302);
-    expect(await host.frameHeight()).toBe(final);
-    expect(await overflow(host)).toBe(0);
-  });
+  await page.locator('#h').focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  expect(await h.frameHeight()).toBe(MIN + 48);
+  await page.keyboard.press('ArrowUp');
+  expect(await h.frameHeight()).toBe(MIN + 24);
+  expect(await h.settled()).toEqual([MIN, MIN + 24, MIN + 48, MIN + 24]);
 });
