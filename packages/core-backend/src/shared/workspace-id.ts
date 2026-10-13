@@ -34,3 +34,27 @@ export function branchForWorkspaceId(workspaceId: string): string {
     return workspaceId;
   }
 }
+
+/**
+ * Canonicalize a workspace id so every row keyed on one — a queued save, a
+ * file lock — and every reader of those rows key on the SAME string.
+ *
+ * The id reaches `enqueue` and a lock's `acquire` via a route `:id` path
+ * param, which Express URL-decodes — so a slashed feature branch arrives as `alice/feature`. But the
+ * worker claims per `WorkspaceService.knownWorkspaces()`, whose ids are
+ * `encodeURIComponent(branch)` → `alice%2Ffeature`. Those strings differ, so
+ * `WHERE workspace_id = …` never matched and the row was never drained —
+ * silently stranding every human save on a feature branch (protected branches
+ * have no `/`, so encoded == decoded and they were unaffected).
+ *
+ * `encodeURIComponent(decodeURIComponent(id))` is idempotent and collapses both
+ * forms to the encoded id `knownWorkspaces()` uses. A malformed `%` sequence
+ * (which `decodeURIComponent` would throw on) is left untouched.
+ */
+export function canonicalWorkspaceId(id: string): string {
+  try {
+    return encodeURIComponent(decodeURIComponent(id));
+  } catch {
+    return id;
+  }
+}

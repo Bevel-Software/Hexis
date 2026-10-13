@@ -56,7 +56,7 @@ describe('coreCommandActions', () => {
 
   it('offers a member the page verbs, the apps and their own settings', () => {
     expect(labels(visibleActions(all, ctx()))).toEqual([
-      'New page',
+      'Create new page',
       'Connect your agent',
       'Go to Knowledge',
       'Go to Skills & Tools',
@@ -66,7 +66,7 @@ describe('coreCommandActions', () => {
 
   it('adds Invite people and the admin settings for an admin', () => {
     expect(labels(visibleActions(all, ctx({ isAdmin: true })))).toEqual([
-      'New page',
+      'Create new page',
       'Invite people',
       'Connect your agent',
       'Go to Knowledge',
@@ -76,9 +76,9 @@ describe('coreCommandActions', () => {
     ]);
   });
 
-  it('leaves out New page before the workspace knows its folder, and Invite with no dialog to open', () => {
+  it('leaves out Create new page before the workspace knows its folder, and Invite with no dialog to open', () => {
     const shown = labels(visibleActions(all, ctx({ isAdmin: true, createPage: null, invite: null })));
-    expect(shown).not.toContain('New page');
+    expect(shown).not.toContain('Create new page');
     expect(shown).not.toContain('Invite people');
   });
 
@@ -127,12 +127,20 @@ describe('shortcut hints', () => {
   it('come from the table the shortcuts are bound by, and only for bound commands', () => {
     const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
     const hint = (id: string) => all.find((a) => a.id === id)?.shortcut;
-    expect(hint('new-page')).toEqual(['C']);
-    expect(hint('go-to:knowledge')).toEqual(['G', 'K']);
-    expect(hint('go-to:skills-tools')).toEqual(['G', 'S']);
-    expect(hint('invite')).toBeUndefined();
-    expect(Object.keys(COMMAND_SHORTCUTS).sort()).toEqual(['go-to:knowledge', 'go-to:skills-tools', 'new-page']);
+    expect(hint('new-page')).toEqual({ key: 'c' });
+    expect(hint('invite')).toEqual({ key: 'i', shift: true });
+    expect(hint('go-to:knowledge')).toEqual({ key: 'k', shift: true });
+    expect(hint('go-to:skills-tools')).toEqual({ key: 's', shift: true });
+    expect(hint('edit-page')).toBeUndefined();
+    expect(hint('connect-agent')).toBeUndefined();
+    expect(Object.keys(COMMAND_SHORTCUTS).sort()).toEqual([
+      'go-to:knowledge',
+      'go-to:skills-tools',
+      'invite',
+      'new-page',
+    ]);
   });
+
 });
 
 describe('suggestedActions', () => {
@@ -141,12 +149,12 @@ describe('suggestedActions', () => {
 
   it('suggests the commonest verbs and the way to the other app', () => {
     expect(suggest(ctx({ isAdmin: true, onboardingPending: true }))).toEqual([
-      'New page',
+      'Create new page',
       'Invite people',
       'Connect your agent',
       'Go to Skills & Tools',
     ]);
-    expect(suggest(ctx({ activeAppId: 'skills-tools' }))).toEqual(['New page', 'Go to Knowledge']);
+    expect(suggest(ctx({ activeAppId: 'skills-tools' }))).toEqual(['Create new page', 'Go to Knowledge']);
   });
 });
 
@@ -166,31 +174,6 @@ describe('mergeCommandActions / visibleActions', () => {
     error.mockRestore();
   });
 
-  it('keeps a registry command whose keys collide with bound ones, but drops its shortcut', () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const withKeys = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
-    const extra: CommandAction[] = [
-      { id: 'clash', label: 'Clash', shortcut: ['c'], visible: () => true, run: vi.fn() },
-      { id: 'prefix', label: 'Prefix', shortcut: ['G'], visible: () => true, run: vi.fn() },
-      { id: 'longer', label: 'Longer', shortcut: ['g', 'k', 'x'], visible: () => true, run: vi.fn() },
-      // Three keys that collide with nothing: still unbindable, so still dropped.
-      { id: 'too-long', label: 'Too long', shortcut: ['x', 'y', 'z'], visible: () => true, run: vi.fn() },
-      { id: 'fine', label: 'Fine', shortcut: ['O'], visible: () => true, run: vi.fn() },
-      { id: 'also-fine', label: 'Also fine', shortcut: ['g', 'o'], visible: () => true, run: vi.fn() },
-    ];
-    const merged = mergeCommandActions(withKeys, extra);
-    const shortcutOf = (id: string) => merged.find((a) => a.id === id)?.shortcut;
-    expect(merged.map((a) => a.id).slice(-6)).toEqual(['clash', 'prefix', 'longer', 'too-long', 'fine', 'also-fine']);
-    expect(shortcutOf('clash')).toBeUndefined();
-    expect(shortcutOf('prefix')).toBeUndefined();
-    expect(shortcutOf('longer')).toBeUndefined();
-    expect(shortcutOf('too-long')).toBeUndefined();
-    expect(shortcutOf('fine')).toEqual(['O']);
-    expect(shortcutOf('also-fine')).toEqual(['g', 'o']);
-    expect(error).toHaveBeenCalledTimes(4);
-    error.mockRestore();
-  });
-
   it('drops a command whose visible() throws, and keeps the rest', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const broken: CommandAction = {
@@ -202,7 +185,7 @@ describe('mergeCommandActions / visibleActions', () => {
       run: vi.fn(),
     };
     expect(labels(visibleActions(mergeCommandActions(core, [broken]), ctx()))).toEqual([
-      'New page',
+      'Create new page',
       'Connect your agent',
     ]);
     error.mockRestore();

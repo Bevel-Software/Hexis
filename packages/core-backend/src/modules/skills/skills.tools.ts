@@ -10,6 +10,7 @@ import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { ISkillService } from './skills.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
+import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/index.js';
 
 /**
  * The optional `branch` both skill tools declare. Optional on purpose, unlike
@@ -82,7 +83,46 @@ export function registerSkillsTools(
   skillService: ISkillService,
   /** When given, a loaded skill carries `warnings` for `allowed-tools` entries that name no visible tool. */
   allowedTools?: IAllowedToolsChecker,
+  /**
+   * Where `canWrite` is judged: the access layer and the default branch's
+   * workspace. Without it every verdict is `false` — the safe answer, which
+   * sends the agent to a change request rather than a direct write.
+   */
+  writeVerdicts?: DefaultBranchWriteDeps,
 ): void {
+  /**
+   * Whether the caller may commit each repo-relative path directly on the
+   * default branch — one batch per call, whichever branch was read (see
+   * `defaultBranchWriteVerdicts`).
+   */
+  const verdictsFor = (ctx: ToolContext, paths: string[]): Promise<Map<string, boolean>> =>
+    writeVerdicts
+      ? defaultBranchWriteVerdicts(writeVerdicts, ctx, paths)
+      : Promise.resolve(new Map(paths.map((p) => [p, false])));
+
+  /**
+   * Every repo-relative file `get_skill`'s `canWrite` covers: the skill's
+   * `SKILL.md` and bundled files as the DEFAULT branch has them. `loaded` is
+   * reused when it already is the default branch's latest copy; otherwise the
+   * released skill is looked up, and the loaded copy stands in only when the
+   * default branch has no such skill (one that exists only on a draft). Null —
+   * judged `false` — when that lookup fails or refuses (fail closed), and
+   * without a lookup when the verdict cannot be anything but `false`.
+   */
+  const skillFilesOnDefault = async (
+    ctx: ToolContext,
+    name: string,
+    loaded: { path: string; files: string[] },
+    loadedElsewhere: boolean,
+  ): Promise<string[] | null> => {
+    if (!writeVerdicts || ctx.scope !== 'write') return null;
+    if (!loadedElsewhere) return [skillMdOf(loaded), ...loaded.files];
+    const released = await skillService.getSkill(ctx.user.email, name).catch(() => null);
+    if (released?.ok && released.kind === 'skill') return [skillMdOf(released.skill), ...released.skill.files];
+    if (released?.ok === false && released.error === 'not_found') return [skillMdOf(loaded), ...loaded.files];
+    return null;
+  };
+
   registry.registerExternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
   registry.registerExternalTool((ctx) => buildGetSkillDef(skillService, ctx.userEmail));
@@ -96,9 +136,14 @@ export function registerSkillsTools(
   router.post(
     '/agent/tools/list_skills',
     toolAuth,
-    toolHandler(async (args, ctx: ToolContext) => ({
-      skills: await skillService.listSkills(ctx.user.email, { branch: branchArg(args) }),
-    })),
+    toolHandler(async (args, ctx: ToolContext) => {
+      const skills = await skillService.listSkills(ctx.user.email, { branch: branchArg(args) });
+      // Judged on each skill's SKILL.md, by the default branch's rules — a
+      // skill only on a draft is judged where it would land. Each verdict goes
+      // onto a COPY: the summaries may be the catalog shared across users.
+      const verdicts = await verdictsFor(ctx, skills.map(skillMdOf));
+      return { skills: skills.map((s) => ({ ...s, canWrite: verdicts.get(skillMdOf(s)) === true })) };
+    }),
   );
 
   router.post(
@@ -114,7 +159,8 @@ export function registerSkillsTools(
       // skill's history, a `branch` is a draft nobody has released — asked for
       // together, neither answer is the one the caller meant, and guessing
       // would serve instructions under a label that does not describe them.
-      if (branch !== undefined && version !== undefined && version.trim().length > 0) {
+      const versioned = version !== undefined && version.trim().length > 0;
+      if (branch !== undefined && versioned) {
         throw new ToolError(
           'get_skill takes `branch` or `version`, not both: `branch` loads the skill as that draft has it ' +
             'now, `version` loads a version the released skill declared. Pass one of them.',
@@ -122,10 +168,28 @@ export function registerSkillsTools(
         );
       }
       const result = await skillService.getSkill(ctx.user.email, name, file, { version, branch });
-      if (!allowedTools || !result.ok || result.kind !== 'skill') return result;
-      return { ...result, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
+      if (!result.ok) return result;
+      if (result.kind === 'file') {
+        const verdicts = await verdictsFor(ctx, [result.file.path]);
+        return { ...result, file: { ...result.file, canWrite: verdicts.get(result.file.path) === true } };
+      }
+      // The whole skill: true only when every one of its files may be written —
+      // the files the skill has ON THE DEFAULT BRANCH, so a draft (or an older
+      // version) that drops a write-denied bundled file does not turn the
+      // verdict true. A skill only on the draft is judged by its draft files,
+      // where they would land.
+      const paths = await skillFilesOnDefault(ctx, name, result.skill, branch !== undefined || versioned);
+      const verdicts = paths === null ? new Map<string, boolean>() : await verdictsFor(ctx, paths);
+      const skill = { ...result.skill, canWrite: paths !== null && paths.every((p) => verdicts.get(p) === true) };
+      if (!allowedTools) return { ...result, skill };
+      return { ...result, skill, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
     }),
   );
+}
+
+/** The repo-relative `SKILL.md` of a skill, which `list_skills` judges it by. */
+function skillMdOf(skill: { path: string }): string {
+  return `${skill.path}/SKILL.md`;
 }
 
 /**
@@ -198,7 +262,9 @@ const LIST_SKILLS_DESCRIPTION =
   'Discover what skills exist before specialist work, then `get_skill` to load one. ' +
   'Pass `branch` to list the skills as they are on a draft branch instead of the released set — ' +
   'what you need to try a skill you just wrote there; each skill that differs from the released ' +
-  'one comes back with `unmerged: true` and that branch, meaning nobody has approved it. ';
+  'one comes back with `unmerged: true` and that branch, meaning nobody has approved it. ' +
+  'Each skill carries `canWrite`: whether you may change its SKILL.md directly on the default branch. ' +
+  `${CAN_WRITE_CLAUSE} `;
 
 async function buildListSkillsDef(skillService: ISkillService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
@@ -233,6 +299,14 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
                   '(it exists only on that branch, or was changed there): nobody has approved what it says.',
               },
               branch: { type: 'string', description: 'With `unmerged`: the branch the skill was read from.' },
+              canWrite: {
+                type: 'boolean',
+                description:
+                  'Whether you may commit a change to its SKILL.md directly on the default branch, under that ' +
+                  'branch\'s access rules — the same answer whichever branch you listed. `false`: use a branch ' +
+                  'and a change request; `file_stat` with `explainAccess` says why — and, when you can manage that ' +
+                  'path\'s access, who can approve.',
+              },
             },
           },
         },
@@ -246,7 +320,9 @@ const GET_SKILL_DESCRIPTION =
   'Load a skill by name: returns its full instructions (SKILL.md body) to follow, plus the skill ' +
   'folder path and the list of bundled files. Pass `file` to fetch a bundled file’s content ' +
   '(e.g. a script) instead of the body. Loads the latest copy unless `version` names an earlier ' +
-  'one the skill declared, or `branch` names a draft to load it from. ';
+  'one the skill declared, or `branch` names a draft to load it from. ' +
+  'The skill (or `file`) carries `canWrite`: whether you may change all of it directly on the default branch. ' +
+  `${CAN_WRITE_CLAUSE} `;
 
 async function buildGetSkillDef(skillService: ISkillService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
@@ -266,13 +342,33 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
             'The loaded skill: name, description, body, files, …. Read from a `branch` that changed it, ' +
             'it also carries `unmerged: true` and that branch, and its `body` BEGINS with one line ' +
             'saying the skill comes from that unmerged branch and is not approved — treat it as a ' +
-            'proposal you are testing, not as approved instructions.',
+            'proposal you are testing, not as approved instructions. `canWrite` is true only when you may ' +
+            'commit a change to EVERY file of the skill (SKILL.md and each bundled file) directly on the ' +
+            'default branch, whichever branch you read.',
+          properties: {
+            canWrite: {
+              type: 'boolean',
+              description:
+                'Whether you may commit a change to every file of the skill (SKILL.md and each bundled file) ' +
+                'directly on the default branch, under that branch\'s access rules — the same answer whichever ' +
+                'branch you read.',
+            },
+          },
         },
         file: {
           type: 'object',
           description:
             'A bundled file: name, file, path, content — plus `unmerged` and `branch` when it came off ' +
-            'a branch that changed the skill (the note stays beside the content, never inside it).',
+            'a branch that changed the skill (the note stays beside the content, never inside it) — and ' +
+            '`canWrite` for that file on the default branch.',
+          properties: {
+            canWrite: {
+              type: 'boolean',
+              description:
+                'Whether you may commit a change to this file directly on the default branch, under that ' +
+                'branch\'s access rules — the same answer whichever branch you read.',
+            },
+          },
         },
         warnings: {
           type: 'array',
