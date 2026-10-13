@@ -617,12 +617,40 @@ describe('buildSandboxedHtml', () => {
       { type: 'bevel.height', height: 256 },
       { type: 'bevel.height', height: 500 },
     ]);
-    // And growth with the viewport still, but by its own amount — a page
-    // that got taller while the frame did — is posted too.
+    // Growth while the frame grows, by at least as much, cannot be told
+    // from a page in viewport units and is held too; the next change at a
+    // steady viewport is posted, so a page that really grew is not held
+    // for good.
     page.viewport = 500;
     page.flowEnd = 900;
     bridge.resize();
-    expect(bridge.posted).toHaveLength(3);
+    expect(bridge.posted).toHaveLength(2);
+    page.flowEnd = 901;
+    bridge.resize();
+    expect(bridge.posted[2]).toEqual({ type: 'bevel.height', height: 901 });
+  });
+
+  it('holds back a page that moves further than the viewport, or shrinks with it: judged against the last measurement, not the last post', () => {
+    // A `200vh` child: twice the viewport and 16 more. The first report is
+    // posted; sized to it, the frame is the viewport, and the page is now
+    // twice THAT — moved further than the viewport, held. Judged against
+    // the last post instead, a tick at the same viewport would compare the
+    // held height with the post, find it different, and post it: the frame
+    // would double on every round trip.
+    const page = { childBottoms: [488], scrollHeight: 496, flowEnd: 496, viewport: 240 };
+    const bridge = runHeightBridge(page);
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 496 }]);
+    page.viewport = 496;
+    page.flowEnd = 1008;
+    bridge.resize();
+    bridge.resize();
+    expect(bridge.posted).toHaveLength(1);
+    // The host shrinks the frame and the page shrinks with it: held the
+    // same way, so a frame cut down by its host is not chased to the floor.
+    page.viewport = 300;
+    page.flowEnd = 616;
+    bridge.resize();
+    expect(bridge.posted).toHaveLength(1);
   });
 
   it("puts back a body's own inline height exactly, priority included", () => {

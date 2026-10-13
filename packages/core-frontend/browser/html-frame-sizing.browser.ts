@@ -201,20 +201,25 @@ test.describe('an HTML page in a frame whose host grows with the content', () =>
     expect(await overflow(host)).toBe(0);
   });
 
-  test('a page in viewport units settles: a 100vh child with the body\'s margins stops growing the frame', async ({ page }) => {
-    // The page is the viewport and 16 more, whatever the viewport is. Sized
-    // to the first report the frame is the viewport, so without a guard the
-    // next report would be 16 taller, and the next, without end.
-    const host = await load(page, '<div style="height:100vh;background:#eee">fills the viewport</div>');
-    const reports = await host.settled();
-    expect(reports.length).toBeLessThanOrEqual(2);
-    const final = reports[reports.length - 1]!;
-    expect(await host.frameHeight()).toBe(final);
-    // Still nothing new a second later: the frame has settled for good.
-    await page.waitForTimeout(1000);
-    expect(await host.reports()).toEqual(reports);
-    expect(await host.frameHeight()).toBe(final);
-  });
+  // Sized to a report, the frame IS the viewport, so a page in viewport
+  // units measures anew on every round trip: at 100vh it is the viewport
+  // and 16 more (the body's margins), and without a guard the next report
+  // would be 16 taller, and the next, without end; at 200vh it is twice the
+  // viewport and 16, and the frame would double each time; at 50vh it is
+  // half and 16, which settles on its own — and must still be allowed to.
+  for (const units of ['100vh', '200vh', '50vh'] as const) {
+    test(`a page in viewport units settles: a ${units} child with the body's margins stops growing the frame`, async ({ page }) => {
+      const host = await load(page, `<div style="height:${units};background:#eee">sized to the viewport</div>`);
+      const reports = await host.settled();
+      expect(reports.length).toBeLessThanOrEqual(units === '50vh' ? 6 : 2);
+      const final = reports[reports.length - 1]!;
+      expect(await host.frameHeight()).toBe(Math.max(final, FLOOR));
+      // Still nothing new a second later: the frame has settled for good.
+      await page.waitForTimeout(1000);
+      expect(await host.reports()).toEqual(reports);
+      expect(await host.frameHeight()).toBe(Math.max(final, FLOOR));
+    });
+  }
 
   test('a page sized to its viewport settles at its content instead of chasing the frame', async ({ page }) => {
     const host = await load(

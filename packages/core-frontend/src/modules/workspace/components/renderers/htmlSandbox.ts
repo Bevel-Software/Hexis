@@ -429,13 +429,17 @@ const NAV_BRIDGE = `
  * more item. The children's own edges union in besides, for a box out of
  * the flow.
  *
- * One thing no forcing reaches: a length in viewport units (\`100vh\`), which
- * is the frame's height whatever the page's boxes do. Sized to such a
- * report, the frame IS the viewport, so the page would measure taller by
- * its margins on every round trip and the frame would never settle. So a
- * report is held back when the page's height moved by exactly what the
- * viewport moved by since the last one: that page is sized to the frame,
- * not to its content, and the frame stays where it is.
+ * One thing no forcing reaches: a length in viewport units (\`100vh\`,
+ * \`200vh\`), which is the frame's height whatever the page's boxes do.
+ * Sized to such a report, the frame IS the viewport, so the page would
+ * measure taller on every round trip — by its margins at \`100vh\`, by
+ * double at \`200vh\` — and the frame would never settle; a page that moves
+ * less than the viewport does (\`50vh\`) settles on its own. So a report is
+ * held back when the page's height moved at least as far as the viewport
+ * did, the same way, since the last measurement: that page is sized to
+ * the frame, not to its content, and the frame stays where it is. Against
+ * the last MEASUREMENT, posted or held: judged against the last post, a
+ * held height would be posted at the next tick and the growth resume.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
@@ -487,19 +491,21 @@ const HEIGHT_BRIDGE = `
     }
     return bottom + (window.pageYOffset || 0);
   }
-  var lastViewport = -1;
+  var measuredHeight = -1;
+  var measuredViewport = -1;
   function report() {
     var height = Math.ceil(measure());
     var viewport = window.innerHeight || 0;
     if (!isFinite(height) || height < 0) return;
-    if (height !== last && last >= 0 && viewport !== lastViewport
-        && Math.abs((height - last) - (viewport - lastViewport)) <= 1) {
-      // Moved with the viewport, not with its content: sized to the frame.
-      lastViewport = viewport;
-      return;
-    }
-    lastViewport = viewport;
-    if (height === last) return;
+    var dv = viewport - measuredViewport;
+    var dh = height - measuredHeight;
+    var changed = height !== measuredHeight;
+    // Moved with the viewport, at least as far and the same way: sized to
+    // the frame, not to its content.
+    var withViewport = measuredHeight >= 0 && dv !== 0 && (dh > 0) === (dv > 0) && Math.abs(dh) >= Math.abs(dv) - 1;
+    measuredHeight = height;
+    measuredViewport = viewport;
+    if (!changed || withViewport || height === last) return;
     last = height;
     parent.postMessage({ type: 'bevel.height', height: height }, '*');
   }
@@ -508,7 +514,15 @@ const HEIGHT_BRIDGE = `
     observer.observe(document.documentElement);
     if (document.body) observer.observe(document.body);
   }
-  if (typeof addEventListener === 'function') addEventListener('load', report);
+  if (typeof addEventListener === 'function') {
+    addEventListener('load', report);
+    // The frame's own resize: the root's and the body's boxes keep their
+    // size when the frame grows around them, so the observer above does
+    // not see it, and the viewport the next measurement is judged against
+    // must be the new one — or a change that came with the frame's growth
+    // would be read as growth with the viewport.
+    addEventListener('resize', report);
+  }
   report();
 })();
 `;
