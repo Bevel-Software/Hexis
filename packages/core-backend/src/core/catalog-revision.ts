@@ -29,10 +29,12 @@ const log = logger('catalog-revision');
  */
 
 /**
- * A skill's line: everything `list_skills` shows about it on an AGENT
+ * A skill's line: what `list_skills` shows about the skill ITSELF on an AGENT
  * surface. Not `plugins`, which only the browser route decorates onto the
  * catalog — a field no agent-facing listing carries cannot be a change one
- * owes a refresh for.
+ * owes a refresh for. Not `canWrite` either: it is a verdict about the caller,
+ * judged per call by the tool, not part of the skill, and it is never on the
+ * summaries this digest reads.
  */
 function skillFingerprint(s: SkillSummary): string {
   return [s.name, s.path, s.version ?? '', s.description].join('\u0000');
