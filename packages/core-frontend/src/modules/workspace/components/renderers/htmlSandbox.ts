@@ -412,32 +412,48 @@ const NAV_BRIDGE = `
  * frame's height back as the page's: a page that got shorter could never
  * report less, and a frame whose viewport runs a border short of its height
  * would shrink by that border on every report until the page collapsed.
- * The contents are measured as one range, which covers text nodes as well
- * as elements — the body always has an element child, this very script,
- * so counting elements alone would measure a page of plain text as empty —
- * and the children's own edges besides, for a box the range's rectangle
- * does not reach. A body with nothing measurable answers with its own box.
+ * The contents are measured three ways and the lowest edge wins: where the
+ * flow ends, read off a zero-height marker the runtime appends after the
+ * content (the end of the last LINE box, which text written straight into
+ * the body reaches — the body always has an element child, this very
+ * script, so counting elements alone would measure such a page as empty,
+ * and a range over the text gives the inline boxes, which end above the
+ * line box when the line is taller than the type); the contents as one
+ * range, for text and elements alike; and the children's own edges, for a
+ * box neither reaches. A body with nothing measurable answers with its own
+ * box.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
   if (typeof document === 'undefined' || !document.documentElement) return;
   var last = -1;
+  var mark = null;
   function bottomSpacing(body) {
     if (typeof getComputedStyle !== 'function') return 0;
     var style = getComputedStyle(body);
     return (parseFloat(style.paddingBottom) || 0) + (parseFloat(style.marginBottom) || 0);
+  }
+  function flowEnd(body) {
+    if (typeof document.createElement !== 'function' || typeof body.appendChild !== 'function') return -Infinity;
+    if (!mark || mark.parentNode !== body) {
+      mark = document.createElement('div');
+      mark.setAttribute('aria-hidden', 'true');
+      mark.style.cssText = 'display:block;height:0;margin:0;padding:0;border:0;clear:both';
+      body.appendChild(mark);
+    }
+    return mark.getBoundingClientRect().top;
   }
   function measure() {
     var body = document.body;
     if (!body || typeof body.getBoundingClientRect !== 'function') {
       return document.documentElement.scrollHeight || 0;
     }
-    var bottom = -Infinity;
+    var bottom = flowEnd(body);
     if (typeof document.createRange === 'function') {
       var range = document.createRange();
       range.selectNodeContents(body);
       var rect = range.getBoundingClientRect();
-      if (rect && (rect.height > 0 || rect.bottom > 0)) bottom = rect.bottom;
+      if (rect && (rect.height > 0 || rect.bottom > 0) && rect.bottom > bottom) bottom = rect.bottom;
     }
     var kids = body.children || [];
     for (var i = 0; i < kids.length; i++) {

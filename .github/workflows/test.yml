@@ -88,6 +88,16 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
+      # The one real-browser suite (`packages/core-frontend/browser`): the HTML
+      # frame's runtime measures the page and the renderer sizes the frame to
+      # it across the browser's own layout, sandboxed frame and `postMessage`,
+      # which the unit suites' happy-dom does not have — so the pair is
+      # round-tripped through Chromium here (Round-Trip Through the Real
+      # Intermediary). Its own step, after the unit suites, so a browser that
+      # fails to install is its own failure and not a red unit run.
+      - run: pnpm --filter @bevel-software/platform-core-frontend exec playwright install --with-deps chromium
+      - run: pnpm --filter @bevel-software/platform-core-frontend run test:browser
+
       # Design-system ratchet. The UI is migrating onto semantic tokens, so a
       # hard ban would fail against the remaining ~520 off-system call sites.
       # This only fails when the count goes UP — i.e. when new off-system

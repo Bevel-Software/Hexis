@@ -436,6 +436,10 @@ describe('buildSandboxedHtml', () => {
     bodyRectBottom?: number;
     /** The lowest edge of the body's contents as one range — text included; absent, no range can be made. */
     contentsBottom?: number;
+    /** Where the flow ends — the top of the marker the runtime appends after the content. Default 0. */
+    flowEnd?: number;
+    /** False: a document that cannot make the marker (no `createElement`). */
+    canMark?: boolean;
   }) {
     // No lib sources: a vm script cannot parse an `export`. The bridges are
     // appended after the lib either way.
@@ -446,10 +450,14 @@ describe('buildSandboxedHtml', () => {
     const observedTargets: string[] = [];
     const children = opts.childBottoms.map((bottom) => ({ getBoundingClientRect: () => ({ bottom }) }));
     const documentElement = { scrollHeight: opts.scrollHeight, tagName: 'HTML' };
+    const appended: unknown[] = [];
     const body = {
       tagName: 'BODY',
       children,
       getBoundingClientRect: () => ({ bottom: opts.bodyRectBottom ?? 0 }),
+      appendChild: (el: unknown) => {
+        appended.push(el);
+      },
     };
     const contents = opts.contentsBottom;
     const ctx: Record<string, unknown> = {
@@ -459,6 +467,17 @@ describe('buildSandboxedHtml', () => {
         addEventListener: () => undefined,
         getElementById: () => null,
         getElementsByName: () => [],
+        // The marker the runtime appends to read where the flow ends.
+        ...(opts.canMark === false
+          ? {}
+          : {
+              createElement: () => ({
+                style: {},
+                parentNode: body,
+                setAttribute: () => undefined,
+                getBoundingClientRect: () => ({ top: opts.flowEnd ?? 0 }),
+              }),
+            }),
         ...(contents === undefined
           ? {}
           : {
@@ -482,7 +501,7 @@ describe('buildSandboxedHtml', () => {
     };
     vm.createContext(ctx);
     vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
-    return { posted, observedTargets, children, documentElement, resize: () => observed!() };
+    return { posted, observedTargets, children, documentElement, appended, resize: () => observed!() };
   }
 
   it('injects the height bridge: the page posts bevel.height at load and on every change, once per value', () => {
@@ -516,9 +535,14 @@ describe('buildSandboxedHtml', () => {
     ]);
   });
 
-  it('measures a body with nothing measurable by its own box', () => {
-    const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36 });
+  it('measures a body with nothing measurable — no marker, no range, no children — by its own box', () => {
+    const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36, canMark: false });
     expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 44 }]);
+  });
+
+  it('an empty body with a marker is as tall as its spacing: the flow ends where it starts', () => {
+    const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 8 }]);
   });
 
   it('measures text written straight into the body: the body always has an element child, this script, with no box of its own', () => {
@@ -531,6 +555,17 @@ describe('buildSandboxedHtml', () => {
     bridge.children.push({ getBoundingClientRect: () => ({ bottom: 950 }) });
     bridge.resize();
     expect(bridge.posted[1]).toEqual({ type: 'bevel.height', height: 958 });
+  });
+
+  it('reads where the flow ends off one marker appended after the content: the last line box, past the inline boxes a range gives', () => {
+    // A range over text ends at the inline boxes (712); the line box runs to
+    // 720, which is where the marker lands. The frame sized to the range
+    // would clip the page by the difference.
+    const bridge = runHeightBridge({ childBottoms: [0], scrollHeight: 150, contentsBottom: 712, flowEnd: 720 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 728 }]);
+    // One marker, kept across reports.
+    bridge.resize();
+    expect(bridge.appended).toHaveLength(1);
   });
 
   it('says nothing about height where there is no document to measure', () => {
