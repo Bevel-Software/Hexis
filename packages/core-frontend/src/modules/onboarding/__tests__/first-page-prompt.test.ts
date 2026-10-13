@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
+import {
+  FIRST_PAGE_PROMPT,
+  chatGptPromptUrl,
+  claudePromptUrl,
+  firstPagePromptFor,
+  firstPagePromptInFolder,
+  firstPageRoute,
+} from '../first-page-prompt';
 
 /**
  * The first-page prompt links: the prompt must arrive in the chat exactly as
@@ -105,5 +112,53 @@ describe('firstPagePromptFor', () => {
   it('is the generic request without a pack, or with one that has none to give', () => {
     expect(firstPagePromptFor(null)).toBe(FIRST_PAGE_PROMPT);
     expect(firstPagePromptFor({ firstPagePrompt: '  ' })).toBe(FIRST_PAGE_PROMPT);
+  });
+});
+
+/**
+ * The request, pointed at the folder New page would write in when that is
+ * below the top of Knowledge: an agent writing as the person must try where
+ * they may write.
+ */
+describe('the first-page request in a folder', () => {
+  it('names the folder in the generic request', () => {
+    expect(firstPagePromptInFolder(FIRST_PAGE_PROMPT, 'Sales')).toBe(
+      "Using our Hexis knowledge base, write a page in Knowledge/Sales about our company: what we do, who we work with, and our main products. Ask me for anything you don't know, then save it.",
+    );
+    expect(firstPagePromptInFolder(FIRST_PAGE_PROMPT, 'Sales/Team')).toContain('write a page in Knowledge/Sales/Team about');
+  });
+
+  it('leaves the request as it is at the top of Knowledge', () => {
+    expect(firstPagePromptInFolder(FIRST_PAGE_PROMPT, null)).toBe(FIRST_PAGE_PROMPT);
+  });
+
+  it('adds the place to a starter pack’s request that does not say it', () => {
+    expect(firstPagePromptInFolder('Using our Hexis knowledge base, fill in the Customers page.', 'Sales')).toBe(
+      'Using our Hexis knowledge base, fill in the Customers page. Save it in Knowledge/Sales.',
+    );
+  });
+
+  it('points a built-in pack’s "page in Knowledge" at the folder, naming one place', () => {
+    const sales =
+      "Using our Hexis knowledge base, fill in the Customers page in Knowledge for our sales team: who buys from us. Ask me for anything you don't know, then save it.";
+    const out = firstPagePromptInFolder(sales, 'Sales');
+    expect(out).toBe(sales.replace('page in Knowledge for', 'page in Knowledge/Sales for'));
+    expect(out).not.toContain('Save it in');
+  });
+
+  it('matches "in Knowledge" in any case, keeping the request’s own casing', () => {
+    expect(firstPagePromptInFolder('Write a page IN KNOWLEDGE about us.', 'Sales')).toBe(
+      'Write a page IN KNOWLEDGE/Sales about us.',
+    );
+    expect(firstPagePromptInFolder('Write a page in knowledge.', 'Sales')).toBe('Write a page in knowledge/Sales.');
+  });
+
+  it('does not mistake "knowledge base" or a name starting with Knowledge for the folder', () => {
+    expect(firstPagePromptInFolder('Write a page in Knowledge Management.', 'Sales')).toBe(
+      'Write a page in Knowledge Management. Save it in Knowledge/Sales.',
+    );
+    expect(firstPagePromptInFolder('Look in knowledge base, then write it in Knowledge.', 'Sales')).toBe(
+      'Look in knowledge base, then write it in Knowledge/Sales.',
+    );
   });
 });

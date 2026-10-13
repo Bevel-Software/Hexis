@@ -98,7 +98,7 @@ async function makeHarness(opts: {
   });
   app.use(
     '/api',
-    createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })),
+    createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })),
   );
 
   const server = await new Promise<Server>((resolve) => {
