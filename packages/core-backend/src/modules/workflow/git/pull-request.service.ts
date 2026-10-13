@@ -447,6 +447,11 @@ export class PullRequestService implements IPullRequestService {
       // network flood came with.
       if (err instanceof WorkflowValidationError) {
         log.debug(`${what} could not resolve ${where}; answering no touched paths:`, { err });
+      } else if (err instanceof MergeLogUnreadError) {
+        // Already warned once where the log was read — per batch for a
+        // listing, per request for a lone summary. Warning again per row
+        // would repeat one database failure up to a batch's worth of times.
+        log.debug(`${what} skipped for ${where}: the merge log could not be read; answering no touched paths`);
       } else {
         log.warn(`${what} failed for ${where}:`, { err });
       }

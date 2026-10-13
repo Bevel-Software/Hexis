@@ -394,6 +394,24 @@ describe('PullRequestService.listPrsByState', () => {
     expect(atCommit).not.toHaveBeenCalled();
   });
 
+  it('warns once for a failed merge-log read, not once more per applied row', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { svc } = svcOver(
+        [1, 2, 3].map((number) => row({ number, state: 'merged' })),
+        ['Knowledge/A.md'],
+        [],
+        { mergeLogThrows: true },
+      );
+      await svc.listPrsByState(['merged']);
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('could not read who applied 3 change requests'))).toHaveLength(1);
+      expect(lines.filter((l) => l.includes('changedPathsAndPairsOfAppliedChange'))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('remembers nothing from a listing whose merge-log read failed: the next listing asks again', async () => {
     const { svc, mergeLogReads } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [], {
       mergeLogThrows: true,
