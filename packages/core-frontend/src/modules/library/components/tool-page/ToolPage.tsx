@@ -25,7 +25,7 @@ import { NameWithBadges } from '../NameWithBadges';
 import { WorkspaceContext } from '../../../workspace/state/workspace.context';
 import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
 import { useItemDeletedElsewhere } from '../../../workspace/hooks/useItemDeletedElsewhere';
-import { landingAfterClose } from '../../../workspace/routing/landing';
+import { landingAfterClose } from '../../../workspace';
 
 /**
  * One tool, as a page.

@@ -1,5 +1,5 @@
 import { kbFileUrl } from './kb-routes';
-import { LIBRARY_ROOT, isLibraryLocation, libraryItemWorkspacePath } from '../../library/routes/library-paths';
+import { LIBRARY_ROOT, isLibraryLocation, libraryItemWorkspacePath } from '../../library';
 
 /**
  * Where the page lands once the file on screen has closed — deleted from the
