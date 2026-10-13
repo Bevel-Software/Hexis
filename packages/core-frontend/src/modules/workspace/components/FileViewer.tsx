@@ -447,10 +447,11 @@ export function FileViewer() {
   // already been re-set to true by the Edit click — and the naive
   // mirror would revert editMode back to false. To avoid that, Done
   // stamps `lastDoneAtRef`; the mirror ignores transitions that fall
-  // within a short window after Done (longer than a typical
-  // commit+push round-trip on a normal network — Done's release
-  // running >`DONE_RELEASE_WINDOW_MS` would be exceptional, and the
-  // worst-case outcome is one extra Edit click to recover).
+  // within a short window after Done (longer than a typical save-and-
+  // release round-trip on a normal network; the server queues the commit
+  // itself — Done's release running >`DONE_RELEASE_WINDOW_MS` would be
+  // exceptional, and the worst-case outcome is one extra Edit click to
+  // recover).
   const wasHoldingLockRef = useRef(false);
   const lastDoneAtRef = useRef(0);
   const DONE_RELEASE_WINDOW_MS = 5_000;
@@ -664,8 +665,9 @@ export function FileViewer() {
 
   const handleExitEditMode = useCallback(() => {
     if (!editMode) return;
-    // Flip to View mode SYNCHRONOUSLY. The actual save+commit+push that
-    // `saveAndRelease` runs takes a full git-push round-trip (~1–3 s)
+    // Flip to View mode SYNCHRONOUSLY. The save and release that
+    // `saveAndRelease` runs are two network round-trips (the server then
+    // queues the commit of what is on disk; nothing waits on git here),
     // and we don't want the user staring at a frozen "Done" button
     // waiting for the network — they explicitly asked to leave edit
     // mode, the UI should respect that immediately.

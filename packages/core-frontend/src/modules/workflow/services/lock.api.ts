@@ -70,9 +70,11 @@ async function unwrap<T>(res: Response): Promise<T> {
 /**
  * Try to acquire the lock for `(branch, path)`. Resolves with the
  * `AcquireLockResult` payload — `acquired: true` when the caller now
- * holds the lock, `acquired: false` when someone else does (the
- * holder's lock state is included so the UI can render "X is editing
- * this page" without a follow-up call).
+ * holds the lock, `acquired: false` when a live hold is held elsewhere:
+ * someone else's, or the caller's own from another tab or their agent
+ * (the server refuses a live hold whoever holds it). The hold is included
+ * so the UI can say "X is editing this page", or `SELF_HOLD_MESSAGE` for
+ * the caller's own, without a follow-up call.
  */
 export async function acquireLock(
   workspaceId: string,
