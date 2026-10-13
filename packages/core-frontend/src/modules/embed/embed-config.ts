@@ -47,14 +47,25 @@ const UNCONFIGURED: EmbedRuntimeConfig = { baseUrl: '', token: null, openLink: n
 
 let current: EmbedRuntimeConfig = UNCONFIGURED;
 
+/**
+ * Which runtime is current: replaced each time the embed is configured or
+ * reset (a new mount, an unmount), and NOT by a renewal, which only changes
+ * the token. What a call or a renewal started under one runtime learns must
+ * not reach the next: its successor's token is for another page.
+ */
+let runtime: object = {};
+
 /** Hand the embed its runtime: called by {@link mountEmbed} before anything renders. */
 export function configureEmbed(config: Partial<EmbedRuntimeConfig>): void {
   current = { ...current, ...config };
+  runtime = {};
+  renewing = null;
 }
 
 /** Back to the SPA page's own answers — on unmount, and in tests. */
 export function resetEmbedConfig(): void {
   current = UNCONFIGURED;
+  runtime = {};
   renewing = null;
 }
 
@@ -125,7 +136,7 @@ export function renewEmbedToken(): Promise<string | null> {
   const renew = current.renew;
   if (!renew) return Promise.resolve(null);
   if (!renewing) {
-    const config = current;
+    const mount = runtime;
     // A renewal that throws instead of answering null is a renewal that failed.
     const mine: Promise<string | null> = Promise.resolve()
       .then(renew)
@@ -133,7 +144,7 @@ export function renewEmbedToken(): Promise<string | null> {
       .then((token) => {
         // A mount that was taken down meanwhile must not have its successor's
         // token replaced by the answer to its own question.
-        if (current !== config) return null;
+        if (runtime !== mount) return null;
         if (!token) return null;
         current = { ...current, token };
         for (const listener of renewedListeners) listener();
@@ -155,16 +166,22 @@ export function renewEmbedToken(): Promise<string | null> {
  *
  * A call that was sent with a token another call has already replaced is
  * retried with the new one without asking for a third.
+ *
+ * Only within the runtime it was sent under: a call whose mount was replaced
+ * while it ran (another `open_page` in the chat, for another page) is never
+ * retried with the successor's token — that would send an old draft to the
+ * other page. Its refusal is reported as it came.
  */
 export async function withEmbedToken<T>(call: (token: string) => Promise<T>): Promise<T> {
+  const mount = runtime;
   const sent = embedToken();
   try {
     return await call(sent);
   } catch (err) {
-    if ((err as { status?: unknown } | null)?.status !== 401) throw err;
+    if ((err as { status?: unknown } | null)?.status !== 401 || runtime !== mount) throw err;
     const now = embedToken();
     const fresh = now !== sent ? now : await renewEmbedToken();
-    if (!fresh) throw err;
+    if (!fresh || runtime !== mount) throw err;
     return call(fresh);
   }
 }
