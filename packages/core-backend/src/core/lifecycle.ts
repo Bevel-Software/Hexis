@@ -553,9 +553,14 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // Clearing the interval stops future ticks; it does nothing to a job a
   // tick already started, which holds a claim it heartbeats through the
   // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
-  // that finishes releases or marks its row; one that cannot in time is
-  // killed with the process and its claim goes stale for the next sweep
-  // — which is the recovery every crash already gets.
+  // that finishes releases or marks its row. One that cannot in time is
+  // NOT cancelled — the bounded wait only stops waiting — and what becomes
+  // of it depends on who is stopping: a process shutting down takes it
+  // along; a tenant host evicting one graph ends the pool under it, so its
+  // next heartbeat or write fails and it stops there, writing nothing
+  // more. Either way its claim goes stale and the next sweep — the next
+  // boot's, or a live graph's — picks the row up again, which is the
+  // recovery every crash already gets.
   if (deps.pluginJoinRequestJobs) {
     await bounded(deps.pluginJoinRequestJobs.drain(), remaining(), 'finishing the join-request jobs', log);
   }

@@ -453,10 +453,10 @@ export class PluginJoinRequestJobs {
         if (state !== 'held') throw new ClaimLostError(state);
       });
     } catch (err) {
-      // The cause when there is one (see `underlying`): the requester reads
-      // this sentence on their card, and a database's reason is one, where
-      // a wrapper's cut-off column list is not.
-      const reason = sanitizeError(underlying(err));
+      // The cause when there is one (see `underlying`), for the log; a
+      // database's reason, where a wrapper's cut-off column list is not.
+      const cause = underlying(err);
+      const reason = sanitizeError(cause);
       // `pluginKey` is a persisted folder path, so it is escaped before it
       // reaches a log line: a folder carrying control characters could
       // otherwise write newlines of its own into the log.
@@ -481,13 +481,19 @@ export class PluginJoinRequestJobs {
         return;
       }
       log.error(`join request for ${key} failed: ${loggable(reason)}`);
+      // What the requester reads on their card. The git work's own words
+      // are theirs to see (credentials stripped); a database's reason is
+      // not — it names tables and columns and is for the operator, who has
+      // it in the line above — so a wrapped failure is recorded in one
+      // stable sentence.
+      const shown = cause === err ? reason : DATABASE_FAILURE_REASON;
       await this.store
         // Named with the token, so this lands only if the row is still this
         // process's. A worker that overran the window and had its row taken
         // writes nothing here rather than stamping its failure on the attempt
         // that replaced it — which would show the requester a failure for
         // work that is, at that moment, succeeding.
-        .markFailed(record.id, live.claimToken, reason)
+        .markFailed(record.id, live.claimToken, shown)
         // Nothing left to do if even that write fails: the row stays
         // `pending` and the next boot's sweep tries the whole thing again.
         .catch((writeErr: unknown) => {
@@ -686,6 +692,13 @@ function underlying(err: unknown): unknown {
   const cause = typeof err === 'object' && err !== null ? (err as { cause?: unknown }).cause : undefined;
   return cause instanceof Error ? cause : err;
 }
+
+/**
+ * The sentence a requester's card carries when the database, not the git
+ * work, refused the request: stable, and naming no table or column. The
+ * database's own words go to the server log beside it.
+ */
+export const DATABASE_FAILURE_REASON = 'the request could not be recorded; an admin can find the reason in the server log';
 
 /** Node's "there is no such file" errors, and only those. */
 function isFileAbsent(err: unknown): boolean {

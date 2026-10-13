@@ -1,11 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
-import {
-  PluginJoinRequestJobs,
-  JoinRequestNotReadyError,
-  type JoinRequestJobsDeps,
-  CLAIM_STALE_AFTER_MS,
-} from '../join-request-jobs.service.js';
+import { PluginJoinRequestJobs, JoinRequestNotReadyError, type JoinRequestJobsDeps } from '../index.js';
+// The claim window is not part of the module's surface: a test that moves
+// the clock past it reads the number the service itself uses.
+import { CLAIM_STALE_AFTER_MS, DATABASE_FAILURE_REASON } from '../join-request-jobs.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -146,7 +144,7 @@ describe('PluginJoinRequestJobs', () => {
     expect(row.failureReason).not.toContain('ghp_secret');
   });
 
-  it("records a database failure as the database's reason, not the wrapper's cut-off SQL", async () => {
+  it("logs a database failure as the database's reason, and shows the requester one stable sentence", async () => {
     const h = harness();
     h.workflow.openChangeRequest.mockRejectedValue(
       new Error('Failed query: insert into "change_requests" ("id", "number", "title", "body", "source_branch", "target_branch", "author_id", "status", "created_at", "updated_at") values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', {
@@ -155,9 +153,16 @@ describe('PluginJoinRequestJobs', () => {
     );
     await h.jobs.start(pendingRow(h.store));
 
+    // The operator gets the reason, not the wrapper's cut-off SQL…
+    const logged = consoleError.mock.calls.map((c) => String(c[0]));
+    // (`printable` renders the reason as a JSON string, so its own quotes come escaped.)
+    expect(logged).toContainEqual(expect.stringMatching(/failed: "relation \\"change_requests\\" does not exist"/));
+    expect(logged.some((l) => l.includes('Failed query'))).toBe(false);
+    // …and the requester's card names no table.
     const [row] = h.store.all();
     expect(row.status).toBe('failed');
-    expect(row.failureReason).toBe('relation "change_requests" does not exist');
+    expect(row.failureReason).toBe(DATABASE_FAILURE_REASON);
+    expect(row.failureReason).not.toContain('change_requests');
   });
 
   it('fails the record rather than throwing when the plugin is gone', async () => {
