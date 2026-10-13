@@ -5,3 +5,9 @@
 
 /** Where "Connect your tools" lives; every in-app link to it uses this. */
 export { CONNECT_TOOLS_PATH } from './routes/library-paths';
+/** A tool's page, by slug — the one shape the server accepts as an OAuth return target. */
+export { pathForTool } from './routes/library-paths';
+/** A tool's mark, as the gallery draws it, for any surface that lists tools. */
+export { ToolLogo, type ToolLogoProps } from './components/ToolLogo';
+/** The outcome a tool sign-in carries back in the fragment, read once on arrival. */
+export { readOAuthFragment, type OAuthFragmentOutcome } from './utils/oauth-fragment';

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -9,7 +9,7 @@ import {
 } from '../../workspace/state/workspace.context';
 import { AdminContext } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import type { ConnectPending, ToolSecrets } from '../../secrets-vault';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
@@ -64,19 +64,6 @@ vi.mock('../../access/api', async (importOriginal) => {
     fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
   };
 });
-
-// "Connect your tools" fetches its own listing and writes keys through these;
-// everything else in both modules stays real for the pages that use it.
-const connectMock = vi.hoisted(() => ({ getConnectPending: vi.fn(), getMcpOAuthRequest: vi.fn() }));
-vi.mock('../../secrets-vault/services/connect.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../secrets-vault/services/connect.api')>()),
-  ...connectMock,
-}));
-const varsMock = vi.hoisted(() => ({ setUserVar: vi.fn(), deleteUserVar: vi.fn(), checkToolConnection: vi.fn() }));
-vi.mock('../../secrets-vault/services/tool-secrets.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../secrets-vault/services/tool-secrets.api')>()),
-  ...varsMock,
-}));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
@@ -598,6 +585,48 @@ describe('LibraryRoutes', () => {
  * sidebar (and, in the shell, the toggle and the selected tab) are on screen
  * with it. The shell's `/connect` redirects here; see `ShellRoutes.test`.
  */
+/**
+ * The secrets endpoints "Connect your tools" talks to, answered at the HTTP
+ * seam — the page's own services and the shared `authFetch` stay real, so
+ * what is pinned is the page as it talks to the server. Anything else that
+ * reaches `fetch` here is a mistake, and says so.
+ */
+interface SecretsServer {
+  /** What `/api/connect/pending` answers. */
+  listing: ConnectPending;
+  /** Who is asking in agent-connect mode; null answers the lookup with 404. */
+  oauthRequest: { clientName: string; scope: null; resource: null } | null;
+  /** Every request, in order: method, path and the parsed JSON body. */
+  calls: { method: string; path: string; body: unknown }[];
+}
+
+function serveSecrets(listing: ConnectPending): SecretsServer {
+  const server: SecretsServer = { listing, oauthRequest: null, calls: [] };
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://test');
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const path = url.pathname;
+      server.calls.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : null });
+      if (method === 'GET' && path === '/api/connect/pending') return json(server.listing);
+      if (method === 'GET' && path === '/api/mcp/oauth/request') {
+        return server.oauthRequest ? json(server.oauthRequest) : json({ error: 'Unknown request' }, 404);
+      }
+      if (method === 'POST' && /^\/api\/secrets\/tools\/[^/]+\/check$/.test(path)) {
+        return json({ verdict: { status: 'ok', detail: null, checkedAt: new Date().toISOString() } });
+      }
+      if ((method === 'PUT' || method === 'DELETE') && /^\/api\/secrets\/tools\/[^/]+\/vars\/[^/]+\/user$/.test(path)) {
+        return json({ ok: true });
+      }
+      throw new Error(`the test server has no answer for ${method} ${path}`);
+    }),
+  );
+  return server;
+}
+
 describe('LibraryRoutes — Connect your tools', () => {
   /** heyreach, holding one per-person key that is or is not saved. */
   const keyedTool = (saved: boolean) =>
@@ -607,6 +636,8 @@ describe('LibraryRoutes — Connect your tools', () => {
       ],
     });
 
+  let server: SecretsServer;
+
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
@@ -614,7 +645,7 @@ describe('LibraryRoutes — Connect your tools', () => {
     pluginsMock.listJoinRequests.mockResolvedValue([]);
     window.history.replaceState(null, '', '/skills-and-tools/connect');
     sessionStorage.clear();
-    connectMock.getConnectPending.mockReset().mockResolvedValue({
+    server = serveSecrets({
       tools: [
         {
           slug: 'heyreach',
@@ -630,13 +661,10 @@ describe('LibraryRoutes — Connect your tools', () => {
       oauth: [],
       toolOAuth: [],
     });
-    connectMock.getMcpOAuthRequest.mockReset();
-    varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
-    varsMock.checkToolConnection.mockReset().mockResolvedValue({
-      status: 'ok',
-      detail: null,
-      checkedAt: new Date().toISOString(),
-    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('renders the page inside the Skills & Tools layout, with no sidebar row selected', async () => {
@@ -655,7 +683,7 @@ describe('LibraryRoutes — Connect your tools', () => {
   });
 
   it('keeps agent-connect mode, with the same sidebar beside it', async () => {
-    connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null });
+    server.oauthRequest = { clientName: 'Claude', scope: null, resource: null };
     // The page reads the browser's own address, as the BrowserRouter keeps it.
     window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=signed-state');
     renderAt('/skills-and-tools/connect?oauth=signed-state');
@@ -663,7 +691,8 @@ describe('LibraryRoutes — Connect your tools', () => {
       await screen.findByRole('button', { name: 'Finish & return to your agent' }),
     ).toBeInTheDocument();
     expect(nav()).toBeInTheDocument();
-    expect(connectMock.getMcpOAuthRequest).toHaveBeenCalledWith('signed-state');
+    const asked = (vi.mocked(fetch).mock.calls as [RequestInfo | URL, RequestInit?][]).map(([input]) => String(input));
+    expect(asked).toContain('/api/mcp/oauth/request?state=signed-state');
   });
 
   it("the sidebar's setup reminder opens the page at its own address", async () => {
@@ -689,7 +718,11 @@ describe('LibraryRoutes — Connect your tools', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(screen.queryByRole('button', { name: /integrations? needs? setup/ })).toBeNull());
-    expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k');
+    expect(server.calls).toContainEqual({
+      method: 'PUT',
+      path: '/api/secrets/tools/heyreach/vars/API_KEY/user',
+      body: { value: 'k', label: null },
+    });
   });
 
   // The other direction: unticking a signed-in tool deletes the sign-in, and
@@ -714,7 +747,7 @@ describe('LibraryRoutes — Connect your tools', () => {
       const [signedIn, setSignedIn] = useState(true);
       return { ...CATALOG, tools: [signedInTool(signedIn)], reload: () => setSignedIn(false) };
     });
-    connectMock.getConnectPending.mockResolvedValue({
+    server.listing = {
       tools: [],
       oauth: [],
       toolOAuth: [
@@ -730,8 +763,7 @@ describe('LibraryRoutes — Connect your tools', () => {
           ownerOnly: false,
         },
       ],
-    });
-    varsMock.deleteUserVar.mockReset().mockResolvedValue(undefined);
+    };
     renderAt('/skills-and-tools/connect');
 
     const skip = await screen.findByRole('checkbox', {
@@ -741,7 +773,13 @@ describe('LibraryRoutes — Connect your tools', () => {
 
     fireEvent.click(skip);
 
-    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('heyreach', 'TOKEN'));
+    await waitFor(() =>
+      expect(server.calls).toContainEqual({
+        method: 'DELETE',
+        path: '/api/secrets/tools/heyreach/vars/TOKEN/user',
+        body: null,
+      }),
+    );
     expect(await screen.findByRole('button', { name: /1 integration needs setup/ })).toBeInTheDocument();
   });
 });
