@@ -358,12 +358,12 @@ export class PluginJoinRequestJobs {
    */
   startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
     void this.sweep().catch((err: unknown) => {
-      log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(err))}`);
+      log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(underlying(err)))}`);
     });
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => {
       void this.sweep().catch((err: unknown) => {
-        log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(err))}`);
+        log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(underlying(err)))}`);
       });
     }, intervalMs);
     // Never a reason for the process to stay alive: every row is durable, and
@@ -667,6 +667,19 @@ export class PluginJoinRequestJobs {
  */
 function loggable(reason: string): string {
   return printable(reason);
+}
+
+/**
+ * The error behind a wrapped one. Drizzle reports a failed query as its own
+ * error whose message is the SQL and whose `cause` is the database's reason;
+ * the sanitizer caps a message at a couple of hundred characters, so logging
+ * the wrapper showed a cut-off column list and never the reason. The reason
+ * is what the sweep's warning needs — "the pool has been ended", "relation
+ * does not exist" — so the cause is logged when there is one.
+ */
+function underlying(err: unknown): unknown {
+  const cause = typeof err === 'object' && err !== null ? (err as { cause?: unknown }).cause : undefined;
+  return cause instanceof Error ? cause : err;
 }
 
 /** Node's "there is no such file" errors, and only those. */

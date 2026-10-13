@@ -425,13 +425,18 @@ export interface CoreStopDeps {
   /** The lease loop from {@link holdCommitWorkerLease}: its stop finishes the in-flight commit and releases the lease. */
   commitWorker: Pick<LeaseLoopHandle, 'stop'>;
   /**
-   * Background work to wind down before the pool goes — the join-request
-   * sweep and its jobs, today. The timer is stopped first so nothing new is
-   * scheduled, then the jobs already running are awaited (within the budget)
-   * so the pool is not ended under a clone or a push that is still writing
-   * to it. Optional: a caller that has not built them yet passes nothing.
+   * The plugin join-request jobs, whose sweep must be wound down before the
+   * pool goes. The timer is stopped first so nothing new is scheduled, then
+   * the jobs already running are awaited (within the budget) so the pool is
+   * not ended under a clone or a push that is still writing to it. Optional:
+   * a caller that has not built them yet passes nothing.
+   *
+   * Named as `CoreServices` names it, because the graph IS what is passed
+   * here (`stopCore(graph.core)`): under another name the slot stayed empty,
+   * the sweep outlived every stopped graph, and a multi-tenant host gained
+   * one more sweeper querying an ended pool, every minute, per eviction.
    */
-  backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
+  pluginJoinRequestJobs?: { stopSweeping(): void; drain(): Promise<void> };
   /**
    * The agent upload store, whose own sweep deletes staged bytes nobody
    * applied. Stopped with this graph because the next graph for the same
@@ -532,7 +537,7 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // server is closed (or the tenant is no longer routed to), so this is the
   // earliest point the interval is dead weight. Synchronous and unfailing
   // — it just clears an interval — so it needs no budget of its own.
-  deps.backgroundJobs?.stopSweeping();
+  deps.pluginJoinRequestJobs?.stopSweeping();
   // And the upload store's sweep, for the same reason and in the same breath:
   // synchronous, and it only clears an interval and tells a sweep already
   // running to stop deleting.
@@ -551,8 +556,8 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // that finishes releases or marks its row; one that cannot in time is
   // killed with the process and its claim goes stale for the next sweep
   // — which is the recovery every crash already gets.
-  if (deps.backgroundJobs) {
-    await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+  if (deps.pluginJoinRequestJobs) {
+    await bounded(deps.pluginJoinRequestJobs.drain(), remaining(), 'finishing the join-request jobs', log);
   }
   // The sweep in flight when the interval was cleared: awaited so the next
   // graph for this tenant cannot start staging bytes while a store it has

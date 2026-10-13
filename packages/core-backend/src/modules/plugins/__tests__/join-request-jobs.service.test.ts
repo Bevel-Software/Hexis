@@ -524,6 +524,31 @@ describe('PluginJoinRequestJobs', () => {
     expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
   });
 
+  it("a sweep that cannot read the table logs the database's reason, not the wrapper's cut-off SQL", async () => {
+    vi.useFakeTimers();
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const h = harness();
+      // What Drizzle throws: the SQL in the message, the driver's error underneath.
+      const wrapped = new Error(
+        'Failed query: select "id", "requester_email", "requester_email_bidx", "requester_name", "plugin_key", "status", "failure_reason", "change_request_number", "claimed_at", "claim_token", "created_at" from "plugin_join_requests" where status = $1',
+        { cause: new Error('Cannot use a pool after calling end on the pool') },
+      );
+      h.store.pending = async () => {
+        throw wrapped;
+      };
+      h.jobs.startSweeping(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      h.jobs.stopSweeping();
+      const lines = warned.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('could not look at the join requests still owed: "Cannot use a pool after calling end on the pool"');
+      expect(lines[0]).not.toContain('Failed query');
+    } finally {
+      warned.mockRestore();
+    }
+  });
+
   it('proceeds past a createBranch failure only when the branch is really there', async () => {
     const h = harness();
     const branch = joinBranchFor(ALI, 'Finance');
