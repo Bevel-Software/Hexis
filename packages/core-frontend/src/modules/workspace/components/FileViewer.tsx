@@ -858,8 +858,9 @@ export function FileViewer() {
   //   - Lock is already held because we're in edit mode (handleEnterEditMode
   //     guarantees it). Save = checkpoint commit, lock stays held so
   //     subsequent keystrokes don't have to re-acquire.
-  //   - Final commit + release happens on exit-edit, unmount, file switch,
-  //     or `IDLE_RELEASE_MS` of inactivity (the hook's idle timer).
+  //   - The final write + release happens on exit-edit, unmount, file
+  //     switch, or `IDLE_RELEASE_MS` of inactivity (the hook's idle
+  //     timer); the server queues the commit of what is on disk.
   const handleSave = useCallback(async (content: string) => {
     if (!openFilePath) return;
     openFileContentRef.current = content;
@@ -867,12 +868,12 @@ export function FileViewer() {
       // Defensive: this path runs when a save fires without us being in
       // edit mode (rare — renderer is readOnly when !editMode, so
       // normally only the explicit Edit-button + saveCheckpoint flow
-      // reaches here). Acquire the lock, commit-and-release as a
+      // reaches here). Acquire the lock, save-and-release as a
       // one-shot, and stay in View mode. We deliberately do NOT call
       // `setEditMode(true)` — the user didn't ask to enter Edit mode,
       // they just hit save, so the UI shouldn't silently promote them.
-      // `saveAndRelease` handles the full commit-then-release-then-
-      // push cycle in one call.
+      // `saveAndRelease` writes the buffer and releases the hold in one
+      // call; the server queues the commit of what is on disk.
       const { acquired, error } = await fileLock.acquire();
       if (!acquired) {
         // Read the message off the resolved outcome, not `fileLock.lockError`

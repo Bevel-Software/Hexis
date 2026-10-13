@@ -110,8 +110,8 @@ interface UseFileLockArgs {
   /**
    * Current authenticated user's id. Used to recognise "this lock is held
    * by me" responses from the server during the brief window between a
-   * tab-switch cleanup releasing the lock and the backend actually
-   * committing the release — without this, switching away and back to a
+   * tab-switch cleanup sending its release and the server answering it —
+   * without this, switching away and back to a
    * file you were just editing would flicker an amber "[your own name]
    * is editing this page" banner. Optional so test harnesses without auth context
    * still work; in that case nothing is filtered.
@@ -214,8 +214,9 @@ interface UseFileLockReturn {
  *     the latest buffer + commit. The lock stays held — releasing here
  *     would race against the next keystroke.
  *   - Release on unmount / branch-or-path change. The cleanup callback
- *     commits the final pending content and drops the lock so the next
- *     editor can take over.
+ *     writes the final pending content to disk and drops the lock so the
+ *     next editor can take over; the server queues the commit of what is
+ *     on disk.
  */
 export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
   const { workspaceId, branch, path, currentUserId } = args;
@@ -570,9 +571,10 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     idleTimerRef.current = window.setTimeout(() => {
       idleTimerRef.current = null;
       if (!holdingLockRef.current) return;
-      // saveAndRelease writes the current buffer (if any), commits, and
-      // releases the lock. On success the `holdingLock` state flips to
-      // false; the editor's `readOnly` check reacts on the next render.
+      // saveAndRelease writes the current buffer (if any) and releases
+      // the lock; the server queues the commit of what is on disk. On
+      // success the `holdingLock` state flips to false; the editor's
+      // `readOnly` check reacts on the next render.
       // On failure we leave the timer cleared — the user's next
       // activity will start a fresh one. Errors are logged here because
       // the hook user has already moved on by definition (they were
