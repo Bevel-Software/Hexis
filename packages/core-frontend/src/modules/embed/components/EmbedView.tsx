@@ -337,9 +337,13 @@ export function EmbedView() {
   }, []);
 
   /**
-   * The surface the app's renderers are mounted on. Rebuilt only when the
-   * page changes: the renderers take it as a context, and a fresh object per
-   * render would re-run every read effect that depends on it.
+   * The surface the app's renderers are mounted on. Rebuilt when the page
+   * changes and when the token is renewed, and at no other time: the
+   * renderers take it as a context, and a fresh object per render would
+   * re-run every read effect that depends on it. A renewal has to rebuild
+   * it, because the byte addresses it hands out carry the token, and a
+   * picture refused under the old one loads again only through a fresh
+   * address.
    */
   const surface = useMemo<RendererSurface | null>(() => {
     if (!view) return null;
