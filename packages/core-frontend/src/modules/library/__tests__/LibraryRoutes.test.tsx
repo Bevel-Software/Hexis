@@ -9,7 +9,7 @@ import {
 } from '../../workspace/state/workspace.context';
 import { AdminContext } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
-import type { ConnectPending, ToolSecrets } from '../../secrets-vault';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
@@ -591,16 +591,19 @@ describe('LibraryRoutes', () => {
  * what is pinned is the page as it talks to the server. Anything else that
  * reaches `fetch` here is a mistake, and says so.
  */
+/** What `/api/connect/pending` answers, as JSON on the wire: three lists, shaped by the fixtures below. */
+type ConnectListing = { tools: object[]; oauth: object[]; toolOAuth: object[] };
+
 interface SecretsServer {
   /** What `/api/connect/pending` answers. */
-  listing: ConnectPending;
+  listing: ConnectListing;
   /** Who is asking in agent-connect mode; null answers the lookup with 404. */
   oauthRequest: { clientName: string; scope: null; resource: null } | null;
   /** Every request, in order: method, path and the parsed JSON body. */
   calls: { method: string; path: string; body: unknown }[];
 }
 
-function serveSecrets(listing: ConnectPending): SecretsServer {
+function serveSecrets(listing: ConnectListing): SecretsServer {
   const server: SecretsServer = { listing, oauthRequest: null, calls: [] };
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
