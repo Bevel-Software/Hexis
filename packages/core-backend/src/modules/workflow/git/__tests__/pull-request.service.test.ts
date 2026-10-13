@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { PullRequestService, changeSourceFor } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
@@ -278,7 +280,16 @@ describe('PullRequestService.listPrsByState', () => {
       hasError: false,
       startedAt: new Date(0),
     }));
-    const mergeLogReads = vi.fn(async () => mergeLogRows);
+    // Answered FROM THE PREDICATE: only the attempts of the request numbers
+    // the query names come back, so a read that leaves a row out leaves that
+    // row without its head instead of passing on a stub that answers all.
+    const mergeLogReads = vi.fn(async (predicate: SQL) => {
+      const { params } = new PgDialect().sqlToQuery(predicate);
+      return mergeLogRows.filter((r) => params.includes(r.prNumber));
+    });
+    /** The request numbers each merge-log read asked for. */
+    const mergeLogAsked = () =>
+      mergeLogReads.mock.calls.map(([predicate]) => new PgDialect().sqlToQuery(predicate).params);
     const db = {
       select: () => ({
         from: (table: unknown) => (table === prMergeLog ? { where: mergeLogReads } : select()),
@@ -299,7 +310,7 @@ describe('PullRequestService.listPrsByState', () => {
       changedPathsAndPairsOfAppliedChange: atCommit,
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
-    return { svc, select, forPr, atCommit, ensureRemotesFetched, mergeLogReads };
+    return { svc, select, forPr, atCommit, ensureRemotesFetched, mergeLogReads, mergeLogAsked };
   }
 
   beforeEach(() => {
@@ -358,13 +369,15 @@ describe('PullRequestService.listPrsByState', () => {
 
   it('reads the merge log of every applied row in ONE query, and hands each row its own head', async () => {
     const heads = { 1: '1'.repeat(40), 2: '2'.repeat(40), 3: '3'.repeat(40) };
-    const { svc, atCommit, mergeLogReads } = svcOver(
+    const { svc, atCommit, mergeLogReads, mergeLogAsked } = svcOver(
       [1, 2, 3].map((number) => row({ number, state: 'merged' })),
       ['Knowledge/A.md'],
       Object.entries(heads).map(([n, headSha]) => ({ name: 'Robin Lee', headSha, prNumber: Number(n) })),
     );
     await svc.listPrsByState(['merged']);
     expect(mergeLogReads).toHaveBeenCalledTimes(1);
+    // That one query names every applied row, not just the first.
+    expect([...mergeLogAsked()[0]!].sort()).toEqual([1, 2, 3]);
     for (const [n, headSha] of Object.entries(heads)) {
       expect(atCommit).toHaveBeenCalledWith('ws', expect.objectContaining({ number: Number(n), headSha }));
     }
