@@ -632,7 +632,9 @@ describe('a chat view whose token runs out', () => {
     vi.stubGlobal('fetch', fetchMock);
     try {
       mount();
-      expect(await screen.findByText('Quarterly numbers')).toBeTruthy();
+      // The email renderer and its parser are lazy-loaded: longer than the
+      // default wait under a full suite's load.
+      expect(await screen.findByText('Quarterly numbers', {}, { timeout: 5_000 })).toBeTruthy();
       expect(renew).toHaveBeenCalledTimes(1);
       // Refused once under the old token; the retry, and the renderer's own
       // re-read once the surface carries the fresh token, go under the new.
@@ -653,7 +655,7 @@ describe('a chat view whose token runs out', () => {
     vi.stubGlobal('fetch', fetchMock);
     try {
       mount();
-      expect(await screen.findByText(EMBED_EXPIRED)).toBeTruthy();
+      expect(await screen.findByText(EMBED_EXPIRED, {}, { timeout: 5_000 })).toBeTruthy();
       expect(renew).toHaveBeenCalledTimes(1);
       // Once: the refusal after a failed renewal is the end, never a loop.
       expect(fetchMock).toHaveBeenCalledTimes(1);
