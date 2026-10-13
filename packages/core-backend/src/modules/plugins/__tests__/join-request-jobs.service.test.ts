@@ -146,6 +146,20 @@ describe('PluginJoinRequestJobs', () => {
     expect(row.failureReason).not.toContain('ghp_secret');
   });
 
+  it("records a database failure as the database's reason, not the wrapper's cut-off SQL", async () => {
+    const h = harness();
+    h.workflow.openChangeRequest.mockRejectedValue(
+      new Error('Failed query: insert into "change_requests" ("id", "number", "title", "body", "source_branch", "target_branch", "author_id", "status", "created_at", "updated_at") values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', {
+        cause: new Error('relation "change_requests" does not exist'),
+      }),
+    );
+    await h.jobs.start(pendingRow(h.store));
+
+    const [row] = h.store.all();
+    expect(row.status).toBe('failed');
+    expect(row.failureReason).toBe('relation "change_requests" does not exist');
+  });
+
   it('fails the record rather than throwing when the plugin is gone', async () => {
     const h = harness({ target: async () => null });
     await expect(h.jobs.start(pendingRow(h.store))).resolves.toBeUndefined();

@@ -398,7 +398,7 @@ export class PluginJoinRequestJobs {
     // wrap the whole attempt: the claim has to be refreshed for as long as
     // the work runs, and the work is the part that can take minutes.
     const live = await this.store.claim(record.id, CLAIM_STALE_AFTER_MS).catch((err: unknown) => {
-      log.warn(`could not claim a join request: ${loggable(sanitizeError(err))}`);
+      log.warn(`could not claim a join request: ${loggable(sanitizeError(underlying(err)))}`);
       return null;
     });
     if (!live) {
@@ -426,7 +426,7 @@ export class PluginJoinRequestJobs {
         if (!still) held = false;
         return still ? 'held' : 'lost';
       } catch (err: unknown) {
-        log.warn(`could not refresh a join-request claim: ${loggable(sanitizeError(err))}`);
+        log.warn(`could not refresh a join-request claim: ${loggable(sanitizeError(underlying(err)))}`);
         return 'unknown';
       }
     };
@@ -453,7 +453,10 @@ export class PluginJoinRequestJobs {
         if (state !== 'held') throw new ClaimLostError(state);
       });
     } catch (err) {
-      const reason = sanitizeError(err);
+      // The cause when there is one (see `underlying`): the requester reads
+      // this sentence on their card, and a database's reason is one, where
+      // a wrapper's cut-off column list is not.
+      const reason = sanitizeError(underlying(err));
       // `pluginKey` is a persisted folder path, so it is escaped before it
       // reaches a log line: a folder carrying control characters could
       // otherwise write newlines of its own into the log.
@@ -473,7 +476,7 @@ export class PluginJoinRequestJobs {
         // claim held by a process that never really started.
         log.warn(`join request for ${key} postponed: ${loggable(reason)}`);
         await this.store.release(record.id, live.claimToken).catch((releaseErr: unknown) => {
-          log.warn(`could not release that claim: ${loggable(sanitizeError(releaseErr))}`);
+          log.warn(`could not release that claim: ${loggable(sanitizeError(underlying(releaseErr)))}`);
         });
         return;
       }
@@ -488,7 +491,7 @@ export class PluginJoinRequestJobs {
         // Nothing left to do if even that write fails: the row stays
         // `pending` and the next boot's sweep tries the whole thing again.
         .catch((writeErr: unknown) => {
-          log.error(`could not record that failure: ${loggable(sanitizeError(writeErr))}`);
+          log.error(`could not record that failure: ${loggable(sanitizeError(underlying(writeErr)))}`);
         });
     } finally {
       held = false;
@@ -674,8 +677,10 @@ function loggable(reason: string): string {
  * error whose message is the SQL and whose `cause` is the database's reason;
  * the sanitizer caps a message at a couple of hundred characters, so logging
  * the wrapper showed a cut-off column list and never the reason. The reason
- * is what the sweep's warning needs — "the pool has been ended", "relation
- * does not exist" — so the cause is logged when there is one.
+ * is what every line this service reports needs — "the pool has been
+ * ended", "relation does not exist" — the sweep's warning, the claim and
+ * heartbeat warnings, and the failure a requester reads on their card. An
+ * error with no cause (git's, the claim's own) is reported as it is.
  */
 function underlying(err: unknown): unknown {
   const cause = typeof err === 'object' && err !== null ? (err as { cause?: unknown }).cause : undefined;

@@ -7,7 +7,7 @@ const log = logger('server');
 export interface ShellGraph {
   commitWorker: ShutdownDeps['commitWorker'];
   db: ShutdownDeps['db'];
-  pluginJoinRequestJobs?: ShutdownDeps['backgroundJobs'];
+  pluginJoinRequestJobs?: ShutdownDeps['pluginJoinRequestJobs'];
   /** The agent upload store, whose sweep stops with the graph. */
   agentUploadStore?: ShutdownDeps['agentUploadStore'];
   /** The agent download store, whose sweep stops with the graph. */
@@ -102,7 +102,7 @@ export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promi
     const shutdown = createShutdown({
       server: server ?? notListening,
       commitWorker: graph?.commitWorker ?? { stop: () => host?.stop() ?? Promise.resolve() },
-      backgroundJobs: graph?.pluginJoinRequestJobs,
+      pluginJoinRequestJobs: graph?.pluginJoinRequestJobs,
       agentUploadStore: graph?.agentUploadStore,
       agentDownloadStore: graph?.agentDownloadStore,
       startupRetry: graph?.startupRetry,
