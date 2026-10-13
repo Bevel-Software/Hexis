@@ -556,11 +556,13 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // that finishes releases or marks its row. One that cannot in time is
   // NOT cancelled — the bounded wait only stops waiting — and what becomes
   // of it depends on who is stopping: a process shutting down takes it
-  // along; a tenant host evicting one graph ends the pool under it, so its
-  // next heartbeat or write fails and it stops there, writing nothing
-  // more. Either way its claim goes stale and the next sweep — the next
-  // boot's, or a live graph's — picks the row up again, which is the
-  // recovery every crash already gets.
+  // along; a tenant host evicting one graph ends the pool under it, which
+  // cancels nothing already running — a clone or push in flight finishes
+  // on its own — but its next heartbeat or database write fails, so from
+  // there the job records nothing and stops. Either way its claim goes
+  // stale and the next sweep — the next boot's, or a live graph's — picks
+  // the row up and does the whole thing again, which is the recovery every
+  // crash already gets (and why each step is written to be redone).
   if (deps.pluginJoinRequestJobs) {
     await bounded(deps.pluginJoinRequestJobs.drain(), remaining(), 'finishing the join-request jobs', log);
   }

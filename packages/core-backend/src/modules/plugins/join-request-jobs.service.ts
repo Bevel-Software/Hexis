@@ -698,7 +698,7 @@ function underlying(err: unknown): unknown {
  * work, refused the request: stable, and naming no table or column. The
  * database's own words go to the server log beside it.
  */
-export const DATABASE_FAILURE_REASON = 'the request could not be recorded; an admin can find the reason in the server log';
+const DATABASE_FAILURE_REASON = 'the request could not be recorded; an admin can find the reason in the server log';
 
 /** Node's "there is no such file" errors, and only those. */
 function isFileAbsent(err: unknown): boolean {

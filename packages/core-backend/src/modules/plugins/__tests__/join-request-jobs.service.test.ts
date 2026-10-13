@@ -3,7 +3,7 @@ import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import { PluginJoinRequestJobs, JoinRequestNotReadyError, type JoinRequestJobsDeps } from '../index.js';
 // The claim window is not part of the module's surface: a test that moves
 // the clock past it reads the number the service itself uses.
-import { CLAIM_STALE_AFTER_MS, DATABASE_FAILURE_REASON } from '../join-request-jobs.service.js';
+import { CLAIM_STALE_AFTER_MS } from '../join-request-jobs.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -161,8 +161,7 @@ describe('PluginJoinRequestJobs', () => {
     // …and the requester's card names no table.
     const [row] = h.store.all();
     expect(row.status).toBe('failed');
-    expect(row.failureReason).toBe(DATABASE_FAILURE_REASON);
-    expect(row.failureReason).not.toContain('change_requests');
+    expect(row.failureReason).toBe('the request could not be recorded; an admin can find the reason in the server log');
   });
 
   it('fails the record rather than throwing when the plugin is gone', async () => {
