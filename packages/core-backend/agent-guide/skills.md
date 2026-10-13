@@ -27,6 +27,12 @@ that version (omit `version` for the latest). Any other `metadata` keys are
 the author's own notes — the catalog carries the file as it is and acts on
 none of them.
 
+Before offering to change a skill, read its `canWrite`: `list_skills` judges
+the `SKILL.md`, `get_skill` every file of the skill, both by the default
+branch's rules whichever branch you read. `canWrite: false` means use a
+branch and a change request; do not offer a direct write (see *Direct writes
+vs change requests* under **Access control**).
+
 A `SKILL.md` committed on the default branch is listed and loadable from the
 very next `list_skills` or `get_skill`, on the connection you already have:
 the released catalog is cached briefly and dropped the moment the default

@@ -15,6 +15,7 @@ import {
 } from './agent-access.gate.js';
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
+import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
@@ -965,6 +966,28 @@ export function registerWorkspaceTools(
 
   /** A repo-relative path in the workspace-relative form every tool speaks. */
   const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
+
+  /**
+   * `canWrite` for workspace paths, as `list_files` and `read_file` report it:
+   * whether the caller may commit a change there directly on the DEFAULT
+   * branch, whichever branch the call read — one batch per call (see
+   * `defaultBranchWriteVerdicts`). The repository folder itself is judged as
+   * the repository root; a path outside the repository never lands on the
+   * default branch, so it is `false`.
+   */
+  const canWriteAt = async (ctx: ToolContext, wsPaths: string[]): Promise<Map<string, boolean>> => {
+    const relOf = (p: string): string | null => {
+      const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
+      return norm === kbDirName ? '' : toKbRelative(norm, kbDirName);
+    };
+    const rels = wsPaths.map(relOf);
+    const verdicts = await defaultBranchWriteVerdicts(
+      { accessControl, defaultWorkspaceId: () => kb.defaultWorkspaceId() },
+      ctx,
+      rels.filter((r): r is string => r !== null),
+    );
+    return new Map(wsPaths.map((p, i) => [p, rels[i] !== null && verdicts.get(rels[i]!) === true]));
+  };
   const sourceToWs = (s: AccessDecisionSource | null) => (s ? { ...s, path: toWs(s.path) } : null);
 
   /**
@@ -1823,7 +1846,19 @@ export function registerWorkspaceTools(
    * hook, the extraction and the not-found message all have to match, and a
    * copy drifts on the first change to any of them.
    */
-  const readForTool: ReadForTool = async (branch, p, ctx) => {
+  const readForTool: ReadForTool = async (branch, p, ctx) => (await readServed(branch, p, ctx)).result;
+
+  /**
+   * {@link readForTool}, also saying, at the guide's name, whether a file of
+   * the knowledge base's own answered first on THIS branch (`guide`: `own`)
+   * or the platform's guide answered alone (`alone`); `null` for any other
+   * path. `read_file` needs it to judge `canWrite` there (see its handler).
+   */
+  const readServed = async (
+    branch: string,
+    p: string,
+    ctx: ToolContext,
+  ): Promise<{ result: ReadResult; guide: 'own' | 'alone' | null }> => {
     // The guide's name at the repository root answers with the platform's
     // guide, which is text the code owns and every agent may read: no gate
     // and no read hook for it. A file the knowledge base keeps under that
@@ -1832,7 +1867,8 @@ export function registerWorkspaceTools(
     // guide an earlier release wrote to disk (still on a draft, say) is
     // recognised by its header and not served a second time.
     if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
-      return { kind: 'text', text: await guideAt(branch, ctx, p) };
+      const { text, own } = await guideServed(branch, ctx, p);
+      return { result: { kind: 'text', text }, guide: own ? 'own' : 'alone' };
     }
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
     await assertCanRead(readGateFor(branch, ctx), p);
@@ -1841,20 +1877,39 @@ export function registerWorkspaceTools(
     // the access gate and the read hook above — a document read is still a
     // KB read. ONE registry dispatch picks the reader by extension.
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-    return readers.readerFor(p).read(bytes, p);
+    return { result: await readers.readerFor(p).read(bytes, p), guide: null };
+  };
+
+  /**
+   * Whether the DEFAULT branch has a file of the knowledge base's own at the
+   * guide's name that this caller may read — not a copy of the platform's
+   * guide an earlier release wrote. Telling the two apart reads the file, so
+   * that branch's read hook is asked first, as {@link ownGuideFile} does —
+   * after the gate, before the bytes. A refusal, like any failure, is
+   * `false`, so `canWrite` fails closed.
+   */
+  const ownGuideOnDefault = async (ctx: ToolContext, p: string): Promise<boolean> => {
+    try {
+      const fs = await ctx.getFilesystem(kb.defaultBranch);
+      if (!(await ownGuideReadable(fs, kb.defaultBranch, ctx, p))) return false;
+      await notifyAgentRead(agentAccessGate, ctx, kb.defaultBranch, p);
+      return await isOwnEntryStill(fs, p);
+    } catch {
+      return false;
+    }
   };
 
   mount({
     name: 'read_file',
     gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. What comes back for a document, an email file, an image ' +
-      'or any other binary file is the content rule\'s business (see the shared rules): text files as text, documents and ' +
-      'email files as extracted text, an image as the picture itself, anything else as a one-line description. ' +
-      'Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored ' +
-      'for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. ' +
-      'It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: such a ref belongs to no ' +
-      'workspace, so `branch` is ignored for it.',
+      'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text files as ' +
+      'text, documents and email files as extracted text, an image as the picture, anything else as a one-line ' +
+      'description. It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
+      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. Optional `offset`/`limit` slice the ' +
+      'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
+      'spills with them, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
+      CAN_WRITE_CLAUSE,
     inputs: {
       type: 'object',
       properties: {
@@ -1869,7 +1924,16 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path that was read (echoes the input).'), content: str('File (or spill) content, sliced if offset/limit were given.') },
+      properties: {
+        path: str('The path that was read (echoes the input).'),
+        content: str('File (or spill) content, sliced if offset/limit were given.'),
+        canWrite: {
+          type: 'boolean',
+          description:
+            'Whether you may commit a change to this file directly on the default branch, under that branch\'s access ' +
+            'rules — the same answer whichever branch you read. Absent for a spill ref.',
+        },
+      },
       required: ['path', 'content'],
     },
     write: false,
@@ -1886,7 +1950,19 @@ export function registerWorkspaceTools(
           ? content.slice(start, limit !== undefined ? start + limit : undefined)
           : content;
       };
-      const result = await readForTool(a.branch as string, p, ctx);
+      const branch = a.branch as string;
+      const { result, guide } = await readServed(branch, p, ctx);
+      // Judged after the read, so a path the caller may not read is refused
+      // before anything is said about writing it. At the guide's name this
+      // answers for the knowledge base's own file there, as `file_stat` does:
+      // where the platform's guide stands alone there is nothing to change —
+      // `false`, whether nothing is there or a file the caller may not read.
+      // Like every verdict here, that is decided on the DEFAULT branch, not
+      // the one read: a draft that deleted or added the file must not move
+      // the answer about what can land directly.
+      const ownOnDefault =
+        guide === null || (branch === kb.defaultBranch ? guide === 'own' : await ownGuideOnDefault(ctx, p));
+      const canWrite = ownOnDefault && (await canWriteAt(ctx, [p])).get(p) === true;
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1898,14 +1974,17 @@ export function registerWorkspaceTools(
       // content blocks before any client could try to validate it, so the
       // schema keeps describing the text path it has always described.
       // `offset`/`limit` are meaningless on a picture and are ignored.
+      // The picture's answer has no fields beside it, so its `canWrite` rides
+      // in the text note that accompanies it.
       if (result.kind === 'image') {
-        return mcpImageResult(result.data, result.mimeType, result.note);
+        const verdict = `canWrite: ${canWrite}`;
+        return mcpImageResult(result.data, result.mimeType, result.note ? `${result.note} (${verdict})` : verdict);
       }
       // Text and refusals alike land in `content` — a refusal (corrupt
       // document, unreadable binary, oversized image) IS the file's honest
       // textual answer, sliced like any other content.
       const content = result.kind === 'text' ? result.text : result.message;
-      return { path: p, content: slice(content) };
+      return { path: p, content: slice(content), canWrite };
     },
   });
 
@@ -1925,10 +2004,14 @@ export function registerWorkspaceTools(
    * node is indistinguishable from an absent one on every other read.
    */
   /** What a read of the guide's path answers: the guide, after the knowledge base's own readable file when it has one. */
-  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> => {
+  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> =>
+    (await guideServed(branch, ctx, p)).text;
+
+  /** {@link guideAt}, also saying whether a file of the knowledge base's own came first. */
+  const guideServed = async (branch: string, ctx: ToolContext, p: string): Promise<{ text: string; own: boolean }> => {
     const guide = await agentGuide!();
     const own = await ownGuideFile(branch, ctx, p);
-    return own === null ? guide : withPlatformGuideAppended(own, guide);
+    return own === null ? { text: guide, own: false } : { text: withPlatformGuideAppended(own, guide), own: true };
   };
 
   const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
@@ -2008,7 +2091,8 @@ export function registerWorkspaceTools(
     name: 'list_files',
     gated: true,
     description:
-      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it.`,
+      `List a directory. Returns \`{ path, entries: [{ name, type, size?, canWrite }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it. ` +
+      `\`canWrite\`: may you change that file, or add a file directly inside that folder, directly on the default branch. ${CAN_WRITE_CLAUSE}`,
     inputs: {
       type: 'object',
       properties: {
@@ -2028,8 +2112,19 @@ export function registerWorkspaceTools(
           description: 'Directory entries.',
           items: {
             type: 'object',
-            properties: { name: str('Entry name.'), type: str('`file` or `directory`.'), size: int('Size in bytes (files only).') },
-            required: ['name', 'type'],
+            properties: {
+              name: str('Entry name.'),
+              type: str('`file` or `directory`.'),
+              size: int('Size in bytes (files only).'),
+              canWrite: {
+                type: 'boolean',
+                description:
+                  'Whether you may commit directly on the default branch, under that branch\'s access rules: for a ' +
+                  'file, a change to it; for a folder, a new file directly inside it, by that folder\'s own rules. ' +
+                  'The same answer whichever branch you listed.',
+              },
+            },
+            required: ['name', 'type', 'canWrite'],
           },
         },
       },
@@ -2042,7 +2137,12 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
-      return { path: a.path ?? '', entries: filtered };
+      // One batch for the listing. A folder is judged at its own path, whose
+      // rules (its `access.md` and those above it) are what a file added
+      // directly inside it would get.
+      const wsPathOf = (e: DirEntry): string => (dir ? `${dir}/${e.name}` : e.name);
+      const verdicts = await canWriteAt(ctx, filtered.map(wsPathOf));
+      return { path: a.path ?? '', entries: filtered.map((e) => ({ ...e, canWrite: verdicts.get(wsPathOf(e)) === true })) };
     },
   });
 
