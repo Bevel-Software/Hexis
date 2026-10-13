@@ -358,12 +358,12 @@ export class PluginJoinRequestJobs {
    */
   startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
     void this.sweep().catch((err: unknown) => {
-      log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(err))}`);
+      log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(underlying(err)))}`);
     });
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => {
       void this.sweep().catch((err: unknown) => {
-        log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(err))}`);
+        log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(underlying(err)))}`);
       });
     }, intervalMs);
     // Never a reason for the process to stay alive: every row is durable, and
@@ -398,7 +398,7 @@ export class PluginJoinRequestJobs {
     // wrap the whole attempt: the claim has to be refreshed for as long as
     // the work runs, and the work is the part that can take minutes.
     const live = await this.store.claim(record.id, CLAIM_STALE_AFTER_MS).catch((err: unknown) => {
-      log.warn(`could not claim a join request: ${loggable(sanitizeError(err))}`);
+      log.warn(`could not claim a join request: ${loggable(sanitizeError(underlying(err)))}`);
       return null;
     });
     if (!live) {
@@ -426,7 +426,7 @@ export class PluginJoinRequestJobs {
         if (!still) held = false;
         return still ? 'held' : 'lost';
       } catch (err: unknown) {
-        log.warn(`could not refresh a join-request claim: ${loggable(sanitizeError(err))}`);
+        log.warn(`could not refresh a join-request claim: ${loggable(sanitizeError(underlying(err)))}`);
         return 'unknown';
       }
     };
@@ -453,7 +453,10 @@ export class PluginJoinRequestJobs {
         if (state !== 'held') throw new ClaimLostError(state);
       });
     } catch (err) {
-      const reason = sanitizeError(err);
+      // The cause when there is one (see `underlying`), for the log; a
+      // database's reason, where a wrapper's cut-off column list is not.
+      const cause = underlying(err);
+      const reason = sanitizeError(cause);
       // `pluginKey` is a persisted folder path, so it is escaped before it
       // reaches a log line: a folder carrying control characters could
       // otherwise write newlines of its own into the log.
@@ -473,22 +476,28 @@ export class PluginJoinRequestJobs {
         // claim held by a process that never really started.
         log.warn(`join request for ${key} postponed: ${loggable(reason)}`);
         await this.store.release(record.id, live.claimToken).catch((releaseErr: unknown) => {
-          log.warn(`could not release that claim: ${loggable(sanitizeError(releaseErr))}`);
+          log.warn(`could not release that claim: ${loggable(sanitizeError(underlying(releaseErr)))}`);
         });
         return;
       }
       log.error(`join request for ${key} failed: ${loggable(reason)}`);
+      // What the requester reads on their card. The git work's own words
+      // are theirs to see (credentials stripped); a database's reason is
+      // not — it names tables and columns and is for the operator, who has
+      // it in the line above — so a wrapped failure is recorded in one
+      // stable sentence.
+      const shown = cause === err ? reason : DATABASE_FAILURE_REASON;
       await this.store
         // Named with the token, so this lands only if the row is still this
         // process's. A worker that overran the window and had its row taken
         // writes nothing here rather than stamping its failure on the attempt
         // that replaced it — which would show the requester a failure for
         // work that is, at that moment, succeeding.
-        .markFailed(record.id, live.claimToken, reason)
+        .markFailed(record.id, live.claimToken, shown)
         // Nothing left to do if even that write fails: the row stays
         // `pending` and the next boot's sweep tries the whole thing again.
         .catch((writeErr: unknown) => {
-          log.error(`could not record that failure: ${loggable(sanitizeError(writeErr))}`);
+          log.error(`could not record that failure: ${loggable(sanitizeError(underlying(writeErr)))}`);
         });
     } finally {
       held = false;
@@ -668,6 +677,30 @@ export class PluginJoinRequestJobs {
 function loggable(reason: string): string {
   return printable(reason);
 }
+
+/**
+ * The error behind a wrapped one. Drizzle reports a failed query as its own
+ * error whose message is the SQL and whose `cause` is the database's reason;
+ * the sanitizer caps a message at a couple of hundred characters, so logging
+ * the wrapper showed a cut-off column list and never the reason. The reason
+ * is what every LOG line this service writes needs — "the pool has been
+ * ended", "relation does not exist" — the sweep's warning, the claim and
+ * heartbeat warnings, the failure line. The requester's card is the one
+ * place it does not go: a wrapped failure is recorded there as
+ * `DATABASE_FAILURE_REASON`, since a table name is the operator's to read.
+ * An error with no cause (git's, the claim's own) is reported as it is.
+ */
+function underlying(err: unknown): unknown {
+  const cause = typeof err === 'object' && err !== null ? (err as { cause?: unknown }).cause : undefined;
+  return cause instanceof Error ? cause : err;
+}
+
+/**
+ * The sentence a requester's card carries when the database, not the git
+ * work, refused the request: stable, and naming no table or column. The
+ * database's own words go to the server log beside it.
+ */
+const DATABASE_FAILURE_REASON = 'the request could not be recorded; an admin can find the reason in the server log';
 
 /** Node's "there is no such file" errors, and only those. */
 function isFileAbsent(err: unknown): boolean {
