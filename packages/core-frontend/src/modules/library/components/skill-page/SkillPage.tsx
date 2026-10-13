@@ -66,9 +66,7 @@ import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
 import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
 import { isBinaryFile } from '../../../workspace/components/renderers';
-import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
-import { useItemDeletedElsewhere } from '../../../workspace/hooks/useItemDeletedElsewhere';
-import { landingAfterClose } from '../../../workspace';
+import { DeletedFileNotice, landingAfterClose, useItemDeletedElsewhere } from '../../../workspace';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of

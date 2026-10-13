@@ -22,10 +22,12 @@ import { DeleteToolDialog } from './DeleteToolDialog';
 import { copyToClipboard } from '../../utils/clipboard';
 import { useLibraryToast } from '../../state/toast.context';
 import { NameWithBadges } from '../NameWithBadges';
-import { WorkspaceContext } from '../../../workspace/state/workspace.context';
-import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
-import { useItemDeletedElsewhere } from '../../../workspace/hooks/useItemDeletedElsewhere';
-import { landingAfterClose } from '../../../workspace';
+import {
+  DeletedFileNotice,
+  WorkspaceContext,
+  landingAfterClose,
+  useItemDeletedElsewhere,
+} from '../../../workspace';
 
 /**
  * One tool, as a page.
