@@ -109,12 +109,12 @@ interface UseFileLockArgs {
   path: string | null;
   /**
    * Current authenticated user's id. Used to recognise "this lock is held
-   * by me" responses from the server during the brief window between a
-   * tab-switch cleanup sending its release and the server answering it —
-   * without this, switching away and back to a
-   * file you were just editing would flicker an amber "[your own name]
-   * is editing this page" banner. Optional so test harnesses without auth context
-   * still work; in that case nothing is filtered.
+   * by me" responses from the server while a tab-switch cleanup's save or
+   * release request for the page is still in flight (both count, see
+   * `requestsInFlight`) — without this, switching away and back to a file
+   * you were just editing would flicker an amber "[your own name] is
+   * editing this page" banner. Optional so test harnesses without auth
+   * context still work; in that case nothing is filtered.
    */
   currentUserId?: string | null;
   /**
