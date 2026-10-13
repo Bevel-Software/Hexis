@@ -5,6 +5,8 @@
  * this is the one thing in the frontend that says which product this is.
  */
 
+import { useMakerUrl } from './maker-url';
+
 /** The product's own name, before its maker's: the first half of {@link PRODUCT_NAME}. */
 const PRODUCT = 'Hexis';
 
@@ -17,9 +19,6 @@ const MAKER = 'Bevel';
  * link inside one is fine, so a title uses {@link ProductName}.
  */
 export const PRODUCT_NAME = `${PRODUCT} by ${MAKER}`;
-
-/** Where the maker's name leads. */
-export const MAKER_URL = 'https://bevel.software';
 
 /**
  * The product's name wherever it is shown: "Hexis by Bevel", with the maker's
@@ -34,11 +33,12 @@ export const MAKER_URL = 'https://bevel.software';
  * {@link PRODUCT_NAME}.
  */
 export function ProductName({ link = true, className }: { link?: boolean; className?: string }) {
+  const makerUrl = useMakerUrl();
   return (
     <span className={className}>
       {PRODUCT} by{' '}
       {link ? (
-        <a href={MAKER_URL} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+        <a href={makerUrl} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
           {MAKER}
         </a>
       ) : (

@@ -185,13 +185,44 @@ describe('ChangeReadGate', () => {
 
     it('the rescues name FILES: a folder target at the root is judged as a folder, even for an admin', async () => {
       // The KB clone's own folder, asked about as an extraction destination:
-      // the root scope, which here grants nobody — an admin included.
-      expect(await judge(ADMIN, KB, 'dir')).toEqual({ allowed: false, unreadable: '' });
-      expect(await judge(ADMIN, `${KB}/KnowledgeBase`, 'dir')).toEqual({ allowed: false, unreadable: 'KnowledgeBase' });
-      // With a root that lets the admin read (write folds into read), the same folders open.
+      // the root scope. It grants nobody here, so a non-admin is refused; an
+      // admin reads it through the root floor (write implies read), which is
+      // the access tree's own answer, not a rescue.
+      expect(await judge(ALICE, KB, 'dir')).toEqual({ allowed: false, unreadable: '' });
+      expect(await judge(ALICE, `${KB}/KnowledgeBase`, 'dir')).toEqual({ allowed: false, unreadable: 'KnowledgeBase' });
+      expect(await judge(ADMIN, KB, 'dir')).toEqual({ allowed: true, via: 'readable' });
+      expect(await judge(ADMIN, `${KB}/KnowledgeBase`, 'dir')).toEqual({ allowed: true, via: 'readable' });
+    });
+
+    it('an admin may add a loose file directly in the knowledge folder, with or without a root access.md', async () => {
+      // The reported case: an admin could make a folder under the knowledge
+      // root (the new-folder exception) and write inside it, but not a page
+      // directly in the root — the floor gave them write there and nothing
+      // gave them read. Write implies read, so the floor gives both.
+      expect(await judge(ADMIN, `${KB}/KnowledgeBase/notes.md`)).toEqual({ allowed: true, via: 'readable' });
       await write(repo, 'access.md', `---\nowner:\n  - Admin\n---\nwrite:\n  - Admin\n`);
       access.invalidate(WS);
-      expect(await judge(ADMIN, KB, 'dir')).toEqual({ allowed: true, via: 'readable' });
+      expect(await judge(ADMIN, `${KB}/KnowledgeBase/notes.md`)).toEqual({ allowed: true, via: 'readable' });
+    });
+
+    it('the deployment owner is an admin for this gate too, whether or not roles.yaml names them', async () => {
+      const OWNER = 'owner@bevel.software';
+      const ws = stubWorkspaceService(path.join(root, WS));
+      const owned = new ChangeReadGate(
+        ws,
+        new AccessControlService(ws, KB, new NodeFs(), [OWNER]),
+        testKbContext({ kbDirName: KB }),
+        new NodeFs(),
+      );
+      await write(repo, 'KnowledgeBase/Board/access.md', '---\nread:\n  - deny Admin\n---\n');
+      expect(await owned.judge(WS, OWNER, `${KB}/KnowledgeBase/notes.md`, 'file')).toEqual({ allowed: true, via: 'readable' });
+      // Excluded exactly where the Admin role is.
+      expect(await owned.judge(WS, OWNER, `${KB}/KnowledgeBase/Board/memo.md`, 'file')).toEqual({
+        allowed: false,
+        unreadable: 'KnowledgeBase/Board',
+      });
+      // Not an owner on the gate's own service: no floor, no read.
+      expect(await judge(OWNER, `${KB}/KnowledgeBase/notes.md`)).toEqual({ allowed: false, unreadable: 'KnowledgeBase' });
     });
 
     it('a roles.yaml that is there but unusable is not an open door', async () => {
