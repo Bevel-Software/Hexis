@@ -144,6 +144,14 @@ export interface AppliedChangeRef {
    * the number after git's subject — be recognised as the request's own.
    */
   title?: string;
+  /**
+   * The source head this request's apply recorded (`pr_merge_log.head_sha_at_merge`).
+   * When given, the merge commit's SECOND parent must be it. The number alone
+   * does not prove the commit is this request's: a knowledge base that moved
+   * between deployments carries another deployment's merge commits, whose
+   * subjects name the same small numbers.
+   */
+  headSha?: string;
 }
 
 /**
@@ -164,7 +172,13 @@ export interface AppliedChangeRef {
  *   file list is empty anyway, so nothing readable is lost.
  */
 export type AppliedMergeResult =
-  | { kind: 'merged'; sha: string; mergeCommit: string | null }
+  | {
+      kind: 'merged';
+      sha: string;
+      mergeCommit: string | null;
+      /** The source head this merge merged — `mergeCommit`'s second parent when it has one. */
+      mergedHead?: string;
+    }
   | { kind: 'conflicts'; paths: string[] };
 
 export type PrFileStatus =

@@ -3,6 +3,7 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { PullRequestService, changeSourceFor } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';
+import { prMergeLog } from '../../../database/schema.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail as hash } from '../../../../shared/email-identity.js';
@@ -260,10 +261,21 @@ describe('PullRequestService.listPrsByState', () => {
   }
 
   /** The service over a drizzle-shaped select that answers `rows`. */
-  function svcOver(rows: Record<string, unknown>[], changedPaths: string[] = []) {
+  function svcOver(
+    rows: Record<string, unknown>[],
+    changedPaths: string[] = [],
+    mergeLog: { name: string; headSha: string }[] = [],
+  ) {
     const orderBy = vi.fn(async () => rows);
-    const select = vi.fn(() => ({ from: () => ({ where: () => ({ orderBy }) }) }));
-    const db = { select } as unknown as Database;
+    // `select` counts the change-request reads; the merge-log read an applied
+    // row's head comes from is answered beside it.
+    const select = vi.fn(() => ({ where: () => ({ orderBy }) }));
+    const mergeLogRows = mergeLog.map((r) => ({ ...r, succeeded: true, hasError: false, startedAt: new Date(0) }));
+    const db = {
+      select: () => ({
+        from: (table: unknown) => (table === prMergeLog ? { where: async () => mergeLogRows } : select()),
+      }),
+    } as unknown as Database;
     const answer = (paths: string[]) => ({ paths, pairs: paths.map((path) => ({ path })) });
     const ensureRemotesFetched = vi.fn(async () => undefined);
     const workspace = {
@@ -325,6 +337,15 @@ describe('PullRequestService.listPrsByState', () => {
     });
     // The close time is the latest moment the row records, so it is `updatedAt`.
     expect(summary.updatedAt).toBe('2026-04-03T09:30:00.000Z');
+  });
+
+  it('hands the head its apply logged with the merge commit, so another request\'s (#N) commit is refused', async () => {
+    const head = 'b'.repeat(40);
+    const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [
+      { name: 'Robin Lee', headSha: head },
+    ]);
+    await svc.listPrsByState(['merged']);
+    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA, title: 'A proposal', headSha: head });
   });
 
   it('reads the table for a set that contains `open` ALONGSIDE another state', async () => {

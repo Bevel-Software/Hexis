@@ -183,6 +183,30 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
     expect(JSON.stringify(detail)).not.toContain(MERGE_SHA);
   });
 
+  it('checks the recorded merge commit against the head its apply logged', async () => {
+    // A `(#4)` on the target may be another deployment's #4; only a commit
+    // that merged this request's own head is read as applied.
+    const { svc, appliedChangeShas } = harness({}, { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] });
+    await svc.getPrDetail(4);
+    expect(appliedChangeShas).toHaveBeenCalledWith('ws', {
+      number: 4,
+      mergeSha: MERGE_SHA,
+      title: 'A proposal',
+      headSha: PROPOSAL_HEAD,
+    });
+  });
+
+  it('a recorded commit that merged another head shows the request\'s own proposal, never that commit', async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      {},
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }], mismatch: true },
+    );
+    const detail = await svc.getPrDetail(4);
+    expect(detail?.finished).toMatchObject({ appliedSha: null });
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, {});
+    expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
+  });
+
   it('a merged row recording no merge commit sends no sha', async () => {
     const { svc, appliedChangeShas } = harness({ mergedSha: null }, { mergeLog: [{ name: 'Robin Lee' }] });
     expect((await svc.getPrDetail(4))?.finished).toMatchObject({ appliedSha: null });

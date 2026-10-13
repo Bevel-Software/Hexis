@@ -169,7 +169,7 @@ function makeService(mergeResult: AppliedMergeResult) {
     svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [APPROVED], 'open', CR_ROW.title, BASE, 'ws-1');
   /** The values written to the change request row (not the merge log). */
   const crUpdate = () => captured.find((c) => c.kind === 'update' && c.table === changeRequests)?.values;
-  return { merge, crUpdate, mergeChangeRequest };
+  return { merge, crUpdate, mergeChangeRequest, captured };
 }
 
 describe('mergePr — which commit the row records', () => {
@@ -218,6 +218,26 @@ describe('mergePr — which commit the row records', () => {
     expect(mergeChangeRequest).toHaveBeenCalledTimes(1);
     const opts = mergeChangeRequest.mock.calls[0][5] as { appliedChangeNumber?: number };
     expect(opts.appliedChangeNumber).toBe(CR_ROW.number);
+  });
+
+  it('logs the head the merge actually took, which the reader checks the merge commit against', async () => {
+    // The branch can move between the gate that read HEAD_SHA and the merge's
+    // own fetch. The merge commit's second parent is then the newer head, and
+    // a log still naming HEAD_SHA would make the reader refuse the request's
+    // own commit.
+    const { merge, captured } = makeService({
+      kind: 'merged',
+      sha: 'own',
+      mergeCommit: 'own',
+      mergedHead: 'head-the-merge-took',
+    });
+
+    await merge();
+
+    const logDone = captured.find(
+      (c) => c.kind === 'update' && c.table === prMergeLog && c.values.succeeded === true,
+    )?.values;
+    expect(logDone).toMatchObject({ headShaAtMerge: 'head-the-merge-took' });
   });
 });
 
@@ -297,7 +317,7 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
   it('hands the stored title to the probe, so a merge commit in the old message format is recognised', async () => {
     const { merge, appliedMergeCommitOnTarget } = makeStuckService('a-commit');
     await merge();
-    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, CR_ROW.title);
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, HEAD_SHA, CR_ROW.title);
   });
 
   it('records that commit instead of refusing, and merges nothing', async () => {
@@ -312,7 +332,7 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
     });
     expect(result.sha).toBe('the-commit-the-first-attempt-pushed');
     // Asked of the TARGET branch's own workspace, for this request's number.
-    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, CR_ROW.title);
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, HEAD_SHA, CR_ROW.title);
     // Nothing was merged, committed or pushed: the merge already happened.
     expect(mergeChangeRequest).not.toHaveBeenCalled();
   });

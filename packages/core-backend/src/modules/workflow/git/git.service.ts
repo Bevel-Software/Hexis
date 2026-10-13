@@ -1645,6 +1645,11 @@ export class GitService implements IGitService {
         // discards a prior attempt's state, never real work.
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
+        // The source tip this attempt merges, resolved once: the merge below
+        // takes this sha, and the result reports it, so what the merge log
+        // records as the applied head is the second parent of the commit.
+        const { stdout: sourceTip } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}^{commit}`]);
+        const sourceHead = sourceTip.trim();
 
         if (opts.authorize) {
           // The tip this attempt merges into, and the paths it writes against
@@ -1663,7 +1668,7 @@ export class GitService implements IGitService {
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceHead]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
@@ -1696,11 +1701,19 @@ export class GitService implements IGitService {
         if (staged.trim() === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
+          // An earlier attempt's commit is this request's only if it merged
+          // this same head.
           const own =
             opts.appliedChangeNumber === undefined
               ? null
-              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber, opts.appliedChangeTitle);
-          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own };
+              : await this.ownMergeCommitOn(
+                  cwd,
+                  `origin/${targetBranch}`,
+                  opts.appliedChangeNumber,
+                  sourceHead,
+                  opts.appliedChangeTitle,
+                );
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own, mergedHead: sourceHead };
         }
 
         await this.git(cwd, [
@@ -1715,7 +1728,7 @@ export class GitService implements IGitService {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
           this.accessControl?.invalidate(baseWorkspaceId);
           // A commit of this request's own, with the subject the reader verifies.
-          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim(), mergedHead: sourceHead };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // Base moved under us — reset to the new tip and re-merge next loop.
@@ -1758,9 +1771,12 @@ export class GitService implements IGitService {
     baseWorkspaceId: string,
     targetBranch: string,
     number: number,
+    headSha: string,
     title?: string,
   ): Promise<string | null> {
     assertValidBranchName(targetBranch);
+    // No head, nothing a commit could be matched to: it owns none.
+    if (!/^[0-9a-f]{40,64}$/.test(headSha)) return null;
     const cwd = await this.repoDir(baseWorkspaceId);
     // The fetch runs outside the workspace mutex, the way the implicit and
     // per-request fetches do (see `fetchLocks`, `fetchPrRefs`): it writes only
@@ -1783,7 +1799,9 @@ export class GitService implements IGitService {
       );
       return null;
     }
-    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number, title));
+    return this.mutex.run(baseWorkspaceId, () =>
+      this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number, headSha, title),
+    );
   }
 
   /**
@@ -1811,6 +1829,13 @@ export class GitService implements IGitService {
    * {@link appliedMergeCommitOnTarget}, which the approval gate asks before it
    * refuses a retry that has nothing left to merge.
    *
+   * The message alone is not enough, so the commit must also have merged
+   * `headSha`, the request's own source head, as its second parent. A
+   * knowledge base moved here from another deployment carries that
+   * deployment's merge commits, numbered from 1 like ours, so `(#6)` on the
+   * target may be some other request #6. Taking it recorded that other
+   * request's change under this one.
+   *
    * `title` lets the old message format be recognised — see
    * {@link mergeCommitMessageNames}.
    */
@@ -1818,21 +1843,23 @@ export class GitService implements IGitService {
     cwd: string,
     targetRef: string,
     number: number,
+    headSha: string,
     title?: string,
   ): Promise<string | null> {
     // The whole message per commit. Records are NUL-separated (`-z`), the one
-    // byte a commit message cannot hold, and the sha is the record's first
-    // line: nothing a title may contain can split a record or a line early.
+    // byte a commit message cannot hold; the sha is the record's first line
+    // and the parents its second, so nothing a title may contain can split a
+    // record or a line early.
     const { stdout } = await this.git(cwd, [
       'log', '-z', '--merges', '--fixed-strings', `--grep=(#${number})`,
-      '--format=%H%n%B', targetRef,
+      '--format=%H%n%P%n%B', targetRef,
     ]);
     for (const record of stdout.split('\0')) {
-      const newline = record.indexOf('\n');
-      const sha = (newline === -1 ? record : record.slice(0, newline)).trim();
+      const [shaLine = '', parentsLine = '', ...rest] = record.split('\n');
+      const sha = shaLine.trim();
       if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;
-      const message = newline === -1 ? '' : record.slice(newline + 1);
-      if (mergeCommitMessageNames(message, number, title)) return sha;
+      if (parentsLine.trim().split(/\s+/)[1] !== headSha) continue;
+      if (mergeCommitMessageNames(rest.join('\n'), number, title)) return sha;
     }
     return null;
   }
@@ -3002,6 +3029,16 @@ export class GitService implements IGitService {
     if (!headSha) {
       throw new AppliedChangeMismatchError(
         `commit ${mergeSha} is not a merge commit, so it cannot be change request #${number}'s`,
+      );
+    }
+    // The head the request's apply recorded, when the caller knows it. A
+    // subject naming `(#N)` is not unique to this request: a knowledge base
+    // that moved here from another deployment carries that deployment's merge
+    // commits, numbered from 1 like ours, and an apply that wrote no commit of
+    // its own once recorded one of those as its own.
+    if (applied.headSha !== undefined && headSha !== applied.headSha) {
+      throw new AppliedChangeMismatchError(
+        `commit ${mergeSha} merged ${headSha}, not change request #${number}'s head ${applied.headSha}`,
       );
     }
     const baseSha = await revParse(`${mergeSha}^1^{commit}`);

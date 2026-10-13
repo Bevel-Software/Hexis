@@ -258,6 +258,13 @@ export class PullRequestService implements IPullRequestService {
   /** Applied rows whose recorded commit is not their own, by the same key — never asked again. */
   private readonly mismatchedAppliedChanges = new Set<string>();
   /**
+   * An applied request's apply, by number, once the merge log has one: it is
+   * final once the request is merged, and every read of an applied request
+   * needs its head. Not remembered while the log has none, because the row is
+   * marked merged a moment before its log entry is marked succeeded.
+   */
+  private readonly appliedMerges = new Map<number, { name: string | null; headSha: string }>();
+  /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
    * workspace KB, so it can't be shared across workspaces or viewers. The stored
@@ -418,8 +425,8 @@ export class PullRequestService implements IPullRequestService {
       // indefinitely. A commit the clone does not HOLD is not remembered —
       // the next fetch may bring it, and the next list asks again.
       if (this.mismatchedAppliedChanges.has(key)) return empty;
-      return this.gitService
-        .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
+      return this.withAppliedHead(source.applied, () => this.lastSucceededMerge(row.number))
+        .then((applied) => this.gitService.changedPathsAndPairsOfAppliedChange(workspaceId, applied))
         .then((answer) => {
           // Full: what is remembered stays, and this answer is simply not
           // kept. A list scans every applied row in one pass, so clearing or
@@ -752,6 +759,11 @@ export class PullRequestService implements IPullRequestService {
     // answers no touched paths for it — truthfully, since it changed nothing
     // on the target and no owner's file was touched by it.
     const source = workspaceId ? changeSourceFor(row) : ({ kind: 'none' } as ChangeSource);
+    // The request's apply in the merge log, looked up only when something
+    // reads it: the merge-commit check below, the no-commit fallback, or the
+    // finished facts past the cache.
+    let mergeLookup: Promise<{ name: string | null; headSha: string } | null> | undefined;
+    const merge = () => (mergeLookup ??= this.lastSucceededMerge(row.number));
     try {
       if (workspaceId && source.kind === 'commit') {
         // An APPLIED request is read from its merge commit, not from its
@@ -772,10 +784,11 @@ export class PullRequestService implements IPullRequestService {
         await this.workspaceService
           .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
           .catch(() => undefined);
-        const ends = await this.gitService.appliedChangeShas(workspaceId, source.applied);
+        const applied = await this.withAppliedHead(source.applied, merge);
+        const ends = await this.gitService.appliedChangeShas(workspaceId, applied);
         baseSha = ends.baseSha;
         headSha = ends.headSha;
-        files = await this.gitService.changedFilesOfAppliedChange(workspaceId, source.applied, {
+        files = await this.gitService.changedFilesOfAppliedChange(workspaceId, applied, {
           ...(opts.patches === false ? { patchCap: 0 } : {}),
         });
         // Only now, past the verification both reads above run, is the
@@ -874,12 +887,6 @@ export class PullRequestService implements IPullRequestService {
     // longer holds answers no files, as before, and so does a target that
     // cannot be refreshed: a stale tip could put other people's work in the
     // list, so the read fails closed and the next one tries again.
-    //
-    // The merge-log lookup runs only when something reads it — this fallback,
-    // or the finished facts past the cache — so a warm read of an applied
-    // request with its own commit costs no query.
-    let mergeLookup: Promise<{ name: string | null; headSha: string } | null> | undefined;
-    const merge = () => (mergeLookup ??= this.lastSucceededMerge(row.number));
     const applied = row.state === 'merged' && appliedSha === null && workspaceId ? await merge() : null;
     if (workspaceId && applied?.headSha) {
       try {
@@ -1116,6 +1123,23 @@ export class PullRequestService implements IPullRequestService {
   }
 
   /**
+   * `applied` with the source head its apply recorded, so the git layer
+   * accepts the recorded merge commit only if that head is its second parent.
+   * The number in the subject is not enough on its own: a knowledge base moved
+   * here from another deployment carries that deployment's merge commits,
+   * numbered from 1 like ours, and an apply that wrote no commit once recorded
+   * one of those. A request with no apply in the log (applied before the log
+   * existed) is checked as before, by its number.
+   */
+  private async withAppliedHead(
+    applied: AppliedChangeRef,
+    lookup: () => Promise<{ headSha: string } | null>,
+  ): Promise<AppliedChangeRef> {
+    const head = (await lookup())?.headSha;
+    return head ? { ...applied, headSha: head } : applied;
+  }
+
+  /**
    * The request's apply in the merge log ({@link lastApply}): the applier's
    * display name and the source head it applied. Never the log's email
    * column, nor its error text. `null` when none is recorded
@@ -1126,6 +1150,8 @@ export class PullRequestService implements IPullRequestService {
   private async lastSucceededMerge(
     prNumber: number,
   ): Promise<{ name: string | null; headSha: string } | null> {
+    const known = this.appliedMerges.get(prNumber);
+    if (known) return known;
     try {
       const attempts = await this.db
         .select({
@@ -1137,7 +1163,9 @@ export class PullRequestService implements IPullRequestService {
         })
         .from(prMergeLog)
         .where(eq(prMergeLog.prNumber, prNumber));
-      return lastApply(attempts);
+      const applied = lastApply(attempts);
+      if (applied && this.appliedMerges.size < MAX_REMEMBERED_APPLIED_CHANGES) this.appliedMerges.set(prNumber, applied);
+      return applied;
     } catch (err) {
       log.warn(`could not read who applied change request #${prNumber}:`, { err });
       return null;
