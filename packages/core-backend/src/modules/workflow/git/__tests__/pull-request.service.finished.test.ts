@@ -165,9 +165,22 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
     });
   });
 
-  it('a failed merge-log read reads as no applier, never as no answer', async () => {
-    const { svc } = harness({}, { mergeLogThrows: true });
-    expect((await svc.getPrDetail(4))?.finished).toMatchObject({ appliedBy: null, appliedSha: MERGE_SHA });
+  it('a failed merge-log read answers from the row, never a merge commit checked by number alone', async () => {
+    // Unread is not "no head recorded": that would let a foreign merge commit
+    // of the same number pass, so the commit is not read on its strength.
+    const { svc, appliedChangeShas, changedFilesOfProposalHead } = harness({}, { mergeLogThrows: true });
+    const detail = await svc.getPrDetail(4);
+    expect(detail?.finished).toMatchObject({ appliedBy: null, appliedSha: null, at: CLOSED_AT.toISOString() });
+    expect(detail?.files).toEqual([]);
+    expect(appliedChangeShas).not.toHaveBeenCalled();
+    expect(changedFilesOfProposalHead).not.toHaveBeenCalled();
+  });
+
+  it('a failed merge-log read is not cached: the next read asks the log again', async () => {
+    const h = harness({}, { mergeLogThrows: true });
+    await h.svc.getPrDetail(4);
+    await h.svc.getPrDetail(4);
+    expect(h.mergeLogWhere).toHaveBeenCalledTimes(2);
   });
 
   it('never sends the recorded sha when it is not the request\'s own merge commit', async () => {
@@ -495,12 +508,28 @@ describe('PullRequestService.getPrDetail — which merge-log attempt was the app
       head: latest.headSha,
     });
   });
-  it("a finalization names the begun attempt before it, with that attempt's head", async () => {
+  it('a finalization names the begun attempt on the head it verified, and keeps that head', async () => {
     const pushed = attempt('Robin', 2, false, false);
-    expect(await applyOf([attempt('Dana', 5, true, true), pushed, attempt('Failed', 1, false, true)])).toEqual({
+    const fin = { ...attempt('Dana', 5, true, true), headSha: pushed.headSha };
+    expect(await applyOf([fin, pushed, attempt('Failed', 1, false, true)])).toEqual({
       appliedBy: { name: 'Robin' },
       head: pushed.headSha,
     });
+  });
+  it('with two begun attempts on two heads, keeps the verified head and names the attempt on it', async () => {
+    // The source moved between two crashed tries. The newer begun attempt is
+    // not the one that pushed: the finalization verified the OLDER one's head.
+    const pushed = attempt('Robin', 2, false, false);
+    const newerOtherHead = attempt('Sam', 3, false, false);
+    const fin = { ...attempt('Dana', 5, true, true), headSha: pushed.headSha };
+    expect(await applyOf([fin, newerOtherHead, pushed])).toEqual({
+      appliedBy: { name: 'Robin' },
+      head: pushed.headSha,
+    });
+  });
+  it('a finalization whose verified head no begun attempt carries names nobody, and keeps its head', async () => {
+    const fin = attempt('Dana', 5, true, true);
+    expect(await applyOf([fin, attempt('Sam', 3, false, false)])).toEqual({ appliedBy: null, head: fin.headSha });
   });
   it('a finalization with no begun attempt behind it names nobody, and reads its own head', async () => {
     const fin = attempt('Dana', 5, true, true);

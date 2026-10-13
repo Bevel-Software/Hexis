@@ -565,6 +565,26 @@ describe('ChangeRequestDialog: an applied request', () => {
     expect(await screen.findByText(/made no change of its own/)).toBeInTheDocument();
   });
 
+  it('without a merge commit of its own, says nothing of success while the page check is pending', async () => {
+    let reject!: (err: unknown) => void;
+    crApi.fileExistsOnWorkspace.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_, no) => {
+          reject = no;
+        }),
+    );
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Docs/pricing.yaml')], { appliedSha: null }),
+    );
+    renderDialog();
+    await waitFor(() => expect(crApi.fileExistsOnWorkspace).toHaveBeenCalled());
+    expect(await screen.findByText('Loading…')).toBeInTheDocument();
+    expect(screen.queryByText(/made no change of its own/)).not.toBeInTheDocument();
+    reject(new WorkspaceApiError(500, 'git timed out'));
+    expect(await screen.findByText(/couldn't be read right now \(git timed out\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/made no change of its own/)).not.toBeInTheDocument();
+  });
+
   it('with no files and no commit of its own, is the status line in a compact dialog', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detailOf('merged', [], { appliedSha: null }));
     renderDialog();

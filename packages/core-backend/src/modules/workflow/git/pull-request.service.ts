@@ -80,10 +80,17 @@ interface MergeLogAttempt {
  * Who applied a request, and the source head they applied, from its merge-log
  * attempts. The newest SUCCEEDED attempt, unless that attempt is a recovery
  * finalization (`finalizeAlreadyApplied`, recorded succeeded WITH a note):
- * whoever finalized it merged nothing, so the applier is the earlier attempt
- * that pushed and crashed before recording — begun, never completed (not
- * succeeded, no error) — and nobody when there is none. `null` when the
- * request has no succeeded attempt at all.
+ * whoever finalized it merged nothing, so the applier is the attempt that
+ * pushed and crashed before recording — begun, never completed (not
+ * succeeded, no error) — and nobody when there is none.
+ *
+ * The head stays the one the finalization recorded either way: it is the
+ * head that finalization VERIFIED as the merge commit's second parent. A
+ * request can hold several begun attempts on different heads (the source
+ * moved between two crashed tries), and the newest of them is not
+ * necessarily the one that pushed, so the applier is the newest begun
+ * attempt on THAT head, and nobody when none is. `null` when the request
+ * has no succeeded attempt at all.
  */
 function lastApply(
   attempts: MergeLogAttempt[],
@@ -93,8 +100,10 @@ function lastApply(
   if (at === -1) return null;
   const done = newestFirst[at];
   if (!done.hasError) return { name: done.name, headSha: done.headSha };
-  const pushed = newestFirst.slice(at + 1).find((a) => !a.succeeded && !a.hasError);
-  return pushed ? { name: pushed.name, headSha: pushed.headSha } : { name: null, headSha: done.headSha };
+  const pushed = newestFirst
+    .slice(at + 1)
+    .find((a) => !a.succeeded && !a.hasError && a.headSha === done.headSha);
+  return { name: pushed?.name ?? null, headSha: done.headSha };
 }
 
 /** The merge-log columns {@link lastApply} reads: never the email, nor the error text. */
@@ -111,6 +120,24 @@ const MERGE_LOG_BATCH = 1_000;
 
 /** Who applied a request and the head they applied — see {@link lastApply}. */
 type AppliedMerge = { name: string | null; headSha: string };
+
+/**
+ * The merge log could not be read — which is not "no apply recorded". A
+ * request with no recorded head is checked by its number alone, and a
+ * knowledge base moved here from another deployment can satisfy that with a
+ * foreign merge commit of the same number. So an unread log answers nothing:
+ * the applied change is not read on its strength, nothing read is remembered,
+ * and the next read asks the log again.
+ */
+class MergeLogUnreadError extends Error {
+  constructor(cause: unknown) {
+    super('the merge log could not be read', { cause });
+    this.name = 'MergeLogUnreadError';
+  }
+}
+
+/** A row's merge-log answer, as a listing hands it in — see `appliedMergesFor`. */
+type MergeLookup = AppliedMerge | null | MergeLogUnreadError;
 
 /** How many mismatched applied rows to remember — see `touchedPathsFor`. */
 const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
@@ -405,7 +432,7 @@ export class PullRequestService implements IPullRequestService {
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
-    opts: { fetch?: boolean; merges?: Map<number, AppliedMerge | null> } = {},
+    opts: { fetch?: boolean; merges?: Map<number, MergeLookup> } = {},
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
     const empty = { paths: [] as string[], pairs: [] as ChangedPathPair[] };
     if (!workspaceId) return empty;
@@ -446,10 +473,16 @@ export class PullRequestService implements IPullRequestService {
       // the next fetch may bring it, and the next list asks again.
       if (this.mismatchedAppliedChanges.has(key)) return empty;
       // A listing hands in its rows' merge-log answers, read in one query
-      // (`appliedMergesFor`); a lone summary asks for its own.
+      // (`appliedMergesFor`); a lone summary asks for its own. A log that
+      // could not be read rejects here, before git is asked anything, so the
+      // row answers no paths and remembers none (`MergeLogUnreadError`).
       const merges = opts.merges;
       const lookup = merges?.has(row.number)
-        ? async () => merges.get(row.number) ?? null
+        ? async () => {
+            const known = merges.get(row.number);
+            if (known instanceof MergeLogUnreadError) throw known;
+            return known ?? null;
+          }
         : () => this.lastSucceededMerge(row.number);
       return this.withAppliedHead(source.applied, lookup)
         .then((applied) => this.gitService.changedPathsAndPairsOfAppliedChange(workspaceId, applied))
@@ -485,7 +518,7 @@ export class PullRequestService implements IPullRequestService {
   private async summaryOf(
     row: ChangeRequestRow,
     workspaceId: string | null,
-    opts: { fetch?: boolean; merges?: Map<number, AppliedMerge | null> } = {},
+    opts: { fetch?: boolean; merges?: Map<number, MergeLookup> } = {},
   ): Promise<PullRequestSummary> {
     const touched = await this.touchedPathsFor(row, workspaceId, opts);
     const summary = this.rowToSummary(
@@ -793,8 +826,17 @@ export class PullRequestService implements IPullRequestService {
     // The request's apply in the merge log, looked up only when something
     // reads it: the merge-commit check below, the no-commit fallback, or the
     // finished facts past the cache.
+    // A log that could not be read fails the merge-commit check closed (no
+    // files, no `appliedSha`), names nobody, and keeps this detail out of
+    // the cache, so the next read asks again (`MergeLogUnreadError`).
     let mergeLookup: Promise<{ name: string | null; headSha: string } | null> | undefined;
-    const merge = () => (mergeLookup ??= this.lastSucceededMerge(row.number));
+    let mergeLogUnread = false;
+    const merge = () =>
+      (mergeLookup ??= this.lastSucceededMerge(row.number).catch((err: unknown) => {
+        mergeLogUnread = true;
+        throw err;
+      }));
+    const mergeOrNobody = () => merge().catch(() => null);
     try {
       if (workspaceId && source.kind === 'commit') {
         // An APPLIED request is read from its merge commit, not from its
@@ -894,7 +936,8 @@ export class PullRequestService implements IPullRequestService {
       // a branch not yet published or a clone not yet caught up, and presenting
       // a live proposal as one that changes nothing would tell a reviewer the
       // opposite of the truth.
-      if (!(err instanceof WorkflowValidationError) || row.state === 'open') throw err;
+      const degradable = err instanceof WorkflowValidationError || err instanceof MergeLogUnreadError;
+      if (!degradable || row.state === 'open') throw err;
       log.warn(
         `change request #${prNumber} is ${row.state} and can no longer be diffed; answering from its row alone:`,
         { err },
@@ -918,7 +961,7 @@ export class PullRequestService implements IPullRequestService {
     // longer holds answers no files, as before, and so does a target that
     // cannot be refreshed: a stale tip could put other people's work in the
     // list, so the read fails closed and the next one tries again.
-    const applied = row.state === 'merged' && appliedSha === null && workspaceId ? await merge() : null;
+    const applied = row.state === 'merged' && appliedSha === null && workspaceId ? await mergeOrNobody() : null;
     // Validated cache hit: TTL fresh AND both shas unchanged since we cached.
     const cachedHit = (expectHeadSha: string): PullRequestDetail | null => {
       const cached = this.detailCache.get(cacheKey);
@@ -1071,7 +1114,7 @@ export class PullRequestService implements IPullRequestService {
     const finished =
       row.state === 'open'
         ? null
-        : await this.finishedFacts(row, appliedSha, row.state === 'merged' ? await merge() : null);
+        : await this.finishedFacts(row, appliedSha, row.state === 'merged' ? await mergeOrNobody() : null);
 
     const detail: PullRequestDetail = {
       ...summary,
@@ -1099,8 +1142,9 @@ export class PullRequestService implements IPullRequestService {
 
     // A patch-less detail is an internal read; it must not be served to the
     // next client poll as if it were the full one. Nor may a read a mutation
-    // overtook: its row predates that mutation.
-    if (opts.patches !== false && generation === this.cacheGeneration) {
+    // overtook: its row predates that mutation. Nor one that could not read
+    // the merge log, which answered less than the next read may.
+    if (opts.patches !== false && generation === this.cacheGeneration && !mergeLogUnread) {
       this.detailCache.set(cacheKey, {
         at: now,
         headSha: detail.headSha,
@@ -1181,10 +1225,11 @@ export class PullRequestService implements IPullRequestService {
   /**
    * The request's apply in the merge log ({@link lastApply}): the applier's
    * display name and the source head it applied. Never the log's email
-   * column, nor its error text. `null` when none is recorded
-   * (a request applied before the log, or by a path that writes none) and
-   * when the lookup fails: both are courtesies on top of what the row says,
-   * so a failure reads as "not recorded", never as no answer.
+   * column, nor its error text. `null` when none is recorded (a request
+   * applied before the log, or by a path that writes none). A lookup that
+   * FAILS is not that: it rejects with {@link MergeLogUnreadError}, because
+   * "no head recorded" lets a same-number foreign merge commit pass the
+   * check, and an unread log must not. Only an answer is remembered.
    */
   private async lastSucceededMerge(prNumber: number): Promise<AppliedMerge | null> {
     const known = this.appliedMerges.get(prNumber);
@@ -1199,7 +1244,7 @@ export class PullRequestService implements IPullRequestService {
       return applied;
     } catch (err) {
       log.warn(`could not read who applied change request #${prNumber}:`, { err });
-      return null;
+      throw new MergeLogUnreadError(err);
     }
   }
 
@@ -1213,13 +1258,15 @@ export class PullRequestService implements IPullRequestService {
    * and is not remembered as such: `mergePr` flips the row to merged before
    * it marks its log row succeeded, so a listing in between sees no apply yet,
    * and remembering that would check the request without its head for good.
-   * A failed read answers null for every number, as the per-row read does.
+   * A failed read answers {@link MergeLogUnreadError} for every number of its
+   * batch, as the per-row read rejects with it: never null, which would
+   * check those rows by number alone.
    */
   private async appliedMergesFor(
     rows: ChangeRequestRow[],
     workspaceId: string | null,
-  ): Promise<Map<number, AppliedMerge | null>> {
-    const merges = new Map<number, AppliedMerge | null>();
+  ): Promise<Map<number, MergeLookup>> {
+    const merges = new Map<number, MergeLookup>();
     if (!workspaceId) return merges;
     const wanted: number[] = [];
     for (const row of rows) {
@@ -1251,7 +1298,8 @@ export class PullRequestService implements IPullRequestService {
         }
       } catch (err) {
         log.warn(`could not read who applied ${batch.length} change requests:`, { err });
-        for (const prNumber of batch) merges.set(prNumber, null);
+        const unread = new MergeLogUnreadError(err);
+        for (const prNumber of batch) merges.set(prNumber, unread);
       }
     }
     return merges;

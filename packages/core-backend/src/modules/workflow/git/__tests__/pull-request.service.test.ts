@@ -268,6 +268,7 @@ describe('PullRequestService.listPrsByState', () => {
     changedPaths: string[] = [],
     // Each attempt belongs to the request it names, or to the first row's.
     mergeLog: { name: string; headSha: string; prNumber?: number }[] = [],
+    opts: { mergeLogThrows?: boolean } = {},
   ) {
     const orderBy = vi.fn(async () => rows);
     // `select` counts the change-request reads; the merge-log read an applied
@@ -284,6 +285,7 @@ describe('PullRequestService.listPrsByState', () => {
     // the query names come back, so a read that leaves a row out leaves that
     // row without its head instead of passing on a stub that answers all.
     const mergeLogReads = vi.fn(async (predicate: SQL) => {
+      if (opts.mergeLogThrows) throw new Error('db down');
       const { params } = new PgDialect().sqlToQuery(predicate);
       return mergeLogRows.filter((r) => params.includes(r.prNumber));
     });
@@ -381,6 +383,24 @@ describe('PullRequestService.listPrsByState', () => {
     for (const [n, headSha] of Object.entries(heads)) {
       expect(atCommit).toHaveBeenCalledWith('ws', expect.objectContaining({ number: Number(n), headSha }));
     }
+  });
+
+  it('a merge log that cannot be read lists the applied row with no paths, never one checked by number alone', async () => {
+    const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [], {
+      mergeLogThrows: true,
+    });
+    const [summary] = await svc.listPrsByState(['merged']);
+    expect(summary?.touchedNodePaths ?? []).toEqual([]);
+    expect(atCommit).not.toHaveBeenCalled();
+  });
+
+  it('remembers nothing from a listing whose merge-log read failed: the next listing asks again', async () => {
+    const { svc, mergeLogReads } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [], {
+      mergeLogThrows: true,
+    });
+    await svc.listPrsByState(['merged']);
+    await svc.listPrsByState(['merged']);
+    expect(mergeLogReads).toHaveBeenCalledTimes(2);
   });
 
   it('asks the merge log nothing about a row whose change it already remembers', async () => {
@@ -615,8 +635,12 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
       closedReason: null,
       ...over,
     };
+    // The merge log records no apply: the commit is checked by its number.
     const db = {
-      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+      select: () => ({
+        from: (table: unknown) =>
+          table === prMergeLog ? { where: async () => [] } : { where: () => ({ limit: async () => [row] }) },
+      }),
     } as unknown as Database;
     const ensureRemotesFetched = vi.fn(async () => undefined);
     const workspace = {

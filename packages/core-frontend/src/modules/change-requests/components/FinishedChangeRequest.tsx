@@ -142,9 +142,11 @@ export function FinishedChangeRequest({
     // Refused, with or without a commit to read: the sentence and the lock,
     // never the content.
     pane = <MarkedFile diff={null} raw={null} failure={failure} onRetry={() => retry(selected)} />;
-  } else if (appliedSha === null && failure === null) {
-    // Only once the remaining read settled cleanly: a retryable failure falls
-    // through to the sentence with Try again rather than reading as success.
+  } else if (appliedSha === null && sides !== null) {
+    // Only once the remaining read SETTLED cleanly: `failure` is null while it
+    // is still pending too, so a probe in flight shows Loading… below, and a
+    // retryable failure falls through to the sentence with Try again — never
+    // either one reading as success.
     pane = (
       <p className="py-6 text-center text-detail text-ink-faint">
         Everything this request proposed was already there when it was applied, so it made no

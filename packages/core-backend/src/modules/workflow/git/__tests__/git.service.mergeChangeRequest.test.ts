@@ -10,6 +10,8 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
 import { mergeCommitSubject } from '../merge-commit.js';
+import { NodeGitRunner } from '../node-git-runner.js';
+import type { GitRunOptions, IGitRunner } from '../../../../shared/git.contract.js';
 import { AppliedChangeMismatchError } from '../../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -689,24 +691,38 @@ describe('GitService.mergeChangeRequest', () => {
       await runGit(baseRepo, ['fetch', 'origin', '+refs/heads/alice/other:refs/remotes/origin/alice/other']);
       const otherTip = (await gitOut(baseRepo, ['rev-parse', 'refs/remotes/origin/alice/other'])).trim();
 
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
-      type GitFn = (cwd: string, args: string[], opts?: unknown) => Promise<{ stdout: string }>;
-      const inner = git as unknown as { git: GitFn };
-      const original = inner.git.bind(git);
-      inner.git = async (cwd, args, opts) => {
-        const out = await original(cwd, args, opts);
-        // A concurrent fetch lands right after the merge resolved its head.
-        if (args[0] === 'rev-parse' && args[1] === 'origin/alice/add^{commit}') {
-          await runGit(baseRepo, ['update-ref', 'refs/remotes/origin/alice/add', otherTip]);
-        }
-        return out;
+      // The race is driven through the injected runner, the seam every git
+      // call of the service goes through: a concurrent fetch lands right after
+      // the merge resolved its head.
+      const real = new NodeGitRunner();
+      let raced = false;
+      const racing: IGitRunner = {
+        defaultTimeoutMs: real.defaultTimeoutMs,
+        credentials: real.credentials,
+        run: (async (cwd: string, args: string[], opts?: GitRunOptions) => {
+          const out = await real.run(cwd, args, opts as GitRunOptions & { encoding?: 'utf8' });
+          if (args[0] === 'rev-parse' && args[1] === 'origin/alice/add^{commit}') {
+            await runGit(baseRepo, ['update-ref', 'refs/remotes/origin/alice/add', otherTip]);
+            raced = true;
+          }
+          return out;
+        }) as IGitRunner['run'],
       };
+      const git = new GitService(
+        stubWorkspaceService(baseWsId, baseRepo),
+        new WorkflowHooks(),
+        testKbContext(),
+        undefined,
+        null,
+        racing,
+      );
       const seen: string[][] = [];
       const result = await git.mergeChangeRequest(
         baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
         { authorize: async (t) => { seen.push(t.changedPaths); } },
       );
 
+      expect(raced).toBe(true);
       expect(result.kind).toBe('merged');
       expect(seen).toEqual([['feature.md']]);
       const merged = result.kind === 'merged' ? result.mergeCommit : null;
