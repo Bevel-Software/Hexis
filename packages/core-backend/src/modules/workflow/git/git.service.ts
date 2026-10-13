@@ -73,6 +73,14 @@ const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
 /**
+ * The deadline of the one fetch that runs while holding a workspace's
+ * reservation (`changedFilesOfProposalHead`). Far below the runner's default:
+ * every other git operation on that workspace waits behind it, and the read it
+ * serves fails closed and is retried, so giving up early costs only a retry.
+ */
+const PROPOSAL_TARGET_FETCH_TIMEOUT_MS = 15_000;
+
+/**
  * Git parses `--author="Name <email>"` by scanning for the last `<` and `>` and
  * taking everything before the `<` as the name. Stray angle brackets, newlines, or
  * carriage returns in either field break that parser or let a caller forge a
@@ -1655,14 +1663,14 @@ export class GitService implements IGitService {
           // The tip this attempt merges into, and the paths it writes against
           // that tip. Re-read every attempt: a retry happens BECAUSE the
           // target moved, which can move its roles and its file set too.
-          const { stdout: targetSha } = await this.git(cwd, ['rev-parse', `origin/${targetBranch}`]);
-          const changedPaths = await this.prChangedPathsAt(
-            cwd,
-            `origin/${targetBranch}`,
-            `origin/${sourceBranch}`,
-            { forAccessCheck: true },
-          );
-          await opts.authorize({ sha: targetSha.trim(), changedPaths });
+          // Both ends are the SHAS this attempt merges, never the ref names:
+          // the change-request reads fetch outside this reservation, so
+          // `origin/<source>` can move between the rev-parse above and here,
+          // and the callback would then authorize paths the merge never takes.
+          const { stdout: targetTip } = await this.git(cwd, ['rev-parse', 'HEAD']);
+          const targetSha = targetTip.trim();
+          const changedPaths = await this.prChangedPathsAt(cwd, targetSha, sourceHead, { forAccessCheck: true });
+          await opts.authorize({ sha: targetSha, changedPaths });
         }
 
         // `--no-commit --no-ff` so we author the merge commit as the human and
@@ -3159,10 +3167,13 @@ export class GitService implements IGitService {
     // Unlike the open-request reads, the fetch runs UNDER the reservation:
     // this answer is only safe against the tip this fetch delivered, so the
     // fetch, the target's resolution and the diff are one serialized git
-    // operation. The read is rare (an apply with no commit of its own) and
-    // cached, so a slow origin holding the lock here costs little.
+    // operation. What that costs the workspace is bounded twice: the fetch
+    // gets its own short deadline rather than the runner's default (a slow
+    // origin fails this read closed, retryable, instead of holding every other
+    // git operation here), and the caller answers repeat reads from its detail
+    // cache before it ever gets here.
     return this.mutex.run(workspaceId, async () => {
-      if (!(await this.fetchPublishedRefs(cwd, [targetBranch]))) {
+      if (!(await this.fetchPublishedRefs(cwd, [targetBranch], { timeoutMs: PROPOSAL_TARGET_FETCH_TIMEOUT_MS }))) {
         throw new Error(`could not refresh ${targetBranch} to read commit ${headSha} against it`);
       }
       try {
@@ -3563,7 +3574,11 @@ export class GitService implements IGitService {
    * Answers whether the fetch succeeded, for the one caller that must not
    * read a stale tip (`changedFilesOfProposalHead`).
    */
-  private async fetchPublishedRefs(cwd: string, branches: string[]): Promise<boolean> {
+  private async fetchPublishedRefs(
+    cwd: string,
+    branches: string[],
+    opts: { timeoutMs?: number } = {},
+  ): Promise<boolean> {
     // Best-effort: a branch may be local-only (rare) or origin briefly
     // unreachable; `resolveBranchRef` still falls back to whatever is local.
     // `--no-write-fetch-head` — this runs on the CR-detail path (polled around
@@ -3575,10 +3590,11 @@ export class GitService implements IGitService {
     // "reflect the latest push" is exactly what a drifted `remote.origin.fetch`
     // silently stops delivering, and the CR diff would then be computed against
     // a stale head. Every caller `assertValidBranchName`s every branch.
-    return this.git(cwd, [
-      'fetch', '--no-write-fetch-head', 'origin',
-      ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`),
-    ]).then(
+    return this.git(
+      cwd,
+      ['fetch', '--no-write-fetch-head', 'origin', ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`)],
+      opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs },
+    ).then(
       () => {
         this.prFetchFailureLoggedAt.delete(cwd);
         return true;

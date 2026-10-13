@@ -166,15 +166,34 @@ describe('GitService.changedFilesOfProposalHead', () => {
     const runs = vi.spyOn(runner, 'run');
     let release!: () => void;
     const held = mutex.run(workspaceId, () => new Promise<void>((resolve) => (release = resolve)));
+    // Resolves when the read asks for the reservation: everything it does
+    // before that has run by then, so a fetch ahead of the lock would show.
+    let asked!: () => void;
+    const reservationAsked = new Promise<void>((resolve) => (asked = resolve));
+    const run = mutex.run.bind(mutex);
+    vi.spyOn(mutex, 'run').mockImplementation(((key: string, fn: () => Promise<unknown>) => {
+      if (key === workspaceId) asked();
+      return run(key, fn);
+    }) as typeof mutex.run);
     const read = git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
     // Another git operation holds the workspace: the read must not touch the
     // target's ref under it, so no fetch has run yet.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await reservationAsked;
     expect(fetchesOf(runs)).toEqual([]);
     release();
     await held;
     expect((await read).map((f) => f.path)).toEqual(['Pricing.md']);
     expect(fetchesOf(runs)).toHaveLength(1);
+  });
+
+  it('gives the fetch it holds the reservation through a short deadline of its own', async () => {
+    const { headOf9 } = await seedStaleTarget();
+    const runs = vi.spyOn(runner, 'run');
+    await git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
+    const fetch = runs.mock.calls.find((c) => (c[1] as string[])[0] === 'fetch');
+    const timeoutMs = (fetch?.[2] as { timeoutMs?: number } | undefined)?.timeoutMs;
+    expect(timeoutMs).toBeGreaterThan(0);
+    expect(timeoutMs).toBeLessThanOrEqual(15_000);
   });
 
   it("fails closed when origin cannot be reached and the clone's target predates the fork", async () => {

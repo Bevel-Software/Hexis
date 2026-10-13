@@ -264,16 +264,24 @@ describe('PullRequestService.listPrsByState', () => {
   function svcOver(
     rows: Record<string, unknown>[],
     changedPaths: string[] = [],
-    mergeLog: { name: string; headSha: string }[] = [],
+    // Each attempt belongs to the request it names, or to the first row's.
+    mergeLog: { name: string; headSha: string; prNumber?: number }[] = [],
   ) {
     const orderBy = vi.fn(async () => rows);
     // `select` counts the change-request reads; the merge-log read an applied
-    // row's head comes from is answered beside it.
+    // row's head comes from is answered beside it, and counted too.
     const select = vi.fn(() => ({ where: () => ({ orderBy }) }));
-    const mergeLogRows = mergeLog.map((r) => ({ ...r, succeeded: true, hasError: false, startedAt: new Date(0) }));
+    const mergeLogRows = mergeLog.map((r) => ({
+      prNumber: rows[0]?.number,
+      ...r,
+      succeeded: true,
+      hasError: false,
+      startedAt: new Date(0),
+    }));
+    const mergeLogReads = vi.fn(async () => mergeLogRows);
     const db = {
       select: () => ({
-        from: (table: unknown) => (table === prMergeLog ? { where: async () => mergeLogRows } : select()),
+        from: (table: unknown) => (table === prMergeLog ? { where: mergeLogReads } : select()),
       }),
     } as unknown as Database;
     const answer = (paths: string[]) => ({ paths, pairs: paths.map((path) => ({ path })) });
@@ -291,7 +299,7 @@ describe('PullRequestService.listPrsByState', () => {
       changedPathsAndPairsOfAppliedChange: atCommit,
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
-    return { svc, select, forPr, atCommit, ensureRemotesFetched };
+    return { svc, select, forPr, atCommit, ensureRemotesFetched, mergeLogReads };
   }
 
   beforeEach(() => {
@@ -346,6 +354,27 @@ describe('PullRequestService.listPrsByState', () => {
     ]);
     await svc.listPrsByState(['merged']);
     expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA, title: 'A proposal', headSha: head });
+  });
+
+  it('reads the merge log of every applied row in ONE query, and hands each row its own head', async () => {
+    const heads = { 1: '1'.repeat(40), 2: '2'.repeat(40), 3: '3'.repeat(40) };
+    const { svc, atCommit, mergeLogReads } = svcOver(
+      [1, 2, 3].map((number) => row({ number, state: 'merged' })),
+      ['Knowledge/A.md'],
+      Object.entries(heads).map(([n, headSha]) => ({ name: 'Robin Lee', headSha, prNumber: Number(n) })),
+    );
+    await svc.listPrsByState(['merged']);
+    expect(mergeLogReads).toHaveBeenCalledTimes(1);
+    for (const [n, headSha] of Object.entries(heads)) {
+      expect(atCommit).toHaveBeenCalledWith('ws', expect.objectContaining({ number: Number(n), headSha }));
+    }
+  });
+
+  it('asks the merge log nothing about a row whose change it already remembers', async () => {
+    const { svc, mergeLogReads } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md']);
+    await svc.listPrsByState(['merged']);
+    await svc.listPrsByState(['merged']);
+    expect(mergeLogReads).toHaveBeenCalledTimes(1);
   });
 
   it('reads the table for a set that contains `open` ALONGSIDE another state', async () => {

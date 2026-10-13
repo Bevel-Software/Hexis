@@ -97,6 +97,21 @@ function lastApply(
   return pushed ? { name: pushed.name, headSha: pushed.headSha } : { name: null, headSha: done.headSha };
 }
 
+/** The merge-log columns {@link lastApply} reads: never the email, nor the error text. */
+const MERGE_LOG_ATTEMPT_COLUMNS = {
+  name: prMergeLog.triggeredByName,
+  headSha: prMergeLog.headShaAtMerge,
+  succeeded: prMergeLog.succeeded,
+  hasError: sql<boolean>`${prMergeLog.error} is not null`,
+  startedAt: prMergeLog.startedAt,
+};
+
+/** How many request numbers one batched merge-log read names at once. */
+const MERGE_LOG_BATCH = 1_000;
+
+/** Who applied a request and the head they applied — see {@link lastApply}. */
+type AppliedMerge = { name: string | null; headSha: string };
+
 /** How many mismatched applied rows to remember — see `touchedPathsFor`. */
 const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
 /** How many rows a listing reads from git at once. */
@@ -119,6 +134,11 @@ async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item:
 const DETAIL_CACHE_TTL_MS = 30_000;
 
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
+
+/** What an applied row's remembered change is keyed by — see `touchedPathsFor`. */
+function appliedChangeKey(workspaceId: string, applied: AppliedChangeRef): string {
+  return `${workspaceId}\u0000${applied.mergeSha}\u0000${applied.number}`;
+}
 
 /**
  * Where a change request's files are read from.
@@ -263,7 +283,7 @@ export class PullRequestService implements IPullRequestService {
    * needs its head. Not remembered while the log has none, because the row is
    * marked merged a moment before its log entry is marked succeeded.
    */
-  private readonly appliedMerges = new Map<number, { name: string | null; headSha: string }>();
+  private readonly appliedMerges = new Map<number, AppliedMerge>();
   /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
@@ -385,7 +405,7 @@ export class PullRequestService implements IPullRequestService {
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
-    opts: { fetch?: boolean } = {},
+    opts: { fetch?: boolean; merges?: Map<number, AppliedMerge | null> } = {},
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
     const empty = { paths: [] as string[], pairs: [] as ChangedPathPair[] };
     if (!workspaceId) return empty;
@@ -413,7 +433,7 @@ export class PullRequestService implements IPullRequestService {
       // run four git processes per row on every call. Only an ANSWER is kept.
       // A commit this clone does not hold yet rejects, and that is this row's
       // turn to be fetched, so the next read asks again.
-      const key = `${workspaceId}\u0000${source.applied.mergeSha}\u0000${source.applied.number}`;
+      const key = appliedChangeKey(workspaceId, source.applied);
       const known = this.appliedChanges.get(key);
       if (known) return known;
       // A row whose commit the clone holds but which is NOT this request's
@@ -425,7 +445,13 @@ export class PullRequestService implements IPullRequestService {
       // indefinitely. A commit the clone does not HOLD is not remembered —
       // the next fetch may bring it, and the next list asks again.
       if (this.mismatchedAppliedChanges.has(key)) return empty;
-      return this.withAppliedHead(source.applied, () => this.lastSucceededMerge(row.number))
+      // A listing hands in its rows' merge-log answers, read in one query
+      // (`appliedMergesFor`); a lone summary asks for its own.
+      const merges = opts.merges;
+      const lookup = merges?.has(row.number)
+        ? async () => merges.get(row.number) ?? null
+        : () => this.lastSucceededMerge(row.number);
+      return this.withAppliedHead(source.applied, lookup)
         .then((applied) => this.gitService.changedPathsAndPairsOfAppliedChange(workspaceId, applied))
         .then((answer) => {
           // Full: what is remembered stays, and this answer is simply not
@@ -459,7 +485,7 @@ export class PullRequestService implements IPullRequestService {
   private async summaryOf(
     row: ChangeRequestRow,
     workspaceId: string | null,
-    opts: { fetch?: boolean } = {},
+    opts: { fetch?: boolean; merges?: Map<number, AppliedMerge | null> } = {},
   ): Promise<PullRequestSummary> {
     const touched = await this.touchedPathsFor(row, workspaceId, opts);
     const summary = this.rowToSummary(
@@ -567,7 +593,12 @@ export class PullRequestService implements IPullRequestService {
     // Bounded fan-out: an applied row's read takes the workspace mutex for
     // its git calls, so a hundred rows launched at once would only queue on
     // it while holding a hundred pending promises.
-    return mapWithLimit(rows, SUMMARY_CONCURRENCY, (row) => this.summaryOf(row, workspaceId, { fetch: false }));
+    // The merge log of every applied row still to be read from git, in one
+    // query rather than one per row.
+    const merges = await this.appliedMergesFor(rows, workspaceId);
+    return mapWithLimit(rows, SUMMARY_CONCURRENCY, (row) =>
+      this.summaryOf(row, workspaceId, { fetch: false, merges }),
+    );
   }
 
   async listPrsAuthoredBy(
@@ -888,7 +919,30 @@ export class PullRequestService implements IPullRequestService {
     // cannot be refreshed: a stale tip could put other people's work in the
     // list, so the read fails closed and the next one tries again.
     const applied = row.state === 'merged' && appliedSha === null && workspaceId ? await merge() : null;
+    // Validated cache hit: TTL fresh AND both shas unchanged since we cached.
+    const cachedHit = (expectHeadSha: string): PullRequestDetail | null => {
+      const cached = this.detailCache.get(cacheKey);
+      return !opts.fresh &&
+        cached &&
+        now - cached.at < DETAIL_CACHE_TTL_MS &&
+        cached.headSha === expectHeadSha &&
+        // The target moving on changes `behind` without touching the head.
+        cached.baseSha === baseSha &&
+        // An apply leaves both shas where the open request's detail had them
+        // (the merge commit's parents ARE the two tips it merged), so the state
+        // is compared too, or a cached open detail would answer for an applied
+        // request.
+        cached.value.state === row.state
+        ? cached.value
+        : null;
+    };
     if (workspaceId && applied?.headSha) {
+      // Asked BEFORE the read below, which fetches the target while holding
+      // the workspace's reservation: a repeat read of the same finished
+      // request must not hold it again. Only a detail that read this head
+      // answers — a read that failed closed cached no head, so it is retried.
+      const hit = cachedHit(applied.headSha);
+      if (hit) return hit;
       try {
         files = await this.gitService.changedFilesOfProposalHead(
           workspaceId,
@@ -906,23 +960,8 @@ export class PullRequestService implements IPullRequestService {
       }
     }
 
-    // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
-    const cached = this.detailCache.get(cacheKey);
-    if (
-      !opts.fresh &&
-      cached &&
-      now - cached.at < DETAIL_CACHE_TTL_MS &&
-      cached.headSha === headSha &&
-      // The target moving on changes `behind` without touching the head.
-      cached.baseSha === baseSha &&
-      // An apply leaves both shas where the open request's detail had them
-      // (the merge commit's parents ARE the two tips it merged), so the state
-      // is compared too, or a cached open detail would answer for an applied
-      // request.
-      cached.value.state === row.state
-    ) {
-      return cached.value;
-    }
+    const hit = cachedHit(headSha);
+    if (hit) return hit;
 
     // The detail has the real file list, so its pairs come straight off it —
     // the same shape the list builds from its own diff, so a reader gating on
@@ -1147,20 +1186,12 @@ export class PullRequestService implements IPullRequestService {
    * when the lookup fails: both are courtesies on top of what the row says,
    * so a failure reads as "not recorded", never as no answer.
    */
-  private async lastSucceededMerge(
-    prNumber: number,
-  ): Promise<{ name: string | null; headSha: string } | null> {
+  private async lastSucceededMerge(prNumber: number): Promise<AppliedMerge | null> {
     const known = this.appliedMerges.get(prNumber);
     if (known) return known;
     try {
       const attempts = await this.db
-        .select({
-          name: prMergeLog.triggeredByName,
-          headSha: prMergeLog.headShaAtMerge,
-          succeeded: prMergeLog.succeeded,
-          hasError: sql<boolean>`${prMergeLog.error} is not null`,
-          startedAt: prMergeLog.startedAt,
-        })
+        .select(MERGE_LOG_ATTEMPT_COLUMNS)
         .from(prMergeLog)
         .where(eq(prMergeLog.prNumber, prNumber));
       const applied = lastApply(attempts);
@@ -1170,6 +1201,60 @@ export class PullRequestService implements IPullRequestService {
       log.warn(`could not read who applied change request #${prNumber}:`, { err });
       return null;
     }
+  }
+
+  /**
+   * {@link lastSucceededMerge} for every applied row of a listing that still
+   * has to be read from git, in one query per {@link MERGE_LOG_BATCH} numbers
+   * instead of one per row. Rows whose change is already remembered (or known
+   * not to be theirs) are not asked about: they never reach the lookup.
+   *
+   * A request with no succeeded attempt answers null for THIS listing only,
+   * and is not remembered as such: `mergePr` flips the row to merged before
+   * it marks its log row succeeded, so a listing in between sees no apply yet,
+   * and remembering that would check the request without its head for good.
+   * A failed read answers null for every number, as the per-row read does.
+   */
+  private async appliedMergesFor(
+    rows: ChangeRequestRow[],
+    workspaceId: string | null,
+  ): Promise<Map<number, AppliedMerge | null>> {
+    const merges = new Map<number, AppliedMerge | null>();
+    if (!workspaceId) return merges;
+    const wanted: number[] = [];
+    for (const row of rows) {
+      const source = changeSourceFor(row);
+      if (source.kind !== 'commit') continue;
+      const key = appliedChangeKey(workspaceId, source.applied);
+      if (this.appliedChanges.has(key) || this.mismatchedAppliedChanges.has(key)) continue;
+      const known = this.appliedMerges.get(row.number);
+      if (known) merges.set(row.number, known);
+      else wanted.push(row.number);
+    }
+    for (let at = 0; at < wanted.length; at += MERGE_LOG_BATCH) {
+      const batch = wanted.slice(at, at + MERGE_LOG_BATCH);
+      try {
+        const attempts = await this.db
+          .select({ prNumber: prMergeLog.prNumber, ...MERGE_LOG_ATTEMPT_COLUMNS })
+          .from(prMergeLog)
+          .where(inArray(prMergeLog.prNumber, batch));
+        const byNumber = new Map<number, MergeLogAttempt[]>();
+        for (const { prNumber, ...attempt } of attempts) {
+          const list = byNumber.get(prNumber);
+          if (list) list.push(attempt);
+          else byNumber.set(prNumber, [attempt]);
+        }
+        for (const prNumber of batch) {
+          const applied = lastApply(byNumber.get(prNumber) ?? []);
+          merges.set(prNumber, applied);
+          if (applied && this.appliedMerges.size < MAX_REMEMBERED_APPLIED_CHANGES) this.appliedMerges.set(prNumber, applied);
+        }
+      } catch (err) {
+        log.warn(`could not read who applied ${batch.length} change requests:`, { err });
+        for (const prNumber of batch) merges.set(prNumber, null);
+      }
+    }
+    return merges;
   }
 
   private async findRow(prNumber: number): Promise<ChangeRequestRow | null> {

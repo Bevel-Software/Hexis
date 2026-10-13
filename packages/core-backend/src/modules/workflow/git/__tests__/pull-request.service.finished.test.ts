@@ -345,6 +345,30 @@ describe('PullRequestService.getPrDetail — an apply that made no commit of its
     expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
   });
 
+  it('answers a repeat read from its cache, without fetching the target under the reservation again', async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      { mergedSha: null },
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] },
+    );
+    const first = await svc.getPrDetail(4);
+    const second = await svc.getPrDetail(4);
+    expect(changedFilesOfProposalHead).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first);
+    expect(second?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
+  });
+
+  it('reads again after a read that failed closed, rather than serving its empty answer', async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      { mergedSha: null },
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] },
+    );
+    changedFilesOfProposalHead.mockRejectedValueOnce(new Error('could not refresh main'));
+    expect((await svc.getPrDetail(4))?.files).toEqual([]);
+    const again = await svc.getPrDetail(4);
+    expect(changedFilesOfProposalHead).toHaveBeenCalledTimes(2);
+    expect(again?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
+  });
+
   it('does not reach for the head when the request has its own verified merge commit', async () => {
     const { svc, changedFilesOfProposalHead } = harness(
       {},

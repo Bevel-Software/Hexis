@@ -122,10 +122,14 @@ export interface ChangedPathPair {
 }
 
 /**
- * An APPLIED change request, named by BOTH the commit its row records and the
- * number that row carries — because reading the commit's own change is only
- * sound if the commit really is that request's merge commit, and the number is
- * what proves it (the merge commit's subject ends with `(#<number>)`).
+ * An APPLIED change request, named by the commit its row records, the number
+ * that row carries and, when its apply logged one, the source head it merged —
+ * because reading the commit's own change is only sound if the commit really is
+ * that request's merge commit. The number is checked against the merge commit's
+ * subject (it ends with `(#<number>)`), and the head against its second
+ * parent: the number alone does not prove ownership, since a knowledge base
+ * that moved between deployments carries other merge commits naming the same
+ * numbers (see `headSha` below).
  *
  * The pair travels together so no read can ask for a commit without saying which
  * request it must belong to. `merged_sha` is not reliably a commit the request

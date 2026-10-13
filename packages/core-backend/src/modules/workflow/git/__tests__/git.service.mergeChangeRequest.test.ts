@@ -675,6 +675,45 @@ describe('GitService.mergeChangeRequest', () => {
       expect(seen[0].changedPaths).toEqual(['feature.md']);
     });
 
+    it('authorizes the source head it merges, even when the source ref moves in between', async () => {
+      // The change-request reads fetch outside the workspace reservation, so
+      // `origin/<source>` can move after the merge resolved its head. The
+      // callback must still decide on the paths of the commit that is merged.
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      await pushFeatureBranch(root, upstream, 'alice/other', async (dir) => {
+        await fs.writeFile(path.join(dir, 'other.md'), 'elsewhere\n');
+      });
+      await runGit(baseRepo, ['fetch', 'origin', '+refs/heads/alice/other:refs/remotes/origin/alice/other']);
+      const otherTip = (await gitOut(baseRepo, ['rev-parse', 'refs/remotes/origin/alice/other'])).trim();
+
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+      type GitFn = (cwd: string, args: string[], opts?: unknown) => Promise<{ stdout: string }>;
+      const inner = git as unknown as { git: GitFn };
+      const original = inner.git.bind(git);
+      inner.git = async (cwd, args, opts) => {
+        const out = await original(cwd, args, opts);
+        // A concurrent fetch lands right after the merge resolved its head.
+        if (args[0] === 'rev-parse' && args[1] === 'origin/alice/add^{commit}') {
+          await runGit(baseRepo, ['update-ref', 'refs/remotes/origin/alice/add', otherTip]);
+        }
+        return out;
+      };
+      const seen: string[][] = [];
+      const result = await git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+        { authorize: async (t) => { seen.push(t.changedPaths); } },
+      );
+
+      expect(result.kind).toBe('merged');
+      expect(seen).toEqual([['feature.md']]);
+      const merged = result.kind === 'merged' ? result.mergeCommit : null;
+      const files = await gitOut(baseRepo, ['diff', '--name-only', `${merged}^1`, String(merged)]);
+      expect(files.trim().split('\n')).toEqual(['feature.md']);
+    });
+
     it('refuses before anything is committed or pushed when the hook throws', async () => {
       const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
       await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
