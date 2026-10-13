@@ -11,6 +11,7 @@ import { runCoreMigrations, runEnterpriseMigrations, runPiiBackfill, type PiiBac
 import { prFileApprovals, users } from '../core-schema.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { PII_CIPHERTEXT_PREFIX, derivePiiKeys, isEncryptedBlob } from '../../../shared/column-crypto.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
 
 /**
  * Personal data in a real Postgres: what a database handle stores under its
@@ -22,12 +23,10 @@ import { PII_CIPHERTEXT_PREFIX, derivePiiKeys, isEncryptedBlob } from '../../../
  * key, which sees what a dump would.
  *
  * Runs where `TEST_DATABASE_URL` names a server this role may create
- * databases on (CI carries one as a service container); skipped elsewhere.
- * Every test works in a scratch database of its own and drops it: the
- * database the URL names is only connected to, never written.
+ * databases on, each test in a scratch database of its own (`pg-scratch.ts`).
  */
-const ADMIN_URL = process.env.TEST_DATABASE_URL;
-const TIMEOUT = 120_000;
+const ADMIN_URL = PG_ADMIN_URL;
+const TIMEOUT = PG_TEST_TIMEOUT;
 const KEY = randomBytes(32).toString('base64');
 const keys = derivePiiKeys(KEY);
 
@@ -45,31 +44,13 @@ const TABLES = [
 type Row = Record<string, unknown>;
 type Query = (text: string) => Promise<Row[]>;
 
-const created: string[] = [];
 const open: Database[] = [];
 const plain: pg.Pool[] = [];
 /** Temporary folders a test made (an overlay's migration history); removed in `afterAll`. */
 const folders: string[] = [];
 
-async function withAdmin<T>(fn: (admin: pg.Client) => Promise<T>): Promise<T> {
-  const admin = new pg.Client({ connectionString: ADMIN_URL });
-  await admin.connect();
-  try {
-    return await fn(admin);
-  } finally {
-    await admin.end();
-  }
-}
-
 /** A scratch database of this test's own; dropped in `afterAll`. */
-async function scratchDatabase(): Promise<string> {
-  const name = `hexis_pii_${randomBytes(6).toString('hex')}`;
-  await withAdmin((admin) => admin.query(`create database ${name}`));
-  created.push(name);
-  const url = new URL(ADMIN_URL!);
-  url.pathname = `/${name}`;
-  return url.toString();
-}
+const scratchDatabase = () => scratchDatabaseUrl('hexis_pii');
 
 /** The application's handle on a schema, holding `key`. */
 function handle(url: string, opts: { schema?: string; key?: string | null } = {}): Database {
@@ -157,9 +138,7 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
   // With the tests' own timeout: every test leaves a scratch database, and
   // dropping them one after the other outlasts the default for a hook.
   afterAll(async () => {
-    await withAdmin(async (admin) => {
-      for (const name of created) await admin.query(`drop database if exists ${name} with (force)`);
-    });
+    await dropScratchDatabases();
     for (const folder of folders) rmSync(folder, { recursive: true, force: true });
   }, TIMEOUT);
 

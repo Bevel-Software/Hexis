@@ -12,17 +12,25 @@ import { InviteDialogContext } from './invite-dialog.context';
  * reads nothing, not even the admin verdict — until somebody asks for it.
  */
 export function InviteDialogProvider({ children }: { children: ReactNode }) {
-  const [isOpen, setIsOpen] = useState(false);
+  // While open, the addresses the dialog starts with; null while closed. An
+  // open while already open keeps the dialog as it is.
+  const [openWith, setOpenWith] = useState<string[] | null>(null);
   const [invitedRevision, setInvitedRevision] = useState(0);
-  const open = useCallback(() => setIsOpen(true), []);
+  // Also wired straight to onClick handlers, so `options` may be a click
+  // event: only an array of addresses counts.
+  const open = useCallback((options?: { emails?: string[] }) => {
+    const emails = options?.emails;
+    setOpenWith((current) => current ?? (Array.isArray(emails) ? emails : []));
+  }, []);
   const value = useMemo(() => ({ open, invitedRevision }), [open, invitedRevision]);
   return (
     <InviteDialogContext.Provider value={value}>
       {children}
-      {isOpen && (
+      {openWith && (
         <InviteDialog
           open
-          onClose={() => setIsOpen(false)}
+          initialEmails={openWith}
+          onClose={() => setOpenWith(null)}
           onInvited={() => setInvitedRevision((r) => r + 1)}
         />
       )}
