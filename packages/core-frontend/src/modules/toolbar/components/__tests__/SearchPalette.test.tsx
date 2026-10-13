@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { act } from 'react';
@@ -788,6 +788,30 @@ describe('SearchPalette: shortcuts', () => {
     expect(keycap('Go to Knowledge (shortcut Shift K)').textContent).toBe('Shift K');
   });
 
+  describe('on an Apple device', () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('draws a Shift key as ⇧ and the capital in the narrow cap, and still says "Shift"', async () => {
+      vi.stubGlobal('navigator', {
+        ...navigator,
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+      });
+      const user = userEvent.setup();
+      renderPalette();
+      await user.click(trigger());
+      const keycap = (name: string) => screen.getByRole('option', { name }).querySelector('kbd')!;
+      // Drawn as the symbol, spoken as the word: the row's name carries "Shift".
+      expect(keycap('Create new page (shortcut C)').textContent).toBe('C');
+      expect(keycap('Invite people (shortcut Shift I)').textContent).toBe('⇧I');
+      expect(keycap('Go to Skills & Tools (shortcut Shift S)').textContent).toBe('⇧S');
+      // One width for the platform, not one per key: C sits in the same cap as ⇧S.
+      for (const cap of screen.getAllByRole('option').flatMap((o) => [...o.querySelectorAll('kbd')])) {
+        expect(cap).toHaveClass('w-7');
+        expect(cap).not.toHaveClass('w-14');
+      }
+    });
+  });
+
   it('gives Edit this page, Connect your agent and the settings rows no key', async () => {
     publishEditablePage('knowledge-base/KnowledgeBase/Onboarding.md');
     const user = userEvent.setup();
@@ -917,13 +941,28 @@ describe('SearchPalette: shortcuts', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const run = vi.fn();
     const user = userEvent.setup();
+    const shiftC = vi.fn();
+    const command = (id: string, label: string, shortcut: CommandAction['shortcut'], fn = run): CommandAction => ({
+      id,
+      label,
+      shortcut,
+      visible: () => true,
+      run: fn,
+    });
     renderPalette({
       commandActions: [
-        // The same key as Create new page, and as Go to Knowledge.
-        { id: 'clash', label: 'Clash', shortcut: { key: 'C' }, visible: () => true, run },
-        { id: 'clash-shift', label: 'Clash shift', shortcut: { key: 'k', shift: true }, visible: () => true, run },
-        // Two keys: not one letter.
-        { id: 'two-keys', label: 'Two keys', shortcut: { key: 'gk' }, visible: () => true, run },
+        // The same key as Create new page, and as Go to Knowledge — whatever the letter's case.
+        command('clash', 'Clash', { key: 'C' }),
+        command('clash-shift', 'Clash shift', { key: 'k', shift: true }),
+        // Not one letter: two keys, a digit, a symbol, nothing.
+        command('two-keys', 'Two keys', { key: 'gk' }),
+        command('digit', 'Digit', { key: '1' }),
+        command('symbol', 'Symbol', { key: '⇧' }),
+        command('empty', 'Empty', { key: '' }),
+        // The old shape, a list of keys, as a distribution not yet migrated gives it.
+        command('old-shape', 'Old shape', ['G', 'K'] as unknown as CommandAction['shortcut']),
+        // ⇧C is free: C is bound without Shift.
+        command('shift-c', 'Shift C', { key: 'c', shift: true }, shiftC),
       ],
     });
     press('c');
@@ -933,15 +972,32 @@ describe('SearchPalette: shortcuts', () => {
     expect(location()).toBe('/workspace');
     press('g');
     press('k');
+    press('1');
     expect(run).not.toHaveBeenCalled();
-    // The rows stay, with no key shown.
+    shift('c');
+    expect(shiftC).toHaveBeenCalledTimes(1);
+    expect(createPage).toHaveBeenCalledTimes(1);
+    // The rows stay, with no key shown — except ⇧C's, which is bound.
     await user.click(trigger());
     await user.type(input(), 'clash');
     expect(groupRows('Actions')).toEqual(['Clash', 'Clash shift']);
+    for (const q of ['two keys', 'digit', 'symbol', 'empty', 'old shape']) {
+      await user.clear(input());
+      await user.type(input(), q);
+      expect(screen.getAllByRole('option').flatMap((o) => [...o.querySelectorAll('kbd')])).toHaveLength(0);
+    }
     await user.clear(input());
-    await user.type(input(), 'two keys');
-    expect(groupRows('Actions')).toEqual(['Two keys']);
-    expect(error).toHaveBeenCalledTimes(3);
+    await user.type(input(), 'shift c');
+    expect(screen.getByRole('option', { name: 'Shift C (shortcut Shift C)' })).toBeInTheDocument();
+    // Each dropped shortcut is said once, naming its command; the old shape
+    // shows what was given.
+    expect(error).toHaveBeenCalledTimes(7);
+    expect(error.mock.calls.map(([message]) => String(message))).toEqual(
+      ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'old-shape'].map((id) =>
+        expect.stringContaining(` of ${id} `),
+      ),
+    );
+    expect(String(error.mock.calls[6][0])).toContain('["G","K"]');
     error.mockRestore();
   });
 });

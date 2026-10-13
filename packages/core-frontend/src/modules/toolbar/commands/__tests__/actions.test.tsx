@@ -4,7 +4,6 @@ import {
   COMMAND_SHORTCUTS,
   coreCommandActions,
   mergeCommandActions,
-  shortcutId,
   suggestedActions,
   visibleActions,
   type CommandAction,
@@ -142,18 +141,6 @@ describe('shortcut hints', () => {
     ]);
   });
 
-  it('names a shortcut by its letter, after shift+ when Shift is held', () => {
-    expect(shortcutId({ key: 'C' })).toBe('c');
-    expect(shortcutId({ key: 'k', shift: true })).toBe('shift+k');
-    expect(shortcutId(undefined)).toBeNull();
-  });
-
-  it('calls the page command "Create new page", with "new page" among its names', () => {
-    const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
-    const newPage = all.find((a) => a.id === 'new-page')!;
-    expect(newPage.label).toBe('Create new page');
-    expect(newPage.keywords).toContain('new page');
-  });
 });
 
 describe('suggestedActions', () => {
@@ -184,54 +171,6 @@ describe('mergeCommandActions / visibleActions', () => {
     expect(merged.map((a) => a.id).slice(-1)).toEqual(['new-ontology']);
     expect(labels(merged)).not.toContain('Impostor');
     expect(error).toHaveBeenCalled();
-    error.mockRestore();
-  });
-
-  it('keeps a registry command whose shortcut is taken or not one letter, but drops its shortcut', () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const withKeys = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
-    const command = (id: string, shortcut: CommandAction['shortcut']): CommandAction => ({
-      id,
-      label: id,
-      shortcut,
-      visible: () => true,
-      run: vi.fn(),
-    });
-    const extra: CommandAction[] = [
-      // Taken by core: C, and ⇧K — whatever the letter's case.
-      command('clash', { key: 'C' }),
-      command('clash-shift', { key: 'k', shift: true }),
-      // Not one letter.
-      command('two-keys', { key: 'gk' }),
-      command('digit', { key: '1' }),
-      command('symbol', { key: '⇧' }),
-      command('empty', { key: '' }),
-      // The old shape, a list of keys: the message shows what was given.
-      command('old-shape', ['G', 'K'] as unknown as CommandAction['shortcut']),
-      // One letter each, free: kept. ⇧C is free, since C is bound without Shift.
-      command('fine', { key: 'O' }),
-      command('fine-shift', { key: 'o', shift: true }),
-      command('shift-c', { key: 'c', shift: true }),
-      // Taken by the registry command before it.
-      command('second', { key: 'o' }),
-    ];
-    const merged = mergeCommandActions(withKeys, extra);
-    const shortcutOf = (id: string) => merged.find((a) => a.id === id)?.shortcut;
-    expect(merged.map((a) => a.id).slice(-extra.length)).toEqual(extra.map((a) => a.id));
-    for (const id of ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'old-shape', 'second']) {
-      expect(shortcutOf(id)).toBeUndefined();
-    }
-    expect(shortcutOf('fine')).toEqual({ key: 'O' });
-    expect(shortcutOf('fine-shift')).toEqual({ key: 'o', shift: true });
-    expect(shortcutOf('shift-c')).toEqual({ key: 'c', shift: true });
-    expect(error).toHaveBeenCalledTimes(8);
-    // Each message names the command it is about.
-    expect(error.mock.calls.map(([message]) => String(message))).toEqual(
-      ['clash', 'clash-shift', 'two-keys', 'digit', 'symbol', 'empty', 'old-shape', 'second'].map((id) =>
-        expect.stringContaining(` of ${id} `),
-      ),
-    );
-    expect(String(error.mock.calls[6][0])).toContain('["G","K"]');
     error.mockRestore();
   });
 

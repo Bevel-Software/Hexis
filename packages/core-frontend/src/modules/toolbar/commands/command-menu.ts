@@ -14,7 +14,8 @@
  * and ONLY to that one. Ctrl+K on a Mac is the text fields' "delete to end of
  * line", which nobody pressing it there means as "search".
  */
-const APPLE = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+const isApple = (): boolean => typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+const APPLE = isApple();
 
 /** The keys as drawn: `⌘K` on Apple platforms, `Ctrl K` elsewhere. */
 export const COMMAND_MENU_SHORTCUT_LABEL = APPLE ? '⌘K' : 'Ctrl K';
@@ -41,14 +42,14 @@ export interface ShortcutHint {
 }
 
 /**
- * How a command's shortcut is shown on this platform — `apple` is for tests;
- * the app asks for the platform it runs on, as {@link COMMAND_MENU_SHORTCUT_LABEL}
- * does.
+ * How a command's shortcut is shown on the platform the app runs on, read
+ * when the menu draws (a suite renders the menu under one user agent, then
+ * another), as {@link COMMAND_MENU_SHORTCUT_LABEL} is read once.
  */
-export function shortcutHint(shortcut: { key: string; shift?: boolean }, apple: boolean = APPLE): ShortcutHint {
+export function shortcutHint(shortcut: { key: string; shift?: boolean }): ShortcutHint {
   const key = shortcut.key.toUpperCase();
   if (!shortcut.shift) return { label: key, spoken: key };
-  return { label: apple ? `⇧${key}` : `Shift ${key}`, spoken: `Shift ${key}` };
+  return { label: isApple() ? `⇧${key}` : `Shift ${key}`, spoken: `Shift ${key}` };
 }
 
 /**
@@ -56,8 +57,8 @@ export function shortcutHint(shortcut: { key: string; shift?: boolean }, apple: 
  * `⇧K` on Apple platforms, `Shift K` elsewhere — so the keys line up down the
  * menu, each centred in its cap.
  */
-export function shortcutKeycapWidth(apple: boolean = APPLE): string {
-  return apple ? 'w-7' : 'w-14';
+export function shortcutKeycapWidth(): string {
+  return isApple() ? 'w-7' : 'w-14';
 }
 
 const openRequests = new Set<() => void>();
