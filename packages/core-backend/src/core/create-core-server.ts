@@ -674,6 +674,7 @@ export async function createCoreServer(
     core.accessControl,
     core.workspaceService,
     core.authService,
+    core.authService,
     core.workflowService,
     core.eventBus,
     core.db,
@@ -762,6 +763,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.accountHooks,
     core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —

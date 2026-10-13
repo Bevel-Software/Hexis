@@ -133,11 +133,31 @@ describe('Admin write floor at the repository root', () => {
       expect(await service().canWrite(WS, ADMIN, 'README.md')).toBe(true);
     });
 
-    it('is write only: read and download still answer to the access tree', async () => {
-      await write(repo, 'access.md', '---\n---\nwrite:\n  - deny Admin\n');
+    it('is write and the read it implies: download still answers to the access tree', async () => {
+      await write(repo, 'access.md', '---\n---\nwrite:\n  - deny Admin\nread:\n  - deny Admin\n');
       const svc = service();
-      expect(await svc.canDownload(WS, ADMIN, 'README.md')).toBe(false);
+      for (const who of [ADMIN, OWNER]) {
+        expect(await svc.canRead(WS, who, 'README.md')).toBe(true);
+        expect(await svc.canRead(WS, who, 'Knowledge/Foo.md')).toBe(true);
+        expect(await svc.canDownload(WS, who, 'README.md')).toBe(false);
+      }
       expect(await svc.canWrite(WS, ENGINEER, 'README.md')).toBe(false);
+      expect(await svc.canRead(WS, ENGINEER, 'README.md')).toBe(false);
+      // Who may read, for the banner: the floor's holders, and nobody else.
+      expect((await svc.eligibleReaders(WS, 'Knowledge/Foo.md')).roles).toEqual(['Admin']);
+    });
+
+    it('the deployment owner, absent from roles.yaml, reads where the Admin role reads and not where it is excluded', async () => {
+      await write(repo, 'access.md', '---\n---\nread:\n  - Engineer\n');
+      await write(repo, 'HR/access.md', '---\n---\nread:\n  - Engineer\n  - deny Admin\n');
+      await write(repo, 'Ops/access.md', '---\n---\nread:\n  - deny everyone\n  - Admin\n');
+      const svc = service();
+      for (const who of [ADMIN, OWNER]) {
+        expect(await svc.canRead(WS, who, 'Knowledge/Foo.md')).toBe(true);
+        expect(await svc.canRead(WS, who, 'HR/Salaries.md')).toBe(false);
+        expect(await svc.canRead(WS, who, 'Ops/Runbook.md')).toBe(true);
+      }
+      expect(await svc.canRead(WS, ENGINEER, 'Ops/Runbook.md')).toBe(false);
     });
 
     describe('a subfolder that excludes Admin', () => {
@@ -280,6 +300,7 @@ describe('Admin write floor at the repository root', () => {
           service(),
           { ...ws, getOrCreateForBranch: async () => ({ id: WS, kbDirName: KB }) } as unknown as WorkspaceService,
           { getUserById: async (id: string) => users[id as 'u-admin'] ?? null } as unknown as AuthService,
+          { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
           {
             getLock: async () => null,
             acquireLock: async () => ({ acquired: true, lock: {} }),

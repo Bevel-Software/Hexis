@@ -156,6 +156,7 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
         accessControl,
         workspaceService,
         { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
+        { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
         workflowService,
         { emit: vi.fn() } as unknown as WorkflowEventBus,
         usersDbDouble(),

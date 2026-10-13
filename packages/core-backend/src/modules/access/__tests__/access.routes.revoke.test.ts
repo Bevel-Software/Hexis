@@ -134,7 +134,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

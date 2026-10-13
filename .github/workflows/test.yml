@@ -98,14 +98,13 @@ jobs:
       # no-op rather than a build error.
       - run: pnpm ds:check
 
-  # ESLint over the files a pull request adds or changes. Not `pnpm lint`:
-  # the repository as a whole does not lint clean yet (errors in files no
-  # open change touches), so a repo-wide gate would fail every PR and say
-  # nothing about the one in front of it. Linting what the PR changed is the
-  # ratchet — no new lint errors land — the way `ds:check` ratchets the
-  # design system. Pull requests only: a push has no base to compare with.
-  lint-changed:
-    name: Lint (changed files)
+  # Lint ratchet. `eslint .` does not pass on the whole repo yet, so running
+  # it would fail every pull request and say nothing about the one at hand.
+  # This lints only the files the pull request touches and fails when any of
+  # them comes out with more ESLint problems than it had at the merge base; a
+  # new file must lint clean. See scripts/lint-ratchet.mjs. Pull requests only:
+  # a push has no base to compare against, and its pull request already ran.
+  lint:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -113,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          # The base branch's history, so the PR's own changes can be named.
+          # The merge base and the base branch's history, for the "before" counts.
           fetch-depth: 0
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
@@ -127,21 +126,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Added, copied, modified or renamed files only — a deleted file has
-      # nothing to lint. Files the config ignores are skipped, not warned on.
-      - name: ESLint the files this pull request changes
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          git diff --name-only -z --diff-filter=ACMR "origin/$BASE_REF...HEAD" -- \
-            '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' > "$RUNNER_TEMP/changed"
-          if [ ! -s "$RUNNER_TEMP/changed" ]; then
-            echo "No lintable files changed."
-            exit 0
-          fi
-          tr '\0' '\n' < "$RUNNER_TEMP/changed"
-          xargs -0 pnpm exec eslint --no-warn-ignored < "$RUNNER_TEMP/changed"
+      # The ratchet decides whether a pull request may merge, so its own tests
+      # run first: a broken ratchet must not pass everything.
+      - run: pnpm test:scripts
+
+      - run: pnpm lint:check --base "origin/${{ github.base_ref }}"
 
   # The local MCP server is the one thing in this repo that runs on OTHER
   # PEOPLE'S machines, at whatever Node they happen to have — so "it works on
