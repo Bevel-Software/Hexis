@@ -1579,6 +1579,16 @@ export class AccessControlService implements IAccessControl {
     return result;
   }
 
+  async groupsOfUser(workspaceId: string, userEmail: string): Promise<string[]> {
+    const model = await this.loadModel(workspaceId);
+    const email = canonicalEmail(userEmail);
+    const names: string[] = [];
+    for (const principal of model.roles.byCanonical.values()) {
+      if (principal.kind === 'group' && principal.emails.has(email)) names.push(principal.displayName);
+    }
+    return names;
+  }
+
   async canWriteBatch(
     workspaceId: string,
     userEmail: string,

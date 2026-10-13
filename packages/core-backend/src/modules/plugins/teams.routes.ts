@@ -37,6 +37,10 @@ import type { IPluginIndexService, PluginCatalogEntry } from './plugins.contract
  * what `read: everyone` (or a public plugin) reaches. Same slice, same
  * caller gate, asked of the resolver as `canReadAsEveryoneBatch`. The name
  * cannot collide with a group's: `everyone` is reserved by the grammar.
+ *
+ * The groups listed after it are every group for an admin, and only the
+ * caller's own groups for anyone else (`groupsOfUser`), so the lens never
+ * names a group the caller has no part in.
  */
 export interface TeamAccess {
   name: string;
@@ -110,10 +114,23 @@ export function createTeamsRoutes(
         };
       };
 
+      // Which groups to list. An admin manages every group, so sees them all.
+      // Anyone else sees only the groups they are in: a group's NAME is
+      // information too. A deployment that gives each client, author or
+      // customer a group of their own would otherwise show every member the
+      // whole roster, even though the slices of groups they are not in come
+      // back empty.
+      const [isAdmin, ownGroups] = await Promise.all([
+        accessControl.holdsAdminRootWrite(wsId, email),
+        accessControl.groupsOfUser(wsId, email),
+      ]);
+      const mine = new Set(ownGroups);
+      const listed = isAdmin ? groups : groups.filter((name) => mine.has(name));
+
       const teams: TeamAccess[] = [
         slice(EVERYONE_TEAM, await accessControl.canReadAsEveryoneBatch(wsId, probes)),
       ];
-      for (const name of groups) {
+      for (const name of listed) {
         const team = await accessControl.canReadAsGroupBatch(wsId, name, probes);
         if (team === null) continue; // gone between the two reads — nothing to say
         teams.push(slice(name, team));
