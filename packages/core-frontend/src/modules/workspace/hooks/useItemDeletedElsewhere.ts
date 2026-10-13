@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState } from 'react';
 import { useLatestRef } from '../../../shared/components';
-import { canonicalizeWorkspaceId, useEventBus } from '../../workflow/state/event-bus.context';
+import { canonicalizeWorkspaceId, useEventBus } from '../../workflow';
 import { readFile, WorkspaceApiError } from '../services/workspace.api';
 import { WorkspaceContext } from '../state/workspace.context';
 import type { DeletedBy } from '../components/DeletedFileNotice';
