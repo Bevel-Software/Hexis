@@ -2,13 +2,15 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '../../../shared/components';
 import { useAppRegistry } from '../../../core/registry';
-import { isViewOnlyFile, pickFileRenderer } from '../../workspace/components/renderers';
-import { CanDownloadContext } from '../../workspace/components/renderers/DownloadFileButton';
 import {
+  CanDownloadContext,
+  isViewOnlyFile,
+  kbFileUrl,
+  pickFileRenderer,
   RendererSurfaceContext,
+  RendererWorkspaceContext,
   type RendererSurface,
-} from '../../workspace/components/renderers/rendererSurface';
-import { RendererWorkspaceContext } from '../../workspace/components/renderers/rendererWorkspace';
+} from '../../workspace';
 import {
   cancelEmbed,
   embedRawUrl,
@@ -30,7 +32,6 @@ import {
   renewEmbedToken,
   withEmbedToken,
 } from '../embed-config';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
 const HEARTBEAT_MS = 30_000;
