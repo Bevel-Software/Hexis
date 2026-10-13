@@ -653,6 +653,25 @@ describe('buildSandboxedHtml', () => {
     expect(bridge.posted).toHaveLength(1);
   });
 
+  it('judges the slope on the exact height: a 99vh page moves less than the viewport and is posted, so it converges instead of staying clipped', () => {
+    // 99vh plus 16 of margins at a 240 viewport: 253.6, reported as 254.
+    // Sized to it, the viewport is 254 and the page 267.46 — a move of
+    // 13.86 against the viewport's 14. Rounded up it would read as 14, be
+    // held, and leave the last 14px of the page clipped for good.
+    const page = { childBottoms: [0], scrollHeight: 240, flowEnd: 253.6, viewport: 240 };
+    const bridge = runHeightBridge(page);
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 254 }]);
+    page.viewport = 254;
+    page.flowEnd = 267.46;
+    bridge.resize();
+    expect(bridge.posted[1]).toEqual({ type: 'bevel.height', height: 268 });
+    // Whereas a move of exactly the viewport's change — 100vh — is held.
+    page.viewport = 268;
+    page.flowEnd = 281.46;
+    bridge.resize();
+    expect(bridge.posted).toHaveLength(2);
+  });
+
   it("puts back a body's own inline height exactly, priority included", () => {
     const bridge = runHeightBridge({
       childBottoms: [300],

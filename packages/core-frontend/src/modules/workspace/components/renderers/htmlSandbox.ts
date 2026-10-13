@@ -492,18 +492,26 @@ const HEIGHT_BRIDGE = `
     return bottom + (window.pageYOffset || 0);
   }
   var measuredHeight = -1;
+  var measuredExact = -1;
   var measuredViewport = -1;
   function report() {
-    var height = Math.ceil(measure());
+    var exact = measure();
+    var height = Math.ceil(exact);
     var viewport = window.innerHeight || 0;
     if (!isFinite(height) || height < 0) return;
     var dv = viewport - measuredViewport;
-    var dh = height - measuredHeight;
+    // The slope is read off the exact measurement: rounded up, a page at
+    // 99vh moves by the viewport's whole change once that change is small,
+    // and would be held with the last of its height clipped. A hair's
+    // breadth of tolerance only, for the sub-pixel error of a layout — a
+    // page at 100vh moves by exactly the viewport's change and must be held.
+    var dh = exact - measuredExact;
     var changed = height !== measuredHeight;
     // Moved with the viewport, at least as far and the same way: sized to
     // the frame, not to its content.
-    var withViewport = measuredHeight >= 0 && dv !== 0 && (dh > 0) === (dv > 0) && Math.abs(dh) >= Math.abs(dv) - 1;
+    var withViewport = measuredHeight >= 0 && dv !== 0 && (dh > 0) === (dv > 0) && Math.abs(dh) >= Math.abs(dv) - 0.05;
     measuredHeight = height;
+    measuredExact = exact;
     measuredViewport = viewport;
     if (!changed || withViewport || height === last) return;
     last = height;

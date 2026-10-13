@@ -205,13 +205,23 @@ test.describe('an HTML page in a frame whose host grows with the content', () =>
   // units measures anew on every round trip: at 100vh it is the viewport
   // and 16 more (the body's margins), and without a guard the next report
   // would be 16 taller, and the next, without end; at 200vh it is twice the
-  // viewport and 16, and the frame would double each time; at 50vh it is
-  // half and 16, which settles on its own — and must still be allowed to.
-  for (const units of ['100vh', '200vh', '50vh'] as const) {
-    test(`a page in viewport units settles: a ${units} child with the body's margins stops growing the frame`, async ({ page }) => {
-      const host = await load(page, `<div style="height:${units};background:#eee">sized to the viewport</div>`);
+  // viewport and 16, and the frame would double each time. Those two are
+  // held after the first report. A page that moves LESS than the viewport
+  // settles on its own and must be allowed to: 50vh and 90vh start from a
+  // tall frame, so each report really resizes the viewport, and come down
+  // report by report to the height they ask for — the floor, here.
+  for (const [units, start, reportsExpected] of [
+    ['100vh', undefined, (n: number) => n <= 2],
+    ['200vh', undefined, (n: number) => n <= 2],
+    ['50vh', 900, (n: number) => n > 1 && n <= 8],
+    ['90vh', 900, (n: number) => n > 1 && n <= 40],
+  ] as const) {
+    test(`a page in viewport units settles: a ${units} child with the body's margins (${start ? `from a ${start}px frame` : 'from the floor'})`, async ({ page }) => {
+      const host = await load(page, `<div style="height:${units};background:#eee">sized to the viewport</div>`, {
+        frameHeight: start,
+      });
       const reports = await host.settled();
-      expect(reports.length).toBeLessThanOrEqual(units === '50vh' ? 6 : 2);
+      expect(reportsExpected(reports.length)).toBe(true);
       const final = reports[reports.length - 1]!;
       expect(await host.frameHeight()).toBe(Math.max(final, FLOOR));
       // Still nothing new a second later: the frame has settled for good.

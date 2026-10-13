@@ -22,11 +22,13 @@ export function HtmlRenderer({
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   /**
    * The page's height as the frame reported it, with the document it was
-   * reported for; read only where the host grows with the page. A rebuilt
-   * document (a save, a reload, a shorter page) starts from the frame's own
-   * height again, so the previous page's height is never applied to it.
+   * reported for — its text AND its generation, since Refresh remounts the
+   * same text as a new frame; read only where the host grows with the page.
+   * A rebuilt document (a save, a reload, a shorter page) starts from the
+   * frame's own height again, so the previous page's height is never
+   * applied to it.
    */
-  const [reported, setReported] = useState<{ doc: string; height: number } | null>(null);
+  const [reported, setReported] = useState<{ doc: string; generation: number; height: number } | null>(null);
   const [value, setValue] = useState(content);
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
@@ -125,12 +127,13 @@ export function HtmlRenderer({
       const msg = event.data as { type?: unknown; height?: unknown } | null;
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.height') return;
       if (typeof msg.height !== 'number' || !Number.isFinite(msg.height) || msg.height < 0) return;
-      setReported({ doc: bundledSrcdoc!, height: Math.ceil(msg.height) });
+      setReported({ doc: bundledSrcdoc!, generation: reloadKey, height: Math.ceil(msg.height) });
     }
     window.addEventListener('message', onHeightMessage);
     return () => window.removeEventListener('message', onHeightMessage);
-  }, [sizesToContent, bundledSrcdoc]);
-  const contentHeight = reported !== null && reported.doc === bundledSrcdoc ? reported.height : null;
+  }, [sizesToContent, bundledSrcdoc, reloadKey]);
+  const contentHeight =
+    reported !== null && reported.doc === bundledSrcdoc && reported.generation === reloadKey ? reported.height : null;
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;

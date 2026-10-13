@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { HtmlRenderer } from '../HtmlRenderer';
 import { RendererSurfaceContext, type RendererSurface } from '../rendererSurface';
@@ -92,6 +92,24 @@ describe('HtmlRenderer on a surface', () => {
     });
     frameSays(short, { type: 'bevel.height', height: 120 });
     await waitFor(() => expect(short.style.height).toBe('120px'));
+  });
+
+  it('starts a refreshed page from the frame\'s own height too, though its text is the same', async () => {
+    const { container } = mount(surface({ sizesToContent: true }));
+    const first = await frameOf(container);
+    frameSays(first, { type: 'bevel.height', height: 900 });
+    await waitFor(() => expect(first.style.height).toBe('900px'));
+
+    // Refresh remounts the same document as a new frame: no height until
+    // that frame has reported its own.
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+    const refreshed = await waitFor(() => {
+      const el = container.querySelector('iframe')!;
+      if (el === first || el.style.height !== '') throw new Error('still the old frame, or its height');
+      return el;
+    });
+    frameSays(refreshed, { type: 'bevel.height', height: 120 });
+    await waitFor(() => expect(refreshed.style.height).toBe('120px'));
   });
 
   it('keeps filling its pane, and ignores the reported height, where the host gives it one', async () => {
