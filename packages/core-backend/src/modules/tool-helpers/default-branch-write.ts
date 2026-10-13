@@ -30,9 +30,13 @@ export interface DefaultBranchWriteDeps {
  * per call.
  *
  * Fails closed: a read-only credential gets `false` for every path without
- * the access layer being asked; a check that throws or cannot resolve the
- * ref (null), or a path the answer leaves out, is `false`. Read the result
- * with `=== true`.
+ * the access layer being asked; a check that throws, or a path the answer
+ * leaves out, is `false`. Read the result with `=== true`. The one answer
+ * that is not closed is the gate's own: `null` — no rules at `HEAD` yet, a
+ * knowledge base being set up — is where the direct write is allowed
+ * (bootstrap, `assertCanWriteAtRef`), so every path is `true` there; a
+ * `false` would send the agent to a change request the gate does not ask
+ * for.
  *
  * Per caller and never cached here: a verdict belongs to one caller's answer,
  * not to anything shared across users.
@@ -48,7 +52,8 @@ export async function defaultBranchWriteVerdicts(
     const answer = await deps.accessControl.canWriteBatchAtRef(deps.defaultWorkspaceId(), 'HEAD', ctx.user.email, [
       ...new Set(paths),
     ]);
-    if (!answer) return verdicts;
+    // Bootstrap: no rules at HEAD, and the gate lets the write through.
+    if (!answer) return new Map(paths.map((p) => [p, true]));
     for (const p of paths) verdicts.set(p, answer.get(p) === true);
   } catch {
     // A verdict that cannot be computed is `false`: the agent then proposes

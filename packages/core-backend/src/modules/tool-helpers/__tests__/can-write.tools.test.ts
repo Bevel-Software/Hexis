@@ -504,13 +504,13 @@ describe('defaultBranchWriteVerdicts fails closed', () => {
     expect([...verdicts]).toEqual([['a.md', false], ['b.md', false]]);
   });
 
-  it('a ref that cannot be resolved (no commit, no roles.yaml at it) is false for every path', async () => {
+  it('no rules at HEAD yet (null) is the gate\'s bootstrap: true for every path, as the direct write is allowed', async () => {
     const verdicts = await defaultBranchWriteVerdicts(
       { accessControl: { canWriteBatchAtRef: async () => null }, defaultWorkspaceId: () => 'ws' },
       ctx,
       ['a.md', 'b.md'],
     );
-    expect([...verdicts]).toEqual([['a.md', false], ['b.md', false]]);
+    expect([...verdicts]).toEqual([['a.md', true], ['b.md', true]]);
   });
 
   it('a path the answer leaves out is false', async () => {
