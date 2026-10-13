@@ -175,6 +175,32 @@ test.describe('an HTML page in a frame whose host grows with the content', () =>
     expect(await overflow(host)).toBe(0);
   });
 
+  test('measuring leaves the page as written: no child is added, the author\'s :last-child still names theirs, and the body\'s inline style is untouched', async ({ page }) => {
+    const host = await load(
+      page,
+      '<style>p { height: 100px; margin: 0 } body > p:last-child { margin-bottom: 50px }</style>' +
+        '<p id="a">a</p><p id="b">b</p>',
+      { frameHeight: 900 },
+    );
+    const reports = await host.settled();
+    const height = reports[reports.length - 1]!;
+    const seen = await host.frame().evaluate(() => ({
+      lastChild: document.querySelector('body > p:last-child')?.id ?? null,
+      bodyStyle: document.body.getAttribute('style'),
+      elements: document.body.children.length,
+    }));
+    // The last child is still the author's second paragraph, so its rule
+    // applies — and the report includes the 50px it adds, which collapses
+    // through the body and so lies past the body's own box: 8 of body
+    // margin, two paragraphs of 100, then the 50.
+    expect(seen.lastChild).toBe('b');
+    expect(seen.bodyStyle).toBeNull();
+    // The runtime's script, the style, the two paragraphs: nothing else.
+    expect(seen.elements).toBe(4);
+    expect(height).toBe(258);
+    expect(await overflow(host)).toBe(0);
+  });
+
   test('a page sized to its viewport settles at its content instead of chasing the frame', async ({ page }) => {
     const host = await load(
       page,

@@ -425,21 +425,24 @@ describe('buildSandboxedHtml', () => {
   });
 
   /**
-   * The height bridge, run against a stand-in document: the body's element
-   * children at the bottom edges given, the body's bottom spacing, a viewport
-   * (`scrollHeight`) the content must never be read from, and the frame's
-   * own `ResizeObserver`.
+   * The height bridge, run against a stand-in document: a root whose box
+   * ends at `flowEnd` while its height and the body's are left to the
+   * content, and at `viewportBottom` while a height of its own holds on
+   * either (the page's `height: 100%`); the body's element children at the
+   * bottom edges given; a viewport (`scrollHeight`) the content must never
+   * be read from; and the frame's own `ResizeObserver`. Both inline styles
+   * record every declaration set and removed, so a test can see the
+   * measurement force `height: auto` and put the page's own back.
    */
   function runHeightBridge(opts: {
     childBottoms: number[];
     scrollHeight: number;
-    bodyRectBottom?: number;
-    /** The lowest edge of the body's contents as one range — text included; absent, no range can be made. */
-    contentsBottom?: number;
-    /** Where the flow ends — the top of the marker the runtime appends after the content. Default 0. */
+    /** Where the root's box ends with the heights left to the content. Default 0. */
     flowEnd?: number;
-    /** False: a document that cannot make the marker (no `createElement`). */
-    canMark?: boolean;
+    /** Where it ends while a height of its own holds; absent, neither has one. */
+    viewportBottom?: number;
+    /** The page's own inline height on the body, if any. */
+    ownHeight?: { value: string; priority: string };
   }) {
     // No lib sources: a vm script cannot parse an `export`. The bridges are
     // appended after the lib either way.
@@ -449,17 +452,42 @@ describe('buildSandboxedHtml', () => {
     let observed: (() => void) | null = null;
     const observedTargets: string[] = [];
     const children = opts.childBottoms.map((bottom) => ({ getBoundingClientRect: () => ({ bottom }) }));
-    const documentElement = { scrollHeight: opts.scrollHeight, tagName: 'HTML' };
-    const appended: unknown[] = [];
+    const styleLog: string[] = [];
+    function inlineStyle(tag: string, own?: { value: string; priority: string }) {
+      const inline = new Map<string, { value: string; priority: string }>();
+      if (own) inline.set('height', own);
+      const style = {
+        getPropertyValue: (name: string) => inline.get(name)?.value ?? '',
+        getPropertyPriority: (name: string) => inline.get(name)?.priority ?? '',
+        setProperty: (name: string, value: string, priority = '') => {
+          inline.set(name, { value, priority });
+          styleLog.push(`${tag} set ${name}: ${value}${priority ? ' !' + priority : ''}`);
+        },
+        removeProperty: (name: string) => {
+          inline.delete(name);
+          styleLog.push(`${tag} remove ${name}`);
+        },
+      };
+      return { inline, style };
+    }
+    const rootStyle = inlineStyle('html');
+    const bodyStyle = inlineStyle('body', opts.ownHeight);
+    const forced = () =>
+      rootStyle.inline.get('height')?.value === 'auto' && bodyStyle.inline.get('height')?.value === 'auto';
+    const documentElement = {
+      scrollHeight: opts.scrollHeight,
+      tagName: 'HTML',
+      style: rootStyle.style,
+      getBoundingClientRect: () => ({
+        bottom: opts.viewportBottom !== undefined && !forced() ? opts.viewportBottom : (opts.flowEnd ?? 0),
+      }),
+    };
     const body = {
       tagName: 'BODY',
       children,
-      getBoundingClientRect: () => ({ bottom: opts.bodyRectBottom ?? 0 }),
-      appendChild: (el: unknown) => {
-        appended.push(el);
-      },
+      style: bodyStyle.style,
+      getBoundingClientRect: () => ({ bottom: 0 }),
     };
-    const contents = opts.contentsBottom;
     const ctx: Record<string, unknown> = {
       document: {
         documentElement,
@@ -467,28 +495,8 @@ describe('buildSandboxedHtml', () => {
         addEventListener: () => undefined,
         getElementById: () => null,
         getElementsByName: () => [],
-        // The marker the runtime appends to read where the flow ends.
-        ...(opts.canMark === false
-          ? {}
-          : {
-              createElement: () => ({
-                style: {},
-                parentNode: body,
-                setAttribute: () => undefined,
-                getBoundingClientRect: () => ({ top: opts.flowEnd ?? 0 }),
-              }),
-            }),
-        ...(contents === undefined
-          ? {}
-          : {
-              createRange: () => ({
-                selectNodeContents: () => undefined,
-                getBoundingClientRect: () => ({ bottom: contents, height: contents }),
-              }),
-            }),
       },
       window: { pageYOffset: 0 },
-      getComputedStyle: () => ({ paddingBottom: '0px', marginBottom: '8px' }),
       parent: { postMessage: (msg: unknown) => posted.push(msg) },
       ResizeObserver: class {
         constructor(cb: () => void) {
@@ -501,32 +509,43 @@ describe('buildSandboxedHtml', () => {
     };
     vm.createContext(ctx);
     vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
-    return { posted, observedTargets, children, documentElement, appended, resize: () => observed!() };
+    return {
+      posted,
+      observedTargets,
+      children,
+      documentElement,
+      inline: { html: rootStyle.inline, body: bodyStyle.inline },
+      styleLog,
+      resize: () => observed!(),
+    };
   }
 
   it('injects the height bridge: the page posts bevel.height at load and on every change, once per value', () => {
-    const bridge = runHeightBridge({ childBottoms: [300, 412], scrollHeight: 420 });
-    // At load: the content's height — its lowest edge plus the body's bottom
-    // spacing — once.
+    const bridge = runHeightBridge({ childBottoms: [300, 412], scrollHeight: 420, flowEnd: 420 });
+    // At load: the content's height — where the root's box ends with the
+    // heights left to the content — once.
     expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 420 }]);
     expect(bridge.observedTargets).toEqual(['HTML', 'BODY']);
-    // A resize that changed nothing says nothing; one that did is posted.
+    // A resize that changed nothing says nothing; one that did is posted:
+    // a child grown past the root's box (out of the flow) still counts.
     bridge.resize();
     expect(bridge.posted).toHaveLength(1);
     bridge.children[1] = { getBoundingClientRect: () => ({ bottom: 972.4 }) };
     bridge.resize();
     expect(bridge.posted).toEqual([
       { type: 'bevel.height', height: 420 },
-      { type: 'bevel.height', height: 981 },
+      { type: 'bevel.height', height: 973 },
     ]);
   });
 
   it('reports the content, not the viewport: a page shorter than its frame says its own height, and a page that got shorter says less', () => {
     // The frame's viewport (`scrollHeight`, never below it) is 900; the
-    // content ends at 400 + 8 of body margin. Reading the viewport would hold
-    // the frame at 900 for good, and a border's worth less on every report.
-    const bridge = runHeightBridge({ childBottoms: [400], scrollHeight: 900 });
+    // content ends at 408. Reading the viewport would hold the frame at 900
+    // for good, and a border's worth less on every report.
+    const page = { childBottoms: [400], scrollHeight: 900, flowEnd: 408 };
+    const bridge = runHeightBridge(page);
     expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 408 }]);
+    page.flowEnd = 158;
     bridge.children[0] = { getBoundingClientRect: () => ({ bottom: 150 }) };
     bridge.resize();
     expect(bridge.posted).toEqual([
@@ -535,37 +554,52 @@ describe('buildSandboxedHtml', () => {
     ]);
   });
 
-  it('measures a body with nothing measurable — no marker, no range, no children — by its own box', () => {
-    const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36, canMark: false });
-    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 44 }]);
-  });
-
-  it('an empty body with a marker is as tall as its spacing: the flow ends where it starts', () => {
-    const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36 });
-    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 8 }]);
-  });
-
   it('measures text written straight into the body: the body always has an element child, this script, with no box of its own', () => {
-    // The only element child is the runtime's own script (edge 0); the text
-    // reaches 700 as the contents' range says. Elements alone would report
-    // the body's spacing and leave the frame at its floor.
-    const bridge = runHeightBridge({ childBottoms: [0], scrollHeight: 150, contentsBottom: 700 });
-    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 708 }]);
-    // An element below the range's rectangle still counts.
-    bridge.children.push({ getBoundingClientRect: () => ({ bottom: 950 }) });
-    bridge.resize();
-    expect(bridge.posted[1]).toEqual({ type: 'bevel.height', height: 958 });
+    // The only element child is the runtime's own script (edge 0); the root's
+    // box, with the heights left to the content, ends after the text's last
+    // line box. Counting elements alone would report nothing and leave the
+    // frame at its floor; a range over the text would stop at the inline
+    // boxes, above the line box.
+    const bridge = runHeightBridge({ childBottoms: [0], scrollHeight: 150, flowEnd: 728 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 728 }]);
   });
 
-  it('reads where the flow ends off one marker appended after the content: the last line box, past the inline boxes a range gives', () => {
-    // A range over text ends at the inline boxes (712); the line box runs to
-    // 720, which is where the marker lands. The frame sized to the range
-    // would clip the page by the difference.
-    const bridge = runHeightBridge({ childBottoms: [0], scrollHeight: 150, contentsBottom: 712, flowEnd: 720 });
-    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 728 }]);
-    // One marker, kept across reports.
-    bridge.resize();
-    expect(bridge.appended).toHaveLength(1);
+  it('a page sized to the viewport is measured with the heights left to the content, and its own inline styles put back', () => {
+    // `html, body { height: 100% }` from a stylesheet: the root's box ends at
+    // the viewport (900) unless the measurement forces both heights to auto,
+    // in which case it ends at the content (308). Reading the box as styled
+    // would hand the frame's height back as the page's.
+    const bridge = runHeightBridge({ childBottoms: [300], scrollHeight: 900, flowEnd: 308, viewportBottom: 900 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 308 }]);
+    // Forced for the measurement, important so the stylesheet cannot win,
+    // and removed again, the body first: the page's inline styles are as
+    // they were — empty.
+    expect(bridge.styleLog).toEqual([
+      'html set height: auto !important',
+      'html set min-height: 0 !important',
+      'body set height: auto !important',
+      'body set min-height: 0 !important',
+      'body remove height',
+      'body remove min-height',
+      'html remove height',
+      'html remove min-height',
+    ]);
+    expect(bridge.inline.html.size).toBe(0);
+    expect(bridge.inline.body.size).toBe(0);
+  });
+
+  it("puts back a body's own inline height exactly, priority included", () => {
+    const bridge = runHeightBridge({
+      childBottoms: [300],
+      scrollHeight: 900,
+      flowEnd: 308,
+      viewportBottom: 900,
+      ownHeight: { value: '100vh', priority: 'important' },
+    });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 308 }]);
+    expect(bridge.inline.body.get('height')).toEqual({ value: '100vh', priority: 'important' });
+    expect(bridge.inline.body.has('min-height')).toBe(false);
+    expect(bridge.inline.html.size).toBe(0);
   });
 
   it('says nothing about height where there is no document to measure', () => {

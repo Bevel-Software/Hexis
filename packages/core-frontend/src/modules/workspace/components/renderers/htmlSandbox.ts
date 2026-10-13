@@ -412,56 +412,72 @@ const NAV_BRIDGE = `
  * frame's height back as the page's: a page that got shorter could never
  * report less, and a frame whose viewport runs a border short of its height
  * would shrink by that border on every report until the page collapsed.
- * The contents are measured three ways and the lowest edge wins: where the
- * flow ends, read off a zero-height marker the runtime appends after the
- * content (the end of the last LINE box, which text written straight into
- * the body reaches — the body always has an element child, this very
- * script, so counting elements alone would measure such a page as empty,
- * and a range over the text gives the inline boxes, which end above the
- * line box when the line is taller than the type); the contents as one
- * range, for text and elements alike; and the children's own edges, for a
- * box neither reaches. A body with nothing measurable answers with its own
- * box.
+ * The content's extent is the root element's box with its height, and the
+ * body's, left to the content: the body's margin box, which ends after
+ * the last LINE box (text written straight into the body reaches it — the
+ * body always has an element child, this very script, so counting
+ * elements alone would measure such a page as empty, and a range over
+ * text gives the inline boxes, which end above the line box when the line
+ * is taller than the type) and after whatever bottom margin the last
+ * child collapsed through the body. A page that sizes its root or body to
+ * the viewport (\`height: 100%\`) would hand the frame's height back, so
+ * the measurement forces both heights to auto for its own duration — an
+ * inline declaration set and removed within one task, which no frame is
+ * painted between and no observer sees, with the page's own inline
+ * heights put back exactly. Nothing is added to the page: a marker element
+ * would change what \`:last-child\` names and give a flex or grid body one
+ * more item. The children's own edges union in besides, for a box out of
+ * the flow.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
   if (typeof document === 'undefined' || !document.documentElement) return;
   var last = -1;
-  var mark = null;
-  function bottomSpacing(body) {
-    if (typeof getComputedStyle !== 'function') return 0;
-    var style = getComputedStyle(body);
-    return (parseFloat(style.paddingBottom) || 0) + (parseFloat(style.marginBottom) || 0);
+  /** Leave an element's height to its content for a measurement; returns what puts the page's own back. */
+  function unsize(el) {
+    var style = el.style;
+    if (!style || typeof style.setProperty !== 'function') return function () {};
+    var hadAttribute = typeof el.hasAttribute === 'function' ? el.hasAttribute('style') : true;
+    var own = { height: style.getPropertyValue('height'), heightPriority: style.getPropertyPriority('height'),
+                min: style.getPropertyValue('min-height'), minPriority: style.getPropertyPriority('min-height') };
+    style.setProperty('height', 'auto', 'important');
+    style.setProperty('min-height', '0', 'important');
+    return function restore() {
+      if (own.height) style.setProperty('height', own.height, own.heightPriority); else style.removeProperty('height');
+      if (own.min) style.setProperty('min-height', own.min, own.minPriority); else style.removeProperty('min-height');
+      // A page that wrote no style attribute gets none: removing the last
+      // declaration leaves an empty attribute behind, which is not as
+      // written. The attribute is written from the declarations lazily, on
+      // the next read of it, so it is read once first — removed before
+      // that, it would come back empty the moment anything looked.
+      if (!hadAttribute && typeof el.removeAttribute === 'function') {
+        el.getAttribute('style');
+        el.removeAttribute('style');
+      }
+    };
   }
-  function flowEnd(body) {
-    if (typeof document.createElement !== 'function' || typeof body.appendChild !== 'function') return -Infinity;
-    if (!mark || mark.parentNode !== body) {
-      mark = document.createElement('div');
-      mark.setAttribute('aria-hidden', 'true');
-      mark.style.cssText = 'display:block;height:0;margin:0;padding:0;border:0;clear:both';
-      body.appendChild(mark);
-    }
-    return mark.getBoundingClientRect().top;
+  /** The root's box with its height, and the body's, left to the content — the body's margin box. */
+  function contentEnd(root, body) {
+    var restoreRoot = unsize(root);
+    var restoreBody = unsize(body);
+    var bottom = root.getBoundingClientRect().bottom;
+    restoreBody();
+    restoreRoot();
+    return bottom;
   }
   function measure() {
+    var root = document.documentElement;
     var body = document.body;
-    if (!body || typeof body.getBoundingClientRect !== 'function') {
-      return document.documentElement.scrollHeight || 0;
+    if (!body || typeof root.getBoundingClientRect !== 'function') {
+      return root.scrollHeight || 0;
     }
-    var bottom = flowEnd(body);
-    if (typeof document.createRange === 'function') {
-      var range = document.createRange();
-      range.selectNodeContents(body);
-      var rect = range.getBoundingClientRect();
-      if (rect && (rect.height > 0 || rect.bottom > 0) && rect.bottom > bottom) bottom = rect.bottom;
-    }
+    var bottom = contentEnd(root, body);
     var kids = body.children || [];
     for (var i = 0; i < kids.length; i++) {
       var edge = kids[i].getBoundingClientRect().bottom;
       if (edge > bottom) bottom = edge;
     }
-    if (!isFinite(bottom)) bottom = body.getBoundingClientRect().bottom;
-    return bottom + (window.pageYOffset || 0) + bottomSpacing(body);
+    return bottom + (window.pageYOffset || 0);
   }
   function report() {
     var height = Math.ceil(measure());
