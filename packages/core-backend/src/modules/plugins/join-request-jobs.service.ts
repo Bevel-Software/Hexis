@@ -683,10 +683,12 @@ function loggable(reason: string): string {
  * error whose message is the SQL and whose `cause` is the database's reason;
  * the sanitizer caps a message at a couple of hundred characters, so logging
  * the wrapper showed a cut-off column list and never the reason. The reason
- * is what every line this service reports needs — "the pool has been
+ * is what every LOG line this service writes needs — "the pool has been
  * ended", "relation does not exist" — the sweep's warning, the claim and
- * heartbeat warnings, and the failure a requester reads on their card. An
- * error with no cause (git's, the claim's own) is reported as it is.
+ * heartbeat warnings, the failure line. The requester's card is the one
+ * place it does not go: a wrapped failure is recorded there as
+ * `DATABASE_FAILURE_REASON`, since a table name is the operator's to read.
+ * An error with no cause (git's, the claim's own) is reported as it is.
  */
 function underlying(err: unknown): unknown {
   const cause = typeof err === 'object' && err !== null ? (err as { cause?: unknown }).cause : undefined;
