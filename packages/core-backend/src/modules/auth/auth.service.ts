@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -21,6 +21,9 @@ import {
 } from './password-hash.js';
 import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
+import { takeAccountSwitchLock } from './account-switch-lock.js';
+import type { IAccountSwitchGuard } from './account-switch-guard.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -36,6 +39,22 @@ const ACTIVE_CACHE_MS = 30_000;
 const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL];
 
 /**
+ * Whether an upsert's returned row was INSERTED rather than updated, from the
+ * one statement that did it: Postgres leaves `xmax` at zero on a row the
+ * statement inserted and sets it on one its `ON CONFLICT DO UPDATE` touched.
+ * So "is this account new" is answered by the write itself, never by a read
+ * before it that a concurrent create could make a lie of.
+ */
+const CREATED = sql<boolean>`(xmax = 0)`;
+
+/**
+ * What every password write refuses for the accounts the platform runs its own
+ * work as: a stored hash would make them able to sign in. One guard,
+ * {@link AuthService.assertNotSystemAccount}, on every path that writes one.
+ */
+const SYSTEM_ACCOUNT_PASSWORD_REFUSAL = 'System accounts cannot be given a password';
+
+/**
  * What every caller is told when it tries to give the deployment admin a
  * stored password — the Account page's own change and an admin's "Set
  * password" on the User Accounts page alike. One sentence in one place, so the
@@ -43,6 +62,12 @@ const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_
  */
 const ENV_ADMIN_PASSWORD_REFUSAL =
   "This account's password is set in the deployment environment and cannot be changed here";
+
+/** What an admin is told when they try to switch an owner off. */
+export const OWNER_SWITCH_OFF_REFUSAL = "The owner can't be switched off.";
+
+/** What an admin is told when deleting an owner's account would leave them no way to sign in. */
+export const OWNER_DELETE_REFUSAL = "The owner's account can't be deleted: they would have no way to sign in.";
 
 /**
  * Decoy hash verified when the email is unknown or has no password set, so
@@ -119,7 +144,7 @@ export interface SsoLoginOptions {
   admittedByProvider?: boolean;
 }
 
-export class AuthService {
+export class AuthService implements IAccountSwitchGuard {
   constructor(
     private readonly db: Database,
     private readonly config: AuthConfig,
@@ -150,16 +175,20 @@ export class AuthService {
     // is put on file, switched off, for an admin to switch on — and is still
     // refused now, with the port's words. Only for single sign-on, the one
     // provisioning nobody asked for (see `AccountAdmissionVerdict`).
+    // Created switched off, so under the switch lock (see account-switch-lock).
     if (verdict.waitForAdmin && reason === 'sso') {
-      await this.db
-        .insert(users)
-        .values({
-          email: normalizedEmail,
-          emailBidx: normalizedEmail,
-          name: normalizedEmail.split('@')[0] || normalizedEmail,
-          deactivatedAt: new Date(),
-        })
-        .onConflictDoNothing({ target: users.emailBidx });
+      await this.db.transaction(async (tx) => {
+        await takeAccountSwitchLock(tx, normalizedEmail);
+        await tx
+          .insert(users)
+          .values({
+            email: normalizedEmail,
+            emailBidx: normalizedEmail,
+            name: normalizedEmail.split('@')[0] || normalizedEmail,
+            deactivatedAt: new Date(),
+          })
+          .onConflictDoNothing({ target: users.emailBidx });
+      });
       throw new AccountAdmissionRefusedError(verdict.message, { waitingForAdmin: true });
     }
     throw new AccountAdmissionRefusedError(verdict.message);
@@ -236,10 +265,12 @@ export class AuthService {
       }
       // Never refused for being switched off: the environment password is
       // the deployment's way back in, and {@link deactivate} refuses this
-      // account for that reason.
+      // account for that reason. A switch-off left on the row by an earlier
+      // version is cleared here too, so the credentials that read the column
+      // directly come back with this sign-in ({@link clearOwnerSwitchOff}).
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       await this.assertAdmitted(normalizedEmail, 'bootstrap');
-      const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
+      const admin = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, defaultName));
       return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
     }
 
@@ -254,8 +285,9 @@ export class AuthService {
     }
     // Only now, with the password proven: telling a stranger that an address
     // is switched off would tell them it has an account.
-    if (user.deactivatedAt) throw new AccountDeactivatedError();
-    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
+    const signedIn = await this.clearOwnerSwitchOff(user);
+    if (signedIn.deactivatedAt) throw new AccountDeactivatedError();
+    return { token: this.signToken(signedIn.id, signedIn.email), user: this.toClientUser(signedIn) };
   }
 
   /**
@@ -285,7 +317,7 @@ export class AuthService {
     if (!opts.admittedByProvider) this.assertAllowedDomain(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
@@ -302,7 +334,10 @@ export class AuthService {
    * Password sign-in refuses it until a password is set. For an address that
    * already has an account it changes nothing but an explicitly given name.
    *
-   * WITH a password, the deployment admin is the one target this refuses, for the reason
+   * WITH a password, this refuses two kinds of target. The accounts the
+   * platform runs its own work as are refused first
+   * ({@link assertNotSystemAccount}): a password would make them able to sign
+   * in. The deployment admin is refused for the reason
    * {@link changePassword} refuses it: that account's password is the
    * environment's, so a stored hash would not replace it but ADD a second
    * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
@@ -321,20 +356,10 @@ export class AuthService {
     }
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
-    if (!password) {
-      await this.assertAdmitted(normalizedEmail, 'admin-create');
-      const [created] = await this.db
-        .insert(users)
-        .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
-        .onConflictDoUpdate({
-          target: users.emailBidx,
-          set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
-        })
-        .returning();
-      return this.toClientUser(created);
-    }
+    if (!password) return (await this.createAccountWithoutPassword(email, name)).user;
     // Before the policy check, so the refusal names the real reason rather
     // than sending the admin off to pick a longer password first.
+    this.assertNotSystemAccount(normalizedEmail);
     if (this.isEnvAdminEmail(normalizedEmail)) {
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -359,6 +384,88 @@ export class AuthService {
   }
 
   /**
+   * An account for single sign-on, or for a password somebody sets later:
+   * created without one, and for an address that already has an account,
+   * nothing changes but an explicitly given name. `created` says which
+   * happened, from the one statement that did it (see {@link CREATED}): an
+   * invite is only an invite when the account is new.
+   */
+  async createAccountWithoutPassword(
+    email: string,
+    name: string | undefined,
+  ): Promise<{ user: AuthUser; created: boolean }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    const suppliedName = (name ?? '').trim();
+    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
+      .onConflictDoUpdate({
+        target: users.emailBidx,
+        set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
+      })
+      .returning({ ...getTableColumns(users), created: CREATED });
+    return { user: this.toClientUser(row), created: row.created === true };
+  }
+
+  /**
+   * An invite's starting password: create the account with it, or give it to
+   * an existing account that is switched on and has no password yet — never
+   * to one that has a password of its own or is switched off. The test and
+   * the write are ONE statement (the upsert's `setWhere`), so a password the
+   * person sets between the admin reading the account list and sending the
+   * invite is never overwritten; `passwordSet` says which happened, and
+   * `created` whether the account is new (see {@link CREATED}).
+   *
+   * The deployment admin has its own password (the environment's): it is
+   * left as it is, as {@link createAccount} would refuse to store one. The
+   * accounts the platform runs its own work as are refused outright: a
+   * password would make them able to sign in.
+   *
+   * When nothing was written, `deactivated` tells a switched-off account
+   * apart from one that has a password of its own.
+   */
+  async createAccountWithStartingPassword(
+    email: string,
+    password: string,
+  ): Promise<{ user: AuthUser; created: boolean; passwordSet: boolean; deactivated: boolean }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    this.assertNotSystemAccount(normalizedEmail);
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
+      if (existing) {
+        return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
+      }
+      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+    }
+    this.assertPasswordPolicy(password);
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
+    const passwordHash = await hashPassword(password);
+    const displayName = normalizedEmail.split('@')[0] || normalizedEmail;
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
+      .onConflictDoUpdate({
+        target: users.emailBidx,
+        set: { passwordHash, updatedAt: new Date() },
+        setWhere: and(isNull(users.passwordHash), isNull(users.deactivatedAt)),
+      })
+      .returning({ ...getTableColumns(users), created: CREATED });
+    if (row) return { user: this.toClientUser(row), created: row.created === true, passwordSet: true, deactivated: false };
+    // The conflicting account has a password or is switched off: untouched.
+    const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
+    if (!existing) throw new Error('Could not set the password');
+    return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
+  }
+
+  /**
    * Is `email` the deployment admin — the account whose password is set in
    * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
    * rather than stored on its row? The single definition behind
@@ -378,6 +485,64 @@ export class AuthService {
       this.config.adminPassword.length > 0 &&
       email === this.config.adminEmail
     );
+  }
+
+  /**
+   * Is `email` an owner of this deployment — an address it is configured
+   * with as its owner (`ADMIN_EMAIL`; on Hexis by Bevel cloud, whoever
+   * created the workspace)? Unlike {@link isEnvAdminEmail} this asks nothing
+   * of `ADMIN_PASSWORD`: the cloud never sets one, and its owner must be
+   * protected all the same. Behind {@link deactivate} (which always refuses
+   * an owner) and {@link assertDeletable} (which refuses one who could not
+   * sign back in). Canonicalises both sides, so `email` may be raw.
+   */
+  isOwnerEmail(email: string): boolean {
+    // Not trusted to be text: the accounts API passes a request body's value
+    // in before validating it, and a non-string is simply not an owner.
+    const candidate = typeof email === 'string' ? canonicalEmail(email) : '';
+    return candidate.length > 0 && this.ownerEmails().includes(candidate);
+  }
+
+  /**
+   * An owner is never switched off, but an earlier version did switch off an
+   * owner without a server-held password, and no admin can undo that for a
+   * workspace's only owner. So wherever an owner's row is read to let them
+   * in, a switch-off left on it is cleared — on the row itself, so that the
+   * credentials that read the column directly (API keys, MCP tokens) are
+   * honoured again too. Returns `row` as it now stands; anyone else's row
+   * unchanged.
+   */
+  private async clearOwnerSwitchOff<T extends { id: string; email: string; deactivatedAt: Date | null }>(
+    row: T,
+  ): Promise<T> {
+    if (!row.deactivatedAt || !this.isOwnerEmail(row.email)) return row;
+    await this.db
+      .update(users)
+      .set({ deactivatedAt: null, updatedAt: new Date() })
+      .where(and(eq(users.id, row.id), isNotNull(users.deactivatedAt)));
+    this.activeCache.delete(row.id);
+    return { ...row, deactivatedAt: null };
+  }
+
+  /**
+   * The configured owner addresses, canonical, blanks dropped. One today
+   * (`ADMIN_EMAIL` is a single string); a list so that every owner is
+   * treated alike should the configuration ever carry more.
+   */
+  private ownerEmails(): string[] {
+    return [this.config.adminEmail].map((e) => canonicalEmail(e ?? '')).filter((e) => e.length > 0);
+  }
+
+  /**
+   * Refuse to delete `email`'s account when it is an owner who could not
+   * sign back in afterwards: only an owner whose password the server holds,
+   * with password sign-in on (exactly {@link reportsAsEnvAdmin}), still has a
+   * way in once the row is gone. Anyone else's account passes.
+   */
+  assertDeletable(email: string): void {
+    if (this.isOwnerEmail(email) && !this.reportsAsEnvAdmin(canonicalEmail(email ?? ''))) {
+      throw new AccountChangeRefusedError(OWNER_DELETE_REFUSAL);
+    }
   }
 
   /**
@@ -431,6 +596,7 @@ export class AuthService {
     if (!user) throw new Error('User not found');
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
+    this.assertNotSystemAccount(user.email);
     if (this.isEnvAdminEmail(user.email)) {
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -461,6 +627,10 @@ export class AuthService {
       name: string;
       hasPassword: boolean;
       isEnvAdmin: boolean;
+      /** One of the deployment's owners (`ADMIN_EMAIL`), with or without a server-held password. */
+      isOwner: boolean;
+      /** An owner whose account may be deleted, since they can sign back in (see {@link assertDeletable}); false for everyone else. */
+      ownerCanBeDeleted: boolean;
       /** When an admin switched the account off; null while it is on. */
       deactivatedAt: Date | null;
       /** One of the accounts the platform runs its own work as: never switched off, nobody signs in with it. */
@@ -472,17 +642,30 @@ export class AuthService {
     // would sort by IV noise. The table is one row per team member.
     const rows = await this.db.select().from(users);
     return rows
-      .map((row) => ({
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        hasPassword: row.passwordHash != null,
-        isEnvAdmin: this.reportsAsEnvAdmin(row.email),
-        deactivatedAt: row.deactivatedAt,
-        isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
-        createdAt: row.createdAt,
-      }))
+      .map((row) => {
+        const isEnvAdmin = this.reportsAsEnvAdmin(row.email);
+        const isOwner = this.isOwnerEmail(row.email);
+        return {
+          id: row.id,
+          email: row.email,
+          name: row.name,
+          hasPassword: row.passwordHash != null,
+          isEnvAdmin,
+          isOwner,
+          ownerCanBeDeleted: isOwner && isEnvAdmin,
+          deactivatedAt: row.deactivatedAt,
+          isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
+          createdAt: row.createdAt,
+        };
+      })
       .sort((a, b) => a.email.localeCompare(b.email));
+  }
+
+  /** Every password write calls this first: the system accounts never get one. */
+  private assertNotSystemAccount(normalizedEmail: string): void {
+    if (SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail)) {
+      throw new Error(SYSTEM_ACCOUNT_PASSWORD_REFUSAL);
+    }
   }
 
   private assertPasswordPolicy(password: string): void {
@@ -511,7 +694,7 @@ export class AuthService {
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { id: user.id, email: user.email, name: user.name };
   }
@@ -574,20 +757,47 @@ export class AuthService {
    * environment password signs it in regardless (see `loginWithPassword`),
    * and a session that sign-in mints must then be usable too, or the way
    * back into a deployment would lead nowhere. {@link deactivate} refuses
-   * the account, but a host may write the column itself.
+   * the account, but a host may write the column itself. Any owner's
+   * leftover switch-off is cleared here, as at sign-in
+   * ({@link clearOwnerSwitchOff}).
    */
   async isActive(userId: string): Promise<boolean> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
     if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit.active;
-    const [row] = await this.db
-      .select({ email: users.email, deactivatedAt: users.deactivatedAt })
+    const [found] = await this.db
+      .select({ id: users.id, email: users.email, deactivatedAt: users.deactivatedAt })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
+    const row = found && (await this.clearOwnerSwitchOff(found));
     const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
     this.activeCache.set(userId, { active, at: now });
     return active;
+  }
+
+  /**
+   * Run `write` only while `email` is not switched off, and keep it so until
+   * `write` has finished: a transaction takes the address's switch lock (see
+   * account-switch-lock), reads the account and stays open across `write`.
+   * Every write that switches an account off, or creates one switched off,
+   * takes the same lock first, so it either committed before the read (and
+   * `write` is refused) or waits until `write` is done. An address with no
+   * account yet counts as switched on. A switched-off account throws a 409
+   * `deactivated` and `write` never runs.
+   */
+  async whileSwitchedOn(email: string, write: () => Promise<void>): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await takeAccountSwitchLock(tx, email);
+      const [account] = await tx
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.emailBidx, canonicalEmail(email)));
+      if (account?.deactivatedAt) {
+        throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
+      }
+      await write();
+    });
   }
 
   /**
@@ -596,9 +806,10 @@ export class AuthService {
    * {@link isActive}). Idempotent: an account already off keeps the moment
    * it was first switched off.
    *
-   * The deployment admin is refused: the environment password is the way
-   * back into a deployment whose every other admin is gone, and switching
-   * it off would close that door from inside. So are the machine accounts
+   * An owner is refused, on every deployment, whether or not the server
+   * holds a password for them: switching the owner off locks them out of
+   * their own workspace (and, where `ADMIN_PASSWORD` is set, closes the
+   * way back into a deployment whose every other admin is gone). So are the machine accounts
    * core runs its own work as. Refusing an admin's own account is the
    * route's concern, since it knows who is asking.
    *
@@ -607,16 +818,21 @@ export class AuthService {
   async deactivate(userId: string): Promise<boolean> {
     const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!row) return false;
-    if (this.isEnvAdminEmail(row.email)) {
-      throw new AccountChangeRefusedError('The deployment admin cannot be switched off: its password in the environment is the way back in.');
+    if (this.isOwnerEmail(row.email)) {
+      throw new AccountChangeRefusedError(OWNER_SWITCH_OFF_REFUSAL);
     }
     if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
       throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');
     }
-    await this.db
-      .update(users)
-      .set({ deactivatedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    // Under the switch lock, so a promotion that checked this account was
+    // on is written before this lands (see account-switch-lock).
+    await this.db.transaction(async (tx) => {
+      await takeAccountSwitchLock(tx, row.email);
+      await tx
+        .update(users)
+        .set({ deactivatedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    });
     this.activeCache.delete(userId);
     return true;
   }

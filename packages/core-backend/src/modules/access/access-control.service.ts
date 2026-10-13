@@ -130,15 +130,16 @@ interface AccessModel {
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
    *
-   * This exists for the two hardcoded `write` rescues below and the root write
-   * floor, and only those. It is NOT a general grant: it never enters scope
-   * resolution, so it gives no read, no download, and no write beyond
-   * `roles.yaml`, `access.md`, and what the root floor reaches (see
-   * `hasPermissionResolved`). The deployment owner is the person who can already change
-   * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
-   * nothing they could not already take — while withholding it turns a
-   * `roles.yaml` that has lost its last Admin into a knowledge base nobody
-   * can repair through the app.
+   * An owner IS an Admin, for every verb: resolution gives them the Admin
+   * role's own keys (`principalKeysOf`), so they read, download, write and
+   * own exactly where a member of the role does and are excluded exactly
+   * where the role is, and they hold the two hardcoded `write` rescues and
+   * the root floor as the role does. The owner is the person who can already
+   * change `ADMIN_EMAIL` itself, so none of this concedes anything they could
+   * not already take — while withholding it turns a `roles.yaml` that has
+   * lost its last Admin into a knowledge base nobody can repair through the
+   * app, and an owner the file does not name into someone the write floor
+   * admits everywhere and the read gate admits nowhere.
    */
   deploymentOwners: ReadonlySet<string>;
 }
@@ -478,18 +479,37 @@ function resolveAtPath(
 /**
  * Every principal key a caller holds: the tokens their email is a member of,
  * plus the PUBLIC keys every caller holds regardless (a plugin principal
- * whose plugin grants `everyone`). Undefined when there is nothing at all,
+ * whose plugin grants `everyone`), plus — for a deployment owner — the Admin
+ * role's own keys, whether or not `roles.yaml` names them: the owner IS an
+ * Admin (see `AccessModel.deploymentOwners`), so every rule that binds the
+ * role binds them, for every verb. Undefined when there is nothing at all,
  * matching the plain `byEmail.get` the tier-2 check used to read.
  */
 function principalKeysOf(model: AccessModel, email: string): Set<string> | undefined {
   const own = model.roles.byEmail.get(email);
   const pub = model.roles.publicKeys;
-  if (!pub?.size) return own;
-  return new Set([...(own ?? []), ...pub]);
+  const asOwner = model.deploymentOwners.has(email) && !own?.has(ADMIN_ROLE_KEY);
+  if (!pub?.size && !asOwner) return own;
+  return new Set([
+    ...(own ?? []),
+    ...(pub ?? []),
+    ...(asOwner ? principalKeysOfToken(model, ADMIN_ROLE_KEY) : []),
+  ]);
 }
 
 /** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
 const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * The verbs the Admin floor at the repository root confers: write, and the
+ * read that write implies (`VERB_REQUIRES`). An admin who may change
+ * everything under the root may see it; otherwise the read-before-write gate
+ * refuses them the very change the floor grants. Download is not implied by
+ * write and stays with the access tree.
+ */
+function holdsAdminFloor(verb: Verb): boolean {
+  return verb === 'write' || verb === 'read';
+}
 
 /**
  * Add to `keys` what holding them confers on top: every plugin principal
@@ -540,9 +560,10 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 /**
  * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
  * of principal KEYS with no person behind them — no direct-email tier, no
- * admin rescue, no machine-owned rule — only the Admin write floor, when the
- * keys include the Admin role. Closest scope first; within a scope a
- * grant to any key wins over a denial to another, exactly as for a person.
+ * admin rescue, no machine-owned rule — only the Admin floor (write, and the
+ * read it implies), when the keys include the Admin role. Closest scope
+ * first; within a scope a grant to any key wins over a denial to another,
+ * exactly as for a person.
  */
 function hasPermissionForKeys(
   model: AccessModel,
@@ -551,7 +572,7 @@ function hasPermissionForKeys(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
-  const adminFloor = verb === 'write' && keys.has(ADMIN_ROLE_KEY);
+  const adminFloor = holdsAdminFloor(verb) && keys.has(ADMIN_ROLE_KEY);
   for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
     if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
     let grant = false;
@@ -620,17 +641,20 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
- * One floor for `write`, applied during the walk: an admin (same definition)
- * always holds `write` at the repository root. When the walk reaches the root
- * `access.md` (or the own frontmatter of a file directly in the root) — or runs
- * out of scopes without a verdict — an admin is granted,
- * whatever the root file says, so no root rule can lock the deployment out of
- * its own tree. A NEARER scope still decides first: a subfolder that denies
- * Admin (or denies `everyone` without naming Admin) excludes admins there like
- * anyone else. The root file's own entries are not rewritten — the floor is a
- * verdict, not a grant line — so `grantSources` stays file-backed.
+ * One floor for `write` and the `read` it implies (`holdsAdminFloor`), applied
+ * during the walk: an admin (same definition) always holds both at the
+ * repository root. When the walk reaches the root `access.md` (or the own
+ * frontmatter of a file directly in the root) — or runs out of scopes without
+ * a verdict — an admin is granted, whatever the root file says, so no root
+ * rule can lock the deployment out of its own tree, and nobody who may change
+ * everything under the root is refused the sight of it. A NEARER scope still
+ * decides first: a subfolder that denies Admin (or denies `everyone` without
+ * naming Admin) excludes admins there like anyone else. The root file's own
+ * entries are not rewritten — the floor is a verdict, not a grant line — so
+ * `grantSources` stays file-backed.
  *
- * No special-cases for `read`/`download` — they fall through to scope resolution.
+ * No special-case for `download` (or `owner`) — they fall through to scope
+ * resolution; write implies read, not download.
  */
 function hasPermissionResolved(
   model: AccessModel,
@@ -676,14 +700,12 @@ function decidePermissionResolved(
     }
   }
 
-  const adminFloor = verb === 'write' && isAdminEmail(model, email);
-  // For write, the deployment owner IS Admin — the floor admits them, so the
-  // Admin rules along the way bind them too: a subfolder denying Admin excludes
-  // the owner exactly as it excludes the role's members.
-  let userRoles = principalKeysOf(model, email);
-  if (adminFloor && !userRoles?.has(ADMIN_ROLE_KEY)) {
-    userRoles = new Set([...(userRoles ?? []), ...principalKeysOfToken(model, ADMIN_ROLE_KEY)]);
-  }
+  const adminFloor = holdsAdminFloor(verb) && isAdminEmail(model, email);
+  // The deployment owner IS Admin: `principalKeysOf` gives them the role's
+  // keys, so the Admin rules along the way bind them too — a subfolder
+  // denying Admin excludes the owner exactly as it excludes the role's
+  // members, and one granting Admin admits them.
+  const userRoles = principalKeysOf(model, email);
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
@@ -1090,12 +1112,11 @@ function canEveryoneReadResolved(
   // Every *named* principal must also still read. A collapsed deny may have
   // been shadowed by a closer-scope `everyone` grant, so re-resolve each
   // candidate through the closeness-first gate rather than trusting the
-  // collapsed deny state. (Role members live in roles.yaml; inline-named users
-  // come from `byEmail`.)
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
-  for (const email of candidates) {
+  // collapsed deny state. The candidates are the same set the eligible-email
+  // lists enumerate — roles.yaml members, inline-named users, and the
+  // deployment owner, whom a `deny Admin` carves out like any member of the
+  // role whether or not roles.yaml names them.
+  for (const email of namedCandidateEmails(model, byEmail)) {
     if (!hasPermissionResolved(model, 'read', email, relativePath, fileOwn)) return false;
   }
   return true;
@@ -1106,11 +1127,14 @@ function canEveryoneReadResolved(
  *
  * Read is default-deny: a path is readable only when resolution grants the
  * caller `read` directly, via one of their roles, via the built-in `everyone`
- * role, or via `owner:` (owners implicitly read).
+ * role, or via `write:`/`owner:` (both imply read).
  *
- * No admin rescue (mirrors `download`): admins read a node only if an
- * `access.md` lists them — directly, via a role, through `everyone`, or as an
- * owner.
+ * No admin rescue on root files (that is write's), but the Admin floor
+ * holds: an admin — a member of the role or the deployment owner — reads
+ * wherever no nearer scope excludes Admin, whether or not the root names it,
+ * because the floor gives them write there and write implies read. A
+ * subfolder that denies Admin, or everyone, takes the read away as it does
+ * for any principal.
  */
 function canReadResolved(
   model: AccessModel,
@@ -1183,9 +1207,10 @@ function eligibleHoldersResolved(
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
-  // The Admin write floor (see `hasPermissionResolved`): Admin holds write here
-  // whenever no nearer scope excludes it, whether or not any file names it.
-  if (verb === 'write' && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
+  // The Admin floor (see `hasPermissionResolved`): Admin holds write, and the
+  // read it implies, here whenever no nearer scope excludes it, whether or not
+  // any file names it.
+  if (holdsAdminFloor(verb) && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
     const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY)!;
     if (allowedFor(principalKeysOfToken(model, ADMIN_ROLE_KEY))) addPrincipal(adminRole.displayName, 'role');
   }
@@ -1232,8 +1257,8 @@ function eligibleHoldersResolved(
 
 /**
  * Every individual the model names: `roles.yaml` members, emails named inline
- * at this path's scope, and the deployment owner (Admin for the write floor
- * even when `roles.yaml` does not list them).
+ * at this path's scope, and the deployment owner (bound by every rule that
+ * names Admin even when `roles.yaml` does not list them).
  */
 function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
   const candidates = new Set<string>(model.deploymentOwners);
@@ -2162,6 +2187,25 @@ export class AccessControlService implements IAccessControl {
   async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
     const model = await this.loadModel(workspaceId);
     return isAdminEmail(model, canonicalEmail(userEmail));
+  }
+
+  async adminEmails(workspaceId: string): Promise<string[]> {
+    let model: AccessModel;
+    try {
+      model = await this.loadModel(workspaceId);
+    } catch (err) {
+      // As canRestorePlatformFile: with no model to ask, the deployment owners
+      // are the only admins left. A `roles.yaml` that does not parse is that
+      // by design; anything else (a clone being read, the disk) is said, so a
+      // list that names fewer admins than there are is diagnosable.
+      if (!(err instanceof AccessConfigError)) {
+        log.warn('the access model could not be loaded; the admins list names the deployment owners only:', { err });
+      }
+      return [...this.deploymentOwners];
+    }
+    const candidates = new Set<string>(model.deploymentOwners);
+    for (const email of model.roles.byEmail.keys()) candidates.add(email);
+    return [...candidates].filter((email) => isAdminEmail(model, email));
   }
 
   async canRestorePlatformFile(
