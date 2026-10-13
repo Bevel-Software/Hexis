@@ -6,6 +6,7 @@ import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
 import { useRendererSurface } from './rendererSurface';
 import {
   HTML_FRAME_KEY_STEP,
+  HTML_FRAME_MAX_HEIGHT,
   HTML_FRAME_MIN_HEIGHT,
   HTML_FRAME_STANDARD_HEIGHT,
   attachFrameResizeHandle,
@@ -21,7 +22,9 @@ const FRAME_HEIGHT_KEY = 'bevel.htmlFrame.height';
 function rememberedFrameHeight(): number {
   try {
     const stored = Number(window.localStorage.getItem(FRAME_HEIGHT_KEY));
-    return Number.isFinite(stored) && stored >= HTML_FRAME_MIN_HEIGHT ? Math.round(stored) : HTML_FRAME_STANDARD_HEIGHT;
+    return Number.isFinite(stored) && stored >= HTML_FRAME_MIN_HEIGHT && stored <= HTML_FRAME_MAX_HEIGHT
+      ? Math.round(stored)
+      : HTML_FRAME_STANDARD_HEIGHT;
   } catch {
     return HTML_FRAME_STANDARD_HEIGHT;
   }
@@ -168,6 +171,7 @@ export function HtmlRenderer({
         rememberFrameHeight(height);
       },
       min: HTML_FRAME_MIN_HEIGHT,
+      max: HTML_FRAME_MAX_HEIGHT,
       step: HTML_FRAME_KEY_STEP,
     });
   }, [sizesToContent, mode, previewError, bundledSrcdoc]);
@@ -309,6 +313,7 @@ export function HtmlRenderer({
               aria-label="Resize the page"
               aria-valuenow={frameHeight}
               aria-valuemin={HTML_FRAME_MIN_HEIGHT}
+              aria-valuemax={HTML_FRAME_MAX_HEIGHT}
               tabIndex={0}
               title="Drag to make the page taller or shorter"
               className="shrink-0 h-2 mt-1 rounded-xs cursor-row-resize outline-none hover:bg-hover focus-visible:bg-accent-hover/60 data-[dragging=true]:bg-accent-hover/60 transition-colors"

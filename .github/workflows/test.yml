@@ -88,13 +88,14 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
-      # The one real-browser suite (`packages/core-frontend/browser`): the HTML
-      # frame's runtime measures the page and the renderer sizes the frame to
-      # it across the browser's own layout, sandboxed frame and `postMessage`,
-      # which the unit suites' happy-dom does not have — so the pair is
-      # round-tripped through Chromium here (Round-Trip Through the Real
-      # Intermediary). Its own step, after the unit suites, so a browser that
-      # fails to install is its own failure and not a red unit run.
+      # The one real-browser suite (`packages/core-frontend/browser`): the
+      # handle under an HTML page's frame is dragged with a real pointer over
+      # a real sandboxed frame in Chromium — a frame is its own document and
+      # would take the pointer the moment a drag crossed into it, which is
+      # what the handle's pointer capture prevents, and which the unit suites'
+      # happy-dom cannot answer (Round-Trip Through the Real Intermediary).
+      # Its own step, after the unit suites, so a browser that fails to
+      # install is its own failure and not a red unit run.
       - run: pnpm --filter @bevel-software/platform-core-frontend exec playwright install --with-deps chromium
       - run: pnpm --filter @bevel-software/platform-core-frontend run test:browser
 

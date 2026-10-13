@@ -15,6 +15,8 @@
 export const HTML_FRAME_STANDARD_HEIGHT = 480;
 /** The least a reader can make it: enough to see that there is a page. */
 export const HTML_FRAME_MIN_HEIGHT = 160;
+/** The most: a tall dashboard's worth; past it the page scrolls inside. */
+export const HTML_FRAME_MAX_HEIGHT = 2400;
 /** One keyboard nudge, in CSS pixels. */
 export const HTML_FRAME_KEY_STEP = 24;
 
@@ -27,6 +29,8 @@ export interface FrameResizeHandleOptions {
   settle: (height: number) => void;
   /** The least height to apply. */
   min: number;
+  /** The most. */
+  max: number;
   /** One keyboard nudge. */
   step: number;
 }
@@ -34,12 +38,17 @@ export interface FrameResizeHandleOptions {
 /**
  * Attach the drag and the keys to `handle`; returns what detaches them.
  * `data-dragging` on the handle says a drag is under way, for the frame to
- * stop taking the pointer meanwhile.
+ * stop taking the pointer meanwhile. The handle is also told to take no
+ * touch gesture of the browser's (`touch-action: none`) while attached: a
+ * finger dragging it would otherwise read as scrolling the page, and the
+ * browser would cancel the pointer before the resize was done.
  */
 export function attachFrameResizeHandle(handle: HTMLElement, options: FrameResizeHandleOptions): () => void {
   let start: { y: number; height: number; pointerId: number } | null = null;
 
-  const clamp = (height: number) => Math.max(options.min, Math.round(height));
+  const clamp = (height: number) => Math.min(options.max, Math.max(options.min, Math.round(height)));
+  const ownTouchAction = handle.style.touchAction;
+  handle.style.touchAction = 'none';
 
   const onPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return;
@@ -81,6 +90,7 @@ export function attachFrameResizeHandle(handle: HTMLElement, options: FrameResiz
   handle.addEventListener('pointercancel', end);
   handle.addEventListener('keydown', onKeyDown);
   return () => {
+    handle.style.touchAction = ownTouchAction;
     handle.removeEventListener('pointerdown', onPointerDown);
     handle.removeEventListener('pointermove', onPointerMove);
     handle.removeEventListener('pointerup', end);

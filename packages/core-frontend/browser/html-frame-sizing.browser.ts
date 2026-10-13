@@ -18,6 +18,7 @@ import { attachFrameResizeHandle } from '../src/modules/workspace/components/ren
 
 const STANDARD = 480;
 const MIN = 160;
+const MAX = 2400;
 
 /** A host page standing in for the renderer: the frame, the handle, and the renderer's rules. */
 const HOST = `<!doctype html>
@@ -41,6 +42,7 @@ const HOST = `<!doctype html>
         window.settled.push(height);
       },
       min: ${MIN},
+      max: ${MAX},
       step: 24,
     });
   };
@@ -97,8 +99,18 @@ test('a drag that crosses into the frame keeps resizing it: the handle holds the
   expect(await h.settled()).toEqual([STANDARD - 250, STANDARD + 150]);
 });
 
-test('never shorter than the least, and the keys nudge it', async ({ page }) => {
+test('never shorter than the least nor taller than the most, the keys nudge it, and a finger on it is never a scroll', async ({ page }) => {
   const h = await host(page);
+  // The browser's own touch gestures are off on the handle, so a finger
+  // dragging it resizes instead of scrolling the page and cancelling.
+  expect(await page.locator('#h').evaluate((el) => getComputedStyle(el).touchAction)).toBe('none');
+  await page.setViewportSize({ width: 800, height: 3200 });
+  const tall = await h.handleBox();
+  await page.mouse.move(tall.x + 5, tall.y + 2);
+  await page.mouse.down();
+  await page.mouse.move(tall.x + 5, 3100, { steps: 6 });
+  await page.mouse.up();
+  expect(await h.frameHeight()).toBe(MAX);
   const box = await h.handleBox();
   await page.mouse.move(box.x + 5, box.y + 2);
   await page.mouse.down();
@@ -112,5 +124,5 @@ test('never shorter than the least, and the keys nudge it', async ({ page }) => 
   expect(await h.frameHeight()).toBe(MIN + 48);
   await page.keyboard.press('ArrowUp');
   expect(await h.frameHeight()).toBe(MIN + 24);
-  expect(await h.settled()).toEqual([MIN, MIN + 24, MIN + 48, MIN + 24]);
+  expect(await h.settled()).toEqual([MAX, MIN, MIN + 24, MIN + 48, MIN + 24]);
 });

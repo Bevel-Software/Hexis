@@ -72,6 +72,9 @@ describe('HtmlRenderer on a surface', () => {
     expect(iframe.style.boxSizing).toBe('content-box');
     expect(handle().getAttribute('aria-valuenow')).toBe('480');
     expect(handle().getAttribute('aria-valuemin')).toBe('160');
+    expect(handle().getAttribute('aria-valuemax')).toBe('2400');
+    // A finger on the handle is a resize, never a scroll of the page.
+    expect(handle().style.touchAction).toBe('none');
   });
 
   it('the reader drags the handle to make the frame taller or shorter, and the choice is kept in this browser', async () => {
@@ -95,11 +98,23 @@ describe('HtmlRenderer on a surface', () => {
     drag(-1000);
     await waitFor(() => expect(iframe.style.height).toBe('160px'));
     expect(window.localStorage.getItem(STORED)).toBe('160');
+    // Taller, and never past the most: the range the handle announces.
+    drag(10_000);
+    await waitFor(() => expect(iframe.style.height).toBe('2400px'));
+    expect(handle().getAttribute('aria-valuenow')).toBe('2400');
+    drag(-1000);
+    await waitFor(() => expect(iframe.style.height).toBe('1400px'));
 
     // The next frame in this browser starts where this one was left.
     unmount();
     const again = mount(surface({ sizesToContent: true }));
-    expect((await frameOf(again.container)).style.height).toBe('160px');
+    expect((await frameOf(again.container)).style.height).toBe('1400px');
+
+    // A stored height outside the range is not believed.
+    again.unmount();
+    window.localStorage.setItem(STORED, '99999');
+    const standard = mount(surface({ sizesToContent: true }));
+    expect((await frameOf(standard.container)).style.height).toBe('480px');
   });
 
   it('the arrow keys nudge the frame by a step, and a drag that is not the main button is ignored', async () => {
