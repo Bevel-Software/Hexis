@@ -2,8 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { AppRegistryContext, EMPTY_REGISTRY, type AppRegistry } from '../../../../../core/registry';
-import { RendererSurfaceContext, type RendererSurface } from '../rendererSurface';
-import { useKbGraphLoader } from '../kbGraphLoader';
+import { RendererSurfaceContext, useKbGraphLoader, type RendererSurface } from '..';
 
 const SURFACE: RendererSurface = {
   kbDirName: 'knowledge-base',

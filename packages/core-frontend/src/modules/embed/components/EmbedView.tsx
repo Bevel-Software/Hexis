@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '../../../shared/components';
 import { useAppRegistry } from '../../../core/registry';
-import { isViewOnlyFile, pickFileRenderer } from '../../workspace/components/renderers';
-import { CanDownloadContext } from '../../workspace/components/renderers/DownloadFileButton';
 import {
+  CanDownloadContext,
   RendererSurfaceContext,
+  RendererWorkspaceContext,
+  isViewOnlyFile,
+  pickFileRenderer,
   type RendererSurface,
-} from '../../workspace/components/renderers/rendererSurface';
-import { RendererWorkspaceContext } from '../../workspace/components/renderers/rendererWorkspace';
+} from '../../workspace/components/renderers';
 import {
   cancelEmbed,
   embedRawUrl,

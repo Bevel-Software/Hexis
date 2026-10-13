@@ -6,8 +6,7 @@ import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
 import { useEffect, useState } from 'react';
 import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE } from '../embed-host';
-import { useKbGraphLoader } from '../../workspace/components/renderers/kbGraphLoader';
-import { useRendererSurface } from '../../workspace/components/renderers/rendererSurface';
+import { useKbGraphLoader, useRendererSurface } from '../../workspace/components/renderers';
 
 /**
  * The HTTP surface, stubbed. The error CLASS is hoisted with the rest: the

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { HtmlRenderer } from '../HtmlRenderer';
-import { RendererSurfaceContext, type RendererSurface } from '../rendererSurface';
+import { RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
+
+/** The renderer the module hands out for an `.html` page — the way the app and the embed get it. */
+const HtmlRenderer = getFileRenderer('Pages/Board.html');
 
 /** A surface outside the app, with only what the HTML view reads of it. */
 function surface(extra: Partial<RendererSurface>): RendererSurface {

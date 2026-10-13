@@ -1,8 +1,8 @@
 import type { IGitService, IWorkflowService } from '@bevel-software/platform-shared';
 import type { KbContext } from '../shared/kb-context.js';
 import type { IAccessControl } from '../modules/access/access-control.interface.js';
-import type { WriteValidator } from '../modules/kb-fs/locking-filesystem.js';
-import type { FileReaderRegistry } from '../modules/workspace/file-readers/file-reader.js';
+import type { WriteValidator } from '../modules/kb-fs/index.js';
+import type { FileReaderRegistry } from '../modules/workspace/index.js';
 import type { CorePorts } from './core-ports.js';
 import type { IAccountLinkService } from '../modules/embed/account-link.service.js';
 import type { EmbedAuthPort, EmbedWorkspacePort } from '../modules/embed/embed.interface.js';

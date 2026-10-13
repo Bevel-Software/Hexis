@@ -1,6 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { timingSafeStringEqual } from '../auth/password-hash.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, timingSafeStringEqual } from '../auth/index.js';
 import jwt from 'jsonwebtoken';
 import type { AuthUser, IGitService, IWorkflowService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
@@ -8,9 +7,9 @@ import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { changeRequestLink, changeRequestLinkBase } from '../workflow/git/change-request-link.js';
-import type { FileReaderRegistry } from '../workspace/file-readers/file-reader.js';
-import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
+import { changeRequestLink, changeRequestLinkBase } from '../workflow/index.js';
+import type { FileReaderRegistry } from '../workspace/index.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 import type {
   EmbedAuthPort,
   EmbedFileView,
