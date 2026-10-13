@@ -118,6 +118,31 @@ export function EmbedView() {
   // renewal.
   const [token, setToken] = useState(embedToken);
   useEffect(() => onEmbedTokenRenewed(() => setToken(embedToken())), []);
+  const registry = useAppRegistry();
+  const [view, setView] = useState<EmbedFileView | null>(null);
+  /**
+   * An expired/absent/rejected token that could not be renewed — the one
+   * state that shows no content. A draft that was open stays on screen
+   * above the sentence, so nothing typed is lost.
+   */
+  const [expired, setExpired] = useState(!token);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [mode, setMode] = useState<'read' | 'write'>('read');
+  const [draft, setDraft] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [sent, setSent] = useState<{ url?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [awaitingLink, setAwaitingLink] = useState(false);
+  /** Who took the lock while this frame was hidden — null while we hold it. */
+  const [lockLost, setLockLost] = useState<string | null>(null);
+  /** The frame is hidden: the lock was let go, and the heartbeat has nothing to keep alive. */
+  const [hidden, setHidden] = useState(false);
+  /** Back from hidden, the lock is being taken again: Save waits for the answer. */
+  const [reacquiring, setReacquiring] = useState(false);
+  // Read access withdrawn mid-edit. The editor stays open on the draft so
+  // nothing typed vanishes, but nothing can be sent from it.
+  const [accessLost, setAccessLost] = useState(false);
+
   // A picture is bytes under the token too, but the browser fetches it
   // itself (`<img src>`), so its refusal never reaches `withEmbedToken`. A
   // picture that fails to load is asked once more with `fetch` to learn why,
@@ -156,30 +181,6 @@ export function EmbedView() {
     root.addEventListener('error', onError, true);
     return () => root.removeEventListener('error', onError, true);
   });
-  const registry = useAppRegistry();
-  const [view, setView] = useState<EmbedFileView | null>(null);
-  /**
-   * An expired/absent/rejected token that could not be renewed — the one
-   * state that shows no content. A draft that was open stays on screen
-   * above the sentence, so nothing typed is lost.
-   */
-  const [expired, setExpired] = useState(!token);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [mode, setMode] = useState<'read' | 'write'>('read');
-  const [draft, setDraft] = useState('');
-  const [notice, setNotice] = useState<string | null>(null);
-  const [sent, setSent] = useState<{ url?: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [awaitingLink, setAwaitingLink] = useState(false);
-  /** Who took the lock while this frame was hidden — null while we hold it. */
-  const [lockLost, setLockLost] = useState<string | null>(null);
-  /** The frame is hidden: the lock was let go, and the heartbeat has nothing to keep alive. */
-  const [hidden, setHidden] = useState(false);
-  /** Back from hidden, the lock is being taken again: Save waits for the answer. */
-  const [reacquiring, setReacquiring] = useState(false);
-  // Read access withdrawn mid-edit. The editor stays open on the draft so
-  // nothing typed vanishes, but nothing can be sent from it.
-  const [accessLost, setAccessLost] = useState(false);
 
   const reload = useCallback(() => {
     if (!embedToken()) {
