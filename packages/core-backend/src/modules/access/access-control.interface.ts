@@ -149,8 +149,11 @@ export type AccessDecisionSource = {
  * `via` names the tier that matched and `principal` the display name of the
  * group, role or plugin principal it matched on (the caller's own email for
  * `person`, `everyone` for the built-in). `admin-floor` is Admin's write at
- * the repository root, which no rule there can take away; its source is the
- * root's rules, or null when the root has none.
+ * the repository root, and the read that write implies, which no rule there
+ * can take away; its source is the scope the floor decided at — the root's
+ * rules (`folder`), or the own `frontmatter` of a file directly in the root,
+ * whose entries are part of the root and cannot take the floor away either —
+ * or null when the walk found no scope at all.
  */
 export interface AccessDecision {
   allowed: boolean;
@@ -677,6 +680,16 @@ export interface IAccessControl {
    * root: the floor keeps it, so the deny could only be rolled back.
    */
   holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
+
+  /**
+   * Every address the resolver treats as an Admin in the working-tree model,
+   * each once: the Admin role's members — through a group too — and the
+   * deployment owners. The same membership answer {@link holdsAdminRootWrite}
+   * gives one address at a time, enumerated. When the model cannot be loaded
+   * (a `roles.yaml` that does not parse makes nobody an Admin), the
+   * deployment owners alone.
+   */
+  adminEmails(workspaceId: string): Promise<string[]>;
 
   /**
    * Whether `userEmail` may put a misplaced platform file back at

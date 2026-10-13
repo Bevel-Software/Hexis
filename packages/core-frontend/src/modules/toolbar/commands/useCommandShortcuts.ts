@@ -29,9 +29,11 @@ function isTypingTarget(target: EventTarget | null): boolean {
  *  - focus is not in a field or an editor (a `c` typed into a page is a `c`);
  *  - no Ctrl, ⌘ or Alt is held (Ctrl+C is copy);
  *  - Shift is held exactly when the shortcut has it: `C` runs without it,
- *    ⇧K with it, and ⇧C runs nothing;
+ *    ⇧K with it, and ⇧C does not run C (it is free for a
+ *    distribution command to take);
  *  - no modal dialog is up (it owns the keyboard, as it does for Ctrl/⌘K);
- *  - the palette is shut (`enabled`) — open, every key is the query's.
+ *  - the palette is shut (`enabled`) — open, the shortcut letters type into
+ *    the query (Escape, Tab, Enter and the arrows still close and navigate).
  *
  * Only commands on offer run: ⇧I for someone who may not invite does
  * nothing, and lets the key through.
