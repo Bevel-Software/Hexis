@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -7,7 +6,6 @@ import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
 import { EMBED_EXPIRED } from '../embed-host';
 import { configureEmbed, resetEmbedConfig } from '../embed-config';
-import { useRendererSurface } from '../../workspace/components/renderers/rendererSurface';
 
 /**
  * The HTTP surface, stubbed. The error CLASS is hoisted with the rest: the
@@ -600,42 +598,66 @@ describe('a chat view whose token runs out', () => {
     expect(screen.queryByText(EMBED_EXPIRED)).toBeNull();
   });
 
-  it('fetches bytes again with a renewed token, and hands later byte addresses the fresh one', async () => {
-    inChat(async () => 'tok-2');
-    api.loadEmbed.mockResolvedValue(
-      view({ repoRelative: 'Pages/Report.html', workspacePath: `${KB}/Pages/Report.html`, content: '<p>hi</p>' }),
-    );
+  /**
+   * A file whose renderer fetches its own bytes — an email, through the
+   * app's own email renderer, which reads them off the surface the view
+   * mounts it on. Refused for the token, the bytes are fetched again under
+   * the renewed one, and the message shows.
+   */
+  const EML_BYTES = [
+    'From: Ada Lovelace <ada@example.com>',
+    'To: bob@example.com',
+    'Subject: Quarterly numbers',
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Please see attached.',
+    '',
+  ].join('\r\n');
+  const emailView = () =>
+    view({
+      nodeName: 'Numbers',
+      repoRelative: 'Mail/Numbers.eml',
+      workspacePath: `${KB}/Mail/Numbers.eml`,
+      content: '',
+      contentIsText: false,
+    });
+
+  it('fetches a renderer\'s bytes again with a renewed token, and the file shows', async () => {
+    const renew = inChat(async () => 'tok-2');
+    api.loadEmbed.mockResolvedValue(emailView());
     const fetchMock = vi.fn(async (url: string) =>
-      url.includes('token=tok&') || url.endsWith('token=tok')
-        ? new Response('', { status: 401 })
-        : new Response('bytes', { status: 200 }),
+      /[?&]token=tok(&|$)/.test(url) ? new Response('', { status: 401 }) : new Response(EML_BYTES, { status: 200 }),
     );
     vi.stubGlobal('fetch', fetchMock);
-    function Bytes() {
-      const surface = useRendererSurface();
-      const [body, setBody] = useState('');
-      useEffect(() => {
-        void surface?.rawFetch(`${KB}/Pages/Report.html`).then((res) => res.text()).then(setBody);
-      }, [surface]);
-      return (
-        <div>
-          <span data-testid="bytes">{body}</span>
-          <span data-testid="src">{surface?.rawUrl(`${KB}/Pages/Report.html`)}</span>
-        </div>
-      );
-    }
-    const registry = {
-      ...EMPTY_REGISTRY,
-      renderers: [{ extensions: ['.html'], Component: Bytes }],
-    } as unknown as AppRegistry;
     try {
-      mount(registry);
-      await waitFor(() => expect(screen.getByTestId('bytes').textContent).toBe('bytes'));
-      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(
-        expect.arrayContaining(['/api/embed/raw?token=tok', '/api/embed/raw?token=tok-2']),
-      );
-      await waitFor(() => expect(screen.getByTestId('src').textContent).toBe('/api/embed/raw?token=tok-2'));
+      mount();
+      expect(await screen.findByText('Quarterly numbers')).toBeTruthy();
+      expect(renew).toHaveBeenCalledTimes(1);
+      // Refused once under the old token; the retry, and the renderer's own
+      // re-read once the surface carries the fresh token, go under the new.
+      const urls = fetchMock.mock.calls.map((c) => c[0] as string);
+      expect(urls[0]).toMatch(/[?&]token=tok(&|$)/);
+      expect(urls.length).toBeGreaterThanOrEqual(2);
+      for (const url of urls.slice(1)) expect(url).toMatch(/[?&]token=tok-2(&|$)/);
       expect(screen.queryByText(EMBED_EXPIRED)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows the expired sentence when a renderer\'s bytes are refused and no fresh token can be had', async () => {
+    const renew = inChat(async () => null);
+    api.loadEmbed.mockResolvedValue(emailView());
+    const fetchMock = vi.fn(async () => new Response('', { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount();
+      expect(await screen.findByText(EMBED_EXPIRED)).toBeTruthy();
+      expect(renew).toHaveBeenCalledTimes(1);
+      // Once: the refusal after a failed renewal is the end, never a loop.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText('Quarterly numbers')).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
