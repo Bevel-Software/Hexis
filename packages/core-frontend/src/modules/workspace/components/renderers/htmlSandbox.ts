@@ -428,6 +428,14 @@ const NAV_BRIDGE = `
  * would change what \`:last-child\` names and give a flex or grid body one
  * more item. The children's own edges union in besides, for a box out of
  * the flow.
+ *
+ * One thing no forcing reaches: a length in viewport units (\`100vh\`), which
+ * is the frame's height whatever the page's boxes do. Sized to such a
+ * report, the frame IS the viewport, so the page would measure taller by
+ * its margins on every round trip and the frame would never settle. So a
+ * report is held back when the page's height moved by exactly what the
+ * viewport moved by since the last one: that page is sized to the frame,
+ * not to its content, and the frame stays where it is.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
@@ -479,9 +487,19 @@ const HEIGHT_BRIDGE = `
     }
     return bottom + (window.pageYOffset || 0);
   }
+  var lastViewport = -1;
   function report() {
     var height = Math.ceil(measure());
-    if (!isFinite(height) || height < 0 || height === last) return;
+    var viewport = window.innerHeight || 0;
+    if (!isFinite(height) || height < 0) return;
+    if (height !== last && last >= 0 && viewport !== lastViewport
+        && Math.abs((height - last) - (viewport - lastViewport)) <= 1) {
+      // Moved with the viewport, not with its content: sized to the frame.
+      lastViewport = viewport;
+      return;
+    }
+    lastViewport = viewport;
+    if (height === last) return;
     last = height;
     parent.postMessage({ type: 'bevel.height', height: height }, '*');
   }

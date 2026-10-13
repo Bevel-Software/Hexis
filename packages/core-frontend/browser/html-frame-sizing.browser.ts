@@ -201,6 +201,21 @@ test.describe('an HTML page in a frame whose host grows with the content', () =>
     expect(await overflow(host)).toBe(0);
   });
 
+  test('a page in viewport units settles: a 100vh child with the body\'s margins stops growing the frame', async ({ page }) => {
+    // The page is the viewport and 16 more, whatever the viewport is. Sized
+    // to the first report the frame is the viewport, so without a guard the
+    // next report would be 16 taller, and the next, without end.
+    const host = await load(page, '<div style="height:100vh;background:#eee">fills the viewport</div>');
+    const reports = await host.settled();
+    expect(reports.length).toBeLessThanOrEqual(2);
+    const final = reports[reports.length - 1]!;
+    expect(await host.frameHeight()).toBe(final);
+    // Still nothing new a second later: the frame has settled for good.
+    await page.waitForTimeout(1000);
+    expect(await host.reports()).toEqual(reports);
+    expect(await host.frameHeight()).toBe(final);
+  });
+
   test('a page sized to its viewport settles at its content instead of chasing the frame', async ({ page }) => {
     const host = await load(
       page,

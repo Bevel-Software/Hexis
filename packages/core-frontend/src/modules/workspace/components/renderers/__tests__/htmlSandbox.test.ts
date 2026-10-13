@@ -443,6 +443,8 @@ describe('buildSandboxedHtml', () => {
     viewportBottom?: number;
     /** The page's own inline height on the body, if any. */
     ownHeight?: { value: string; priority: string };
+    /** The frame's viewport height (`innerHeight`), read live. Default 150. */
+    viewport?: number;
   }) {
     // No lib sources: a vm script cannot parse an `export`. The bridges are
     // appended after the lib either way.
@@ -496,7 +498,12 @@ describe('buildSandboxedHtml', () => {
         getElementById: () => null,
         getElementsByName: () => [],
       },
-      window: { pageYOffset: 0 },
+      window: {
+        pageYOffset: 0,
+        get innerHeight() {
+          return opts.viewport ?? 150;
+        },
+      },
       parent: { postMessage: (msg: unknown) => posted.push(msg) },
       ResizeObserver: class {
         constructor(cb: () => void) {
@@ -586,6 +593,36 @@ describe('buildSandboxedHtml', () => {
     ]);
     expect(bridge.inline.html.size).toBe(0);
     expect(bridge.inline.body.size).toBe(0);
+  });
+
+  it('holds back a report that moved with the viewport: a page in viewport units is sized to the frame, not its content, and the frame settles', () => {
+    // A `100vh` child plus the body's 8px margins: the page is the viewport
+    // and 16 more, whatever the viewport is. Sized to the first report, the
+    // frame is the viewport, so the next measurement is 16 taller again —
+    // and would be, round trip after round trip.
+    const page = { childBottoms: [248], scrollHeight: 256, flowEnd: 256, viewport: 240 };
+    const bridge = runHeightBridge(page);
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 256 }]);
+    // The frame took the report: viewport 256, page 272 — moved by exactly
+    // what the viewport moved by. Held back; the frame stays at 256.
+    page.viewport = 256;
+    page.flowEnd = 272;
+    page.childBottoms[0] = 264;
+    bridge.resize();
+    expect(bridge.posted).toHaveLength(1);
+    // Content that really grew — by more than the viewport did — is posted.
+    page.flowEnd = 500;
+    bridge.resize();
+    expect(bridge.posted).toEqual([
+      { type: 'bevel.height', height: 256 },
+      { type: 'bevel.height', height: 500 },
+    ]);
+    // And growth with the viewport still, but by its own amount — a page
+    // that got taller while the frame did — is posted too.
+    page.viewport = 500;
+    page.flowEnd = 900;
+    bridge.resize();
+    expect(bridge.posted).toHaveLength(3);
   });
 
   it("puts back a body's own inline height exactly, priority included", () => {
