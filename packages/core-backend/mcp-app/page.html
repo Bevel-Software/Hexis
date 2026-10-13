@@ -449,8 +449,13 @@
               if (!shown) say('The chat app refused to open this page.');
               return;
             }
+            // Only a `serverTools` the host named decides: present is yes,
+            // false or null is no. Capabilities that leave it out have said
+            // nothing about it, and the view tries once.
             var caps = message.result.hostCapabilities;
-            if (caps && typeof caps === 'object') serverTools = !!caps.serverTools;
+            if (caps && typeof caps === 'object' && caps.serverTools !== undefined) {
+              serverTools = !!caps.serverTools;
+            }
             send({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
             if (!shown) say('Opening the page…');
           }

@@ -386,10 +386,30 @@ describe('the MCP App view renewing its token', () => {
   });
 
   it('does not ask a host that said it runs no server tools for a view', async () => {
-    handshake({ openLinks: {} });
+    handshake({ openLinks: {}, serverTools: false });
     const page = await opened();
     await expect(page.renew()).resolves.toBeNull();
     expect(toolCalls()).toHaveLength(0);
+  });
+
+  /** Capabilities that leave `serverTools` out say nothing about it: that is not a no. */
+  it('asks a host whose capabilities leave serverTools out once, and takes a refusal as its answer', async () => {
+    handshake({ openLinks: {} });
+    const page = await opened();
+    const renewed = page.renew();
+    expect(toolCalls()).toHaveLength(1);
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, error: { code: -32601, message: 'Method not found' } });
+    await expect(renewed).resolves.toBeNull();
+    await expect(page.renew()).resolves.toBeNull();
+    expect(toolCalls()).toHaveLength(1);
+  });
+
+  it('takes the token from a host whose capabilities leave serverTools out', async () => {
+    handshake({ openLinks: {} });
+    const page = await opened();
+    const renewed = page.renew();
+    fromHost({ jsonrpc: '2.0', id: toolCalls()[0].id, result: { structuredContent: { embedUrl: `${ORIGIN}/embed?token=t2` } } });
+    await expect(renewed).resolves.toBe('t2');
   });
 
   /** A host that said nothing either way is asked once; a refusal is its answer. */
