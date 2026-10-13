@@ -404,15 +404,19 @@ const NAV_BRIDGE = `
  * frame's height to it so the page is shown whole. A height is posted once
  * per value: a page that does not change says nothing twice.
  *
- * The height is the CONTENT's extent — the lowest edge of the body's
- * children plus the body's own bottom padding and margin — never the
- * document's \`scrollHeight\`. That one is the greater of the content and
- * the viewport, and the viewport is whatever the parent just set the frame
- * to, so measuring it feeds the frame's height back as the page's: a page
- * that got shorter could never report less, and a frame whose viewport runs
- * a border short of its height would shrink by that border on every report
- * until the page collapsed. A body with no element children answers with
- * its own box.
+ * The height is the CONTENT's extent — the lowest edge of everything in
+ * the body, text written straight into it included, plus the body's own
+ * bottom padding and margin — never the document's \`scrollHeight\`. That
+ * one is the greater of the content and the viewport, and the viewport is
+ * whatever the parent just set the frame to, so measuring it feeds the
+ * frame's height back as the page's: a page that got shorter could never
+ * report less, and a frame whose viewport runs a border short of its height
+ * would shrink by that border on every report until the page collapsed.
+ * The contents are measured as one range, which covers text nodes as well
+ * as elements — the body always has an element child, this very script,
+ * so counting elements alone would measure a page of plain text as empty —
+ * and the children's own edges besides, for a box the range's rectangle
+ * does not reach. A body with nothing measurable answers with its own box.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
@@ -428,12 +432,19 @@ const HEIGHT_BRIDGE = `
     if (!body || typeof body.getBoundingClientRect !== 'function') {
       return document.documentElement.scrollHeight || 0;
     }
+    var bottom = -Infinity;
+    if (typeof document.createRange === 'function') {
+      var range = document.createRange();
+      range.selectNodeContents(body);
+      var rect = range.getBoundingClientRect();
+      if (rect && (rect.height > 0 || rect.bottom > 0)) bottom = rect.bottom;
+    }
     var kids = body.children || [];
-    var bottom = kids.length ? 0 : body.getBoundingClientRect().bottom;
     for (var i = 0; i < kids.length; i++) {
       var edge = kids[i].getBoundingClientRect().bottom;
       if (edge > bottom) bottom = edge;
     }
+    if (!isFinite(bottom)) bottom = body.getBoundingClientRect().bottom;
     return bottom + (window.pageYOffset || 0) + bottomSpacing(body);
   }
   function report() {

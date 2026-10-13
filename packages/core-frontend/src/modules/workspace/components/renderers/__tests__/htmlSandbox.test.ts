@@ -430,7 +430,13 @@ describe('buildSandboxedHtml', () => {
    * (`scrollHeight`) the content must never be read from, and the frame's
    * own `ResizeObserver`.
    */
-  function runHeightBridge(opts: { childBottoms: number[]; scrollHeight: number; bodyRectBottom?: number }) {
+  function runHeightBridge(opts: {
+    childBottoms: number[];
+    scrollHeight: number;
+    bodyRectBottom?: number;
+    /** The lowest edge of the body's contents as one range — text included; absent, no range can be made. */
+    contentsBottom?: number;
+  }) {
     // No lib sources: a vm script cannot parse an `export`. The bridges are
     // appended after the lib either way.
     const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
@@ -445,6 +451,7 @@ describe('buildSandboxedHtml', () => {
       children,
       getBoundingClientRect: () => ({ bottom: opts.bodyRectBottom ?? 0 }),
     };
+    const contents = opts.contentsBottom;
     const ctx: Record<string, unknown> = {
       document: {
         documentElement,
@@ -452,6 +459,14 @@ describe('buildSandboxedHtml', () => {
         addEventListener: () => undefined,
         getElementById: () => null,
         getElementsByName: () => [],
+        ...(contents === undefined
+          ? {}
+          : {
+              createRange: () => ({
+                selectNodeContents: () => undefined,
+                getBoundingClientRect: () => ({ bottom: contents, height: contents }),
+              }),
+            }),
       },
       window: { pageYOffset: 0 },
       getComputedStyle: () => ({ paddingBottom: '0px', marginBottom: '8px' }),
@@ -501,9 +516,21 @@ describe('buildSandboxedHtml', () => {
     ]);
   });
 
-  it('measures a body with no element children by its own box', () => {
+  it('measures a body with nothing measurable by its own box', () => {
     const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36 });
     expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 44 }]);
+  });
+
+  it('measures text written straight into the body: the body always has an element child, this script, with no box of its own', () => {
+    // The only element child is the runtime's own script (edge 0); the text
+    // reaches 700 as the contents' range says. Elements alone would report
+    // the body's spacing and leave the frame at its floor.
+    const bridge = runHeightBridge({ childBottoms: [0], scrollHeight: 150, contentsBottom: 700 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 708 }]);
+    // An element below the range's rectangle still counts.
+    bridge.children.push({ getBoundingClientRect: () => ({ bottom: 950 }) });
+    bridge.resize();
+    expect(bridge.posted[1]).toEqual({ type: 'bevel.height', height: 958 });
   });
 
   it('says nothing about height where there is no document to measure', () => {
