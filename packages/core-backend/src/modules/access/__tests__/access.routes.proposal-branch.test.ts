@@ -134,6 +134,7 @@ describe('access routes on a proposal branch (real git)', () => {
         access,
         workspaceService,
         authService,
+        authService,
         workflowService,
         { emit: () => {} } as unknown as WorkflowEventBus,
         usersDbDouble(),

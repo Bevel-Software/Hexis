@@ -492,7 +492,7 @@ export class UserAccessRemovalService {
   /** Why `email` may not be removed from access files, or null when it may. */
   private blockedReason(rolesText: string | undefined, email: string): string | null {
     if (this.deploymentOwners.some((o) => canonicalEmail(o) === email)) {
-      return 'This is the deployment owner (ADMIN_EMAIL); their access cannot be removed here.';
+      return 'The owner stays in roles and access rules.';
     }
     const admin = rolesText
       ? (() => {
