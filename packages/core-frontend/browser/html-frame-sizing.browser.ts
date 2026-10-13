@@ -73,21 +73,34 @@ async function load(page: Page, bodyHtml: string, opts: { frameHeight?: number }
   }, srcdoc);
   const reports = () => page.evaluate(() => (window as unknown as { reports: number[] }).reports.slice());
   await expect.poll(async () => (await reports()).length, { timeout: 10_000 }).toBeGreaterThan(0);
+  const frameOf = () => {
+    const frame = page.frames().find((f) => f.parentFrame() === page.mainFrame());
+    if (!frame) throw new Error('the sandboxed frame is not there');
+    return frame;
+  };
   return {
     page,
-    frame: () => {
-      const frame = page.frames().find((f) => f.parentFrame() === page.mainFrame());
-      if (!frame) throw new Error('the sandboxed frame is not there');
-      return frame;
-    },
+    frame: frameOf,
     reports,
     settled: async () => {
       let last = (await reports()).length;
       for (;;) {
         await page.waitForTimeout(300);
         const now = (await reports()).length;
-        if (now === last) return reports();
-        last = now;
+        if (now !== last) {
+          last = now;
+          continue;
+        }
+        // Quiet — and the frame has had a rendering opportunity since, which
+        // is when its `resize` event for the last applied height is
+        // dispatched. Changing the page before that would land in the same
+        // instant as the frame's resize, which the runtime reads as growth
+        // with the viewport (see `HEIGHT_BRIDGE`), and a starved browser
+        // can take longer than the quiet above to get there.
+        await frameOf().evaluate(
+          () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+        );
+        return reports();
       }
     },
     frameHeight: () => page.evaluate(() => document.getElementById('f')!.clientHeight),

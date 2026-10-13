@@ -439,7 +439,11 @@ const NAV_BRIDGE = `
  * did, the same way, since the last measurement: that page is sized to
  * the frame, not to its content, and the frame stays where it is. Against
  * the last MEASUREMENT, posted or held: judged against the last post, a
- * held height would be posted at the next tick and the growth resume.
+ * held height would be posted at the next tick and the growth resume. The
+ * one case this cannot tell apart is content that changes in the same
+ * instant as the frame's resize, before the frame's \`resize\` event has
+ * been dispatched: it reads as growth with the viewport and is held until
+ * the page changes again at a steady viewport, which posts it.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
@@ -500,11 +504,12 @@ const HEIGHT_BRIDGE = `
     var viewport = window.innerHeight || 0;
     if (!isFinite(height) || height < 0) return;
     var dv = viewport - measuredViewport;
-    // The slope is read off the exact measurement: rounded up, a page at
-    // 99vh moves by the viewport's whole change once that change is small,
-    // and would be held with the last of its height clipped. A hair's
-    // breadth of tolerance only, for the sub-pixel error of a layout — a
-    // page at 100vh moves by exactly the viewport's change and must be held.
+    // The slope is read off the exact measurement: taken up to the next
+    // pixel, a page at 99vh moves by the viewport's whole change once that
+    // change is small, and would be held with the last of its height
+    // clipped. A hair's breadth of tolerance only, for the sub-pixel error
+    // of a layout — a page at 100vh moves by exactly the viewport's change
+    // and must be held.
     var dh = exact - measuredExact;
     var changed = height !== measuredHeight;
     // Moved with the viewport, at least as far and the same way: sized to
