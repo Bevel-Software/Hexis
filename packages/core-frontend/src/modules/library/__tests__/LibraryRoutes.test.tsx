@@ -72,7 +72,7 @@ vi.mock('../../secrets-vault/services/connect.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../secrets-vault/services/connect.api')>()),
   ...connectMock,
 }));
-const varsMock = vi.hoisted(() => ({ setUserVar: vi.fn(), checkToolConnection: vi.fn() }));
+const varsMock = vi.hoisted(() => ({ setUserVar: vi.fn(), deleteUserVar: vi.fn(), checkToolConnection: vi.fn() }));
 vi.mock('../../secrets-vault/services/tool-secrets.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../secrets-vault/services/tool-secrets.api')>()),
   ...varsMock,
@@ -690,5 +690,58 @@ describe('LibraryRoutes — Connect your tools', () => {
 
     await waitFor(() => expect(screen.queryByRole('button', { name: /integrations? needs? setup/ })).toBeNull());
     expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k');
+  });
+
+  // The other direction: unticking a signed-in tool deletes the sign-in, and
+  // the reminder has to come back for it — counted, not left at "all set".
+  it('a sign-in removed on the page updates the setup reminder without a reload', async () => {
+    const signedInTool = (authorized: boolean) =>
+      tool({
+        variables: [
+          {
+            name: 'TOKEN',
+            scope: 'user',
+            label: null,
+            key: 'heyreach_TOKEN',
+            adminConfigured: true,
+            userConfigured: authorized,
+            oauth: true,
+            authorized,
+          },
+        ],
+      });
+    dataMock.useLibraryData.mockImplementation(() => {
+      const [signedIn, setSignedIn] = useState(true);
+      return { ...CATALOG, tools: [signedInTool(signedIn)], reload: () => setSignedIn(false) };
+    });
+    connectMock.getConnectPending.mockResolvedValue({
+      tools: [],
+      oauth: [],
+      toolOAuth: [
+        {
+          slug: 'heyreach',
+          varName: 'TOKEN',
+          toolName: 'heyreach',
+          key: 'heyreach_TOKEN',
+          label: null,
+          authorized: true,
+          needsReauth: false,
+          ownerConfigured: true,
+          ownerOnly: false,
+        },
+      ],
+    });
+    varsMock.deleteUserVar.mockReset().mockResolvedValue(undefined);
+    renderAt('/skills-and-tools/connect');
+
+    const skip = await screen.findByRole('checkbox', {
+      name: 'Skip this tool (removes your saved keys and sign-ins for it)',
+    });
+    expect(screen.queryByRole('button', { name: /integrations? needs? setup/ })).toBeNull();
+
+    fireEvent.click(skip);
+
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('heyreach', 'TOKEN'));
+    expect(await screen.findByRole('button', { name: /1 integration needs setup/ })).toBeInTheDocument();
   });
 });
