@@ -12,8 +12,8 @@ import {
   RendererWorkspaceContext,
   getFileRenderer,
   getRendererLayout,
+  type RendererFileRef,
 } from '../../workspace/components/renderers';
-import type { RendererFileRef } from '../../workspace/components/renderers/rendererWorkspace';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
 

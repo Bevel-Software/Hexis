@@ -8,6 +8,7 @@ import { GitService } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
 import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { mergeCommitSubject } from '../merge-commit.js';
+import { WorkspaceMutex } from '../../../kb-fs/mutex.js';
 import { runGit, gitOut, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -25,6 +26,8 @@ describe('GitService.changedFilesOfProposalHead', () => {
   // The runner the service is given, so a test can see every git command it
   // runs — fetches above all — without reaching into the service.
   let runner: NodeGitRunner;
+  // The workspace reservation the service takes, so a test can hold it.
+  let mutex: WorkspaceMutex;
 
   /** The `git fetch` argument lists the service ran since `runs` began watching. */
   function fetchesOf(runs: { mock: { calls: unknown[][] } }): string[][] {
@@ -71,11 +74,12 @@ describe('GitService.changedFilesOfProposalHead', () => {
     await runGit(repo, ['push', 'origin', 'main']);
 
     runner = new NodeGitRunner();
+    mutex = new WorkspaceMutex();
     git = new GitService(
       stubWorkspaceService({ [workspaceId]: path.dirname(repo) }),
       new WorkflowHooks(),
       testKbContext(),
-      undefined,
+      mutex,
       null,
       runner,
     );
@@ -155,6 +159,22 @@ describe('GitService.changedFilesOfProposalHead', () => {
     expect(await gitOut(repo, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
       await gitOut(repo, ['rev-parse', 'main']),
     );
+  });
+
+  it('fetches the target only under the workspace reservation, with the read that relies on it', async () => {
+    const { headOf9 } = await seedStaleTarget();
+    const runs = vi.spyOn(runner, 'run');
+    let release!: () => void;
+    const held = mutex.run(workspaceId, () => new Promise<void>((resolve) => (release = resolve)));
+    const read = git.changedFilesOfProposalHead(workspaceId, 'main', headOf9);
+    // Another git operation holds the workspace: the read must not touch the
+    // target's ref under it, so no fetch has run yet.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchesOf(runs)).toEqual([]);
+    release();
+    await held;
+    expect((await read).map((f) => f.path)).toEqual(['Pricing.md']);
+    expect(fetchesOf(runs)).toHaveLength(1);
   });
 
   it("fails closed when origin cannot be reached and the clone's target predates the fork", async () => {

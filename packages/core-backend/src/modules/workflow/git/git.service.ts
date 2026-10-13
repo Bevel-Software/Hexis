@@ -3119,10 +3119,15 @@ export class GitService implements IGitService {
       throw new WorkflowValidationError(`invalid commit sha: ${headSha}`);
     }
     const cwd = await this.repoDir(workspaceId);
-    if (!(await this.fetchPublishedRefs(cwd, [targetBranch]))) {
-      throw new Error(`could not refresh ${targetBranch} to read commit ${headSha} against it`);
-    }
+    // Unlike the open-request reads, the fetch runs UNDER the reservation:
+    // this answer is only safe against the tip this fetch delivered, so the
+    // fetch, the target's resolution and the diff are one serialized git
+    // operation. The read is rare (an apply with no commit of its own) and
+    // cached, so a slow origin holding the lock here costs little.
     return this.mutex.run(workspaceId, async () => {
+      if (!(await this.fetchPublishedRefs(cwd, [targetBranch]))) {
+        throw new Error(`could not refresh ${targetBranch} to read commit ${headSha} against it`);
+      }
       try {
         await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${headSha}^{commit}`]);
       } catch (err) {
