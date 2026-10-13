@@ -20,8 +20,13 @@ export function HtmlRenderer({
   // than giving it a pane to scroll in (the app, the MCP App's pane).
   const sizesToContent = useRendererSurface()?.sizesToContent === true;
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
-  /** The page's height as the frame reported it; read only where the host grows with the page. */
-  const [contentHeight, setContentHeight] = useState<number | null>(null);
+  /**
+   * The page's height as the frame reported it, with the document it was
+   * reported for; read only where the host grows with the page. A rebuilt
+   * document (a save, a reload, a shorter page) starts from the frame's own
+   * height again, so the previous page's height is never applied to it.
+   */
+  const [reported, setReported] = useState<{ doc: string; height: number } | null>(null);
   const [value, setValue] = useState(content);
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
@@ -113,18 +118,19 @@ export function HtmlRenderer({
   // the page whole; elsewhere the frame keeps its pane and the message is
   // ignored.
   useEffect(() => {
-    if (!sizesToContent) return;
+    if (!sizesToContent || bundledSrcdoc === null) return;
     function onHeightMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
       if (!iframeWin || event.source !== iframeWin) return;
       const msg = event.data as { type?: unknown; height?: unknown } | null;
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.height') return;
       if (typeof msg.height !== 'number' || !Number.isFinite(msg.height) || msg.height < 0) return;
-      setContentHeight(Math.ceil(msg.height));
+      setReported({ doc: bundledSrcdoc!, height: Math.ceil(msg.height) });
     }
     window.addEventListener('message', onHeightMessage);
     return () => window.removeEventListener('message', onHeightMessage);
-  }, [sizesToContent]);
+  }, [sizesToContent, bundledSrcdoc]);
+  const contentHeight = reported !== null && reported.doc === bundledSrcdoc ? reported.height : null;
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -242,9 +248,13 @@ export function HtmlRenderer({
           // In a pane the frame fills it and scrolls inside; where the host
           // grows with the page, the frame takes the height the page reported
           // (a flex-grown frame in an auto-height column would collapse to the
-          // browser's default 150px instead).
-          className={`w-full bg-white rounded-xs border border-line ${sizesToContent ? 'shrink-0' : 'flex-1'}`}
-          style={sizesToContent && contentHeight !== null ? { height: contentHeight } : undefined}
+          // browser's default 150px instead). The height is the CONTENT box,
+          // so the frame's viewport is exactly the height the page reported
+          // and its border is not taken out of the page; and it never drops
+          // below a short pane, so a page sized to its viewport gets one to
+          // draw in rather than the browser's default strip.
+          className={`w-full bg-white rounded-xs border border-line ${sizesToContent ? 'shrink-0 min-h-60' : 'flex-1'}`}
+          style={sizesToContent && contentHeight !== null ? { height: contentHeight, boxSizing: 'content-box' } : undefined}
         />
       ) : (
         <div className="flex items-center justify-center h-full text-ink-muted text-sm">

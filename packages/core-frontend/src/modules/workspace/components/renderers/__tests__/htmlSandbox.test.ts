@@ -424,7 +424,13 @@ describe('buildSandboxedHtml', () => {
     expect(out).toContain('jumpTo(href)');
   });
 
-  it('injects the height bridge: the page posts bevel.height at load and on every change, once per value', () => {
+  /**
+   * The height bridge, run against a stand-in document: the body's element
+   * children at the bottom edges given, the body's bottom spacing, a viewport
+   * (`scrollHeight`) the content must never be read from, and the frame's
+   * own `ResizeObserver`.
+   */
+  function runHeightBridge(opts: { childBottoms: number[]; scrollHeight: number; bodyRectBottom?: number }) {
     // No lib sources: a vm script cannot parse an `export`. The bridges are
     // appended after the lib either way.
     const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
@@ -432,8 +438,13 @@ describe('buildSandboxedHtml', () => {
     const posted: unknown[] = [];
     let observed: (() => void) | null = null;
     const observedTargets: string[] = [];
-    const documentElement = { scrollHeight: 420, tagName: 'HTML' };
-    const body = { scrollHeight: 400, tagName: 'BODY' };
+    const children = opts.childBottoms.map((bottom) => ({ getBoundingClientRect: () => ({ bottom }) }));
+    const documentElement = { scrollHeight: opts.scrollHeight, tagName: 'HTML' };
+    const body = {
+      tagName: 'BODY',
+      children,
+      getBoundingClientRect: () => ({ bottom: opts.bodyRectBottom ?? 0 }),
+    };
     const ctx: Record<string, unknown> = {
       document: {
         documentElement,
@@ -442,6 +453,8 @@ describe('buildSandboxedHtml', () => {
         getElementById: () => null,
         getElementsByName: () => [],
       },
+      window: { pageYOffset: 0 },
+      getComputedStyle: () => ({ paddingBottom: '0px', marginBottom: '8px' }),
       parent: { postMessage: (msg: unknown) => posted.push(msg) },
       ResizeObserver: class {
         constructor(cb: () => void) {
@@ -454,18 +467,43 @@ describe('buildSandboxedHtml', () => {
     };
     vm.createContext(ctx);
     vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
-    // At load: the document's height, once.
-    expect(posted).toEqual([{ type: 'bevel.height', height: 420 }]);
-    expect(observedTargets).toEqual(['HTML', 'BODY']);
+    return { posted, observedTargets, children, documentElement, resize: () => observed!() };
+  }
+
+  it('injects the height bridge: the page posts bevel.height at load and on every change, once per value', () => {
+    const bridge = runHeightBridge({ childBottoms: [300, 412], scrollHeight: 420 });
+    // At load: the content's height — its lowest edge plus the body's bottom
+    // spacing — once.
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 420 }]);
+    expect(bridge.observedTargets).toEqual(['HTML', 'BODY']);
     // A resize that changed nothing says nothing; one that did is posted.
-    observed!();
-    expect(posted).toHaveLength(1);
-    documentElement.scrollHeight = 980.4;
-    observed!();
-    expect(posted).toEqual([
+    bridge.resize();
+    expect(bridge.posted).toHaveLength(1);
+    bridge.children[1] = { getBoundingClientRect: () => ({ bottom: 972.4 }) };
+    bridge.resize();
+    expect(bridge.posted).toEqual([
       { type: 'bevel.height', height: 420 },
       { type: 'bevel.height', height: 981 },
     ]);
+  });
+
+  it('reports the content, not the viewport: a page shorter than its frame says its own height, and a page that got shorter says less', () => {
+    // The frame's viewport (`scrollHeight`, never below it) is 900; the
+    // content ends at 400 + 8 of body margin. Reading the viewport would hold
+    // the frame at 900 for good, and a border's worth less on every report.
+    const bridge = runHeightBridge({ childBottoms: [400], scrollHeight: 900 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 408 }]);
+    bridge.children[0] = { getBoundingClientRect: () => ({ bottom: 150 }) };
+    bridge.resize();
+    expect(bridge.posted).toEqual([
+      { type: 'bevel.height', height: 408 },
+      { type: 'bevel.height', height: 158 },
+    ]);
+  });
+
+  it('measures a body with no element children by its own box', () => {
+    const bridge = runHeightBridge({ childBottoms: [], scrollHeight: 900, bodyRectBottom: 36 });
+    expect(bridge.posted).toEqual([{ type: 'bevel.height', height: 44 }]);
   });
 
   it('says nothing about height where there is no document to measure', () => {

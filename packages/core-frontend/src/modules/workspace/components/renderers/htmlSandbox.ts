@@ -396,21 +396,49 @@ const NAV_BRIDGE = `
  * Runtime appended after the nav bridge so the parent can size the frame to
  * the page. The frame is sandboxed without `allow-same-origin`, so the parent
  * cannot measure the document itself; the page tells it instead, posting
- * `bevel.height` with the document's scroll height whenever that changes —
- * at load, and on every resize the frame's own \`ResizeObserver\` sees. The
- * parent decides what to do with it: in the app the frame keeps its pane
- * and the message is ignored; on a surface whose host grows with the
- * content (`RendererSurface.sizesToContent`, the issue panel), the parent
- * sets the frame's height to it so the page is shown whole. A height is
- * posted once per value: a page that does not change says nothing twice.
+ * `bevel.height` with the content's height whenever that changes — at load,
+ * and on every resize the frame's own \`ResizeObserver\` sees. The parent
+ * decides what to do with it: in the app the frame keeps its pane and the
+ * message is ignored; on a surface whose host grows with the content
+ * (`RendererSurface.sizesToContent`, the issue panel), the parent sets the
+ * frame's height to it so the page is shown whole. A height is posted once
+ * per value: a page that does not change says nothing twice.
+ *
+ * The height is the CONTENT's extent — the lowest edge of the body's
+ * children plus the body's own bottom padding and margin — never the
+ * document's \`scrollHeight\`. That one is the greater of the content and
+ * the viewport, and the viewport is whatever the parent just set the frame
+ * to, so measuring it feeds the frame's height back as the page's: a page
+ * that got shorter could never report less, and a frame whose viewport runs
+ * a border short of its height would shrink by that border on every report
+ * until the page collapsed. A body with no element children answers with
+ * its own box.
  */
 const HEIGHT_BRIDGE = `
 ;(function () {
   if (typeof document === 'undefined' || !document.documentElement) return;
   var last = -1;
+  function bottomSpacing(body) {
+    if (typeof getComputedStyle !== 'function') return 0;
+    var style = getComputedStyle(body);
+    return (parseFloat(style.paddingBottom) || 0) + (parseFloat(style.marginBottom) || 0);
+  }
+  function measure() {
+    var body = document.body;
+    if (!body || typeof body.getBoundingClientRect !== 'function') {
+      return document.documentElement.scrollHeight || 0;
+    }
+    var kids = body.children || [];
+    var bottom = kids.length ? 0 : body.getBoundingClientRect().bottom;
+    for (var i = 0; i < kids.length; i++) {
+      var edge = kids[i].getBoundingClientRect().bottom;
+      if (edge > bottom) bottom = edge;
+    }
+    return bottom + (window.pageYOffset || 0) + bottomSpacing(body);
+  }
   function report() {
-    var height = Math.ceil(document.documentElement.scrollHeight || 0);
-    if (height === last) return;
+    var height = Math.ceil(measure());
+    if (!isFinite(height) || height < 0 || height === last) return;
     last = height;
     parent.postMessage({ type: 'bevel.height', height: height }, '*');
   }
