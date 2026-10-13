@@ -64,6 +64,7 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       accessControl,
       {} as unknown as WorkspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
+      { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
       {} as unknown as WorkflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       {} as unknown as Database,

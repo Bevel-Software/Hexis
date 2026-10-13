@@ -43,9 +43,16 @@ vi.mock('../../../library/services/plugins.api', async (importOriginal) => ({
 }));
 // New page's own naming and retrying is `useCreatePage`'s, pinned by the Get
 // set up column's suite; here it is the command that calls it.
-const createPage = vi.hoisted(() => vi.fn<() => Promise<string>>());
+const createPage = vi.hoisted(() => vi.fn<() => Promise<string | null>>());
+// Where New page would write; null for someone who may write no Knowledge folder.
+const pageTarget = vi.hoisted(() => ({ folder: 'knowledge-base/KnowledgeBase' as string | null }));
 vi.mock('../../../workspace/hooks/useCreatePage', () => ({
-  useCreatePage: () => ({ knowledgeRoot: 'knowledge-base/KnowledgeBase', createPage }),
+  useCreatePage: () => ({
+    knowledgeRoot: 'knowledge-base/KnowledgeBase',
+    createPage,
+    pageFolder: pageTarget.folder,
+    pageFolderSettled: true,
+  }),
 }));
 // The onboarding write is not what these tests are about.
 vi.mock('../../../../lib/api', () => ({ authFetch: vi.fn(async () => ({ ok: true, status: 200 })) }));
@@ -170,6 +177,7 @@ beforeEach(() => {
   publishEditablePage(null);
   inviteOpen.mockReset();
   createPage.mockReset().mockResolvedValue('knowledge-base/KnowledgeBase/Untitled.md');
+  pageTarget.folder = 'knowledge-base/KnowledgeBase';
   api.listSkills.mockReset().mockResolvedValue([
     { name: 'pricing-calculator', description: '', path: 'Plugins/GTM/skills/pricing-calculator' },
   ]);
@@ -672,6 +680,30 @@ describe('SearchPalette: single-key shortcuts', () => {
     press('c');
     expect(createPage).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('combobox')).toBeNull();
+  });
+
+  it('C does nothing, and the menu offers no New page, for someone who may write no Knowledge folder', async () => {
+    pageTarget.folder = null;
+    const user = userEvent.setup();
+    renderPalette();
+    press('c');
+    expect(createPage).not.toHaveBeenCalled();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    await user.click(trigger());
+    expect(screen.queryByRole('option', { name: /^New page/ })).toBeNull();
+    await user.type(input(), 'new page');
+    expect(screen.queryByRole('option', { name: /^New page/ })).toBeNull();
+  });
+
+  it('closes quietly when a refused write found nowhere left to write', async () => {
+    createPage.mockResolvedValue(null);
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    await user.click(screen.getByRole('option', { name: /^New page/ }));
+    expect(createPage).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('G then K goes to Knowledge, G then S to Skills & Tools', () => {

@@ -41,22 +41,34 @@ export async function lintRatchet({ root, baseRef }) {
   const base = git('merge-base', baseRef, 'HEAD').trim();
 
   // Changed files that still exist, each with the path its content had at the
-  // base (`null` for an added file). A rename's line is `R<score>\told\tnew`.
-  const changed = git('diff', '--name-status', '-M', '--diff-filter=AMR', `${base}...HEAD`)
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => {
-      const [status, first, second] = line.split('\t');
-      if (status.startsWith('R')) return { file: second, was: first };
-      return { file: first, was: status === 'A' ? null : first };
-    })
-    .filter(({ file }) => LINTED.test(file));
+  // base (`null` for an added file). `-z` puts a NUL between fields and
+  // records and prints paths as they are: without it git C-quotes a path with
+  // a non-ASCII, control or quote character ("caf\303\251.ts"), which would
+  // not match LINTED and so be dropped — a silent pass for exactly the file
+  // the gate is for. A rename's record is `R<score>`, the old path, the new;
+  // every other record is the status and the path. `-M` is git's default
+  // rename detection: a file moved AND rewritten past half its content comes
+  // back as an addition and counts from zero, so such a rewrite owns the
+  // problems it carried over. A move alone, or with smaller edits, does not.
+  const fields = git('diff', '-z', '--name-status', '-M', '--diff-filter=AMR', `${base}...HEAD`).split('\0');
+  const changed = [];
+  for (let i = 0; i < fields.length && fields[i] !== ''; ) {
+    const status = fields[i++];
+    if (status.startsWith('R')) {
+      const was = fields[i++];
+      changed.push({ file: fields[i++], was });
+    } else {
+      const file = fields[i++];
+      changed.push({ file, was: status === 'A' ? null : file });
+    }
+  }
+  const linted = changed.filter(({ file }) => LINTED.test(file));
 
   const eslint = new ESLint({ cwd: root });
   const problems = (results) => results.reduce((n, r) => n + r.errorCount + r.warningCount, 0);
 
   const rows = [];
-  for (const { file, was } of changed) {
+  for (const { file, was } of linted) {
     const abs = join(root, file);
     if (await eslint.isPathIgnored(abs)) continue;
     if (!(await eslint.calculateConfigForFile(abs))) continue;

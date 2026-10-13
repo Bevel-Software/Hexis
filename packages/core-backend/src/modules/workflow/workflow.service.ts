@@ -71,6 +71,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
+import { pgErrorCode } from '../database/pg-error.js';
 import type { GitService } from './git/git.service.js';
 import { redactSecret } from '../../shared/redact-secret.js';
 import type { PullRequestService } from './git/pull-request.service.js';
@@ -129,7 +130,7 @@ function isOpenPairViolation(err: unknown): boolean {
   const fieldOf = (e: unknown, key: 'code' | 'constraint' | 'message'): unknown =>
     typeof e === 'object' && e !== null ? (e as Record<string, unknown>)[key] : undefined;
   const cause = typeof err === 'object' && err !== null ? (err as { cause?: unknown }).cause : undefined;
-  const is23505 = fieldOf(err, 'code') === '23505' || fieldOf(cause, 'code') === '23505';
+  const is23505 = pgErrorCode(err) === '23505';
   if (!is23505) return false;
   // Prefer the structured `constraint` name; some pg drivers omit it, so fall
   // back to sniffing the named index out of the message (same approach as
