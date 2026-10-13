@@ -331,8 +331,12 @@ export function EmbedView() {
       // The knowledge graph a dashboard draws, as this token's viewer may see
       // it — when the distribution registered where the embed reads it from.
       ...(graphSource ? { loadKbGraph: () => graphSource.inEmbed(token) } : {}),
+      // A host that sizes its frame to the content is told so: a renderer
+      // that draws inside its own frame then grows with its page instead of
+      // scrolling inside a pane nobody gave it.
+      sizesToContent: fitContent,
     };
-  }, [view, token, graphSource]);
+  }, [view, token, graphSource, fitContent]);
 
   /**
    * The workspace the renderers believe they are reading from. Never dialled:

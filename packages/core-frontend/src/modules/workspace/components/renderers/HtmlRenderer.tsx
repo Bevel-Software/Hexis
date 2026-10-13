@@ -3,6 +3,7 @@ import { Pencil, Eye, RotateCw } from 'lucide-react';
 import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
+import { useRendererSurface } from './rendererSurface';
 
 export function HtmlRenderer({
   content,
@@ -15,7 +16,12 @@ export function HtmlRenderer({
   readOnly = false,
 }: FileRendererProps) {
   const { openLink } = useFileNav();
+  // Whether the surface's host grows with the page (an issue panel) rather
+  // than giving it a pane to scroll in (the app, the MCP App's pane).
+  const sizesToContent = useRendererSurface()?.sizesToContent === true;
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
+  /** The page's height as the frame reported it; read only where the host grows with the page. */
+  const [contentHeight, setContentHeight] = useState<number | null>(null);
   const [value, setValue] = useState(content);
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
@@ -99,6 +105,26 @@ export function HtmlRenderer({
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
   }, [openLink, filePath]);
+
+  // Height bridge: the frame is sandboxed without `allow-same-origin`, so
+  // its document cannot be measured from here; the runtime inside it posts
+  // `bevel.height` whenever the page's height changes. Where the surface's
+  // host grows with the content, the frame is sized to it, so the host sees
+  // the page whole; elsewhere the frame keeps its pane and the message is
+  // ignored.
+  useEffect(() => {
+    if (!sizesToContent) return;
+    function onHeightMessage(event: MessageEvent) {
+      const iframeWin = iframeRef.current?.contentWindow;
+      if (!iframeWin || event.source !== iframeWin) return;
+      const msg = event.data as { type?: unknown; height?: unknown } | null;
+      if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.height') return;
+      if (typeof msg.height !== 'number' || !Number.isFinite(msg.height) || msg.height < 0) return;
+      setContentHeight(Math.ceil(msg.height));
+    }
+    window.addEventListener('message', onHeightMessage);
+    return () => window.removeEventListener('message', onHeightMessage);
+  }, [sizesToContent]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -213,7 +239,12 @@ export function HtmlRenderer({
           // iframe cannot exfiltrate, navigate, popup, or fetch.
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
-          className="flex-1 w-full bg-white rounded-xs border border-line"
+          // In a pane the frame fills it and scrolls inside; where the host
+          // grows with the page, the frame takes the height the page reported
+          // (a flex-grown frame in an auto-height column would collapse to the
+          // browser's default 150px instead).
+          className={`w-full bg-white rounded-xs border border-line ${sizesToContent ? 'shrink-0' : 'flex-1'}`}
+          style={sizesToContent && contentHeight !== null ? { height: contentHeight } : undefined}
         />
       ) : (
         <div className="flex items-center justify-center h-full text-ink-muted text-sm">

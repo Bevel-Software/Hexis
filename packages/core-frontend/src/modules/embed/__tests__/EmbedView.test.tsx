@@ -7,6 +7,7 @@ import type { EmbedFileView } from '../services/embed.api';
 import { useEffect, useState } from 'react';
 import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE } from '../embed-host';
 import { useKbGraphLoader } from '../../workspace/components/renderers/kbGraphLoader';
+import { useRendererSurface } from '../../workspace/components/renderers/rendererSurface';
 
 /**
  * The HTTP surface, stubbed. The error CLASS is hoisted with the rest: the
@@ -521,6 +522,27 @@ describe('the renderer', () => {
 
     mount({ ...EMPTY_REGISTRY, renderers } as unknown as AppRegistry);
     expect((await screen.findByTestId('graph-reader')).textContent).toBe('no source');
+  });
+
+  it('tells a registered renderer, through the surface, whether the host grows with the content', async () => {
+    api.loadEmbed.mockResolvedValue(
+      view({ repoRelative: 'Pages/Dash.html', workspacePath: `${KB}/Pages/Dash.html`, content: '<p>dash</p>' }),
+    );
+    const SizingReader = () => {
+      const surface = useRendererSurface();
+      return <div data-testid="sizing-reader">{String(surface?.sizesToContent)}</div>;
+    };
+    const renderers = [{ extensions: ['.html', '.htm'], Component: SizingReader }];
+    // The connector's mint put `sizing=content` on the address.
+    window.history.replaceState({}, '', '/embed?token=tok&sizing=content');
+    mount({ ...EMPTY_REGISTRY, renderers } as unknown as AppRegistry);
+    expect((await screen.findByTestId('sizing-reader')).textContent).toBe('true');
+    cleanup();
+
+    // A host with a fixed reading pane asked nothing.
+    window.history.replaceState({}, '', '/embed?token=tok');
+    mount({ ...EMPTY_REGISTRY, renderers } as unknown as AppRegistry);
+    expect((await screen.findByTestId('sizing-reader')).textContent).toBe('false');
   });
 
   it('falls back to the built-in renderer for the type when nothing is registered', async () => {

@@ -77,6 +77,15 @@ export interface RendererSurface {
    * from here on a surface and from the registry's source in the app.
    */
   loadKbGraph?: () => Promise<unknown>;
+  /**
+   * Whether this surface's host grows with the content rather than giving
+   * the page a fixed pane to scroll in. A renderer that draws inside its own
+   * frame (the sandboxed HTML view) cannot be measured from outside, so
+   * where this is true it sizes its frame to the height the frame reports,
+   * and the host sees the page whole; where it is false or absent, the frame
+   * fills its pane and scrolls inside it as it does in the app.
+   */
+  sizesToContent?: boolean;
 }
 
 export const RendererSurfaceContext = createContext<RendererSurface | null>(null);

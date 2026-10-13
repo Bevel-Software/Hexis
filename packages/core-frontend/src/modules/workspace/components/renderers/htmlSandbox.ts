@@ -392,6 +392,38 @@ const NAV_BRIDGE = `
 })();
 `;
 
+/**
+ * Runtime appended after the nav bridge so the parent can size the frame to
+ * the page. The frame is sandboxed without `allow-same-origin`, so the parent
+ * cannot measure the document itself; the page tells it instead, posting
+ * `bevel.height` with the document's scroll height whenever that changes —
+ * at load, and on every resize the frame's own \`ResizeObserver\` sees. The
+ * parent decides what to do with it: in the app the frame keeps its pane
+ * and the message is ignored; on a surface whose host grows with the
+ * content (`RendererSurface.sizesToContent`, the issue panel), the parent
+ * sets the frame's height to it so the page is shown whole. A height is
+ * posted once per value: a page that does not change says nothing twice.
+ */
+const HEIGHT_BRIDGE = `
+;(function () {
+  if (typeof document === 'undefined' || !document.documentElement) return;
+  var last = -1;
+  function report() {
+    var height = Math.ceil(document.documentElement.scrollHeight || 0);
+    if (height === last) return;
+    last = height;
+    parent.postMessage({ type: 'bevel.height', height: height }, '*');
+  }
+  if (typeof ResizeObserver === 'function') {
+    var observer = new ResizeObserver(report);
+    observer.observe(document.documentElement);
+    if (document.body) observer.observe(document.body);
+  }
+  if (typeof addEventListener === 'function') addEventListener('load', report);
+  report();
+})();
+`;
+
 interface BuildSandboxedHtmlOptions {
   /** Display title (rendered in the iframe doc's <title>). */
   title: string;
@@ -417,7 +449,7 @@ interface BuildSandboxedHtmlOptions {
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
   const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE);
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + HEIGHT_BRIDGE);
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent

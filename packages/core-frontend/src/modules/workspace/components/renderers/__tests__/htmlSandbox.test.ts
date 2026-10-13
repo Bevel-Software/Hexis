@@ -424,6 +424,57 @@ describe('buildSandboxedHtml', () => {
     expect(out).toContain('jumpTo(href)');
   });
 
+  it('injects the height bridge: the page posts bevel.height at load and on every change, once per value', () => {
+    // No lib sources: a vm script cannot parse an `export`. The bridges are
+    // appended after the lib either way.
+    const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
+    const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+    const posted: unknown[] = [];
+    let observed: (() => void) | null = null;
+    const observedTargets: string[] = [];
+    const documentElement = { scrollHeight: 420, tagName: 'HTML' };
+    const body = { scrollHeight: 400, tagName: 'BODY' };
+    const ctx: Record<string, unknown> = {
+      document: {
+        documentElement,
+        body,
+        addEventListener: () => undefined,
+        getElementById: () => null,
+        getElementsByName: () => [],
+      },
+      parent: { postMessage: (msg: unknown) => posted.push(msg) },
+      ResizeObserver: class {
+        constructor(cb: () => void) {
+          observed = cb;
+        }
+        observe(target: { tagName: string }) {
+          observedTargets.push(target.tagName);
+        }
+      },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
+    // At load: the document's height, once.
+    expect(posted).toEqual([{ type: 'bevel.height', height: 420 }]);
+    expect(observedTargets).toEqual(['HTML', 'BODY']);
+    // A resize that changed nothing says nothing; one that did is posted.
+    observed!();
+    expect(posted).toHaveLength(1);
+    documentElement.scrollHeight = 980.4;
+    observed!();
+    expect(posted).toEqual([
+      { type: 'bevel.height', height: 420 },
+      { type: 'bevel.height', height: 981 },
+    ]);
+  });
+
+  it('says nothing about height where there is no document to measure', () => {
+    // The bridge harness's document has no `documentElement`: the nav bridge
+    // runs, the height bridge stays silent rather than throwing.
+    const bridge = runBridge();
+    expect(bridge.posted).toEqual([]);
+  });
+
   // The bridge half of the one-rule promise. The sanitizer keeps a padded
   // href by reading past the padding; the bridge has to hand the parent the
   // same reading, or the resolver builds a path out of the spaces. A padded
