@@ -98,6 +98,40 @@ jobs:
       # no-op rather than a build error.
       - run: pnpm ds:check
 
+  # Lint ratchet. `eslint .` does not pass on the whole repo yet, so running
+  # it would fail every pull request and say nothing about the one at hand.
+  # This lints only the files the pull request touches and fails when any of
+  # them comes out with more ESLint problems than it had at the merge base; a
+  # new file must lint clean. See scripts/lint-ratchet.mjs. Pull requests only:
+  # a push has no base to compare against, and its pull request already ran.
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The merge base and the base branch's history, for the "before" counts.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The ratchet decides whether a pull request may merge, so its own tests
+      # run first: a broken ratchet must not pass everything.
+      - run: pnpm test:scripts
+
+      - run: pnpm lint:check --base "origin/${{ github.base_ref }}"
+
   # The local MCP server is the one thing in this repo that runs on OTHER
   # PEOPLE'S machines, at whatever Node they happen to have — so "it works on
   # the version we build the image with" says nothing about it. Its supported

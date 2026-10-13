@@ -32,7 +32,7 @@ vi.mock('../../access/api', async (importOriginal) => {
 import { suggestPrincipals } from '../../access/api';
 
 const OWNER = 'owner@bevel.software';
-const NOTE = 'Deployment admin, set in the server configuration; cannot be removed here';
+const NOTE = 'Owner; cannot be removed here';
 
 /** Admin as the backend now reports it: a fixed member plus editable ones. */
 function adminRole(over: Partial<RoleRosterEntry> = {}): RoleRosterEntry {
@@ -41,6 +41,7 @@ function adminRole(over: Partial<RoleRosterEntry> = {}): RoleRosterEntry {
     displayName: 'Admin',
     members: ['razvan@bevel.software'],
     fixedMembers: [OWNER],
+    fixedMembersNote: NOTE,
     groups: [],
     capability: { description: 'Full administrative access.', groupAssignable: true },
     isAdmin: true,
@@ -54,6 +55,7 @@ const SALES: RoleRosterEntry = {
   displayName: 'Sales',
   members: ['felix@example.com'],
   fixedMembers: [],
+  fixedMembersNote: null,
   groups: [],
   capability: null,
   isAdmin: false,
@@ -175,6 +177,19 @@ describe('AdminRolesPage: the deployment admin is a fixed Admin member', () => {
     const card = within(await findCard('Sales'));
     expect(card.queryByText(`${NOTE}.`)).not.toBeInTheDocument();
     expect(card.getByRole('button', { name: 'Remove felix@example.com' })).toBeInTheDocument();
+  });
+
+  it('prints the note the server sends, not a copy of its own', async () => {
+    // The wording lives on the server; a reworded note shows up here as sent.
+    const reworded = 'Server-held owner';
+    vi.mocked(fetchRoles).mockResolvedValue([adminRole({ fixedMembersNote: reworded }), SALES]);
+    renderPage();
+    const card = within(await findCard('Admin'));
+    expect(card.getByText(`${reworded}.`)).toBeInTheDocument();
+    expect(card.queryByText(`${NOTE}.`)).not.toBeInTheDocument();
+    await userEvent.type(card.getByRole('combobox', { name: 'Member email' }), OWNER);
+    await userEvent.keyboard('{Enter}');
+    expect(await card.findByText(`${reworded}. ${OWNER} is already an Admin.`)).toBeInTheDocument();
   });
 
   it('degrades to today’s behaviour when the backend omits fixedMembers', async () => {

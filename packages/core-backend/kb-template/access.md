@@ -14,7 +14,8 @@ owner:
 #
 # Verbs are read, write, download and owner. `owner` implies the rest and
 # `write` implies `read`. Read is default-deny: a folder with no `read:` grant
-# is invisible to everyone except admins, who read through `write: Admin`.
+# is invisible to everyone except admins, who may always change what is under
+# the root and so may always see it, unless a nearer access.md excludes them.
 #
 # Each entry is a grant (a bare principal) or a denial (the lowercase word
 # `deny`, a space, then the principal — capitalised forms like `Deny` are
