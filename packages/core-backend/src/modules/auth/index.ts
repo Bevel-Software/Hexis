@@ -1,8 +1,13 @@
 /**
- * What the auth module offers the other modules: its contracts, and the two
- * things a module checking a credential or refusing a switched-off account
- * needs to agree with auth on. Everything else in this folder is auth's own
- * — the composition root wires it, nobody else reaches in.
+ * The entry other modules reach auth through: its admission contract, and
+ * the two things a module checking a credential or refusing a switched-off
+ * account needs to agree with auth on. The composition root wires the rest.
+ *
+ * The embed reaches auth here. Modules written before this entry existed
+ * still import auth's files directly (`auth.service.ts`, the middleware's
+ * request augmentation, `account-admission.ts`); each moves here as it is
+ * touched, and what it needs is added here then — this file holds what is
+ * offered, not everything auth has.
  */
 export {
   ACCOUNT_DEACTIVATED_MESSAGE,
