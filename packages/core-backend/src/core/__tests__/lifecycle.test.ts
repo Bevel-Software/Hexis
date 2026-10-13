@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { createShutdown, holdCommitWorkerLease, holdable, stopCore, withStartupTask, type LeasedWorker } from '../lifecycle.js';
+import { createShutdown, stopCore, withStartupTask, type LeasedWorker } from '../../index.js';
+// The lease helpers are the module's own, not on the entry point: their
+// ordering is pinned here, where the module is the unit under test.
+import { holdCommitWorkerLease, holdable } from '../lifecycle.js';
 import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
 
