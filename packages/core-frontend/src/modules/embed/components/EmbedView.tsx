@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '../../../shared/components';
 import { useAppRegistry } from '../../../core/registry';
@@ -289,8 +289,11 @@ export function EmbedView() {
   // mean anything — and if somebody else took it meanwhile, the reader is
   // told so and Save is refused (the server refuses it too: it saves only
   // under a lock this reader holds).
+  // Kept in step in the same commit that changes it: a passive effect runs
+  // after the screen already shows the change, and a tab coming back in
+  // that gap would take the lock again for a view that has just expired.
   const holdsLockRef = useRef(holdsLock);
-  useEffect(() => {
+  useLayoutEffect(() => {
     holdsLockRef.current = holdsLock;
   }, [holdsLock]);
   useEffect(() => {
