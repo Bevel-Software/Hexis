@@ -1903,12 +1903,12 @@ export function registerWorkspaceTools(
     name: 'read_file',
     gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text files as ' +
-      'text, documents and email files as extracted text, an image as the picture, anything else as a one-line ' +
-      'description. It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
-      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. Optional `offset`/`limit` slice the ' +
+      'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text as ' +
+      'text, documents and email as extracted text, an image as the picture, anything else as a one-line ' +
+      'description. Also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
+      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. `offset`/`limit` slice the ' +
       'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
-      'spills with them, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
+      'spills, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
       CAN_WRITE_CLAUSE,
     inputs: {
       type: 'object',

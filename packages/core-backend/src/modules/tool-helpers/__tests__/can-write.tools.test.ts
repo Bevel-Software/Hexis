@@ -441,7 +441,10 @@ describe('read_file carries canWrite for the file read', () => {
 
   it('gives false on a draft that added AGENTS.md when the default branch has none', async () => {
     const onMain = join(wsDir(MAIN), KB, 'AGENTS.md');
+    // Gone from the default branch as COMMITTED, where the verdict is judged,
+    // not only from its working tree.
     await rm(onMain);
+    await commitMain('no AGENTS.md');
     try {
       for (const as of [ADMIN, ENG]) {
         const main = await call<Read>('read_file', { branch: MAIN, path: `${KB}/AGENTS.md` }, as);
@@ -452,6 +455,7 @@ describe('read_file carries canWrite for the file read', () => {
       }
     } finally {
       await writeFile(onMain, MAIN_TREE['AGENTS.md']);
+      await commitMain('AGENTS.md again');
     }
   });
 

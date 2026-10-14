@@ -67,4 +67,5 @@ export async function defaultBranchWriteVerdicts(
  * The clause each of the four tools carries in its description. Said the
  * same way everywhere so an agent reading any one of them learns the rule.
  */
-export const CAN_WRITE_CLAUSE = '`canWrite: false` means use a branch and a change request; do not offer a direct write.';
+export const CAN_WRITE_CLAUSE =
+  '`canWrite: false` means use a branch and a change request, never a direct write; a read-only connection can do neither.';

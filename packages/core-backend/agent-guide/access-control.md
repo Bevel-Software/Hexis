@@ -216,13 +216,17 @@ File-level write access decides how a change lands on the default branch:
   default branch, **ask the user** whether to write directly or go through the
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
-- **Check `canWrite` before offering a direct write.** `list_skills`,
-  `get_skill`, `list_files` and `read_file` report it: whether the user may
-  commit that change directly on the default branch, under its current access
-  rules — the same answer on a draft, where anyone who can read may write.
-  `canWrite: false` means use a branch and a change request; do not offer a
-  direct write. `file_stat` with `explainAccess: true` says why, and — when
-  you can manage that path's access — who holds each verb: who can approve.
+- **Check `canWrite` before offering a direct write.** `list_skills` reports
+  it for a skill's `SKILL.md`; `get_skill` for every file of the skill (or,
+  with `file`, for that one file alone — never read a file's verdict as the
+  whole skill's); `list_files` and `read_file` per path. The verdict says
+  whether the user may commit that change directly on the default branch,
+  under the rules committed there — the same answer on a draft, where anyone
+  who can read may write. `canWrite: false` means use a branch and a change
+  request; do not offer a direct write. A read-only connection gets `false`
+  everywhere and can do neither. To explain a verdict, call `file_stat` on
+  the DEFAULT branch with `explainAccess: true`: it says why, and — when you
+  can manage that path's access — who holds each verb: who can approve.
   The one exception is `roles.yaml`: a change request cannot carry that edit
   (see above), so `canWrite: false` there means the change is an Admin's to
   make, in the app's Roles page or directly on the default branch — do not
