@@ -119,6 +119,47 @@ describe('HtmlRenderer on a surface', () => {
     expect((await frameOf(standard.container)).style.height).toBe('480px');
   });
 
+  it('a preview rebuilt mid-drag ends the drag where it is: nothing left dragging, the height kept', async () => {
+    const s = surface({ sizesToContent: true });
+    const { container, rerender } = mount(s, '<h1>Board</h1>');
+    const iframe = await frameOf(container);
+    const el = handle();
+    fireEvent.pointerDown(el, { button: 0, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(el, { clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(iframe.style.height).toBe('580px'));
+    expect(el.getAttribute('data-dragging')).toBe('true');
+
+    // The page changes under the reader's finger: the handle is re-attached
+    // for the new preview, and the drag it was in the middle of is settled.
+    rerender(page(s, '<h1>Board</h1><p>rebuilt</p>'));
+    await waitFor(() => expect(handle().hasAttribute('data-dragging')).toBe(false));
+    const frame = container.querySelector('iframe')!;
+    await waitFor(() => expect(frame.style.pointerEvents).toBe(''));
+    expect(frame.style.height).toBe('580px');
+    expect(handle().getAttribute('aria-valuenow')).toBe('580');
+    expect(window.localStorage.getItem(STORED)).toBe('580');
+  });
+
+  it('a second pointer mid-drag does not take the drag over', async () => {
+    const { container } = mount(surface({ sizesToContent: true }));
+    const iframe = await frameOf(container);
+    const el = handle();
+    fireEvent.pointerDown(el, { button: 0, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(el, { clientY: 150, pointerId: 1 });
+    await waitFor(() => expect(iframe.style.height).toBe('530px'));
+    // A second finger lands: ignored, so the first keeps moving the frame
+    // and is the one that ends the drag.
+    fireEvent.pointerDown(el, { button: 0, clientY: 400, pointerId: 2 });
+    fireEvent.pointerMove(el, { clientY: 900, pointerId: 2 });
+    fireEvent.pointerMove(el, { clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(iframe.style.height).toBe('580px'));
+    fireEvent.pointerUp(el, { clientY: 900, pointerId: 2 });
+    expect(el.getAttribute('data-dragging')).toBe('true');
+    fireEvent.pointerUp(el, { clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(el.hasAttribute('data-dragging')).toBe(false));
+    expect(window.localStorage.getItem(STORED)).toBe('580');
+  });
+
   it('the arrow keys nudge the frame by a step, and a drag that is not the main button is ignored', async () => {
     const { container } = mount(surface({ sizesToContent: true }));
     const iframe = await frameOf(container);

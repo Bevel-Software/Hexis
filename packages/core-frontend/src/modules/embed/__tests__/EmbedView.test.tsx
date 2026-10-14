@@ -116,7 +116,10 @@ describe('reporting the content height to the host', () => {
   // sizes its frame to the content.
   beforeEach(() => window.history.replaceState({}, '', '/embed?token=tok&sizing=content'));
   afterEach(() => {
+    // The host put in place by a case goes with it: left behind, a later
+    // "not framed" case would run framed and pass without being exercised.
     if (realParent) Object.defineProperty(window, 'parent', realParent);
+    else delete (window as { parent?: unknown }).parent;
   });
 
   it('keeps a fixed reading pane as it is: nothing relaxed, nothing posted, when the host did not ask for content sizing', async () => {

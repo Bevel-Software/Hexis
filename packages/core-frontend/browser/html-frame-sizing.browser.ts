@@ -99,10 +99,12 @@ test('a drag that crosses into the frame keeps resizing it: the handle holds the
   expect(await h.settled()).toEqual([STANDARD - 250, STANDARD + 150]);
 });
 
-test('never shorter than the least nor taller than the most, the keys nudge it, and a finger on it is never a scroll', async ({ page }) => {
+test('never shorter than the least nor taller than the most, the keys nudge it, and the handle declines the browser\'s touch gestures', async ({ page }) => {
   const h = await host(page);
-  // The browser's own touch gestures are off on the handle, so a finger
-  // dragging it resizes instead of scrolling the page and cancelling.
+  // What is checked here is the declaration: the browser's own touch
+  // gestures are off on the handle (`touch-action: none`), which is what
+  // keeps a finger's drag from reading as a scroll of the page and being
+  // cancelled. The drags below are a mouse's; a finger's is not driven here.
   expect(await page.locator('#h').evaluate((el) => getComputedStyle(el).touchAction)).toBe('none');
   await page.setViewportSize({ width: 800, height: 3200 });
   const tall = await h.handleBox();

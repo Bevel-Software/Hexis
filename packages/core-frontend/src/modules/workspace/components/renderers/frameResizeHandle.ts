@@ -51,7 +51,10 @@ export function attachFrameResizeHandle(handle: HTMLElement, options: FrameResiz
   handle.style.touchAction = 'none';
 
   const onPointerDown = (event: PointerEvent) => {
-    if (event.button !== 0) return;
+    // One drag at a time, by the main button: a second finger or a second
+    // button mid-drag must not take the drag over, or the first pointer's
+    // moves would be ignored and the wrong one would end it.
+    if (start || event.button !== 0) return;
     start = { y: event.clientY, height: options.current(), pointerId: event.pointerId };
     handle.setAttribute('data-dragging', 'true');
     // Capture: the pointer will cross the frame below, which would otherwise
@@ -63,18 +66,22 @@ export function attachFrameResizeHandle(handle: HTMLElement, options: FrameResiz
     if (!start || event.pointerId !== start.pointerId) return;
     options.apply(clamp(start.height + (event.clientY - start.y)));
   };
-  const end = (event: PointerEvent) => {
-    if (!start || event.pointerId !== start.pointerId) return;
-    const height = clamp(start.height + (event.clientY - start.y));
+  /** Let the pointer go and clear the drag's marks; the drag's height is the caller's to settle. */
+  const letGo = (pointerId: number) => {
     start = null;
     handle.removeAttribute('data-dragging');
     if (typeof handle.releasePointerCapture === 'function') {
       try {
-        handle.releasePointerCapture(event.pointerId);
+        handle.releasePointerCapture(pointerId);
       } catch {
         // Already released with the pointer; nothing to let go of.
       }
     }
+  };
+  const end = (event: PointerEvent) => {
+    if (!start || event.pointerId !== start.pointerId) return;
+    const height = clamp(start.height + (event.clientY - start.y));
+    letGo(event.pointerId);
     options.settle(height);
   };
   const onKeyDown = (event: KeyboardEvent) => {
@@ -90,6 +97,15 @@ export function attachFrameResizeHandle(handle: HTMLElement, options: FrameResiz
   handle.addEventListener('pointercancel', end);
   handle.addEventListener('keydown', onKeyDown);
   return () => {
+    // Detached mid-drag (the preview was rebuilt under the reader's finger):
+    // the drag ends where it is, settled at the height it had reached, so
+    // the caller's dragging state and the frame's pointer-events are not
+    // left as they were in the middle of it.
+    if (start) {
+      const height = clamp(options.current());
+      letGo(start.pointerId);
+      options.settle(height);
+    }
     handle.style.touchAction = ownTouchAction;
     handle.removeEventListener('pointerdown', onPointerDown);
     handle.removeEventListener('pointermove', onPointerMove);

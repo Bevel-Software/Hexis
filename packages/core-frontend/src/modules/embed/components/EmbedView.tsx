@@ -291,12 +291,13 @@ export function EmbedView() {
     };
   }, [fitContent, reportHeight]);
   // The height again whenever what is on screen changes — the page arriving,
-  // the editor opening or closing, a notice — so the first real height never
+  // the editor opening or closing, a notice, an expiry or a load failure, the
+  // link prompt, a button going busy — so the first real height never
   // depends on a `ResizeObserver` the host's runtime may not have. Here, with
   // the other hooks: the view returns early below for a page not yet loaded.
   useEffect(() => {
     reportHeight();
-  }, [reportHeight, view, mode, notice, sent, lockLost]);
+  }, [reportHeight, view, mode, notice, sent, lockLost, expired, loadError, awaitingLink, busy]);
 
   /**
    * The surface the app's renderers are mounted on. Rebuilt only when the
