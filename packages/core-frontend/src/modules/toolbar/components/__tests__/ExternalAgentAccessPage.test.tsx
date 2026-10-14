@@ -269,9 +269,12 @@ describe('the interactive tab: Claude and ChatGPT first, each family on its own 
     }
   });
 
-  it('still offers the tool-configuration link', () => {
+  it('still offers the tool-configuration link, at the page\'s address in Skills & Tools', () => {
     mount(PUBLIC_URL);
-    expect(screen.getByRole('link', { name: /Configure your tools/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Configure your tools/ })).toHaveAttribute(
+      'href',
+      '/skills-and-tools/connect',
+    );
   });
 
   /**

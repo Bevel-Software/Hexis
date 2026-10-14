@@ -509,7 +509,13 @@ export async function createCoreServer(
   // one-time link is the whole credential an agent's `curl` carries. Every
   // file behind it was judged when `request_file_download` issued it.
   toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
+  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
+    accessControl: core.accessControl,
+    defaultWorkspaceId: () => core.kb.defaultWorkspaceId(),
+    // A skill's files as committed on the default branch, for the whole-skill
+    // verdict: the same clone and the same git the skill's history is read from.
+    committedFiles: core.gitService,
+  });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
   registerPluginsTools(core.toolRegistry, core.kb);

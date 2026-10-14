@@ -871,7 +871,7 @@ describe('GetStartedColumn: where New page writes', () => {
     expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
   });
 
-  it('offers no New page in the command menu, and C does nothing, when there is nowhere to write', async () => {
+  it('offers no Create new page in the command menu, and C does nothing, when there is nowhere to write', async () => {
     access.writable = new Set();
     const createFile = vi.fn(async () => {});
     const user = userEvent.setup();
@@ -879,7 +879,7 @@ describe('GetStartedColumn: where New page writes', () => {
     await user.keyboard('c');
     expect(createFile).not.toHaveBeenCalled();
     await user.keyboard('{Control>}k{/Control}');
-    expect(screen.queryByRole('option', { name: /^New page/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /^Create new page/ })).not.toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'Connect your agent' })).toBeInTheDocument();
     await user.keyboard('{Escape}');
 
@@ -888,7 +888,7 @@ describe('GetStartedColumn: where New page writes', () => {
     rerender(columnUi({ withPalette: true, createFile, files: [...STARTER_TREE, `${SALES}/.gitkeep`] }));
     await settleRecheck();
     await user.keyboard('{Control>}k{/Control}');
-    expect(screen.getByRole('option', { name: /^New page/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /^Create new page/ })).toBeInTheDocument();
     await user.keyboard('{Escape}');
     await user.keyboard('c');
     await waitFor(() =>

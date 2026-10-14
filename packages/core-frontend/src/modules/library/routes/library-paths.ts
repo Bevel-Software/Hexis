@@ -24,6 +24,16 @@ import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
 export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
+ * "Connect your tools" — a Skills & Tools page, inside `LibraryLayout` like the
+ * welcome page, so it gets the sidebar, its toggle and the selected tab. The
+ * route (`LibraryRoutes`) is the segment, the shell's `/connect` redirect and
+ * every in-app link use the full path — both from here. The server keeps
+ * handing out `/connect`, which redirects here.
+ */
+export const CONNECT_TOOLS_SEGMENT = 'connect';
+export const CONNECT_TOOLS_PATH = `${LIBRARY_ROOT}/${CONNECT_TOOLS_SEGMENT}`;
+
+/**
  * What the sidebar should show as selected for a path. `null` on the pages that
  * are not a filtered view of the catalog — the item pages and the plugin
  * pages — where the gallery rows are all inactive.
@@ -173,8 +183,12 @@ export function isLibraryLocation(pathname: string): boolean {
  * The LEGACY route for one tool — now a redirect to the canonical workspace
  * URL (`urlForItemFile`), preserving any `#…` the OAuth callback appended.
  * Still built in three places, deliberately: the Secrets and Connect pages
- * link it by slug (they don't carry the repo path), and the tool page's own
- * OAuth `returnTo` MUST stay this shape — the server validates it.
+ * link it by slug (they don't carry the repo path), and the tool page hands
+ * it to the OAuth start as its `returnTo`, so a sign-in started from a tool
+ * page lands back on that tool. The server accepts any safe same-origin path
+ * there (`isSafeReturnPath`: one leading `/`, no `#`, no backslash or line
+ * break, at most 512 characters) — this shape is the one these pages choose,
+ * not the one the server requires.
  *
  * Returns the BARE path: never append `#…` to it. The OAuth start route rejects
  * a `returnTo` containing `#`, and the callback is what puts the fragment on.

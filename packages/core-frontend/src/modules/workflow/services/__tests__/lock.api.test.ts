@@ -39,3 +39,7 @@ describe('lock.api', () => {
     expect((err as LockApiError).message).toBe('"Foo.md" is being edited by Dana. Try again in a moment.');
   });
 });
+
+// What a release looks like on the wire (keep-alive on `pagehide`, the
+// bearer header, the queued answer) is tested through workflow's entry
+// point in `hooks/__tests__/useFileLock.wire.test.tsx`, not here.

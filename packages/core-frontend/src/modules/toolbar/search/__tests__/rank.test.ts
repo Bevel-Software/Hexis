@@ -76,7 +76,7 @@ describe('rankByNames', () => {
   const commands = [
     { label: 'Invite people', keywords: ['team', 'members'] },
     { label: 'Team settings', keywords: [] },
-    { label: 'New page', keywords: ['write'] },
+    { label: 'Create new page', keywords: ['new page', 'write'] },
   ];
   const ranked = (query: string) =>
     rankByNames(commands, query, (c) => [c.label, ...c.keywords], 10).map((c) => c.label);
@@ -84,10 +84,14 @@ describe('rankByNames', () => {
   it('ranks an item at the best tier any of its names reaches', () => {
     // "Invite people" reaches tier 0 through its keyword, as "Team settings" does through its label.
     expect(ranked('team')).toEqual(['Invite people', 'Team settings']);
-    expect(ranked('wri')).toEqual(['New page']);
+    expect(ranked('wri')).toEqual(['Create new page']);
+    // The command's old name still finds it first, through its keyword.
+    expect(ranked('new page')).toEqual(['Create new page']);
+    expect(ranked('new')).toEqual(['Create new page']);
   });
 
   it('breaks ties on the first name, the one on screen', () => {
-    expect(ranked('e')).toEqual(['New page', 'Invite people', 'Team settings']);
+    // "Create new page" is longer on screen than the other two, though its keyword "write" is shorter.
+    expect(ranked('e')).toEqual(['Invite people', 'Team settings', 'Create new page']);
   });
 });

@@ -560,16 +560,38 @@ export interface AppRegistry {
    * Commands a distribution adds to the toolbar's command menu (Ctrl/⌘K),
    * listed after core's own.
    *
-   * Core's commands are the verbs every deployment has — New page, Invite
-   * people, the apps, the settings pages. A verb like "New ontology" belongs
+   * Core's commands are the verbs every deployment has — Create new page,
+   * Invite people, the apps, the settings pages. A verb like "New ontology" belongs
    * to the distribution that has ontologies, so core offers the place rather
    * than the command, as it does for folder-menu entries. Each one is plain
    * data plus `visible` and `run`, both handed the menu's context (router,
    * admin verdict, page on screen) — see `CommandAction`. An id core already
-   * uses is dropped; a `visible` that throws costs only its own row. Absent
+   * uses is dropped; a `visible` that throws costs only its own row. A
+   * command's `shortcut` is one letter, with or without Shift
+   * (`{ key: 'o', shift: true }`); one that is not, or that takes a key
+   * already bound, is dropped with its hint. Absent
    * means the menu offers core's commands and no others.
    */
   commandActions?: CommandAction[];
+  /**
+   * Where a renderer that draws the knowledge graph (a dashboard's HTML)
+   * gets the graph from, on each surface it can be mounted on: the app,
+   * where the reader's session reads it, and the embed, where only the
+   * embed token does. Core has no graph; a distribution that has one
+   * registers both, and its renderer asks `useKbGraphLoader` — which
+   * answers `inEmbed` through the embed's surface and `inApp` in the app —
+   * rather than any address, so the same renderer draws inside a chat or an
+   * issue panel as it draws in the app.
+   */
+  kbGraphSource?: KbGraphSource;
+}
+
+/** See {@link AppRegistry.kbGraphSource}. What the graph is, is the distribution's; core carries it as is. */
+export interface KbGraphSource {
+  /** The graph as the signed-in reader may see it, for `workspaceId`. */
+  inApp(workspaceId: string): Promise<unknown>;
+  /** The graph as the embed token's viewer may see it. */
+  inEmbed(token: string): Promise<unknown>;
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {
