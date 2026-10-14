@@ -3151,9 +3151,12 @@ export class GitService implements IGitService {
    * own still has to show — the target already held everything it proposed,
    * so nothing on the target records its files, and its branch is retired.
    *
-   * The head is this request's own (its own merge-log row recorded it), and
-   * when the head is already part of the target the diff is simply empty. It
-   * is not on its own proof against another request's change, though: when
+   * The head is this request's own (its own merge-log row recorded it). When
+   * the head is already part of the target — its commits landed through
+   * another request — it is read against the target as it stood before they
+   * arrived (see {@link targetBeforeArrival}), so the request still lists what
+   * it proposed. The head is not on its own proof against another request's
+   * change, though: when
    * the head and the target last met at more than one commit, which one the
    * diff starts from decides whose files it lists — see {@link proposalBase},
    * which needs `sourceBranch` to recognise the request's own refresh merge
@@ -3201,7 +3204,20 @@ export class GitService implements IGitService {
         throw new WorkflowValidationError(`commit ${headSha} is not in this clone`);
       }
       const baseRef = await this.resolvePublishedBranchRef(cwd, targetBranch);
-      const base = await this.proposalBase(cwd, baseRef, headSha, targetBranch, opts.sourceBranch);
+      let base = await this.proposalBase(cwd, baseRef, headSha, targetBranch, opts.sourceBranch);
+      if (base === headSha) {
+        // The head itself is on the target: its commits reached it through
+        // another request (a stacked draft cut from this one, or a draft
+        // sharing its commit). Against today's target it changes nothing, but
+        // it still proposed what it proposed — so it is read against the target
+        // as it stood just BEFORE the head arrived: the first-parent parent of
+        // the mainline commit that brought it in. Only the head's own commits
+        // lie between the two, never what that other request added.
+        const before = await this.targetBeforeArrival(cwd, baseRef, headSha);
+        base = before === null
+          ? null
+          : await this.proposalBase(cwd, before, headSha, targetBranch, opts.sourceBranch);
+      }
       if (base === null) return [];
       return this.prFilesForRange(cwd, `${base}..${headSha}`, opts.patchCap ?? 400);
     });
@@ -3252,6 +3268,34 @@ export class GitService implements IGitService {
       bases.includes(targetSide)
       ? targetSide
       : null;
+  }
+
+  /**
+   * The target as it stood just before `headSha` became part of it: the first
+   * parent of the oldest commit on the target's first-parent line that
+   * contains the head — the merge (or commit) that brought the head in. Null
+   * when the head is the target's tip itself or nothing on that line holds it.
+   */
+  private async targetBeforeArrival(cwd: string, baseRef: string, headSha: string): Promise<string | null> {
+    // Two walks, intersected: git's `--first-parent --ancestry-path` together
+    // drops the very merge that brought the head in, so the target's line and
+    // the head's descendants are listed separately.
+    const lines = (out: string) => out.split('\n').map((l) => l.trim()).filter(Boolean);
+    const [{ stdout: mainline }, { stdout: descendants }] = await Promise.all([
+      this.git(cwd, ['rev-list', '--first-parent', `${headSha}..${baseRef}`]),
+      this.git(cwd, ['rev-list', '--ancestry-path', `${headSha}..${baseRef}`]),
+    ]);
+    const holdsHead = new Set(lines(descendants));
+    const arrival = lines(mainline).filter((sha) => holdsHead.has(sha)).pop();
+    if (!arrival) return null;
+    try {
+      const { stdout: parent } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${arrival}^1`]);
+      return parent.trim() || null;
+    } catch (err) {
+      // A root commit has no parent: nothing stood before it.
+      if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+      return null;
+    }
   }
 
   /**

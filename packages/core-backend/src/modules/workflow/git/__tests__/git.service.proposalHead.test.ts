@@ -107,9 +107,59 @@ describe('GitService.changedFilesOfProposalHead', () => {
     expect(files.map((f) => f.path)).not.toContain('Other.md');
   });
 
-  it('answers nothing for a head that is already part of the target', async () => {
+  it('reads a head already on the target against the target before it arrived', async () => {
+    // A request sharing #7's commit: the head landed with #7's merge, so it
+    // is read against that merge's first parent — its own edit, and not the
+    // target's later work.
     const { headOf7 } = await seed();
-    expect(await git.changedFilesOfProposalHead(workspaceId, 'main', headOf7)).toEqual([]);
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOf7);
+    expect(files.map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['Pricing.md', 'modified', 1, 1],
+    ]);
+  });
+
+  /**
+   * Stacked drafts, no refresh (Local Testing attempt 19): B adds StackB.md,
+   * C is cut from B and adds StackC.md, another request lands in between,
+   * and C lands first carrying B's commit. B's apply stages nothing and
+   * records B's own commit — already on the target — as the head.
+   */
+  async function seedStackedRaw(): Promise<{ headOfB: string }> {
+    await seed();
+    await runGit(repo, ['checkout', '-b', 'frss/stack-b', 'main']);
+    await fs.writeFile(path.join(repo, 'StackB.md'), 'b\nb\nb\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'add StackB']);
+    const headOfB = await gitOut(repo, ['rev-parse', 'HEAD']);
+    await runGit(repo, ['checkout', '-b', 'frss/stack-c', 'frss/stack-b']);
+    await fs.writeFile(path.join(repo, 'StackC.md'), 'c\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'add StackC']);
+    await runGit(repo, ['checkout', 'main']);
+    await fs.writeFile(path.join(repo, 'Elsewhere.md'), 'someone else\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'another request']);
+    await runGit(repo, ['merge', '--no-ff', '-m', mergeCommitSubject('Stack C', 13), 'frss/stack-c']);
+    await fs.writeFile(path.join(repo, 'Later.md'), 'later\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'later work on the target']);
+    await runGit(repo, ['push', 'origin', 'main']);
+    await runGit(repo, ['branch', '-D', 'frss/stack-b', 'frss/stack-c']);
+    // The head is on the target: the three-dot read lists nothing at all.
+    expect(await gitOut(repo, ['diff', '--name-only', `main...${headOfB}`])).toBe('');
+    return { headOfB };
+  }
+
+  it("lists a stacked draft's own change when it reached the target through the request cut from it", async () => {
+    const { headOfB } = await seedStackedRaw();
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOfB, {
+      sourceBranch: 'frss/stack-b',
+    });
+    // Its own file only: not StackC.md (the request that carried it), not
+    // Elsewhere.md or Later.md (the target's own work before and after).
+    expect(files.map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['StackB.md', 'added', 3, 0],
+    ]);
   });
 
   it('refuses a head this clone does not hold, rather than reaching for it', async () => {
