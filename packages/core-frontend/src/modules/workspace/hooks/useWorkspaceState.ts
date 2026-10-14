@@ -1995,20 +1995,21 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const offLockReleased = bus.subscribe('lock-released', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
       const matchingTab = openTabsRef.current.find((t) => t.path === event.path);
-      if (!matchingTab) return;
-      // Skip if WE just released the lock — that path is already
-      // handled by `saveFile` updating the tab + the `file-changed`
-      // self-echo. Refetching here would race against that and is
-      // wasted work.
-      if (matchingTab.isDirty) return;
-      // Don't clobber a pending agent preview — see file-changed
-      // handler above for the same guard's rationale.
-      if (matchingTab.pendingFileContent !== null) return;
+      if (!matchingTab || matchingTab.deletedBy) return;
+      // A dirty tab's bytes are not taken from this read: if WE just
+      // released the lock, `saveFile` updating the tab + the `file-changed`
+      // self-echo handle it, and a read racing them could land pre-save
+      // bytes. Nor are a pending agent preview's — see file-changed handler
+      // above for the same guard's rationale. Both are still read, only to
+      // learn whether the file is gone: a delete that released the lock
+      // must show the notice over unsaved edits too.
+      const existenceOnly = matchingTab.isDirty || matchingTab.pendingFileContent !== null;
       const read = readFile(subscribedWorkspaceId, event.path);
       trackExistenceCheck(event.path, read);
       read
         .then((content) => {
           if (workspaceIdRef.current !== subscribedWorkspaceId) return;
+          if (existenceOnly) return;
           setOpenTabs((tabs) => tabs.map((t) => {
             if (t.path !== event.path) return t;
             if (t.pendingFileContent !== null) return t;

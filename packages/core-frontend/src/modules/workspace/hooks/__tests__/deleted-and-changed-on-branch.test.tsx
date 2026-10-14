@@ -843,6 +843,40 @@ describe('a file deleted by someone else', () => {
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
+  it('a lock released by a delete shows the notice over unsaved edits too, keeping them', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md', 'KB/Draft.md');
+    await typeInto(result, 'my unsaved edits');
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('my unsaved edits');
+    await expect(result.current.saveFile('KB/Draft.md', 'my unsaved edits')).rejects.toThrow('Draft.md was deleted from this branch');
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it("a lock released on a file that is still there leaves a dirty tab's edits alone", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'my unsaved edits');
+    disk.set('KB/Draft.md', 'changed meanwhile');
+
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    await settle();
+
+    expect(apiMocks.readFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md');
+    expect(result.current.activeTab?.deletedBy).toBeFalsy();
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('my unsaved edits');
+    expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nA page to delete.');
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
