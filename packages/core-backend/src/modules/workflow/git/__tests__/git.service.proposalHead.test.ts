@@ -162,6 +162,42 @@ describe('GitService.changedFilesOfProposalHead', () => {
     ]);
   });
 
+  /**
+   * A head that lies on the target's first-parent line itself: its commit
+   * reached the target without a merge (a fast-forward push), so no commit
+   * on that line brought it in — the head is its own arrival.
+   */
+  async function seedOnLine(laterWork: boolean): Promise<{ head: string }> {
+    await seed();
+    await fs.writeFile(path.join(repo, 'OnLine.md'), 'x\ny\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'add OnLine']);
+    const head = await gitOut(repo, ['rev-parse', 'HEAD']);
+    if (laterWork) {
+      await fs.writeFile(path.join(repo, 'Later.md'), 'later\n');
+      await runGit(repo, ['add', '-A']);
+      await runGit(repo, ['commit', '-m', 'later work on the target']);
+    }
+    await runGit(repo, ['push', 'origin', 'main']);
+    return { head };
+  }
+
+  it("reads a head on the target's first-parent line against its own parent, not itself", async () => {
+    const { head } = await seedOnLine(true);
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', head);
+    expect(files.map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['OnLine.md', 'added', 2, 0],
+    ]);
+  });
+
+  it("reads a head that is the target's tip against its own parent", async () => {
+    const { head } = await seedOnLine(false);
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', head);
+    expect(files.map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['OnLine.md', 'added', 2, 0],
+    ]);
+  });
+
   it('refuses a head this clone does not hold, rather than reaching for it', async () => {
     await seed();
     const runs = vi.spyOn(runner, 'run');

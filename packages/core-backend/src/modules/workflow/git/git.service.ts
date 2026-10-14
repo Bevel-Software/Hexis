@@ -3273,8 +3273,12 @@ export class GitService implements IGitService {
   /**
    * The target as it stood just before `headSha` became part of it: the first
    * parent of the oldest commit on the target's first-parent line that
-   * contains the head — the merge (or commit) that brought the head in. Null
-   * when the head is the target's tip itself or nothing on that line holds it.
+   * contains the head — the merge (or commit) that brought the head in. When
+   * the head lies on that line itself (it reached the target with no merge of
+   * its own, or is the target's tip), the head is that commit, so the answer
+   * is the head's own first parent: never the head, which would read its
+   * change against itself as nothing. Null when nothing on that line holds the
+   * head or the arrival is a root commit.
    */
   private async targetBeforeArrival(cwd: string, baseRef: string, headSha: string): Promise<string | null> {
     // Two walks, intersected: git's `--first-parent --ancestry-path` together
@@ -3286,10 +3290,20 @@ export class GitService implements IGitService {
       this.git(cwd, ['rev-list', '--ancestry-path', `${headSha}..${baseRef}`]),
     ]);
     const holdsHead = new Set(lines(descendants));
-    const arrival = lines(mainline).filter((sha) => holdsHead.has(sha)).pop();
+    const line = lines(mainline);
+    // The range leaves the head out, so an empty line means the head is the
+    // tip (the caller only asks once the head is on the target).
+    const arrival = line.length === 0 ? headSha : line.filter((sha) => holdsHead.has(sha)).pop();
     if (!arrival) return null;
+    const before = await this.firstParent(cwd, arrival);
+    // The arrival stepping straight onto the head: the head is on the line.
+    return before === headSha ? this.firstParent(cwd, headSha) : before;
+  }
+
+  /** A commit's first parent, or null for a root commit. */
+  private async firstParent(cwd: string, sha: string): Promise<string | null> {
     try {
-      const { stdout: parent } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${arrival}^1`]);
+      const { stdout: parent } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${sha}^1`]);
       return parent.trim() || null;
     } catch (err) {
       // A root commit has no parent: nothing stood before it.
