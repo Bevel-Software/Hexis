@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { PullRequestSummary } from '@bevel-software/platform-shared';
+import { withoutAffectedOwners, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { changeAuthorName } from '../utils/author';
@@ -107,19 +107,17 @@ export function AuthorsReason({ body }: { body: string | undefined }) {
  * is USUALLY pure machinery. Rendering it as a pull-quote under the title
  * presents a routing table as the reason someone wants this change. The body is
  * cut at the LAST line that is exactly `## Affected owners` — the block is
- * always appended last, and the author's own `##` headings stay — as the
- * agent tools' `authorsDescription` cuts it. Every HTML comment is dropped,
- * Hexis's hidden markers and an author's own alike, as this view always has:
+ * always appended last, and the author's own `##` headings stay — by the
+ * same shared `withoutAffectedOwners` the agent tools' `authorsDescription`
+ * uses. Every HTML comment is dropped, Hexis's hidden markers and an
+ * author's own alike, as this view always has:
  * a comment is text its writer chose not to show, and the quote renders as
  * plain text, so keeping one would print it raw. What survives is quoted
  * only if a human actually wrote it.
  */
 function authorsReason(body: string | undefined): string | null {
   if (!body) return null;
-  const lines = body.split('\n');
-  const generated = lines.map((l) => l.trimEnd()).lastIndexOf('## Affected owners');
-  const human = (generated === -1 ? lines : lines.slice(0, generated))
-    .join('\n')
+  const human = withoutAffectedOwners(body)
     // Every comment: nothing in one was written to be shown.
     .replace(/<!--[\s\S]*?-->/g, '')
     .trim();

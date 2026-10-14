@@ -61,6 +61,7 @@ import type {
   ChangedFile,
   FileApproval,
 } from '@bevel-software/platform-shared';
+import { withoutAffectedOwners } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeKindOf, type ChangeKind } from './change-request-summary.js';
 
@@ -432,10 +433,7 @@ export function toCrDetail(
  * naming a file it was asked to withhold.
  */
 export function authorsDescription(body: string): string {
-  const lines = body.split('\n');
-  const generated = lines.lastIndexOf('## Affected owners');
-  return (generated === -1 ? lines : lines.slice(0, generated))
-    .join('\n')
+  return withoutAffectedOwners(body)
     .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
     .trim();
 }
