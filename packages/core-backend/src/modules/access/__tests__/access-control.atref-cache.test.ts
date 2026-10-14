@@ -462,6 +462,43 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/roles\.yaml is in the tree but its blob could not be read/));
   });
 
+  it.each(['synced-groups.yaml', 'groups.yaml'])(
+    'refuses to decide, twice, for a ref whose %s blob is lost, and never reads it as absent',
+    async (file) => {
+      // The groups source the model reads at origin/main — the synced file,
+      // which supersedes a manual one still naming a retired team, or the
+      // manual file alone — has its blob lost from the workspace's object
+      // store (real git: the loose object file removed after the fetch).
+      // The tree still names it, so the batch's "missing" is an unreadable
+      // file, not an absent one: the build fails closed on both attempts and
+      // remembers nothing. Reading the synced file as absent would revive
+      // the manual groups; reading the manual one as absent would drop what
+      // it grants.
+      await pushFromOther(`${file} on main`, async () => {
+        if (file === 'synced-groups.yaml') {
+          await fs.writeFile(path.join(other, 'synced-groups.yaml'), 'groups:\n  Platform:\n    - zoe@x.io\n');
+        }
+        await fs.writeFile(path.join(other, 'groups.yaml'), 'groups:\n  Retired Team:\n    - ghost@x.io\n');
+      });
+      await git(repo, 'fetch', '-q', 'origin');
+      const lost = await git(repo, 'rev-parse', `origin/main:${file}`);
+      await fs.rm(path.join(repo, '.git/objects', lost.slice(0, 2), lost.slice(2)));
+
+      spawnLog.length = 0;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      for (const attempt of [1, 2]) {
+        await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+          AccessUnreadableError,
+        );
+        expect(lsTreeBuilds()).toBe(attempt);
+        expect(catFileBatches()).toBe(attempt);
+      }
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(new RegExp(`${file.replaceAll('.', '\\.')} is in the tree but its blob could not be read`)),
+      );
+    },
+  );
+
   it('refuses to decide when a groups source is a directory rather than a file', async () => {
     await pushFromOther('groups.yaml as a folder', async () => {
       await fs.mkdir(path.join(other, 'groups.yaml'));
