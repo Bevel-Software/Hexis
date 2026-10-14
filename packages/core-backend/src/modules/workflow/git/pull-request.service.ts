@@ -996,7 +996,10 @@ export class PullRequestService implements IPullRequestService {
           workspaceId,
           row.targetBranch,
           applied.headSha,
-          opts.patches === false ? { patchCap: 0 } : {},
+          {
+            sourceBranch: row.sourceBranch,
+            ...(opts.patches === false ? { patchCap: 0 } : {}),
+          },
         );
         headSha = applied.headSha;
       } catch (err) {

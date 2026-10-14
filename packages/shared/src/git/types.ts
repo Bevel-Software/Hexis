@@ -339,13 +339,16 @@ export interface IGitService {
    * last-seen tip, which may predate the head's fork and so report the
    * target's own later work as the request's. The head is never fetched —
    * its branch is retired — so a head this clone does not hold rejects with
-   * `WorkflowValidationError`.
+   * `WorkflowValidationError`. When the head and the target last met at more
+   * than one commit, the change is read only from the request's own refresh
+   * merge (which `sourceBranch` names); otherwise it answers no files rather
+   * than guess, since the wrong starting commit lists other requests' files.
    */
   changedFilesOfProposalHead(
     workspaceId: string,
     targetBranch: string,
     headSha: string,
-    opts?: { patchCap?: number },
+    opts?: { patchCap?: number; sourceBranch?: string },
   ): Promise<PullRequestFile[]>;
 
   /**

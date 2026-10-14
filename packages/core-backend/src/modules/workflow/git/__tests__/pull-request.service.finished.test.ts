@@ -218,7 +218,7 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
     );
     const detail = await svc.getPrDetail(4);
     expect(detail?.finished).toMatchObject({ appliedSha: null });
-    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, {});
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, { sourceBranch: 'feature/x' });
     expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
   });
 
@@ -323,7 +323,7 @@ describe('PullRequestService.getPrDetail — an apply that made no commit of its
       { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] },
     );
     const detail = await svc.getPrDetail(4);
-    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, {});
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, { sourceBranch: 'feature/x' });
     expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
     expect(detail?.finished).toMatchObject({ appliedSha: null, appliedBy: { name: 'Robin Lee' } });
   });
@@ -334,7 +334,7 @@ describe('PullRequestService.getPrDetail — an apply that made no commit of its
       { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }], mismatch: true },
     );
     const detail = await svc.getPrDetail(4);
-    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, {});
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, { sourceBranch: 'feature/x' });
     expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
     expect(detail?.finished?.appliedSha).toBeNull();
     expect(JSON.stringify(detail)).not.toContain(MERGE_SHA);

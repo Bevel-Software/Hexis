@@ -230,6 +230,77 @@ describe('GitService.changedFilesOfProposalHead', () => {
     expect(err).not.toBeInstanceOf(WorkflowValidationError);
   });
 
+  /**
+   * Stacked drafts (Local Testing attempt 18): B adds StackB.md; the target
+   * moves on with another request's file; applying B refreshes its draft by
+   * merging the target in; C, cut from B, lands first and carries B's commit.
+   * B's apply then stages nothing and records its refresh merge as the head.
+   * That head and the target now last met at TWO commits — B's own commit
+   * and the target tip the refresh merged — and read from the first, the
+   * diff is everything the refresh pulled from the target.
+   */
+  async function seedStacked(subject: string): Promise<{ headOfB: string }> {
+    await seed();
+    await runGit(repo, ['checkout', '-b', 'frss/stack-b', 'main']);
+    await fs.writeFile(path.join(repo, 'StackB.md'), 'b\n');
+    await runGit(repo, ['add', '-A']);
+    // B's commit dated after the target's, as it was in the repro: git then
+    // lists it first among the merge bases and a three-dot diff starts there.
+    vi.stubEnv('GIT_COMMITTER_DATE', '2030-01-01T00:00:00Z');
+    await runGit(repo, ['commit', '-m', 'add StackB']);
+    vi.unstubAllEnvs();
+    await runGit(repo, ['checkout', '-b', 'frss/stack-c', 'frss/stack-b']);
+    await fs.writeFile(path.join(repo, 'StackC.md'), 'c\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'add StackC']);
+    // Another request lands on the target while both drafts are open.
+    await runGit(repo, ['checkout', 'main']);
+    await fs.writeFile(path.join(repo, 'Elsewhere.md'), 'someone else\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'another request']);
+    await runGit(repo, ['push', 'origin', 'main']);
+    // B's apply refreshes its draft from the target...
+    await runGit(repo, ['checkout', 'frss/stack-b']);
+    await runGit(repo, ['merge', '--no-ff', '-m', subject, 'main']);
+    const headOfB = await gitOut(repo, ['rev-parse', 'HEAD']);
+    // ...while C lands with B's commit in it.
+    await runGit(repo, ['checkout', 'main']);
+    await runGit(repo, ['merge', '--no-ff', '-m', mergeCommitSubject('Stack C', 13), 'frss/stack-c']);
+    await runGit(repo, ['push', 'origin', 'main']);
+    await runGit(repo, ['branch', '-D', 'frss/stack-b', 'frss/stack-c']);
+    const bases = await gitOut(repo, ['merge-base', '--all', 'main', headOfB]);
+    expect(bases.split('\n')).toHaveLength(2);
+    // The read this replaced: a three-dot diff starts from B's own commit.
+    const threeDot = await gitOut(repo, ['diff', '--name-only', `main...${headOfB}`]);
+    expect(threeDot.split('\n')).toContain('Elsewhere.md');
+    return { headOfB };
+  }
+
+  it("reads a stacked draft's refresh merge against the target it merged, not the target's work", async () => {
+    const { headOfB } = await seedStacked('Refresh frss/stack-b from main');
+    const files = await git.changedFilesOfProposalHead(workspaceId, 'main', headOfB, {
+      sourceBranch: 'frss/stack-b',
+    });
+    expect(files.map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['StackB.md', 'added', 1, 0],
+    ]);
+  });
+
+  it('answers no files when the head meets the target twice and is not its own refresh merge', async () => {
+    const { headOfB } = await seedStacked('Merge main into frss/stack-b');
+    expect(
+      await git.changedFilesOfProposalHead(workspaceId, 'main', headOfB, { sourceBranch: 'frss/stack-b' }),
+    ).toEqual([]);
+  });
+
+  it("answers no files for another branch's refresh merge, or with no branch to recognise it by", async () => {
+    const { headOfB } = await seedStacked('Refresh frss/stack-b from main');
+    expect(
+      await git.changedFilesOfProposalHead(workspaceId, 'main', headOfB, { sourceBranch: 'frss/stack-c' }),
+    ).toEqual([]);
+    expect(await git.changedFilesOfProposalHead(workspaceId, 'main', headOfB)).toEqual([]);
+  });
+
   it('refuses anything that is not a sha', async () => {
     await seed();
     await expect(git.changedFilesOfProposalHead(workspaceId, 'main', 'main')).rejects.toBeInstanceOf(

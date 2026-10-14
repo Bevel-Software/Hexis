@@ -81,6 +81,16 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
 const PROPOSAL_TARGET_FETCH_TIMEOUT_MS = 15_000;
 
 /**
+ * The subject of the merge `mergeFromOrigin` writes when it brings a change
+ * request's source up to date with its target — the merge whose SECOND parent
+ * is the target tip it merged. `changedFilesOfProposalHead` recognises it by
+ * this subject, so the two are built in one place.
+ */
+function refreshMergeSubject(sourceBranch: string, targetBranch: string): string {
+  return `Refresh ${sourceBranch} from ${targetBranch}`;
+}
+
+/**
  * Git parses `--author="Name <email>"` by scanning for the last `<` and `>` and
  * taking everything before the `<` as the name. Stray angle brackets, newlines, or
  * carriage returns in either field break that parser or let a caller forge a
@@ -1515,7 +1525,7 @@ export class GitService implements IGitService {
       if (/Already up to date/i.test(mergeStdout)) {
         return { kind: 'clean' as const, alreadyUpToDate: true };
       }
-      const subject = `Refresh ${sourceBranch} from ${targetBranch}`;
+      const subject = refreshMergeSubject(sourceBranch, targetBranch);
       const body =
         `Workflow auto-merge: incorporates the latest ${targetBranch} into ${sourceBranch} ` +
         `as part of opening or refreshing a change request. ` +
@@ -3141,9 +3151,13 @@ export class GitService implements IGitService {
    * own still has to show — the target already held everything it proposed,
    * so nothing on the target records its files, and its branch is retired.
    *
-   * The head is this request's own (its own merge-log row recorded it), so
-   * the answer can never be another request's change: when the head is
-   * already part of the target the three-dot diff is simply empty. The
+   * The head is this request's own (its own merge-log row recorded it), and
+   * when the head is already part of the target the diff is simply empty. It
+   * is not on its own proof against another request's change, though: when
+   * the head and the target last met at more than one commit, which one the
+   * diff starts from decides whose files it lists — see {@link proposalBase},
+   * which needs `sourceBranch` to recognise the request's own refresh merge
+   * and otherwise answers no files. The
    * TARGET is refreshed first, and that refresh is REQUIRED: a stale target
    * tip older than the head's fork point would put the target's own later
    * work — other people's files — into the diff, and nothing local can prove
@@ -3157,9 +3171,10 @@ export class GitService implements IGitService {
     workspaceId: string,
     targetBranch: string,
     headSha: string,
-    opts: { patchCap?: number } = {},
+    opts: { patchCap?: number; sourceBranch?: string } = {},
   ): Promise<PullRequestFile[]> {
     assertValidBranchName(targetBranch);
+    if (opts.sourceBranch !== undefined) assertValidBranchName(opts.sourceBranch);
     if (!/^[0-9a-f]{40,64}$/.test(headSha)) {
       throw new WorkflowValidationError(`invalid commit sha: ${headSha}`);
     }
@@ -3186,8 +3201,57 @@ export class GitService implements IGitService {
         throw new WorkflowValidationError(`commit ${headSha} is not in this clone`);
       }
       const baseRef = await this.resolvePublishedBranchRef(cwd, targetBranch);
-      return this.prFilesForRange(cwd, `${baseRef}...${headSha}`, opts.patchCap ?? 400);
+      const base = await this.proposalBase(cwd, baseRef, headSha, targetBranch, opts.sourceBranch);
+      if (base === null) return [];
+      return this.prFilesForRange(cwd, `${base}..${headSha}`, opts.patchCap ?? 400);
     });
+  }
+
+  /**
+   * Where a proposal head and the target last met, for
+   * {@link changedFilesOfProposalHead}: the commit the head's change is read
+   * against, or null when no commit can be named without guessing.
+   *
+   * One merge base is that commit, exactly as a three-dot diff reads it. More
+   * than one is what stacked drafts leave behind: the apply refreshed the draft
+   * by merging the target into it, and the target later received the draft's
+   * own commit through another request, so both of the refresh merge's
+   * parents are now on the target. A three-dot diff picks one of them at
+   * git's discretion, and the draft-side one reads back exactly what the
+   * refresh pulled from the target — other requests' files under this
+   * request's number. When the head is this request's own refresh merge (the
+   * subject {@link mergeFromOrigin} writes, its second parent the target tip
+   * it merged, and that parent one of the bases) the change is read against
+   * that parent: what the request showed when it was applied. Anything else
+   * answers null — no file list rather than someone else's.
+   */
+  private async proposalBase(
+    cwd: string,
+    baseRef: string,
+    headSha: string,
+    targetBranch: string,
+    sourceBranch: string | undefined,
+  ): Promise<string | null> {
+    let bases: string[];
+    try {
+      const { stdout } = await this.git(cwd, ['merge-base', '--all', baseRef, headSha]);
+      bases = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    } catch (err) {
+      // Exit 1 is git's "these histories never met"; anything else propagates.
+      if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+      return null;
+    }
+    if (bases.length === 1) return bases[0];
+    if (bases.length === 0 || !sourceBranch) return null;
+    const { stdout } = await this.git(cwd, ['log', '-1', '--format=%P%n%s', headSha]);
+    const [parentLine = '', subject = ''] = stdout.split('\n');
+    const parents = parentLine.trim().split(' ').filter(Boolean);
+    const targetSide = parents[1];
+    return parents.length === 2 &&
+      subject.trim() === refreshMergeSubject(sourceBranch, targetBranch) &&
+      bases.includes(targetSide)
+      ? targetSide
+      : null;
   }
 
   /**
