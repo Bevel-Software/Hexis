@@ -572,7 +572,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // 403 — is about the branch that was left, so it must neither overwrite
       // that tab nor close it.
       const readFrom = workspaceId;
-      readFile(readFrom, path).then((content) => {
+      const read = readFile(readFrom, path);
+      // A save of this path while the read is in flight (the editor writing
+      // back as it unmounts) waits on its answer, as for every read here
+      // that can learn the file is gone.
+      trackExistenceCheck(path, read);
+      read.then((content) => {
         if (workspaceIdRef.current !== readFrom) return;
         setOpenTabs((prev) => prev.map((t) => (
           t.path === path ? { ...t, content, savedContent: content } : t
@@ -593,7 +598,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         }
       });
     }
-  }, [workspaceId, dropTabByPath, markTabDeleted]);
+  }, [workspaceId, dropTabByPath, markTabDeleted, trackExistenceCheck]);
 
   const addTab = useCallback(async (relativePath: string): Promise<boolean> => {
     if (!workspaceId) return false;
@@ -1685,7 +1690,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const expectedWorkspaceId = workspaceId;
       const baselineContent = activeBeforeInvalidation?.content ?? null;
       const baselineSavedContent = activeBeforeInvalidation?.savedContent ?? null;
-      readFile(expectedWorkspaceId, activePath).then((content) => {
+      const read = readFile(expectedWorkspaceId, activePath);
+      // The editor's write-back waits on this read too: a 404 it is about
+      // to deliver refuses the write instead of re-creating the file.
+      trackExistenceCheck(activePath, read);
+      read.then((content) => {
         if (workspaceIdRef.current !== expectedWorkspaceId) return;
         if (activeTabPathRef.current !== activePath) return;
         setOpenTabs((prev) => prev.map((t) => {
@@ -1715,7 +1724,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         }
       });
     }
-  }, [fsRevision, workspaceId, markTabDeleted]);
+  }, [fsRevision, workspaceId, markTabDeleted, trackExistenceCheck]);
 
   // ── Reset hydratedKey when persistenceBranch changes ──────────────────────
 
@@ -1979,7 +1988,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // Don't clobber a pending agent preview — see file-changed
       // handler above for the same guard's rationale.
       if (matchingTab.pendingFileContent !== null) return;
-      readFile(subscribedWorkspaceId, event.path)
+      const read = readFile(subscribedWorkspaceId, event.path);
+      trackExistenceCheck(event.path, read);
+      read
         .then((content) => {
           if (workspaceIdRef.current !== subscribedWorkspaceId) return;
           setOpenTabs((tabs) => tabs.map((t) => {

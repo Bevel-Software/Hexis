@@ -688,6 +688,64 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.deletedBy).toBeTruthy();
   });
 
+  it("a save while a switched-to tab's re-read is in flight waits for it and is refused when the file is gone", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    // A write elsewhere invalidates the background tab's bytes.
+    await act(async () => { result.current.bumpFsRevision(); });
+    await settle();
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBeNull();
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      answer = () => reject(new WorkspaceApiError(404, 'Not found'));
+    }));
+    act(() => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'written back'); });
+    await act(async () => {
+      answer();
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    // The page shows the notice for it, not "Opening Draft.md…".
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Draft.md', 'KB/Keep.md']);
+  });
+
+  it("a save while the active tab's re-read after a write is in flight waits for it, is refused, and keeps the edits", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      answer = () => reject(new WorkspaceApiError(404, 'Not found'));
+    }));
+    // A write elsewhere re-reads the clean active tab; the person types
+    // meanwhile and the editor writes the buffer back as it unmounts.
+    await act(async () => { result.current.bumpFsRevision(); });
+    await typeInto(result, 'typed during the read');
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'typed during the read'); });
+    await act(async () => {
+      answer();
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('typed during the read');
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
