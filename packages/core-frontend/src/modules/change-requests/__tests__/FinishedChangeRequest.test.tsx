@@ -89,8 +89,7 @@ vi.mock('../../pr/services/pr-cancel.api', () => ({
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { finishedStatusLine } from '../utils/finishedStatus';
 import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { kbFileUrl, WorkspaceApiError } from '../../workspace';
 import { AuthContext } from '../../auth/state/auth.context';
 import { describeReadFailure } from '../services/denied-file.api';
 

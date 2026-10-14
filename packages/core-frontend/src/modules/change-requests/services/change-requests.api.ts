@@ -11,7 +11,7 @@ import {
   rawFileUrl,
   readFile,
   toApiError,
-} from '../../workspace/services/workspace.api';
+} from '../../workspace';
 import { BranchUnavailableError } from '../utils/readFailure';
 
 /**

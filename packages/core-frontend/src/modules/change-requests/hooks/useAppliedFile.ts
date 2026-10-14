@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestFile } from '@bevel-software/platform-shared';
-import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
+import { getOrCreateWorkspace } from '../../workspace';
 import { fileExistsOnWorkspace, readFileAtCommit } from '../services/change-requests.api';
 import { describeReadFailure } from '../services/denied-file.api';
 import type { ReadFailure } from '../utils/readFailure';

@@ -8,8 +8,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { Banner, Surface, buttonClasses } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
-import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
+import { hasFileViewer, isBinaryFile, kbFileUrl, rendersAsText } from '../../workspace';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { useAppliedFile } from '../hooks/useAppliedFile';
 import { diffLines } from '../utils/diff';

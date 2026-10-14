@@ -31,3 +31,17 @@ export {
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
 export { kbFileUrl, resolveKbHref } from './routing/kb-routes';
+/**
+ * What another module needs to read and link a workspace's files without
+ * reaching into workspace's internals: change requests (the finished view
+ * above all) dial a branch's workspace, read a file's bytes at a commit, map
+ * a failed read, and ask which renderer a path gets.
+ */
+export { hasFileViewer, isBinaryFile, rendersAsText } from './components/renderers';
+export {
+  getOrCreateWorkspace,
+  rawFileUrl,
+  readFile,
+  toApiError,
+  WorkspaceApiError,
+} from './services/workspace.api';

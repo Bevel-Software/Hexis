@@ -8,7 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
  */
 
 import { fileExistsOnWorkspace } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { WorkspaceApiError } from '../../workspace';
 
 afterEach(() => vi.unstubAllGlobals());
 
