@@ -1,15 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { AdminContext } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
@@ -68,7 +67,10 @@ vi.mock('../../access/api', async (importOriginal) => {
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
-const tool = (over: Partial<ToolSecrets>): ToolSecrets => ({
+/** A tool as the catalog carries it — the shape the stubbed data hook answers with, nothing another module exports. */
+type CatalogTool = LibraryData['tools'][number];
+
+const tool = (over: Partial<CatalogTool>): CatalogTool => ({
   slug: 'heyreach',
   name: 'heyreach',
   path: 'Plugins/GTM/heyreach.tool',
@@ -577,5 +579,212 @@ describe('LibraryRoutes', () => {
     const row = await within(main()).findByRole('button', { name: /^GTM/ });
     expect(row).toHaveTextContent('1 skills · 0 tools');
     expect(screen.queryByTestId('library-card-integration-heyreach')).toBeNull();
+  });
+});
+
+/**
+ * "Connect your tools" is a Skills & Tools page: inside the layout, so the
+ * sidebar (and, in the shell, the toggle and the selected tab) are on screen
+ * with it. The shell's `/connect` redirects here; see `ShellRoutes.test`.
+ */
+/**
+ * The secrets endpoints "Connect your tools" talks to, answered at the HTTP
+ * seam — the page's own services and the shared `authFetch` stay real, so
+ * what is pinned is the page as it talks to the server. Anything else that
+ * reaches `fetch` here is a mistake, and says so.
+ */
+/** What `/api/connect/pending` answers, as JSON on the wire: three lists, shaped by the fixtures below. */
+type ConnectListing = { tools: object[]; oauth: object[]; toolOAuth: object[] };
+
+interface SecretsServer {
+  /** What `/api/connect/pending` answers. */
+  listing: ConnectListing;
+  /** Who is asking in agent-connect mode; null answers the lookup with 404. */
+  oauthRequest: { clientName: string; scope: null; resource: null } | null;
+  /** Every request, in order: method, path and the parsed JSON body. */
+  calls: { method: string; path: string; body: unknown }[];
+}
+
+function serveSecrets(listing: ConnectListing): SecretsServer {
+  const server: SecretsServer = { listing, oauthRequest: null, calls: [] };
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://test');
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const path = url.pathname;
+      server.calls.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : null });
+      if (method === 'GET' && path === '/api/connect/pending') return json(server.listing);
+      if (method === 'GET' && path === '/api/mcp/oauth/request') {
+        return server.oauthRequest ? json(server.oauthRequest) : json({ error: 'Unknown request' }, 404);
+      }
+      if (method === 'POST' && /^\/api\/secrets\/tools\/[^/]+\/check$/.test(path)) {
+        return json({ verdict: { status: 'ok', detail: null, checkedAt: new Date().toISOString() } });
+      }
+      if ((method === 'PUT' || method === 'DELETE') && /^\/api\/secrets\/tools\/[^/]+\/vars\/[^/]+\/user$/.test(path)) {
+        return json({ ok: true });
+      }
+      throw new Error(`the test server has no answer for ${method} ${path}`);
+    }),
+  );
+  return server;
+}
+
+describe('LibraryRoutes — Connect your tools', () => {
+  /** heyreach, holding one per-person key that is or is not saved. */
+  const keyedTool = (saved: boolean) =>
+    tool({
+      variables: [
+        { name: 'API_KEY', scope: 'user', label: null, key: 'heyreach_API_KEY', adminConfigured: false, userConfigured: saved },
+      ],
+    });
+
+  let server: SecretsServer;
+
+  beforeEach(() => {
+    dataMock.useLibraryData.mockReturnValue(CATALOG);
+    pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
+    teamsMock.listTeams.mockResolvedValue(TEAMS);
+    pluginsMock.listJoinRequests.mockResolvedValue([]);
+    window.history.replaceState(null, '', '/skills-and-tools/connect');
+    sessionStorage.clear();
+    server = serveSecrets({
+      tools: [
+        {
+          slug: 'heyreach',
+          name: 'heyreach',
+          path: 'Plugins/GTM/heyreach.tool',
+          type: 'inline',
+          canWrite: false,
+          variables: [
+            { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', scope: 'user', configured: false, ownerOnly: false },
+          ],
+        },
+      ],
+      oauth: [],
+      toolOAuth: [],
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('renders the page inside the Skills & Tools layout, with no sidebar row selected', async () => {
+    renderAt('/skills-and-tools/connect');
+    expect(await screen.findByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+    expect(within(main()).getByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+    expect(nav()).toBeInTheDocument();
+    // The page has no row of its own, so nothing is lit — not even Everything.
+    await within(nav()).findByRole('button', { name: /^GTM Team/ });
+    for (const row of within(nav()).getAllByRole('button')) {
+      expect(row).not.toHaveAttribute('aria-current', 'true');
+    }
+    expect(pathname()).toBe('/skills-and-tools/connect');
+    // The way back is the sidebar now, not a link of its own.
+    expect(screen.queryByRole('link', { name: /Skills & tools/i })).toBeNull();
+  });
+
+  it('keeps agent-connect mode, with the same sidebar beside it', async () => {
+    server.oauthRequest = { clientName: 'Claude', scope: null, resource: null };
+    // The page reads the browser's own address, as the BrowserRouter keeps it.
+    window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=signed-state');
+    renderAt('/skills-and-tools/connect?oauth=signed-state');
+    expect(
+      await screen.findByRole('button', { name: 'Finish & return to your agent' }),
+    ).toBeInTheDocument();
+    expect(nav()).toBeInTheDocument();
+    const asked = (vi.mocked(fetch).mock.calls as [RequestInfo | URL, RequestInit?][]).map(([input]) => String(input));
+    expect(asked).toContain('/api/mcp/oauth/request?state=signed-state');
+  });
+
+  it("the sidebar's setup reminder opens the page at its own address", async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [keyedTool(false)] });
+    renderAt('/skills-and-tools');
+    fireEvent.click(await screen.findByRole('button', { name: /1 integration needs setup/ }));
+    expect(pathname()).toBe('/skills-and-tools/connect');
+    expect(await screen.findByRole('heading', { name: 'Connect your tools' })).toBeInTheDocument();
+  });
+
+  // The sidebar now sits beside the page, so a count that lagged a save
+  // would read as a bug. The page's announcement reaches the provider the
+  // sidebar reads from; the mock stands in for the real hook's refetch.
+  it('a key saved on the page updates the setup reminder without a reload', async () => {
+    dataMock.useLibraryData.mockImplementation(() => {
+      const [saved, setSaved] = useState(false);
+      return { ...CATALOG, tools: [keyedTool(saved)], reload: () => setSaved(true) };
+    });
+    renderAt('/skills-and-tools/connect');
+    expect(await screen.findByRole('button', { name: /1 integration needs setup/ })).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value: 'k' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /integrations? needs? setup/ })).toBeNull());
+    expect(server.calls).toContainEqual({
+      method: 'PUT',
+      path: '/api/secrets/tools/heyreach/vars/API_KEY/user',
+      body: { value: 'k', label: null },
+    });
+  });
+
+  // The other direction: unticking a signed-in tool deletes the sign-in, and
+  // the reminder has to come back for it — counted, not left at "all set".
+  it('a sign-in removed on the page updates the setup reminder without a reload', async () => {
+    const signedInTool = (authorized: boolean) =>
+      tool({
+        variables: [
+          {
+            name: 'TOKEN',
+            scope: 'user',
+            label: null,
+            key: 'heyreach_TOKEN',
+            adminConfigured: true,
+            userConfigured: authorized,
+            oauth: true,
+            authorized,
+          },
+        ],
+      });
+    dataMock.useLibraryData.mockImplementation(() => {
+      const [signedIn, setSignedIn] = useState(true);
+      return { ...CATALOG, tools: [signedInTool(signedIn)], reload: () => setSignedIn(false) };
+    });
+    server.listing = {
+      tools: [],
+      oauth: [],
+      toolOAuth: [
+        {
+          slug: 'heyreach',
+          varName: 'TOKEN',
+          toolName: 'heyreach',
+          key: 'heyreach_TOKEN',
+          label: null,
+          authorized: true,
+          needsReauth: false,
+          ownerConfigured: true,
+          ownerOnly: false,
+        },
+      ],
+    };
+    renderAt('/skills-and-tools/connect');
+
+    const skip = await screen.findByRole('checkbox', {
+      name: 'Skip this tool (removes your saved keys and sign-ins for it)',
+    });
+    expect(screen.queryByRole('button', { name: /integrations? needs? setup/ })).toBeNull();
+
+    fireEvent.click(skip);
+
+    await waitFor(() =>
+      expect(server.calls).toContainEqual({
+        method: 'DELETE',
+        path: '/api/secrets/tools/heyreach/vars/TOKEN/user',
+        body: null,
+      }),
+    );
+    expect(await screen.findByRole('button', { name: /1 integration needs setup/ })).toBeInTheDocument();
   });
 });

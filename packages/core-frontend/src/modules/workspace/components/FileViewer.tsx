@@ -28,8 +28,7 @@ import {
   type OpenComparisonDetail,
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
-import { useFileLock } from '../../workflow/hooks/useFileLock';
-import { LockApiError } from '../../workflow/services/lock.api';
+import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../workflow';
 import { useAuth } from '../../auth/state/auth.context';
 import {
   knowledgeSuggestionBranchFor,
@@ -455,10 +454,11 @@ export function FileViewer() {
   // already been re-set to true by the Edit click — and the naive
   // mirror would revert editMode back to false. To avoid that, Done
   // stamps `lastDoneAtRef`; the mirror ignores transitions that fall
-  // within a short window after Done (longer than a typical
-  // commit+push round-trip on a normal network — Done's release
-  // running >`DONE_RELEASE_WINDOW_MS` would be exceptional, and the
-  // worst-case outcome is one extra Edit click to recover).
+  // within a short window after Done (longer than a typical save-and-
+  // release round-trip on a normal network; the server queues the commit
+  // itself — Done's release running >`DONE_RELEASE_WINDOW_MS` would be
+  // exceptional, and the worst-case outcome is one extra Edit click to
+  // recover).
   const wasHoldingLockRef = useRef(false);
   const lastDoneAtRef = useRef(0);
   const DONE_RELEASE_WINDOW_MS = 5_000;
@@ -672,8 +672,9 @@ export function FileViewer() {
 
   const handleExitEditMode = useCallback(() => {
     if (!editMode) return;
-    // Flip to View mode SYNCHRONOUSLY. The actual save+commit+push that
-    // `saveAndRelease` runs takes a full git-push round-trip (~1–3 s)
+    // Flip to View mode SYNCHRONOUSLY. The save and release that
+    // `saveAndRelease` runs are two network round-trips (the server then
+    // queues the commit of what is on disk; nothing waits on git here),
     // and we don't want the user staring at a frozen "Done" button
     // waiting for the network — they explicitly asked to leave edit
     // mode, the UI should respect that immediately.
@@ -864,8 +865,9 @@ export function FileViewer() {
   //   - Lock is already held because we're in edit mode (handleEnterEditMode
   //     guarantees it). Save = checkpoint commit, lock stays held so
   //     subsequent keystrokes don't have to re-acquire.
-  //   - Final commit + release happens on exit-edit, unmount, file switch,
-  //     or `IDLE_RELEASE_MS` of inactivity (the hook's idle timer).
+  //   - The final write + release happens on exit-edit, unmount, file
+  //     switch, or `IDLE_RELEASE_MS` of inactivity (the hook's idle
+  //     timer); the server queues the commit of what is on disk.
   const handleSave = useCallback(async (content: string) => {
     if (!openFilePath) return;
     openFileContentRef.current = content;
@@ -873,12 +875,12 @@ export function FileViewer() {
       // Defensive: this path runs when a save fires without us being in
       // edit mode (rare — renderer is readOnly when !editMode, so
       // normally only the explicit Edit-button + saveCheckpoint flow
-      // reaches here). Acquire the lock, commit-and-release as a
+      // reaches here). Acquire the lock, save-and-release as a
       // one-shot, and stay in View mode. We deliberately do NOT call
       // `setEditMode(true)` — the user didn't ask to enter Edit mode,
       // they just hit save, so the UI shouldn't silently promote them.
-      // `saveAndRelease` handles the full commit-then-release-then-
-      // push cycle in one call.
+      // `saveAndRelease` writes the buffer and releases the hold in one
+      // call; the server queues the commit of what is on disk.
       const { acquired, error } = await fileLock.acquire();
       if (!acquired) {
         // Read the message off the resolved outcome, not `fileLock.lockError`
@@ -1266,6 +1268,9 @@ export function FileViewer() {
   // rule). While a mode is OPEN it shows the way out instead. The header's
   // own cluster is suppressed for prose files (`writeActionInPane`).
   const lockedBy = fileLock.externalLock?.holderName ?? null;
+  // The hold is the viewer's own (another tab, a closed browser whose hold
+  // has not expired, their agent): say so, never name them as someone else.
+  const lockedByYou = fileLock.externalLockIsMine;
   const writeAction = isReviewingPending || viewOnly ? null : proposeMode ? (
     <>
       <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
@@ -1312,7 +1317,7 @@ export function FileViewer() {
       onClick={handleEnterEditMode}
       title={
         lockedBy
-          ? `${lockedBy} is editing this page`
+          ? lockedByYou ? SELF_HOLD_MESSAGE : `${lockedBy} is editing this page`
           : isEnteringEdit
             ? 'Getting the latest version…'
             : 'Click to edit this file'
@@ -1399,6 +1404,7 @@ export function FileViewer() {
             historyButtonRef={headerClockRef}
             titleRef={titleRef}
             lockedBy={fileLock.externalLock?.holderName ?? null}
+            lockedByYou={fileLock.externalLockIsMine}
             historyAvailable={historyAvailable}
             isDirty={isManualDirty}
             waitingOnAgentUpdate={waitingOnAgentUpdate}
@@ -1594,7 +1600,9 @@ export function FileViewer() {
             </Banner>
           )}
 
-          {/* Lock-by-someone-else banner — read-only state until the holder releases. */}
+          {/* Held-page banner — read-only state until the holder releases or
+              the hold expires (the hook clears it either way). A hold under
+              the viewer's own id says so instead of naming them. */}
           {fileLock.externalLock && !fileLock.holdingLock && !isReviewingPending && !onProtectedBranch && (
             <Banner
               role="status"
@@ -1604,7 +1612,13 @@ export function FileViewer() {
               aria-atomic="true"
               className="mb-4 flex-none"
             >
-              <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
+              {fileLock.externalLockIsMine ? (
+                SELF_HOLD_MESSAGE
+              ) : (
+                <>
+                  <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
+                </>
+              )}
             </Banner>
           )}
 

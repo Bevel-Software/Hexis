@@ -38,7 +38,9 @@ vi.mock('../../../access/api', () => ({
 // real endpoints. In these tests we just need the acquire to succeed so the
 // save flow can finish; lock contention paths are exercised in lock-specific
 // tests, not here.
-vi.mock('../../../workflow/services/lock.api', () => ({
+vi.mock('../../../workflow/services/lock.api', async (importOriginal) => ({
+  // The sentences (SELF_HOLD_MESSAGE, EDITING_ENDED_MESSAGE) stay real.
+  ...(await importOriginal<typeof import('../../../workflow/services/lock.api')>()),
   acquireLock: vi.fn(async () => ({
     acquired: true,
     lock: {
@@ -53,7 +55,7 @@ vi.mock('../../../workflow/services/lock.api', () => ({
   })),
   heartbeatLock: vi.fn(async () => ({})),
   checkpointLockedFile: vi.fn(async () => null),
-  releaseLock: vi.fn(async () => null),
+  releaseLock: vi.fn(async (): Promise<void> => {}),
   getLock: vi.fn(async () => null),
   LockApiError: class LockApiError extends Error {
     readonly status: number;
@@ -140,7 +142,13 @@ vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal)
 import { FileViewer } from '../FileViewer';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
-import { acquireLock as acquireLockMock, getLock as getLockMock, LockApiError } from '../../../workflow/services/lock.api';
+import {
+  acquireLock as acquireLockMock,
+  getLock as getLockMock,
+  releaseLock as releaseLockMock,
+  LockApiError,
+  SELF_HOLD_MESSAGE,
+} from '../../../workflow/services/lock.api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
@@ -230,6 +238,7 @@ function ViewerHarness({
   routeState,
   routePath,
   workspaceBranch = 'main',
+  onSaveFile,
 }: {
   initialContent?: string;
   /** What git reports about itself; the history views need `'ready'`. */
@@ -268,6 +277,8 @@ function ViewerHarness({
   routePath?: string;
   /** The branch the workspace is on, as the workspace state reports it. */
   workspaceBranch?: string | null;
+  /** Observes every write the viewer asks the workspace to make. */
+  onSaveFile?: (relativePath: string, content: string) => void;
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
@@ -347,7 +358,8 @@ function ViewerHarness({
     clearUploadError: () => {},
     deleteEntry: async () => {},
     moveEntry: async () => {},
-    saveFile: async (_relativePath: string, content: string) => {
+    saveFile: async (relativePath: string, content: string) => {
+      onSaveFile?.(relativePath, content);
       setOpenFileContent(content);
       setSavedContent(content);
     },
@@ -771,6 +783,97 @@ describe('FileViewer', () => {
     expect(banner).toHaveTextContent('Dana Lee is editing this page. You can edit it when they finish.');
     expect(screen.queryByText(/Locked/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit' })).toHaveAttribute('title', 'Dana Lee is editing this page');
+  });
+
+  // The hold is the viewer's own — another tab, a closed browser whose hold
+  // has not expired yet, their agent saving. Clicking Edit says so, never
+  // "<their own name> is editing this page", and once the hold is gone the
+  // notice leaves by itself and Edit works without a reload.
+  it('says a page held by the viewer is theirs, and gives Edit back when the hold ends', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(acquireLockMock).mockResolvedValueOnce({
+        acquired: false,
+        lock: {
+          branch: 'alice/draft',
+          path: 'knowledge-base/Knowledge/Foo.md',
+          holderUserId: 'u-juan',
+          holderName: 'Juan V.',
+          acquiredAt: new Date().toISOString(),
+          lastHeartbeatAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 10_000).toISOString(),
+        },
+      });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(
+        <ViewerHarness
+          initialContent="Base content"
+          authUser={{ id: 'u-juan', email: 'juan@example.com', name: 'Juan V.' }}
+        />,
+      );
+
+      await user.click(await screen.findByRole('button', { name: 'Edit' }));
+
+      const banner = await screen.findByText(SELF_HOLD_MESSAGE);
+      expect(banner).toHaveTextContent(
+        'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.',
+      );
+      expect(screen.queryByText(/Juan V\./)).not.toBeInTheDocument();
+      expect(screen.queryByText(/is editing this page/)).not.toBeInTheDocument();
+      const edit = screen.getByRole('button', { name: 'Edit' });
+      expect(edit).toBeDisabled();
+      expect(edit).toHaveAttribute('title', SELF_HOLD_MESSAGE);
+
+      // The hold expires; the re-check finds the page free.
+      vi.mocked(getLockMock).mockResolvedValue(null);
+      await act(async () => { await vi.advanceTimersByTimeAsync(11_500); });
+
+      await waitFor(() => expect(screen.queryByText(SELF_HOLD_MESSAGE)).not.toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Closing a tab mid-edit: the browser still warns while there is unsaved
+  // text (the page's `beforeunload` guard), and a clean editor does not
+  // warn. Once the person accepts and the page goes (`pagehide`), the hold
+  // is released at once with a keep-alive request, and the unsaved text is
+  // not written on the way out.
+  it('warns before closing a tab with unsaved text, then gives the page back without saving it', async () => {
+    const user = userEvent.setup();
+    const saved: string[] = [];
+    render(
+      <ViewerHarness
+        initialContent="Base content"
+        captureTyped
+        onSaveFile={(_path, content) => saved.push(content)}
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = await screen.findByRole('textbox');
+
+    const tryToClose = () => {
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    // Nothing typed yet: the tab closes without a warning.
+    expect(tryToClose()).toBe(false);
+
+    await user.type(textarea, ' and a new line');
+    // Unsaved text: the browser asks first, as today.
+    await waitFor(() => expect(tryToClose()).toBe(true));
+
+    vi.mocked(releaseLockMock).mockClear();
+    await act(async () => { window.dispatchEvent(new Event('pagehide')); });
+
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+    expect(releaseLockMock).toHaveBeenCalledWith(
+      'ws-1', 'alice/draft', 'knowledge-base/Knowledge/Foo.md', undefined, { keepalive: true },
+    );
+    // No write of the unsaved text happened on the way out.
+    expect(saved).toEqual([]);
   });
 
   // WP1 regression. The document column moved: the viewer pane used to be

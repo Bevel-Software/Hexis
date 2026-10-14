@@ -16,6 +16,12 @@ export {
   useRendererFileRef,
   type RendererFileRef,
 } from './rendererWorkspace';
+// A surface that mounts these renderers outside the app (the embed) and
+// what a renderer asks of it: the one door for both, so a surface is built
+// and a renderer is tested through this module's entry, never its files.
+export { RendererSurfaceContext, useRendererSurface, type RendererRawRead, type RendererSurface } from './rendererSurface';
+export { CanDownloadContext } from './DownloadFileButton';
+export { useKbGraphLoader } from './kbGraphLoader';
 
 /**
  * The document viewers are code-split: their parsers (xlsx ~141 KB gzip,

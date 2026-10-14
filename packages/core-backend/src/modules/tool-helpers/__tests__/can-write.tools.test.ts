@@ -1,5 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import express from 'express';
@@ -86,10 +88,14 @@ let spills: SpillStore;
 let caller = ENG;
 let scope: 'read' | 'write' = 'write';
 /** Calls the access layer took for write verdicts, by method, since the last reset. */
-let writeChecks: { method: string; workspaceId: string; paths: string[] }[] = [];
+let writeChecks: { method: string; workspaceId: string; ref?: string; paths: string[] }[] = [];
 /** A deployment's read hook: refuses the reads this matches; every read it is asked about is noted. */
 let refuseRead: ((branch: string, wsPath: string) => boolean) | null = null;
 let readsNoted: { branch: string; wsPath: string }[] = [];
+/** Set, the listing of a skill's committed files fails with it — the git behind `get_skill`'s verdict going away. */
+let listingFails: Error | null = null;
+/** The refs the skill's committed files were listed at, in order. */
+let listedAt: string[] = [];
 const hooks = new WorkflowHooks();
 hooks.onAgentRead(async ({ branch, wsPath = '' }) => {
   readsNoted.push({ branch, wsPath });
@@ -97,6 +103,16 @@ hooks.onAgentRead(async ({ branch, wsPath = '' }) => {
 });
 
 const wsDir = (branch: string) => join(root, workspaceIdForBranch(branch));
+
+const execFileAsync = promisify(execFile);
+const git = async (cwd: string, ...args: string[]): Promise<string> =>
+  (await execFileAsync('git', ['-C', cwd, '-c', 'user.email=t@x.io', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args])).stdout;
+/** Commit everything in the default branch's clone: what a direct write is judged by. */
+const commitMain = async (message: string): Promise<void> => {
+  const repo = join(wsDir(MAIN), KB);
+  await git(repo, 'add', '-A');
+  await git(repo, 'commit', '-q', '--allow-empty', '-m', message);
+};
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'can-write-'));
@@ -107,6 +123,11 @@ beforeAll(async () => {
       await writeFile(abs, text);
     }
   }
+  // The default branch is a real clone with its rules COMMITTED: a verdict is
+  // judged at its HEAD, as a direct write is. The draft stays a plain tree;
+  // nothing is judged at a ref there.
+  await git(join(wsDir(MAIN), KB), 'init', '-q', '-b', MAIN);
+  await commitMain('rules');
   const kb = testKbContext({ kbDirName: KB, branchModel: { defaultBranch: MAIN, protectedBranches: [MAIN] } });
   const workspaceService = {
     getWorkspacePath: async (id: string) => join(root, id),
@@ -123,6 +144,12 @@ beforeAll(async () => {
   const counted = new Proxy(access, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
+      if (prop === 'canWriteBatchAtRef') {
+        return (workspaceId: string, ref: string, email: string, paths: string[]) => {
+          writeChecks.push({ method: prop, workspaceId, ref, paths });
+          return (value as (...a: unknown[]) => unknown).call(target, workspaceId, ref, email, paths);
+        };
+      }
       if (prop === 'canWriteBatch' || prop === 'canWrite') {
         return (workspaceId: string, email: string, paths: string[] | string) => {
           writeChecks.push({ method: prop, workspaceId, paths: Array.isArray(paths) ? paths : [paths] });
@@ -175,6 +202,18 @@ beforeAll(async () => {
   registerSkillsTools(new ToolRegistry(), router, toolAuth, toolHandler, skills, undefined, {
     accessControl: counted,
     defaultWorkspaceId: () => kb.defaultWorkspaceId(),
+    // The skill's files as committed: read off the default branch's clone
+    // with git, as the server reads them, so a deletion on disk alone does
+    // not reach the verdict.
+    committedFiles: {
+      commitAtRef: async (workspaceId, ref) => (await git(join(root, workspaceId, KB), 'rev-parse', '--verify', `${ref}^{commit}`)).trim(),
+      listFilesAtRef: async (workspaceId, ref, folder) => {
+        if (listingFails) throw listingFails;
+        listedAt.push(ref);
+        const out = await git(join(root, workspaceId, KB), 'ls-tree', '-r', '-z', '--name-only', ref, '--', folder);
+        return out.split('\0').filter((line) => line.length > 0);
+      },
+    },
   });
   app.use('/api', router);
   server = await new Promise<HttpServer>((r) => {
@@ -249,10 +288,10 @@ describe('list_skills carries canWrite, judged on SKILL.md by the default branch
     for (const s of await skills.listSkills(ENG)) expect(s).not.toHaveProperty('canWrite');
   });
 
-  it('makes one batched write check per call, against the default branch', async () => {
+  it('makes one batched write check per call, against the default branch at its HEAD', async () => {
     await call<Listed>('list_skills', { branch: DRAFT });
     expect(writeChecks).toEqual([
-      expect.objectContaining({ method: 'canWriteBatch', workspaceId: workspaceIdForBranch(MAIN) }),
+      expect.objectContaining({ method: 'canWriteBatchAtRef', workspaceId: workspaceIdForBranch(MAIN), ref: 'HEAD' }),
     ]);
   });
 });
@@ -287,16 +326,59 @@ describe('get_skill carries canWrite for the whole skill', () => {
       expect(draft.skill.files.some((f) => f.endsWith('reference.md'))).toBe(false);
       expect(draft.skill.canWrite).toBe(false);
       expect((await call<Got>('get_skill', { name: 'deck', branch: MAIN }, ENG)).skill.canWrite).toBe(false);
-      expect(writeChecks.filter((c) => c.method === 'canWriteBatch')).toHaveLength(2);
+      expect(writeChecks.filter((c) => c.method === 'canWriteBatchAtRef')).toHaveLength(2);
     } finally {
       await writeFile(onDraft, MAIN_TREE['Plugins/Shared/deck/reference.md']);
     }
+  });
+
+  it('judges the files as COMMITTED on the default branch: a bundled file deleted on disk but not committed still counts', async () => {
+    const onMain = join(wsDir(MAIN), KB, 'Plugins/Shared/deck/reference.md');
+    await rm(onMain);
+    try {
+      // Gone from the clone's working tree, still at HEAD with its rules: the
+      // verdict stays false, as the direct write of it would be refused.
+      expect((await call<Got>('get_skill', { name: 'deck' }, ENG)).skill.canWrite).toBe(false);
+      // Committed, the skill is SKILL.md alone, which Eng may write.
+      await commitMain('drop reference.md');
+      expect((await call<Got>('get_skill', { name: 'deck' }, ENG)).skill.canWrite).toBe(true);
+    } finally {
+      await writeFile(onMain, MAIN_TREE['Plugins/Shared/deck/reference.md']);
+      await commitMain('reference.md again');
+    }
+    expect((await call<Got>('get_skill', { name: 'deck' }, ENG)).skill.canWrite).toBe(false);
   });
 
   it('judges a skill only the draft has by its draft files, where they would land', async () => {
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ENG)).skill.canWrite).toBe(false);
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ADMIN)).skill.canWrite).toBe(true);
     expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
+  });
+
+  it('lists the files and judges them at ONE commit, the one HEAD named when asked', async () => {
+    listedAt = [];
+    writeChecks = [];
+    expect((await call<Got>('get_skill', { name: 'notes' }, ENG)).skill.canWrite).toBe(true);
+    const head = (await git(join(wsDir(MAIN), KB), 'rev-parse', 'HEAD')).trim();
+    // Not "HEAD", which a commit landing in between would move: the commit itself.
+    expect(listedAt).toEqual([head]);
+    expect(writeChecks.map((c) => c.ref)).toEqual([head]);
+  });
+
+  it('a folder of the skill\'s name holding other tracked files on the default branch is not the skill', async () => {
+    // The default branch has no shared-draft SKILL.md, only an unrelated file
+    // under that folder whose rules refuse Eng: not the skill, so the draft's
+    // own files are what is judged, and Eng may write those.
+    const stray = join(wsDir(MAIN), KB, 'Plugins/Shared/shared-draft/locked.md');
+    await mkdir(dirname(stray), { recursive: true });
+    await writeFile(stray, `---\nwrite:\n  - deny Eng <${ENG}>\n---\n# Not the skill\n`);
+    await commitMain('a stray under the draft-only skill\'s folder');
+    try {
+      expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
+    } finally {
+      await rm(stray);
+      await commitMain('stray gone');
+    }
   });
 
   it('a blank `version` is the latest default copy: no second lookup of the released skill', async () => {
@@ -309,27 +391,20 @@ describe('get_skill carries canWrite for the whole skill', () => {
     }
   });
 
-  it('fails closed when the default branch\'s copy cannot be looked up: rejected or refused', async () => {
+  it('fails closed when the files committed on the default branch cannot be listed', async () => {
     const draftRead = { name: 'html-knowledge-view', branch: DRAFT };
     // The baseline: the admin may write every file of it on the default branch.
     expect((await call<Got>('get_skill', draftRead, ADMIN)).skill.canWrite).toBe(true);
-    const real = skills.getSkill.bind(skills);
-    for (const lookup of [
-      async () => { throw new Error('the catalog is unavailable'); },
-      async () => ({ ok: false as const, error: 'forbidden' as const }),
-    ]) {
-      // The draft read itself goes through; the released-skill lookup after it fails.
-      const loads = vi.spyOn(skills, 'getSkill').mockImplementationOnce(real).mockImplementationOnce(lookup);
-      writeChecks = [];
-      try {
-        const got = await call<Got>('get_skill', draftRead, ADMIN);
-        expect(got.skill.canWrite).toBe(false);
-        expect(loads).toHaveBeenCalledTimes(2);
-        // Nothing to judge, so the access layer is not asked.
-        expect(writeChecks).toEqual([]);
-      } finally {
-        loads.mockRestore();
-      }
+    // The draft read itself goes through; the listing of the skill's committed files fails.
+    listingFails = new Error('git is unavailable');
+    writeChecks = [];
+    try {
+      const got = await call<Got>('get_skill', draftRead, ADMIN);
+      expect(got.skill.canWrite).toBe(false);
+      // Nothing to judge, so the access layer is not asked.
+      expect(writeChecks).toEqual([]);
+    } finally {
+      listingFails = null;
     }
   });
 });
@@ -361,6 +436,23 @@ describe('list_files carries canWrite per entry', () => {
     const asAdmin = await call<Listing>('list_files', { branch: MAIN }, ADMIN);
     expect(byName(asEng)[KB]).toBe(false);
     expect(byName(asAdmin)[KB]).toBe(true);
+  });
+
+  // The verdict is what a direct write is judged by: the rules COMMITTED on
+  // the default branch. A grant written to the clone's working tree but not
+  // yet committed — a queued save, an edit in flight — is not yet in force.
+  it('judges the rules as committed, not a grant still only in the working tree', async () => {
+    const rules = join(wsDir(MAIN), KB, 'Notes/Sub/access.md');
+    try {
+      await writeFile(rules, '---\nwrite:\n  - everyone\n---\n');
+      expect(byName(await call<Listing>('list_files', { branch: MAIN, path: `${KB}/Notes` }, ENG)).Sub).toBe(false);
+      await commitMain('open Sub');
+      expect(byName(await call<Listing>('list_files', { branch: MAIN, path: `${KB}/Notes` }, ENG)).Sub).toBe(true);
+    } finally {
+      await writeFile(rules, MAIN_TREE['Notes/Sub/access.md']);
+      await commitMain('close Sub again');
+    }
+    expect(byName(await call<Listing>('list_files', { branch: MAIN, path: `${KB}/Notes` }, ENG)).Sub).toBe(false);
   });
 });
 
@@ -401,7 +493,10 @@ describe('read_file carries canWrite for the file read', () => {
 
   it('gives false on a draft that added AGENTS.md when the default branch has none', async () => {
     const onMain = join(wsDir(MAIN), KB, 'AGENTS.md');
+    // Gone from the default branch as COMMITTED, where the verdict is judged,
+    // not only from its working tree.
     await rm(onMain);
+    await commitMain('no AGENTS.md');
     try {
       for (const as of [ADMIN, ENG]) {
         const main = await call<Read>('read_file', { branch: MAIN, path: `${KB}/AGENTS.md` }, as);
@@ -412,6 +507,7 @@ describe('read_file carries canWrite for the file read', () => {
       }
     } finally {
       await writeFile(onMain, MAIN_TREE['AGENTS.md']);
+      await commitMain('AGENTS.md again');
     }
   });
 
@@ -457,16 +553,25 @@ describe('defaultBranchWriteVerdicts fails closed', () => {
 
   it('a check that throws is false for every path', async () => {
     const verdicts = await defaultBranchWriteVerdicts(
-      { accessControl: { canWriteBatch: async () => Promise.reject(new Error('no clone')) }, defaultWorkspaceId: () => 'ws' },
+      { accessControl: { canWriteBatchAtRef: async () => Promise.reject(new Error('no clone')) }, defaultWorkspaceId: () => 'ws' },
       ctx,
       ['a.md', 'b.md'],
     );
     expect([...verdicts]).toEqual([['a.md', false], ['b.md', false]]);
   });
 
+  it('no rules at HEAD yet (null) is the gate\'s bootstrap: true for every path, as the direct write is allowed', async () => {
+    const verdicts = await defaultBranchWriteVerdicts(
+      { accessControl: { canWriteBatchAtRef: async () => null }, defaultWorkspaceId: () => 'ws' },
+      ctx,
+      ['a.md', 'b.md'],
+    );
+    expect([...verdicts]).toEqual([['a.md', true], ['b.md', true]]);
+  });
+
   it('a path the answer leaves out is false', async () => {
     const verdicts = await defaultBranchWriteVerdicts(
-      { accessControl: { canWriteBatch: async () => new Map([['a.md', true]]) }, defaultWorkspaceId: () => 'ws' },
+      { accessControl: { canWriteBatchAtRef: async () => new Map([['a.md', true]]) }, defaultWorkspaceId: () => 'ws' },
       ctx,
       ['a.md', 'b.md'],
     );
