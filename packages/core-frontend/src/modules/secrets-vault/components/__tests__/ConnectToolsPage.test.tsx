@@ -444,6 +444,27 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
     expect(screen.queryByText(/‹/)).toBeNull();
   });
 
+  // The page scrolls as a document inside the Skills & Tools pane, so the
+  // title and Refresh would leave the screen on a long list — unless the
+  // header sticks to the top of that pane, which it does. jsdom lays nothing
+  // out, so what is pinned here is the mechanism: the header is sticky at
+  // the top, and the page keeps no scroller of its own that would take the
+  // header away from the pane's.
+  it('keeps its title and Refresh in reach on a long list: the header sticks to the top of the pane', async () => {
+    renderPage();
+    const heading = await screen.findByRole('heading', { name: 'Connect your tools' });
+    const header = heading.closest('header')!;
+    expect(header).toHaveClass('sticky', 'top-0');
+    expect(within(header).getByRole('button', { name: /Refresh/ })).toBeInTheDocument();
+    // Neither the page's root nor its content carries a scroll region: the
+    // layout's pane scrolls, and the sticky header sticks to it.
+    const root = header.parentElement!;
+    expect(root.className).not.toMatch(/overflow-y-auto|h-full/);
+    for (const el of root.querySelectorAll('div')) {
+      expect(el.className).not.toMatch(/overflow-y-auto/);
+    }
+  });
+
   it('shows a sign-in that came back to it', async () => {
     window.history.replaceState(null, '', '/skills-and-tools/connect?from=agent#authorized=1');
     renderPage();
