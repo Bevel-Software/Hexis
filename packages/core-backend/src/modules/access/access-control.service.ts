@@ -67,18 +67,29 @@ import {
 } from './directory-sync-bot.js';
 
 /**
+ * What one spec of a batched read came back as: a blob's text, nothing at
+ * that path, or an object that is not a file (a directory, say). The last
+ * two are told apart on purpose: for the model at a commit, a path that is
+ * there but is not a file is not "absent", it is config the model cannot be
+ * read from.
+ */
+type CatFileOutcome =
+  | { kind: 'blob'; text: string }
+  | { kind: 'missing' }
+  | { kind: 'non-blob'; type: string };
+
+/**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
- * them — the blob's text, or null when the spec is missing/ambiguous at the
- * ref or resolves to a non-blob (e.g. a directory). Output protocol per
- * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
- * (the spec may itself contain spaces, hence the endsWith checks).
+ * them. Output protocol per request: `<oid> <type> <size>\n<size bytes>\n`,
+ * or `<spec> missing\n` (the spec may itself contain spaces, hence the
+ * endsWith checks).
  */
-async function catFileBatch(
+async function catFileBatchOutcomes(
   runner: IGitRunner,
   repoDir: string,
   specs: string[],
-): Promise<(string | null)[]> {
+): Promise<CatFileOutcome[]> {
   // Bytes, not text: every `<size>` in the header counts bytes, and the walk
   // below has to step by that count through content that is not all ASCII.
   // One spec per LINE is the protocol, and this walk depends on getting back
@@ -91,7 +102,7 @@ async function catFileBatch(
     input: `${specs.join('\n')}\n`,
     encoding: 'buffer',
   });
-  const results: (string | null)[] = [];
+  const results: CatFileOutcome[] = [];
   let off = 0;
   for (let i = 0; i < specs.length; i++) {
     const nl = out.indexOf(0x0a, off);
@@ -99,7 +110,7 @@ async function catFileBatch(
     const header = out.subarray(off, nl).toString('utf-8');
     off = nl + 1;
     if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-      results.push(null);
+      results.push({ kind: 'missing' });
       continue;
     }
     const parts = header.split(' ');
@@ -107,12 +118,31 @@ async function catFileBatch(
     if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
       throw new Error(`unexpected git cat-file header: ${header}`);
     }
-    // Non-blob (a directory path resolves to a tree) → null, but the
-    // payload still has to be skipped to stay aligned.
-    results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
+    // A non-blob (a directory path resolves to a tree) is reported as such,
+    // and its payload still has to be skipped to stay aligned.
+    results.push(
+      parts[1] === 'blob'
+        ? { kind: 'blob', text: out.subarray(off, off + size).toString('utf-8') }
+        : { kind: 'non-blob', type: parts[1]! },
+    );
     off += size + 1; // payload + trailing LF
   }
   return results;
+}
+
+/**
+ * {@link catFileBatchOutcomes} for callers that want text or nothing: the
+ * blob's text, or null when the spec is missing at the ref or resolves to a
+ * non-blob — the own-entries reads, where a directory where a file was
+ * named simply carries no entries.
+ */
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  const outcomes = await catFileBatchOutcomes(runner, repoDir, specs);
+  return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
 
@@ -1384,22 +1414,31 @@ export class AccessControlService implements IAccessControl {
    *
    * This is what makes the change-request gates affordable. One detail read
    * plus one approval click runs six at-ref gates, and before this cache
-   * every one of them rebuilt the model from git: an `ls-tree -r` plus a
-   * `git show` per `access.md`, ~270ms each on a real knowledge base. Six
-   * builds per click was the lag behind the approve checkmark.
+   * every one of them rebuilt the model from git. A build is two git calls
+   * (`buildModelAtCommit`: one `ls-tree`, one `cat-file --batch` for every
+   * file the model reads), and each call forks the server process, which
+   * costs tens of milliseconds on a server holding a large heap.
    *
-   * Bounded FIFO, so a long-lived server holds the last few tips rather than
-   * one model per commit it ever gated against. A build that found no usable
-   * roles.yaml is deliberately NOT cached, and a build that saw any git read
-   * fail never becomes a model at all: it throws AccessUnreadableError and the
-   * gate fails closed for that call. Both are what a transient failure looks
-   * like, and pinning either to a commit would turn one hiccup into a wrong
-   * verdict, denying or granting, until the base branch moved. Concurrent
-   * misses on the same commit share one build via `atRefInFlight`.
+   * Bounded FIFO. The bound is sized for a listing that resolves access at
+   * every open change request's two refs: one commit per open request plus
+   * the targets, and a knowledge base with a hundred open requests was
+   * evicting in a cycle under the old bound of 64, rebuilding every model on
+   * every listing — thousands of forks, minutes of the main thread, and
+   * every other request waiting behind them. A commit's tree never changes,
+   * so a model is good for as long as it is held; the bound only caps memory.
+   *
+   * A commit with no roles.yaml is remembered too (`atRefNoRoles`): the batch
+   * read answers "missing" for it from git itself, which is as final as the
+   * commit. What is never cached is a build that saw a git read FAIL: it
+   * throws AccessUnreadableError and the gate fails closed for that call, and
+   * pinning that to a commit would turn one hiccup into a wrong verdict until
+   * the branch moved. Concurrent misses on the same commit share one build
+   * via `atRefInFlight`.
    */
   private readonly atRefCache = new Map<string, AtRefModel>();
+  private readonly atRefNoRoles = new Set<string>();
   private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
-  private static readonly AT_REF_CACHE_MAX = 64;
+  private static readonly AT_REF_CACHE_MAX = 512;
 
   /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
@@ -2600,28 +2639,35 @@ export class AccessControlService implements IAccessControl {
   /**
    * List every `access.md` path that exists at any depth as of `ref`.
    * The access tree is structure-agnostic: any `access.md` participates
-   * regardless of where it sits. Uses `git ls-tree -r --name-only`.
-   * `'error'` when git failed: a model built without its access files is
-   * not the model, and the caller must not cache it as one.
+   * regardless of where it sits. Uses `git ls-tree -r -z --name-only`: `-z`
+   * puts a NUL between paths and prints them as they are, where the default
+   * output C-quotes a path with a non-ASCII or special character, which would
+   * then name nothing when read back. `'error'` when git failed: a model
+   * built without its access files is not the model, and the caller must not
+   * cache it as one.
    */
   private async listAccessFilesAtRef(
     repoDir: string,
     ref: string,
-  ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string> } | 'error'> {
     try {
-      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '--name-only', ref]);
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
+      // The fixed-name sources the tree carries (roles.yaml, the groups
+      // files): a read of one of these that comes back empty is "absent"
+      // only when the tree does not name it.
+      const named = new Set<string>();
       const { pluginsDir } = this.kb.layout;
-      for (const line of stdout.split('\n')) {
-        const p = line.trim();
+      for (const p of stdout.split('\0')) {
         if (!p) continue;
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
+        else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         }
       }
-      return { accessFiles: out, pluginDirs };
+      return { accessFiles: out, pluginDirs, named };
     } catch {
       return 'error';
     }
@@ -2666,6 +2712,9 @@ export class AccessControlService implements IAccessControl {
       const key = `${workspaceId}\0${commit}`;
       const hit = this.atRefCache.get(key);
       if (hit) return hit;
+      // A commit known to carry no roles.yaml: the next candidate, without a
+      // build (see `atRefNoRoles`).
+      if (this.atRefNoRoles.has(key)) continue;
       // Registered BEFORE the first await on the build path, so concurrent
       // misses on one commit share a single build instead of all racing past
       // an empty in-flight check together.
@@ -2674,6 +2723,7 @@ export class AccessControlService implements IAccessControl {
         pending = this.buildModelAtCommit(repoDir, commit, candidate)
           .then((built) => {
             if (typeof built !== 'string') this.rememberAtRef(key, built);
+            else if (built === 'no-roles') this.rememberNoRolesAtRef(key);
             return built;
           })
           .finally(() => {
@@ -2718,6 +2768,14 @@ export class AccessControlService implements IAccessControl {
     }
   }
 
+  private rememberNoRolesAtRef(key: string): void {
+    this.atRefNoRoles.add(key);
+    if (this.atRefNoRoles.size > AccessControlService.AT_REF_CACHE_MAX) {
+      const oldest = this.atRefNoRoles.values().next().value;
+      if (oldest !== undefined) this.atRefNoRoles.delete(oldest);
+    }
+  }
+
   /**
    * The uncached build behind `loadModelAtRef`: the whole access tree read
    * at `commit`. `label` is the candidate ref the commit came from, kept for
@@ -2725,6 +2783,15 @@ export class AccessControlService implements IAccessControl {
    * means the commit carries no roles.yaml (the caller tries its next
    * candidate); `'malformed'` means it does but it doesn't parse (the caller
    * answers null, as it always has).
+   *
+   * TWO git calls, whatever the tree holds: one `ls-tree` to learn which
+   * files the model is made of, then one `cat-file --batch` that reads all of
+   * them — roles.yaml, the groups sources, every access.md and every plugin
+   * manifest. It used to be one `git show` per file, and each git call forks
+   * the server process, which on a server holding a large heap costs tens of
+   * milliseconds of the main thread per call: a knowledge base with a few
+   * dozen access files paid a second or more per commit, times every ref a
+   * listing resolves.
    */
   private async buildModelAtCommit(
     repoDir: string,
@@ -2737,20 +2804,74 @@ export class AccessControlService implements IAccessControl {
     // and the caller fails closed (AccessUnreadableError, a 503) until a
     // retry reads the tree in full.
     const tag = `${label}@${commit.slice(0, 7)}`;
+
+    const listed = await this.listAccessFilesAtRef(repoDir, commit);
+    if (listed === 'error') {
+      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
+      throw new AccessUnreadableError(label, 'access.md (ls-tree)');
+    }
+    const wanted = [
+      'roles.yaml',
+      SYNCED_GROUPS_YAML,
+      GROUPS_YAML,
+      ...listed.accessFiles,
+      ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
+    ];
+    let outcomes: CatFileOutcome[];
+    try {
+      outcomes = await catFileBatchOutcomes(this.gitRunner, repoDir, wanted.map((p) => `${commit}:${p}`));
+    } catch (err) {
+      // The operational signal: one line per failed build, naming the commit,
+      // so a run of these is visible in the logs.
+      logger(`access@${tag}`).warn(
+        `git read of the access tree failed; refusing to decide from a partial tree: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new AccessUnreadableError(label, 'access tree (cat-file)');
+    }
+    const fetched = new Map<string, CatFileOutcome>();
+    wanted.forEach((p, i) => fetched.set(p, outcomes[i] ?? { kind: 'missing' }));
+    const refuse = (relativePath: string, why: string): never => {
+      logger(`access@${tag}`).warn(`${relativePath} ${why}; refusing to decide from a partial tree`);
+      throw new AccessUnreadableError(label, relativePath);
+    };
+    // What the build reads. "Missing" from the batch is "absent" only for a
+    // groups source the tree does not name. A path the tree names — an
+    // access.md, a plugin manifest, or a groups file the listing carried —
+    // that comes back missing has a blob git could not read (a lost object),
+    // and one that is not a file is a tree the model cannot be read from:
+    // either way the build fails closed rather than drop what that file
+    // would deny. A path the build did not prefetch (none today) is read on
+    // its own, told apart from a git failure as before.
+    const inTree = (relativePath: string) =>
+      listed.named.has(relativePath) || !(relativePath === SYNCED_GROUPS_YAML || relativePath === GROUPS_YAML);
     const read = async (relativePath: string): Promise<string | null> => {
-      const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
-      if (outcome.kind === 'error') {
-        // The operational signal: one line per failed read, naming the commit
-        // and the path, so a run of these is visible in the logs.
-        logger(`access@${tag}`).warn(`git read of ${relativePath} failed; refusing to decide from a partial tree`);
-        throw new AccessUnreadableError(label, relativePath);
+      const got = fetched.get(relativePath);
+      if (got === undefined) {
+        const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
+        if (outcome.kind === 'error') refuse(relativePath, 'could not be read');
+        return outcome.kind === 'text' ? outcome.text : null;
       }
-      return outcome.kind === 'text' ? outcome.text : null;
+      if (got.kind === 'blob') return got.text;
+      if (got.kind === 'non-blob') return refuse(relativePath, `is a ${got.type}, not a file`);
+      if (!inTree(relativePath)) return null;
+      return refuse(relativePath, 'is in the tree but its blob could not be read');
     };
 
-    const rolesYaml = await read('roles.yaml');
-    if (rolesYaml === null) return 'no-roles';
-    const rolesParsed = parseRolesYaml(rolesYaml);
+    // roles.yaml decides the build's outcome, so its states are read
+    // directly. Absent from the tree is "no roles here" (the caller tries
+    // its next candidate ref). In the tree but unreadable refuses the build:
+    // answering "no roles" for it would be remembered for the commit and
+    // would send a short ref through to origin, which may grant. A directory
+    // of that name is as malformed as a file that does not parse (the caller
+    // answers null, and never falls through to a ref that might grant what
+    // this one does not).
+    const roles = fetched.get('roles.yaml') ?? { kind: 'missing' as const };
+    if (roles.kind === 'missing') {
+      if (listed.named.has('roles.yaml')) refuse('roles.yaml', 'is in the tree but its blob could not be read');
+      return 'no-roles';
+    }
+    if (roles.kind === 'non-blob') return 'malformed';
+    const rolesParsed = parseRolesYaml(roles.text);
     if (!rolesParsed.ok) return 'malformed';
 
     // Same group loading as the working-tree model, read AT THE COMMIT — the
@@ -2775,11 +2896,6 @@ export class AccessControlService implements IAccessControl {
     for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
-    const listed = await this.listAccessFilesAtRef(repoDir, commit);
-    if (listed === 'error') {
-      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
-      throw new AccessUnreadableError(label, 'access.md (ls-tree)');
-    }
     for (const p of listed.accessFiles) {
       const text = await read(p);
       if (text === null) continue;
