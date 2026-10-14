@@ -9,6 +9,7 @@ import { prMergeLog } from '../../../database/schema.js';
 import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { displayName, withoutAddresses } from '../finished-detail.js';
 import { formatAffectedOwnersBlock } from '../../workflow.service.js';
+import { ReviewWorkflowService } from '../../review-workflow/review-workflow.service.js';
 import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
 /**
@@ -486,6 +487,26 @@ describe('withoutAddresses — the detail the app route serves', () => {
     const detail = appliedDetail('merged');
     detail.body = 'Fixes the intro.\n<!--hexis:author:sam@bevel.software-->\n<!-- note to self -->';
     expect(withoutAddresses(detail).body).toBe('Fixes the intro.\n\n<!-- note to self -->');
+  });
+
+  it("drops a bypassed apply's missing-approval messages, which name the owner's address", () => {
+    // An admin applied past a missing approval: the real gate, run on the
+    // finished request, still words that approval with its owner's address.
+    const detail = appliedDetail('merged');
+    detail.approvals[0].approvedBy = [];
+    detail.approvals[0].isApproved = false;
+    const gate = ReviewWorkflowService.prototype.evaluateMergeGate.call({}, {
+      prNumber: 4,
+      state: 'merged',
+      approvals: detail.approvals,
+    });
+    expect(gate.warnings.join('\n')).toContain('Owner One <owner@bevel.software>');
+    detail.mergeBlockedReasons = gate.reasons;
+    detail.mergeWarnings = gate.warnings;
+    const scrubbed = withoutAddresses(detail);
+    expect(scrubbed.mergeWarnings).toEqual([]);
+    expect(scrubbed.mergeBlockedReasons).toEqual(['This pull request has already been merged.']);
+    expect(JSON.stringify(scrubbed)).not.toMatch(/@/);
   });
 
   it('nor on a closed one', () => {

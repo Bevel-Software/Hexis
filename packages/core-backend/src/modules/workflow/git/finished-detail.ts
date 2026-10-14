@@ -30,7 +30,11 @@ function nameOnly(name: string | undefined): string {
  * name that is itself an address (a user who never set one) blanked by
  * {@link displayName}, the rule `applierName` applies to the applier. Comments
  * go entirely: the finished view shows none, and a comment's body is free
- * text an address can sit in.
+ * text an address can sit in. So do the missing-approval messages
+ * (`mergeWarnings`, and the same entries in `mergeBlockedReasons`): each names
+ * its file's eligible approvers as `Name <email>`, and an admin's bypassed
+ * apply leaves them standing on the finished record. Nothing is left to wait
+ * on; the request's own state reason stays.
  *
  * The body goes down to the author's OWN description ({@link authorsText}):
  * the `## Affected owners` block Hexis appends lists every eligible approver
@@ -48,8 +52,11 @@ function nameOnly(name: string | undefined): string {
  */
 export function withoutAddresses(detail: PullRequestDetail): PullRequestDetail {
   if (detail.state === 'open') return detail;
+  const approvalMessages = new Set(detail.mergeWarnings ?? []);
   return {
     ...detail,
+    mergeWarnings: [],
+    mergeBlockedReasons: (detail.mergeBlockedReasons ?? []).filter((r) => !approvalMessages.has(r)),
     body: authorsText(detail.body),
     author: { ...detail.author, name: nameOnly(detail.author.name) },
     ...(detail.appAuthor && { appAuthor: { name: nameOnly(detail.appAuthor.name) } }),
