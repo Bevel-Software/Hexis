@@ -9,7 +9,7 @@ import {
 import { Banner, Surface, buttonClasses } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { hasFileViewer, isBinaryFile, kbFileUrl, rendersAsText } from '../../workspace';
-import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
+import { MarkdownDiffViewer } from '../../review';
 import { useAppliedFile } from '../hooks/useAppliedFile';
 import { diffLines } from '../utils/diff';
 import { finishedStatusLine } from '../utils/finishedStatus';

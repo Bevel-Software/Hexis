@@ -45,3 +45,18 @@ export {
   toApiError,
   WorkspaceApiError,
 } from './services/workspace.api';
+/**
+ * The file pane and the renderer pieces a file shown outside the file page
+ * mounts: a change request's branch preview and a skill page's file pane.
+ */
+export { FilePaneCard } from './components/FilePaneCard';
+export {
+  getFileRenderer,
+  getRendererLayout,
+  type RendererFileRef,
+} from './components/renderers';
+export { DownloadFileButton } from './components/renderers/DownloadFileButton';
+export { READ_PANE } from './components/renderers/readPane';
+export { KbMarkdownView } from './components/renderers/KbMarkdownView';
+export type { KbImageResolver } from './components/renderers/kbMarkdownPipeline';
+export { HtmlRenderer } from './components/renderers/HtmlRenderer';

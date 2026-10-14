@@ -1,9 +1,6 @@
 import type { ReactNode } from 'react';
 import '../../../change-requests/change-requests.css';
-import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
-import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
-import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
-import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
+import { FilePaneCard, HtmlRenderer, KbMarkdownView, type KbImageResolver } from '../../../workspace';
 import { MarkedLines, type DiffLine } from '../../../change-requests';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
