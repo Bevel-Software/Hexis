@@ -7,7 +7,7 @@ import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
 import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
-import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
+import { CONNECT_TOOLS_PATH, libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
 import { EVERYONE_TEAM, filterLibraryItems, pluginsOfItem, type LibraryFilter } from '../utils/status';
 import { pathForGroupMembers } from '../../admin/components/group-members-path';
 import { ownedLensOf, pluginEntriesFor } from '../utils/plugin-entries';
@@ -134,7 +134,7 @@ export function LibraryLayout() {
           <>
             <IntegrationsSetupReminder
               count={attentionCount}
-              onFinishSetup={() => navigate('/connect')}
+              onFinishSetup={() => navigate(CONNECT_TOOLS_PATH)}
             />
             <PullRequestsForMe />
           </>

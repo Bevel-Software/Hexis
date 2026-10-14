@@ -359,6 +359,7 @@ function harness(
                   element={<SkillPage {...(pageProps ?? {})} />}
                 />
                 <Route path="/workspace/*" element={<NavigatedTo />} />
+                <Route path="/skills-and-tools/connect" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
@@ -419,6 +420,15 @@ beforeEach(() => {
 });
 
 describe('SkillPage', () => {
+  // Straight to the page's address inside Skills & Tools — `/connect` is only
+  // the redirect kept for links the server hands out.
+  it('opens Connect your tools at its own address from the integrations section', async () => {
+    renderPage(false);
+    expect(await screen.findByText('slack')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Connect/ }));
+    expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/skills-and-tools\/connect$/);
+  });
+
   it('loads the skill and shows its name, needed integrations and files', async () => {
     renderPage(false);
 

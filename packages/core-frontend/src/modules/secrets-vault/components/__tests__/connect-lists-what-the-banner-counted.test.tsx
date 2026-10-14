@@ -191,7 +191,7 @@ async function rowFor(name: string): Promise<HTMLElement> {
 }
 
 beforeEach(() => {
-  window.history.replaceState(null, '', '/connect');
+  window.history.replaceState(null, '', '/skills-and-tools/connect');
   sessionStorage.clear();
   // The page is always handed what the server would build FOR THIS READER:
   // the full catalog, pruned by their read grant. It comes out equal to

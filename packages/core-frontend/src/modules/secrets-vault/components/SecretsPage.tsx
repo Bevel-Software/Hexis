@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
-import { pathForTool } from '../../library/routes/library-paths';
-import { ToolLogo } from '../../library/components/ToolLogo';
+import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
 import {
   listSecrets,
   createOAuthSecret,
@@ -29,22 +28,6 @@ import { ToolSecretsPanel } from './ToolSecretsPanel';
  * say `Connected` / `Set` / `Needs …` in the same grammar, and everything sits
  * on the shared components rather than hand-rolled borders.
  */
-/**
- * The OAuth-callback outcome carried in the URL fragment
- * (`#authorized` / `#error=<message>`), or null when there is none.
- * `URLSearchParams` already percent-decodes, so the value is used as-is (a
- * second `decodeURIComponent` would corrupt messages containing `%`).
- */
-function readHashOutcome(): { kind: 'authorized' | 'error'; text: string } | null {
-  const hash = window.location.hash.replace(/^#/, '');
-  if (!hash) return null;
-  const params = new URLSearchParams(hash);
-  if (params.has('authorized')) return { kind: 'authorized', text: 'Authorization complete.' };
-  if (params.has('error'))
-    return { kind: 'error', text: params.get('error') || 'Authorization failed.' };
-  return null;
-}
-
 export function SecretsPage() {
   const [tools, setTools] = useState<ToolSecrets[]>([]);
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
@@ -52,10 +35,12 @@ export function SecretsPage() {
   /** A refetch is in flight over a list that is already on screen. */
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Read ONCE, synchronously, before the fragment is stripped below. Kept in
-  // its own slot (not the API `error` above) so the initial refresh() — whose
-  // success path clears the API error — can't race the outcome away.
-  const [oauthOutcome] = useState(readHashOutcome);
+  // The OAuth-callback outcome carried in the fragment (`#authorized` /
+  // `#error=<message>`), read ONCE, synchronously, with the Library's reader
+  // before the fragment is stripped below. Kept in its own slot (not the API
+  // `error` above) so the initial refresh() — whose success path clears the
+  // API error — can't race the outcome away.
+  const [oauthOutcome] = useState(readOAuthFragment);
 
   /**
    * Which load is allowed to publish. Saving two rows in quick succession
@@ -111,8 +96,8 @@ export function SecretsPage() {
 
   // A live API error wins over the (historical) callback outcome; otherwise
   // the callback error stays visible even after the list load succeeds.
-  const shownError = error ?? (oauthOutcome?.kind === 'error' ? oauthOutcome.text : null);
-  const notice = oauthOutcome?.kind === 'authorized' ? oauthOutcome.text : null;
+  const shownError = error ?? (oauthOutcome?.kind === 'error' ? oauthOutcome.message : null);
+  const notice = oauthOutcome?.kind === 'authorized' ? 'Authorization complete.' : null;
 
   const oauthSecrets = secrets.filter((s) => s.kind === 'oauth');
 
