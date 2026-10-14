@@ -158,7 +158,11 @@ export function EmbedView() {
   // ask: a picture refused there stays broken, as it always has.
   const contentRef = useRef<HTMLDivElement | null>(null);
   const imageRenewedTo = useRef<string | null>(null);
-  useEffect(() => {
+  // A layout effect, so the listener is in place in the same commit that
+  // puts the pictures in the DOM: a cached picture can fail before a passive
+  // effect would have run, and an error that fires into no listener is a
+  // refusal nobody learns of.
+  useLayoutEffect(() => {
     const root = contentRef.current;
     if (!root) return;
     const onError = (event: Event) => {
