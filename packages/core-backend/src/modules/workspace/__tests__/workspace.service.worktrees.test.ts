@@ -487,6 +487,27 @@ describe('setting the repository aside', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    "moves nothing when a worktree's record in the repository cannot be read, rather than guessing it is not one",
+    async () => {
+      const svc = service();
+      await svc.getOrCreateForBranch('alice/a');
+      const records = path.join(svc.repository.dir, 'worktrees');
+      const dest = path.join(root, 'set-aside', 'stamp');
+      await fs.chmod(records, 0o000);
+      try {
+        await expect(setAsideRepository(svc.repository, workspacesRoot, 'knowledge-base', dest)).rejects.toThrow(
+          /EACCES/,
+        );
+      } finally {
+        await fs.chmod(records, 0o755);
+      }
+      expect(await fs.access(dest).then(() => true, () => false)).toBe(false);
+      expect(await svc.repository.exists()).toBe(true);
+      expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('worktree');
+    },
+  );
+
   it('leaves both links of a worktree as they were when only one of them can be re-written', async () => {
     const svc = service();
     await svc.getOrCreateForBranch('alice/a');

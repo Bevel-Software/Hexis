@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { readGitfile, type KbRepository } from './kb-repository.js';
 
 const log = logger('set-aside');
@@ -11,7 +12,9 @@ const log = logger('set-aside');
  * the long folder names (`C:/Users/runneradmin/…`) where node may hold the
  * same folder by its 8.3 short name (`C:\Users\RUNNER~1\…`). The nearest
  * part that exists is resolved by the OS, the rest appended; on Windows the
- * result is case-folded, as its file system is.
+ * result is case-folded, as its file system is. Only an absent part is
+ * stepped over: a part that cannot be read (a permission or I/O error) throws,
+ * since "could not tell" is no reason to move someone's worktree.
  */
 async function comparablePath(p: string): Promise<string> {
   let existing = path.resolve(p);
@@ -20,7 +23,8 @@ async function comparablePath(p: string): Promise<string> {
     try {
       existing = await fs.realpath(existing);
       break;
-    } catch {
+    } catch (err) {
+      if (!isAbsence(err)) throw err;
       const parent = path.dirname(existing);
       if (parent === existing) break;
       rest.unshift(path.basename(existing));

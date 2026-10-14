@@ -106,6 +106,22 @@ export async function workingCopyShape(checkoutDir: string): Promise<WorkingCopy
 }
 
 /**
+ * Replace the contents of a file that exists, keeping the file. Git for
+ * Windows marks a worktree's `.git` file hidden, and Windows refuses to
+ * re-create a hidden file (`fs.writeFile` opens with `w`: EPERM) — so the
+ * file is opened as it is and truncated instead.
+ */
+async function rewriteFile(file: string, text: string): Promise<void> {
+  const handle = await fs.open(file, 'r+');
+  try {
+    await handle.truncate(0);
+    await handle.write(text, 0);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
  * The folder a gitfile (`gitdir: <path>`) names, resolved against the file's
  * own folder as git does; null when the file says nothing of the kind.
  */
@@ -634,11 +650,11 @@ export class KbRepository {
         // it still names the old checkout is a worktree git calls prunable,
         // and a `worktree prune` in the set-aside repository would drop it.
         const before = await fs.readFile(gitfile, 'utf8');
-        await fs.writeFile(gitfile, `gitdir: ${gitPath(admin)}\n`);
+        await rewriteFile(gitfile, `gitdir: ${gitPath(admin)}\n`);
         try {
-          await fs.writeFile(path.join(admin, 'gitdir'), `${gitPath(gitfile)}\n`);
+          await rewriteFile(path.join(admin, 'gitdir'), `${gitPath(gitfile)}\n`);
         } catch (err) {
-          await fs.writeFile(gitfile, before).catch((backErr: unknown) => {
+          await rewriteFile(gitfile, before).catch((backErr: unknown) => {
             log.error(`the .git file of the set-aside worktree ${worktree} could not be restored:`, {
               detail: this.redact(backErr instanceof Error ? backErr.message : String(backErr)),
             });
