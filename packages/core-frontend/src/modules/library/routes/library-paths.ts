@@ -183,8 +183,12 @@ export function isLibraryLocation(pathname: string): boolean {
  * The LEGACY route for one tool — now a redirect to the canonical workspace
  * URL (`urlForItemFile`), preserving any `#…` the OAuth callback appended.
  * Still built in three places, deliberately: the Secrets and Connect pages
- * link it by slug (they don't carry the repo path), and the tool page's own
- * OAuth `returnTo` MUST stay this shape — the server validates it.
+ * link it by slug (they don't carry the repo path), and the tool page hands
+ * it to the OAuth start as its `returnTo`, so a sign-in started from a tool
+ * page lands back on that tool. The server accepts any safe same-origin path
+ * there (`isSafeReturnPath`: one leading `/`, no `#`, no backslash or line
+ * break, at most 512 characters) — this shape is the one these pages choose,
+ * not the one the server requires.
  *
  * Returns the BARE path: never append `#…` to it. The OAuth start route rejects
  * a `returnTo` containing `#`, and the callback is what puts the fragment on.
