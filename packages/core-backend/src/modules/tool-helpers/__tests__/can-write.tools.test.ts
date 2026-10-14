@@ -94,6 +94,8 @@ let refuseRead: ((branch: string, wsPath: string) => boolean) | null = null;
 let readsNoted: { branch: string; wsPath: string }[] = [];
 /** Set, the listing of a skill's committed files fails with it — the git behind `get_skill`'s verdict going away. */
 let listingFails: Error | null = null;
+/** The refs the skill's committed files were listed at, in order. */
+let listedAt: string[] = [];
 const hooks = new WorkflowHooks();
 hooks.onAgentRead(async ({ branch, wsPath = '' }) => {
   readsNoted.push({ branch, wsPath });
@@ -204,8 +206,10 @@ beforeAll(async () => {
     // with git, as the server reads them, so a deletion on disk alone does
     // not reach the verdict.
     committedFiles: {
+      commitAtRef: async (workspaceId, ref) => (await git(join(root, workspaceId, KB), 'rev-parse', '--verify', `${ref}^{commit}`)).trim(),
       listFilesAtRef: async (workspaceId, ref, folder) => {
         if (listingFails) throw listingFails;
+        listedAt.push(ref);
         const out = await git(join(root, workspaceId, KB), 'ls-tree', '-r', '-z', '--name-only', ref, '--', folder);
         return out.split('\0').filter((line) => line.length > 0);
       },
@@ -349,6 +353,16 @@ describe('get_skill carries canWrite for the whole skill', () => {
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ENG)).skill.canWrite).toBe(false);
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ADMIN)).skill.canWrite).toBe(true);
     expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
+  });
+
+  it('lists the files and judges them at ONE commit, the one HEAD named when asked', async () => {
+    listedAt = [];
+    writeChecks = [];
+    expect((await call<Got>('get_skill', { name: 'notes' }, ENG)).skill.canWrite).toBe(true);
+    const head = (await git(join(wsDir(MAIN), KB), 'rev-parse', 'HEAD')).trim();
+    // Not "HEAD", which a commit landing in between would move: the commit itself.
+    expect(listedAt).toEqual([head]);
+    expect(writeChecks.map((c) => c.ref)).toEqual([head]);
   });
 
   it('a folder of the skill\'s name holding other tracked files on the default branch is not the skill', async () => {

@@ -4018,6 +4018,18 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The commit `ref` names right now, or null when it names none (an unborn
+   * `HEAD`). A caller that reads several things "at HEAD" pins the commit
+   * once with this and asks each read at that commit, so a commit landing
+   * between the reads cannot hand it one snapshot's files with another's
+   * rules.
+   */
+  async commitAtRef(workspaceId: string, ref: string): Promise<string | null> {
+    const cwd = await this.repoDir(workspaceId);
+    return this.revParseOrNull(cwd, `${ref}^{commit}`);
+  }
+
+  /**
    * A clean `git status` for a path has two honest readings (already
    * committed; a queued re-apply of something that landed) and one dishonest
    * one: the bytes exist, but BESIDE the repository, because a caller wrote a

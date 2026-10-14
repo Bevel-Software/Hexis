@@ -17,7 +17,11 @@ export interface DefaultBranchWriteDeps {
    * has them, so a bundled file deleted on disk but not yet committed is
    * still judged. Absent, `get_skill` answers `false` for the whole skill.
    */
-  committedFiles?: { listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]> };
+  committedFiles?: {
+    /** The commit `ref` names right now, or null when it names none (an unborn HEAD). */
+    commitAtRef(workspaceId: string, ref: string): Promise<string | null>;
+    listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]>;
+  };
 }
 
 /**
@@ -53,11 +57,18 @@ export async function defaultBranchWriteVerdicts(
   deps: DefaultBranchWriteDeps,
   ctx: Pick<ToolContext, 'scope' | 'user'>,
   paths: readonly string[],
+  /**
+   * The commit to judge at, when the caller has already pinned one — a
+   * caller that read a file set at a commit judges it at THAT commit, so a
+   * commit landing in between cannot pair one snapshot's files with
+   * another's rules. Default: `HEAD` of the default branch's clone.
+   */
+  opts: { ref?: string } = {},
 ): Promise<Map<string, boolean>> {
   const verdicts = new Map<string, boolean>(paths.map((p) => [p, false]));
   if (ctx.scope !== 'write' || paths.length === 0) return verdicts;
   try {
-    const answer = await deps.accessControl.canWriteBatchAtRef(deps.defaultWorkspaceId(), 'HEAD', ctx.user.email, [
+    const answer = await deps.accessControl.canWriteBatchAtRef(deps.defaultWorkspaceId(), opts.ref ?? 'HEAD', ctx.user.email, [
       ...new Set(paths),
     ]);
     // Bootstrap: no rules at HEAD, and the gate lets the write through.
