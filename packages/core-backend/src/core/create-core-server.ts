@@ -512,6 +512,9 @@ export async function createCoreServer(
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
     accessControl: core.accessControl,
     defaultWorkspaceId: () => core.kb.defaultWorkspaceId(),
+    // A skill's files as committed on the default branch, for the whole-skill
+    // verdict: the same clone and the same git the skill's history is read from.
+    committedFiles: core.gitService,
   });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.

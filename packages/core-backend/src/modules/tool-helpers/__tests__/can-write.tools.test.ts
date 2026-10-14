@@ -92,6 +92,8 @@ let writeChecks: { method: string; workspaceId: string; ref?: string; paths: str
 /** A deployment's read hook: refuses the reads this matches; every read it is asked about is noted. */
 let refuseRead: ((branch: string, wsPath: string) => boolean) | null = null;
 let readsNoted: { branch: string; wsPath: string }[] = [];
+/** Set, the listing of a skill's committed files fails with it — the git behind `get_skill`'s verdict going away. */
+let listingFails: Error | null = null;
 const hooks = new WorkflowHooks();
 hooks.onAgentRead(async ({ branch, wsPath = '' }) => {
   readsNoted.push({ branch, wsPath });
@@ -198,6 +200,16 @@ beforeAll(async () => {
   registerSkillsTools(new ToolRegistry(), router, toolAuth, toolHandler, skills, undefined, {
     accessControl: counted,
     defaultWorkspaceId: () => kb.defaultWorkspaceId(),
+    // The skill's files as committed: read off the default branch's clone
+    // with git, as the server reads them, so a deletion on disk alone does
+    // not reach the verdict.
+    committedFiles: {
+      listFilesAtRef: async (workspaceId, ref, folder) => {
+        if (listingFails) throw listingFails;
+        const out = await git(join(root, workspaceId, KB), 'ls-tree', '-r', '-z', '--name-only', ref, '--', folder);
+        return out.split('\0').filter((line) => line.length > 0);
+      },
+    },
   });
   app.use('/api', router);
   server = await new Promise<HttpServer>((r) => {
@@ -316,6 +328,23 @@ describe('get_skill carries canWrite for the whole skill', () => {
     }
   });
 
+  it('judges the files as COMMITTED on the default branch: a bundled file deleted on disk but not committed still counts', async () => {
+    const onMain = join(wsDir(MAIN), KB, 'Plugins/Shared/deck/reference.md');
+    await rm(onMain);
+    try {
+      // Gone from the clone's working tree, still at HEAD with its rules: the
+      // verdict stays false, as the direct write of it would be refused.
+      expect((await call<Got>('get_skill', { name: 'deck' }, ENG)).skill.canWrite).toBe(false);
+      // Committed, the skill is SKILL.md alone, which Eng may write.
+      await commitMain('drop reference.md');
+      expect((await call<Got>('get_skill', { name: 'deck' }, ENG)).skill.canWrite).toBe(true);
+    } finally {
+      await writeFile(onMain, MAIN_TREE['Plugins/Shared/deck/reference.md']);
+      await commitMain('reference.md again');
+    }
+    expect((await call<Got>('get_skill', { name: 'deck' }, ENG)).skill.canWrite).toBe(false);
+  });
+
   it('judges a skill only the draft has by its draft files, where they would land', async () => {
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ENG)).skill.canWrite).toBe(false);
     expect((await call<Got>('get_skill', { name: 'draft-only', branch: DRAFT }, ADMIN)).skill.canWrite).toBe(true);
@@ -332,27 +361,20 @@ describe('get_skill carries canWrite for the whole skill', () => {
     }
   });
 
-  it('fails closed when the default branch\'s copy cannot be looked up: rejected or refused', async () => {
+  it('fails closed when the files committed on the default branch cannot be listed', async () => {
     const draftRead = { name: 'html-knowledge-view', branch: DRAFT };
     // The baseline: the admin may write every file of it on the default branch.
     expect((await call<Got>('get_skill', draftRead, ADMIN)).skill.canWrite).toBe(true);
-    const real = skills.getSkill.bind(skills);
-    for (const lookup of [
-      async () => { throw new Error('the catalog is unavailable'); },
-      async () => ({ ok: false as const, error: 'forbidden' as const }),
-    ]) {
-      // The draft read itself goes through; the released-skill lookup after it fails.
-      const loads = vi.spyOn(skills, 'getSkill').mockImplementationOnce(real).mockImplementationOnce(lookup);
-      writeChecks = [];
-      try {
-        const got = await call<Got>('get_skill', draftRead, ADMIN);
-        expect(got.skill.canWrite).toBe(false);
-        expect(loads).toHaveBeenCalledTimes(2);
-        // Nothing to judge, so the access layer is not asked.
-        expect(writeChecks).toEqual([]);
-      } finally {
-        loads.mockRestore();
-      }
+    // The draft read itself goes through; the listing of the skill's committed files fails.
+    listingFails = new Error('git is unavailable');
+    writeChecks = [];
+    try {
+      const got = await call<Got>('get_skill', draftRead, ADMIN);
+      expect(got.skill.canWrite).toBe(false);
+      // Nothing to judge, so the access layer is not asked.
+      expect(writeChecks).toEqual([]);
+    } finally {
+      listingFails = null;
     }
   });
 });

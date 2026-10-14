@@ -10,6 +10,14 @@ import type { ToolContext } from './tool.contract.js';
 export interface DefaultBranchWriteDeps {
   accessControl: Pick<IAccessControl, 'canWriteBatchAtRef'>;
   defaultWorkspaceId: () => string;
+  /**
+   * The files under a folder as COMMITTED at a ref of a workspace, repo-root
+   * relative — what `get_skill`'s whole-skill verdict covers: the skill's
+   * files as the default branch's `HEAD` has them, not as its working tree
+   * has them, so a bundled file deleted on disk but not yet committed is
+   * still judged. Absent, `get_skill` answers `false` for the whole skill.
+   */
+  committedFiles?: { listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]> };
 }
 
 /**
