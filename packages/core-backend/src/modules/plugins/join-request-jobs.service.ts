@@ -4,6 +4,7 @@ import {
   type ChangeRequestState,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
+import { DrizzleQueryError } from 'drizzle-orm';
 import { spliceGrant } from '../access-model/access-splice.js';
 import { sanitizeError } from '../workflow/sanitize-error.js';
 import { logger } from '../../shared/logging.js';
@@ -484,9 +485,12 @@ export class PluginJoinRequestJobs {
       // What the requester reads on their card. The git work's own words
       // are theirs to see (credentials stripped); a database's reason is
       // not — it names tables and columns and is for the operator, who has
-      // it in the line above — so a wrapped failure is recorded in one
-      // stable sentence.
-      const shown = cause === err ? reason : DATABASE_FAILURE_REASON;
+      // it in the line above — so a database failure is recorded in one
+      // stable sentence. The database's failures are the ones the query
+      // layer wraps (`DrizzleQueryError`, its cause the driver's error);
+      // any other wrapped error keeps its own sanitised words, which may be
+      // what the requester needs to act on.
+      const shown = err instanceof DrizzleQueryError ? DATABASE_FAILURE_REASON : reason;
       await this.store
         // Named with the token, so this lands only if the row is still this
         // process's. A worker that overran the window and had its row taken

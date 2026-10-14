@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
+import { DrizzleQueryError } from 'drizzle-orm';
 import { PluginJoinRequestJobs, JoinRequestNotReadyError, type JoinRequestJobsDeps } from '../index.js';
 // The claim window is not part of the module's surface: a test that moves
 // the clock past it reads the number the service itself uses.
@@ -146,10 +147,14 @@ describe('PluginJoinRequestJobs', () => {
 
   it("logs a database failure as the database's reason, and shows the requester one stable sentence", async () => {
     const h = harness();
+    // What Drizzle throws: its own error class, the SQL in the message, the
+    // driver's error as the cause.
     h.workflow.openChangeRequest.mockRejectedValue(
-      new Error('Failed query: insert into "change_requests" ("id", "number", "title", "body", "source_branch", "target_branch", "author_id", "status", "created_at", "updated_at") values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', {
-        cause: new Error('relation "change_requests" does not exist'),
-      }),
+      new DrizzleQueryError(
+        'insert into "change_requests" ("id", "number", "title", "body", "source_branch", "target_branch", "author_id", "status", "created_at", "updated_at") values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+        [],
+        new Error('relation "change_requests" does not exist'),
+      ),
     );
     await h.jobs.start(pendingRow(h.store));
 
@@ -162,6 +167,24 @@ describe('PluginJoinRequestJobs', () => {
     const [row] = h.store.all();
     expect(row.status).toBe('failed');
     expect(row.failureReason).toBe('the request could not be recorded; an admin can find the reason in the server log');
+  });
+
+  it("shows the requester a wrapped failure's own words when it is not the database's", async () => {
+    const h = harness();
+    // The git work failing behind a wrapper of its own: the cause is what is
+    // logged, and what the requester reads, credentials stripped — the
+    // database's stable sentence would hide the detail they can act on.
+    h.workflow.openChangeRequest.mockRejectedValue(
+      new Error('opening the change request failed', {
+        cause: new Error('fatal: unable to access https://x:ghp_secret@github.com/acme/kb: could not resolve host'),
+      }),
+    );
+    await h.jobs.start(pendingRow(h.store));
+    const [row] = h.store.all();
+    expect(row.status).toBe('failed');
+    expect(row.failureReason).toContain('unable to access');
+    expect(row.failureReason).not.toContain('ghp_secret');
+    expect(row.failureReason).not.toContain('could not be recorded');
   });
 
   it('fails the record rather than throwing when the plugin is gone', async () => {
@@ -547,10 +570,11 @@ describe('PluginJoinRequestJobs', () => {
     const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const h = harness();
-      // What Drizzle throws: the SQL in the message, the driver's error underneath.
-      const wrapped = new Error(
-        'Failed query: select "id", "requester_email", "requester_email_bidx", "requester_name", "plugin_key", "status", "failure_reason", "change_request_number", "claimed_at", "claim_token", "created_at" from "plugin_join_requests" where status = $1',
-        { cause: new Error('Cannot use a pool after calling end on the pool') },
+      // What Drizzle throws: its own error class, the SQL in the message, the driver's error underneath.
+      const wrapped = new DrizzleQueryError(
+        'select "id", "requester_email", "requester_email_bidx", "requester_name", "plugin_key", "status", "failure_reason", "change_request_number", "claimed_at", "claim_token", "created_at" from "plugin_join_requests" where status = $1',
+        [],
+        new Error('Cannot use a pool after calling end on the pool'),
       );
       h.store.pending = async () => {
         throw wrapped;
