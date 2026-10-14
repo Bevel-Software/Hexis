@@ -6,6 +6,32 @@ import { readGitfile, type KbRepository } from './kb-repository.js';
 const log = logger('set-aside');
 
 /**
+ * `p` as the file system names it, for comparing two paths that may be
+ * spelled differently: git writes a worktree's link with forward slashes and
+ * the long folder names (`C:/Users/runneradmin/…`) where node may hold the
+ * same folder by its 8.3 short name (`C:\Users\RUNNER~1\…`). The nearest
+ * part that exists is resolved by the OS, the rest appended; on Windows the
+ * result is case-folded, as its file system is.
+ */
+async function comparablePath(p: string): Promise<string> {
+  let existing = path.resolve(p);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      existing = await fs.realpath(existing);
+      break;
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  const joined = path.join(existing, ...rest);
+  return process.platform === 'win32' ? joined.toLowerCase() : joined;
+}
+
+/**
  * Moving a working copy of a repository that is no longer the configured one
  * OUT OF THE WAY, rather than deleting it.
  *
@@ -142,7 +168,11 @@ export async function setAsideRepository(
 ): Promise<string[]> {
   return repository.mutex.runRepository(async () => {
     if (stillApplies && !(await stillApplies())) return [];
-    const inside = (p: string): boolean => p === repository.dir || p.startsWith(repository.dir + path.sep);
+    const repositoryPath = await comparablePath(repository.dir);
+    const inside = async (p: string): Promise<boolean> => {
+      const at = await comparablePath(p);
+      return at === repositoryPath || at.startsWith(repositoryPath + path.sep);
+    };
     const worktrees: Array<{ id: string; dir: string }> = [];
     let entries: import('node:fs').Dirent[] = [];
     try {
@@ -156,7 +186,7 @@ export async function setAsideRepository(
       if (!entry.isDirectory()) continue;
       const dir = path.join(workspacesRoot, entry.name, kbDirName);
       const gitdir = await readGitfile(path.join(dir, '.git')).catch(() => null);
-      if (gitdir !== null && inside(path.resolve(gitdir))) worktrees.push({ id: entry.name, dir });
+      if (gitdir !== null && (await inside(gitdir))) worktrees.push({ id: entry.name, dir });
     }
     const repositoryThere = await fs.access(repository.dir).then(
       () => true,

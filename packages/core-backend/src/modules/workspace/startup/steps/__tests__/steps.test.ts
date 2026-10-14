@@ -781,7 +781,8 @@ describe('TemplateFilesStep: the guide copies earlier releases wrote', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect((await fs.lstat(path.join(dir, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
-    expect(await fs.readlink(path.join(dir, 'AGENTS.md'))).toBe('conventions/ours.md');
+    // Windows reads the link back with its own separator.
+    expect((await fs.readlink(path.join(dir, 'AGENTS.md'))).replace(/\\/g, '/')).toBe('conventions/ours.md');
     expect(norm(await fs.readFile(path.join(dir, 'conventions/ours.md'), 'utf8'))).toBe(MANAGED_GUIDE_COPY);
   });
 });

@@ -7,7 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceService } from '../workspace.service.js';
-import { workingCopyShape } from '../kb-repository.js';
+import { KbRepository, workingCopyShape } from '../kb-repository.js';
 import { setAsideRepository } from '../set-aside-clone.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -428,6 +428,34 @@ describe('the repository address changes, with nothing of the branch on disk yet
 });
 
 describe('setting the repository aside', () => {
+  it('finds the worktrees when the repository is held by another spelling of its path than git wrote', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    // Windows names one folder two ways (`RUNNER~1` and `runneradmin`); a
+    // link to the same folder is the portable way to get two spellings.
+    const alias = path.join(os.tmpdir(), `bevel-alias-${path.basename(root)}`);
+    await fs.symlink(root, alias, 'junction');
+    try {
+      const aliased = new KbRepository({
+        dir: path.join(alias, path.relative(root, svc.repository.dir)),
+        kbRepoUrl: () => upstream,
+        mutex: svc.repository.mutex,
+      });
+      const dest = path.join(root, 'set-aside', 'stamp');
+
+      const moved = await setAsideRepository(aliased, workspacesRoot, 'knowledge-base', dest);
+
+      expect(moved.sort()).toEqual([workspaceIdForBranch('alice/a'), workspaceIdForBranch('bob/b')].sort());
+      expect((await fs.readdir(dest)).sort()).toEqual(
+        ['knowledge-base.git', workspaceIdForBranch('alice/a'), workspaceIdForBranch('bob/b')].sort(),
+      );
+    } finally {
+      // The link only, never through it.
+      await fs.unlink(alias).catch(() => fs.rmdir(alias));
+    }
+  });
+
   it('moves nothing when the reason for it no longer holds once the reservation is held', async () => {
     const svc = service();
     await svc.getOrCreateForBranch('alice/a');
