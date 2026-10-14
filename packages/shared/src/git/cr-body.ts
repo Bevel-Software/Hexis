@@ -20,3 +20,18 @@ export function withoutAffectedOwners(body: string): string {
   const generated = lines.map((l) => l.trimEnd()).lastIndexOf(AFFECTED_OWNERS_HEADING);
   return (generated === -1 ? lines : lines.slice(0, generated)).join('\n');
 }
+
+/**
+ * The author's own description: the body without the generated `## Affected
+ * owners` block (see {@link withoutAffectedOwners}) and without Hexis's own
+ * hidden markers — the `<!--hexis:…-->` / `<!--bevel:…-->` comments older
+ * bodies carry identity in. Both are Hexis's machinery, and both can name a
+ * person by email address; an HTML comment the author wrote is the author's
+ * prose and stays. Shared by the agent tools' description and a finished
+ * request's HTTP detail, so neither can serve the machinery the other strips.
+ */
+export function authorsText(body: string): string {
+  return withoutAffectedOwners(body)
+    .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
+    .trim();
+}

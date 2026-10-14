@@ -61,7 +61,7 @@ import type {
   ChangedFile,
   FileApproval,
 } from '@bevel-software/platform-shared';
-import { withoutAffectedOwners } from '@bevel-software/platform-shared';
+import { authorsText } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeKindOf, type ChangeKind } from './change-request-summary.js';
 
@@ -431,11 +431,12 @@ export function toCrDetail(
  * the author's own prose, which may mention any path they chose to write about —
  * that is a person's sentence, shown to every viewer in the app, not Hexis
  * naming a file it was asked to withhold.
+ *
+ * The rule itself is the shared `authorsText`, which a finished request's HTTP
+ * detail serves too.
  */
 export function authorsDescription(body: string): string {
-  return withoutAffectedOwners(body)
-    .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
-    .trim();
+  return authorsText(body);
 }
 
 /**

@@ -8,6 +8,7 @@ import type { IAccessControl } from '../../../access/access-control.interface.js
 import { prMergeLog } from '../../../database/schema.js';
 import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { displayName, withoutAddresses } from '../finished-detail.js';
+import { formatAffectedOwnersBlock } from '../../workflow.service.js';
 import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
 /**
@@ -403,6 +404,7 @@ describe('withoutAddresses — the detail the app route serves', () => {
       number: 4,
       state,
       title: 'A proposal',
+      body: '',
       author: { login: 'user-0123456789ab', name: 'Sam Author' },
       appAuthor: { name: 'Sam Author' },
       finished: state === 'open' ? null : { at: null, appliedBy: { name: 'Robin Lee' }, closedReason: null, appliedSha: null },
@@ -461,6 +463,29 @@ describe('withoutAddresses — the detail the app route serves', () => {
     const detail = appliedDetail('merged');
     detail.body = 'Questions to sales@bevel.software.';
     expect(withoutAddresses(detail).body).toBe('Questions to sales@bevel.software.');
+  });
+
+  it('drops the generated Affected owners block, whose approvers carry addresses', () => {
+    // The body exactly as opening a request writes it: the author's
+    // description, then the generated block naming each eligible approver.
+    const block = formatAffectedOwnersBlock(
+      ['Knowledge/A.md'],
+      new Map([['Knowledge/A.md', { roles: ['Admin'], users: [{ name: 'Owner One', email: 'owner@bevel.software' }] }]]),
+    );
+    expect(block).toContain('owner@bevel.software');
+    for (const state of ['merged', 'closed'] as const) {
+      const detail = appliedDetail(state);
+      detail.body = ['Why: the old page was wrong.', block].join('\n\n');
+      const scrubbed = withoutAddresses(detail);
+      expect(scrubbed.body).toBe('Why: the old page was wrong.');
+      expect(JSON.stringify(scrubbed)).not.toMatch(/@/);
+    }
+  });
+
+  it("drops Hexis's hidden identity markers and keeps the author's own comment", () => {
+    const detail = appliedDetail('merged');
+    detail.body = 'Fixes the intro.\n<!--hexis:author:sam@bevel.software-->\n<!-- note to self -->';
+    expect(withoutAddresses(detail).body).toBe('Fixes the intro.\n\n<!-- note to self -->');
   });
 
   it('nor on a closed one', () => {

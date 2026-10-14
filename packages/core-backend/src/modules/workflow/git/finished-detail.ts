@@ -1,4 +1,4 @@
-import type { PullRequestDetail } from '@bevel-software/platform-shared';
+import { authorsText, type PullRequestDetail } from '@bevel-software/platform-shared';
 
 /**
  * A person's name as the finished view may show it, or null: a blank name and
@@ -32,10 +32,13 @@ function nameOnly(name: string | undefined): string {
  * go entirely: the finished view shows none, and a comment's body is free
  * text an address can sit in.
  *
- * What stays as written is the author's OWN text, the title and the
- * description: the finished view shows them as the open view does, and an
- * address the author typed into their proposal is theirs to have published,
- * not a person's identity the record leaks.
+ * The body goes down to the author's OWN description ({@link authorsText}):
+ * the `## Affected owners` block Hexis appends lists every eligible approver
+ * as `Name <email>`, and Hexis's hidden markers can carry identity too. What
+ * stays as written is the author's own text, the title and the description:
+ * the finished view shows them as the open view does, and an address the
+ * author typed into their proposal is theirs to have published, not a
+ * person's identity the record leaks.
  *
  * An OPEN request is returned untouched: its review controls compare the
  * viewer's own address with these to offer Undo.
@@ -47,6 +50,7 @@ export function withoutAddresses(detail: PullRequestDetail): PullRequestDetail {
   if (detail.state === 'open') return detail;
   return {
     ...detail,
+    body: authorsText(detail.body),
     author: { ...detail.author, name: nameOnly(detail.author.name) },
     ...(detail.appAuthor && { appAuthor: { name: nameOnly(detail.appAuthor.name) } }),
     approvals: detail.approvals.map((a) => ({
