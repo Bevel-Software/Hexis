@@ -650,9 +650,14 @@ export class KbRepository {
         // it still names the old checkout is a worktree git calls prunable,
         // and a `worktree prune` in the set-aside repository would drop it.
         const before = await fs.readFile(gitfile, 'utf8');
-        await rewriteFile(gitfile, `gitdir: ${gitPath(admin)}\n`);
+        // Written as the file system names them, as git itself writes them:
+        // on Windows a path held by its 8.3 short name (`RUNNER~1`) would
+        // otherwise be what `git worktree list` shows.
+        const realAdmin = await fs.realpath(admin);
+        const realGitfile = path.join(await fs.realpath(worktree), '.git');
+        await rewriteFile(gitfile, `gitdir: ${gitPath(realAdmin)}\n`);
         try {
-          await rewriteFile(path.join(admin, 'gitdir'), `${gitPath(gitfile)}\n`);
+          await rewriteFile(path.join(admin, 'gitdir'), `${gitPath(realGitfile)}\n`);
         } catch (err) {
           await rewriteFile(gitfile, before).catch((backErr: unknown) => {
             log.error(`the .git file of the set-aside worktree ${worktree} could not be restored:`, {

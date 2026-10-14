@@ -442,7 +442,8 @@ describe('setting the repository aside', () => {
         kbRepoUrl: () => upstream,
         mutex: svc.repository.mutex,
       });
-      const dest = path.join(root, 'set-aside', 'stamp');
+      // The destination too is named through the alias.
+      const dest = path.join(alias, 'set-aside', 'stamp');
 
       const moved = await setAsideRepository(aliased, workspacesRoot, 'knowledge-base', dest);
 
@@ -450,6 +451,14 @@ describe('setting the repository aside', () => {
       expect((await fs.readdir(dest)).sort()).toEqual(
         ['knowledge-base.git', workspaceIdForBranch('alice/a'), workspaceIdForBranch('bob/b')].sort(),
       );
+      // Re-linked by the names the file system gives them, as git writes its
+      // own links: `git worktree list` shows the real path, not the alias.
+      const realDest = await fs.realpath(dest);
+      const list = asGit(await git(path.join(dest, 'knowledge-base.git'), ['worktree', 'list', '--porcelain']));
+      for (const id of [workspaceIdForBranch('alice/a'), workspaceIdForBranch('bob/b')]) {
+        expect(list).toContain(`worktree ${asGit(path.join(realDest, id))}\n`);
+      }
+      expect(list).not.toContain('prunable');
     } finally {
       // The link only, never through it.
       await fs.unlink(alias).catch(() => fs.rmdir(alias));
