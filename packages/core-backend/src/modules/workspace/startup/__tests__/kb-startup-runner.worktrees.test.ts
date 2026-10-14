@@ -318,4 +318,36 @@ describe('the repository address changes', () => {
     const origin = await git(repositoryDir(), ['config', '--get', 'remote.origin.url']).catch(() => null);
     expect(origin === null || origin.trim() === replacement).toBe(true);
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'moves nothing when the workspaces root cannot be read, rather than the repository without its worktrees',
+    async () => {
+      await makeRunner([touchDefault]).runAll();
+      const replacement = path.join(root, 'replacement.git');
+      await git(root, ['init', '--bare', '-b', DEFAULT_BRANCH, replacement]);
+      const other = path.join(root, '.seed-replacement');
+      await fs.mkdir(other);
+      await git(other, ['init', '-b', DEFAULT_BRANCH]);
+      await fs.writeFile(path.join(other, 'marker.txt'), 'replacement', 'utf8');
+      await git(other, ['add', '-A']);
+      await git(other, ['commit', '-m', 'init']);
+      await git(other, ['branch', PROTECTED[1]!]);
+      await git(other, ['push', '-q', replacement, ...PROTECTED]);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await fs.chmod(workspacesRoot, 0o000);
+      try {
+        await makeRunner([], { kbRepoUrl: () => replacement })
+          .runAll()
+          .catch(() => {});
+      } finally {
+        await fs.chmod(workspacesRoot, 0o755);
+      }
+
+      expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+      expect((await git(repositoryDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(upstream);
+      expect((await git(checkoutOf(DEFAULT_BRANCH), ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe(DEFAULT_BRANCH);
+    },
+  );
 });

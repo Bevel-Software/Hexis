@@ -184,7 +184,8 @@ The volumes, and what each holds:
 
 The database dump is the backup that matters. Everything that was pushed
 is in your git remote, so workspace copies re-clone and spills expire. What
-was NOT pushed yet — commits waiting on a push that failed — lives only in
+was NOT pushed yet — every local commit not on the remote, whether its push
+failed or is still pending — lives only in
 the repository on the **backups** volume (with the change-review ledger), so
 archive that volume too if you want those back; a restore without it starts
 from what the remote holds. Archive volumes while the app is stopped:

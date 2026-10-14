@@ -615,6 +615,8 @@ export class KbRepository {
    * path the worktree's `.git` file still holds. Answers the moved worktrees
    * that could not be re-linked (git had already lost track of them, or a
    * write failed) — their files are all there, only `git` in them is not.
+   * A worktree whose second link cannot be written gets its first one back,
+   * so neither link names a place the other does not.
    */
   async relinkMovedCopy(movedRepository: string, movedWorktrees: readonly string[]): Promise<string[]> {
     const gitPath = (p: string): string => (process.platform === 'win32' ? p.replace(/\\/g, '/') : p);
@@ -628,8 +630,21 @@ export class KbRepository {
         if (!(await fs.stat(admin).then((st) => st.isDirectory(), () => false))) {
           throw new Error(`the repository has no ${admin}`);
         }
+        // Both links or neither: a `.git` re-pointed while the record behind
+        // it still names the old checkout is a worktree git calls prunable,
+        // and a `worktree prune` in the set-aside repository would drop it.
+        const before = await fs.readFile(gitfile, 'utf8');
         await fs.writeFile(gitfile, `gitdir: ${gitPath(admin)}\n`);
-        await fs.writeFile(path.join(admin, 'gitdir'), `${gitPath(gitfile)}\n`);
+        try {
+          await fs.writeFile(path.join(admin, 'gitdir'), `${gitPath(gitfile)}\n`);
+        } catch (err) {
+          await fs.writeFile(gitfile, before).catch((backErr: unknown) => {
+            log.error(`the .git file of the set-aside worktree ${worktree} could not be restored:`, {
+              detail: this.redact(backErr instanceof Error ? backErr.message : String(backErr)),
+            });
+          });
+          throw err;
+        }
       } catch (err) {
         unlinked.push(worktree);
         log.warn(`the set-aside worktree ${worktree} could not be re-linked to the set-aside repository:`, {

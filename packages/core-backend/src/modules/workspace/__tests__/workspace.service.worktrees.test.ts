@@ -394,9 +394,96 @@ describe('the repository address changes, with nothing of the branch on disk yet
     expect(await fs.readFile(path.join(checkoutOf('carol/c'), 'other.md'), 'utf-8')).toBe('other\n');
     expect((await git(moved.repository.dir, ['config', '--get', 'remote.origin.url'])).trim()).toBe(other);
   });
+
+  it('sets it aside once when two absent branches are opened at once, and both get worktrees of the new one', async () => {
+    await service().getOrCreateForBranch('alice/a');
+    const other = path.join(root, 'other.git');
+    await git(root, ['init', '--bare', '-b', 'main', other]);
+    const otherSeed = path.join(root, '.other-seed');
+    await fs.mkdir(otherSeed);
+    await git(otherSeed, ['init', '-b', 'carol/c']);
+    await fs.writeFile(path.join(otherSeed, 'other.md'), 'other\n');
+    await git(otherSeed, ['add', '-A']);
+    await git(otherSeed, ['commit', '-m', 'other']);
+    await git(otherSeed, ['push', '-q', other, 'carol/c', 'carol/c:main']);
+
+    const setAside = path.join(root, 'set-aside');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const moved = service(new NodeGitRunner(), other, setAside);
+    await Promise.all([moved.getOrCreateForBranch('carol/c'), moved.getOrCreateForBranch('main')]);
+
+    // One repository set aside, with the one worktree it had; neither new
+    // worktree went with a second set-aside.
+    const kept: string[] = [];
+    for (const stamp of await fs.readdir(setAside)) {
+      for (const name of await fs.readdir(path.join(setAside, stamp))) kept.push(name);
+    }
+    expect(kept.sort()).toEqual(['knowledge-base.git', workspaceIdForBranch('alice/a')].sort());
+    for (const branch of ['carol/c', 'main']) {
+      expect(await workingCopyShape(checkoutOf(branch))).toBe('worktree');
+      expect(await fs.readFile(path.join(checkoutOf(branch), 'other.md'), 'utf-8')).toBe('other\n');
+    }
+    expect((await git(moved.repository.dir, ['config', '--get', 'remote.origin.url'])).trim()).toBe(other);
+  });
 });
 
 describe('setting the repository aside', () => {
+  it('moves nothing when the reason for it no longer holds once the reservation is held', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    const dest = path.join(root, 'set-aside', 'stamp');
+
+    expect(await setAsideRepository(svc.repository, workspacesRoot, 'knowledge-base', dest, async () => false)).toEqual([]);
+    expect(await fs.access(dest).then(() => true, () => false)).toBe(false);
+    expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('worktree');
+    expect(await svc.repository.exists()).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'moves nothing when the workspaces root cannot be read, rather than the repository without its worktrees',
+    async () => {
+      const svc = service();
+      await svc.getOrCreateForBranch('alice/a');
+      const dest = path.join(root, 'set-aside', 'stamp');
+      await fs.chmod(workspacesRoot, 0o000);
+      try {
+        await expect(setAsideRepository(svc.repository, workspacesRoot, 'knowledge-base', dest)).rejects.toThrow(
+          /EACCES/,
+        );
+      } finally {
+        await fs.chmod(workspacesRoot, 0o755);
+      }
+      expect(await svc.repository.exists()).toBe(true);
+      expect(await fs.access(dest).then(() => true, () => false)).toBe(false);
+      expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('worktree');
+    },
+  );
+
+  it('leaves both links of a worktree as they were when only one of them can be re-written', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    const aliceGitfile = path.join(checkoutOf('alice/a'), '.git');
+    const before = await fs.readFile(aliceGitfile, 'utf8');
+    // The record behind alice's worktree cannot be written: its `gitdir` is a folder.
+    const admin = (await git(checkoutOf('alice/a'), ['rev-parse', '--path-format=absolute', '--git-dir'])).trim();
+    await fs.rm(path.join(admin, 'gitdir'));
+    await fs.mkdir(path.join(admin, 'gitdir'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dest = path.join(root, 'set-aside', 'stamp');
+
+    await setAsideRepository(svc.repository, workspacesRoot, 'knowledge-base', dest);
+
+    // Not half re-pointed: the moved `.git` still names what it named.
+    expect(await fs.readFile(path.join(dest, workspaceIdForBranch('alice/a'), '.git'), 'utf8')).toBe(before);
+    // The other worktree is re-linked both ways.
+    const keptBob = path.join(dest, workspaceIdForBranch('bob/b'));
+    expect(asGit((await git(keptBob, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim())).toBe(
+      asGit(await fs.realpath(path.join(dest, 'knowledge-base.git'))),
+    );
+  });
+
   it('puts the worktrees back when the repository cannot follow them, so nothing is split', async () => {
     const svc = service();
     await svc.getOrCreateForBranch('alice/a');

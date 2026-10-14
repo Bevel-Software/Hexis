@@ -121,21 +121,36 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
  * git had already lost track of goes with the rest. Under the repository
  * reservation: no fetch or worktree add runs while the folders move.
  * Answers the workspace ids moved.
+ *
+ * `stillApplies`, when given, is asked again UNDER the reservation, before
+ * anything moves: a caller decided to set the repository aside on what it
+ * read before taking the reservation, and another caller may have set it
+ * aside and made a fresh one of the configured address meanwhile. When the
+ * answer is no, nothing moves and the call answers no ids.
+ *
+ * A workspaces root that cannot be read (a permission or I/O error, not an
+ * absence) stops the call before anything moves, as an unreadable repository
+ * does: moving the repository without worktrees it could not see would leave
+ * every one of them pointing at nothing.
  */
 export async function setAsideRepository(
   repository: KbRepository,
   workspacesRoot: string,
   kbDirName: string,
   dest: string,
+  stillApplies?: () => Promise<boolean>,
 ): Promise<string[]> {
   return repository.mutex.runRepository(async () => {
+    if (stillApplies && !(await stillApplies())) return [];
     const inside = (p: string): boolean => p === repository.dir || p.startsWith(repository.dir + path.sep);
     const worktrees: Array<{ id: string; dir: string }> = [];
     let entries: import('node:fs').Dirent[] = [];
     try {
       entries = await fs.readdir(workspacesRoot, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
       // No workspaces root: only the repository to move.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;

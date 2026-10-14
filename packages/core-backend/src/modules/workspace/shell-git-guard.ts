@@ -12,8 +12,10 @@
  * checked-out branch); what it does not refuse is refused here:
  *
  *  - plumbing that writes any ref, unchecked: `update-ref`;
- *  - renaming, copying, deleting or force-moving a branch, and changing its
- *    upstream (which writes the shared configuration);
+ *  - renaming, copying, deleting or force-moving a branch, and setting or
+ *    changing its upstream (which writes the shared configuration) in every
+ *    form git has for it: `branch --set-upstream-to|--unset-upstream|-t|--track`,
+ *    `checkout`/`switch -t|--track`, `push -u|--set-upstream`;
  *  - what rewrites the shared store or the list of worktrees: `gc`, `prune`,
  *    `repack`, `pack-refs`, `prune-packed`, `reflog expire|delete`, `replace`,
  *    `filter-branch`, `worktree` other than `list`;
@@ -44,7 +46,13 @@ const ALWAYS_REFUSED = new Set([
 ]);
 
 const BRANCH_WRITE_FLAGS =
-  /^(?:-[a-zA-Z]*[dDmMcCfu][a-zA-Z]*|--delete|--move|--copy|--force|--set-upstream-to(?:=.*)?|--unset-upstream|--edit-description)$/;
+  /^(?:-[a-zA-Z]*[dDmMcCfut][a-zA-Z]*|--delete|--move|--copy|--force|--set-upstream-to(?:=.*)?|--unset-upstream|--track(?:=.*)?|--edit-description)$/;
+
+/** `checkout`/`switch` flags that record an upstream for the branch they create. */
+const CHECKOUT_TRACK_FLAGS = /^(?:-[a-zA-Z]*t[a-zA-Z]*|--track(?:=.*)?)$/;
+
+/** `push` flags that record an upstream for the pushed branch. */
+const PUSH_UPSTREAM_FLAGS = /^(?:-[a-zA-Z]*u[a-zA-Z]*|--set-upstream)$/;
 
 const CONFIG_WRITE_FLAGS =
   /^(?:--unset|--unset-all|--add|--replace-all|--rename-section|--remove-section|--edit|-e)$/;
@@ -71,6 +79,11 @@ function refusalFor(args: string[]): string | null {
       return flags.some((f) => BRANCH_WRITE_FLAGS.test(f))
         ? 'git branch that deletes, renames, copies or force-moves a branch, or changes its upstream'
         : null;
+    case 'checkout':
+    case 'switch':
+      return flags.some((f) => CHECKOUT_TRACK_FLAGS.test(f)) ? `git ${sub} that sets an upstream` : null;
+    case 'push':
+      return flags.some((f) => PUSH_UPSTREAM_FLAGS.test(f)) ? 'git push that sets an upstream' : null;
     case 'remote': {
       const verb = positionals[0];
       return verb === undefined || verb === 'show' || verb === 'get-url' ? null : `git remote ${verb}`;

@@ -708,13 +708,20 @@ export class KbStartupRunner {
     // The repository first: its address is every worktree's. Even with no
     // workspaces root — the repository lives outside it, and a worktree added
     // later would fetch from whatever address it holds.
-    await this.reconcileRepositoryWithConfigured(configured, path.join(setAsideRoot, stamp));
+    //
+    // The root is read BEFORE anything moves, and only an absent root counts
+    // as "no workspaces": one that cannot be read (a permission or I/O error)
+    // stops the phase, rather than letting the repository move without the
+    // worktrees it could not see.
     let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(this.opts.workspacesRoot, { withFileTypes: true });
-    } catch {
-      return; // no workspaces yet
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      entries = []; // no workspaces yet
     }
+    await this.reconcileRepositoryWithConfigured(configured, path.join(setAsideRoot, stamp));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const repoDir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);

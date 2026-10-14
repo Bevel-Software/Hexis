@@ -752,7 +752,17 @@ export class WorkspaceService implements IWorkspaceService {
         let movedIds: string[] | null = null;
         const move = async (): Promise<void> => {
           if (this.discardsOf(id) !== discardsAtAdoption) return;
-          movedIds = await setAsideRepository(this.repository, this.workspacesRoot, this.kbDirName, kept);
+          // Asked again under the reservation: two branches opened at once
+          // both read the old address, and the first one's set-aside and fresh
+          // repository may be done by the time this one holds it. Moving then
+          // would set aside the replacement and the first branch's worktree.
+          let superseded = false;
+          const ids = await setAsideRepository(this.repository, this.workspacesRoot, this.kbDirName, kept, async () => {
+            superseded = !(await this.isRepositoryOfAnother());
+            return !superseded;
+          });
+          if (superseded) return;
+          movedIds = ids;
           for (const movedId of movedIds) this.forgetClone(movedId);
         };
         // What surrounds a set-aside is asked for every workspace that goes,
