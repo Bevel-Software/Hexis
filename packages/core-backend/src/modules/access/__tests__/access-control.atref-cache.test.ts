@@ -18,11 +18,16 @@ import { AccessUnreadableError } from '../../access-model/access-errors.js';
  * the process boundary, which is the cost this cache exists to remove.
  * `injected.failNext` makes ONE matching spawn fail the way a transient git
  * error does, so the cache's behaviour under a failed read can be pinned
- * without a flaky fixture.
+ * without a flaky fixture. `injected.rewriteNext` lets ONE matching spawn
+ * run for real and rewrites what it printed before the service reads it,
+ * for replies a healthy git cannot be made to give.
  */
 const { spawnLog, injected } = vi.hoisted(() => ({
   spawnLog: [] as string[][],
-  injected: { failNext: null as null | ((argv: string[]) => boolean) },
+  injected: {
+    failNext: null as null | ((argv: string[]) => boolean),
+    rewriteNext: null as null | ((argv: string[]) => null | ((stdout: Buffer, stdin: string) => Buffer)),
+  },
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -64,6 +69,41 @@ vi.mock('node:child_process', async (importOriginal) => {
     });
     return child as unknown as ReturnType<typeof actual.spawn>;
   };
+  type Child = ReturnType<typeof actual.spawn>;
+  const realSpawn = actual.spawn as unknown as (...a: unknown[]) => Child;
+  /**
+   * The real child, with what it was fed on stdin recorded and its stdout
+   * handed to `fn` whole, once it has exited, before the service sees it.
+   */
+  const rewriting = (file: string, args: string[], options: unknown, fn: (stdout: Buffer, stdin: string) => Buffer) => {
+    const real = realSpawn(file, args, options);
+    const fed: Buffer[] = [];
+    const out: Buffer[] = [];
+    const child = Object.assign(new EventEmitter(), {
+      pid: real.pid,
+      exitCode: null as number | null,
+      signalCode: null,
+      stdin: Object.assign(new EventEmitter(), {
+        write: (chunk: string | Buffer) => {
+          fed.push(Buffer.from(chunk));
+          return real.stdin!.write(chunk);
+        },
+        end: () => real.stdin!.end(),
+      }),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: (signal?: NodeJS.Signals | number) => real.kill(signal),
+    });
+    real.stdout!.on('data', (chunk: Buffer) => out.push(chunk));
+    real.stderr!.pipe(child.stderr);
+    real.on('error', (err) => child.emit('error', err));
+    real.on('close', (code, signal) => {
+      child.stdout.end(fn(Buffer.concat(out), Buffer.concat(fed).toString('utf-8')));
+      child.exitCode = code;
+      child.emit('close', code, signal);
+    });
+    return child as unknown as Child;
+  };
   const spawn = ((file: string, args: string[], options: unknown) => {
     if (file === 'git') {
       spawnLog.push(args ?? []);
@@ -71,8 +111,13 @@ vi.mock('node:child_process', async (importOriginal) => {
         injected.failNext = null;
         return failing();
       }
+      const rewrite = injected.rewriteNext?.(args);
+      if (rewrite) {
+        injected.rewriteNext = null;
+        return rewriting(file, args, options, rewrite);
+      }
     }
-    return (actual.spawn as unknown as (...a: unknown[]) => unknown)(file, args, options);
+    return realSpawn(file, args, options);
   }) as unknown as typeof actual.spawn;
   return { ...actual, execFile, spawn };
 });
@@ -101,6 +146,30 @@ function fileShows(): number {
       argv.includes('show') &&
       argv.some((a) => /:(roles\.yaml|groups\.yaml|synced-groups\.yaml|(.*\/)?access\.md|.*\/plugin\.json)$/.test(a)),
   ).length;
+}
+
+/**
+ * Rewrite ONE record of a `git cat-file --batch` reply — the one answering
+ * the stdin spec `which` matches — as `<spec> missing`, or as the same
+ * object reported with type `tree`. The reply is index-aligned with the
+ * specs fed on stdin, each record `<oid> <type> <size>\n<size bytes>\n` or
+ * `<spec> missing\n`, so the records are walked by the specs.
+ */
+function rewriteBatchRecord(which: RegExp, as: 'missing' | 'tree') {
+  return (stdout: Buffer, stdin: string): Buffer => {
+    const parts: Buffer[] = [];
+    let off = 0;
+    for (const spec of stdin.split('\n').filter(Boolean)) {
+      const nl = stdout.indexOf(0x0a, off);
+      const header = stdout.subarray(off, nl).toString('utf-8');
+      const end = header.endsWith(' missing') ? nl + 1 : nl + 1 + Number(header.split(' ')[2]) + 1;
+      if (!which.test(spec)) parts.push(stdout.subarray(off, end));
+      else if (as === 'missing') parts.push(Buffer.from(`${spec} missing\n`));
+      else parts.push(Buffer.from(header.replace(' blob ', ' tree ')), stdout.subarray(nl, end));
+      off = end;
+    }
+    return Buffer.concat(parts);
+  };
 }
 
 /**
@@ -184,10 +253,12 @@ describe('AccessControlService — at-ref model cache', () => {
     svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
     spawnLog.length = 0;
     injected.failNext = null;
+    injected.rewriteNext = null;
   });
 
   afterEach(async () => {
     injected.failNext = null;
+    injected.rewriteNext = null;
     // Spies are restored here, not at the end of the test that made them:
     // a failing assertion would otherwise leave a console.warn mock in place
     // for every test after it (this config sets no `restoreMocks`).
@@ -371,6 +442,32 @@ describe('AccessControlService — at-ref model cache', () => {
       AccessUnreadableError,
     );
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/groups\.yaml is a tree, not a file; refusing to decide/));
+  });
+
+  it.each([
+    ['access.md', 'missing', /:Team\/access\.md$/, /Team\/access\.md was listed but has no blob/],
+    ['access.md', 'a tree', /:Team\/access\.md$/, /Team\/access\.md is a tree, not a file/],
+    ['plugin manifest', 'missing', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json was listed but has no blob/],
+    ['plugin manifest', 'a tree', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json is a tree, not a file/],
+  ])('refuses to decide when a listed %s comes back %s from the batch, and never caches it', async (_what, how, spec, warned) => {
+    // A healthy git cannot be made to answer this: the listing names blobs
+    // only, and a commit's objects do not change between two reads of it.
+    // The batch's reply is rewritten at the process boundary instead, so the
+    // build's refusal of a listed path it could not read is pinned all the
+    // same: a model missing that file could grant what the file denies.
+    injected.rewriteNext = (argv) =>
+      argv.includes('cat-file') ? rewriteBatchRecord(spec, how === 'missing' ? 'missing' : 'tree') : null;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const batchesBefore = catFileBatches();
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+      AccessUnreadableError,
+    );
+    expect(injected.rewriteNext).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(warned));
+    // ...and nothing was pinned: the next call, with git answering in full,
+    // builds again and answers.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(catFileBatches()).toBe(batchesBefore + 2);
   });
 
   it('holds the models of far more commits than one listing resolves', async () => {
