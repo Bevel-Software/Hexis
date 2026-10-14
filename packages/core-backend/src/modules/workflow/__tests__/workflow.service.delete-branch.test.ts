@@ -20,6 +20,7 @@ import { WorkflowHooks } from '../workflow-hooks.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { WorkflowEventBus } from '../event-bus.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { makeFakeLockDb } from './fake-file-lock-db.js';
 import {
   BranchAuthorshipError,
   BranchDeleteBlockedError,
@@ -112,7 +113,6 @@ interface Harness {
   };
   fetch: ReturnType<typeof vi.fn>;
   deleted: string[];
-  fileLocks: FileLockService;
   /** What the service announced to connected tabs. */
   emitted: { kind: string; number?: number }[];
   hasAnyActive: MockInstance<FileLockService['hasAnyActive']>;
@@ -137,6 +137,8 @@ function harness(opts: {
   changes?: Record<string, string[] | 'error'>;
   /** Branches whose deletion fails at the host (the leased push is refused). */
   deleteFails?: string[];
+  /** Hold locks in a real (in-memory) lock store instead of answering from `savesLanding`. */
+  realLocks?: boolean;
 }): Harness {
   const deleted: string[] = [];
   const emitted: { kind: string; number?: number }[] = [];
@@ -175,8 +177,10 @@ function harness(opts: {
   const landing = new Set((opts.savesLanding ?? []).map(workspaceIdForBranch));
   const queued = new Set((opts.commitsQueued ?? []).map(workspaceIdForBranch));
   // The real service, for its gate on acquiring; what is held is mocked.
-  const fileLocks = new FileLockService({} as Database);
-  const hasAnyActive = vi.spyOn(fileLocks, 'hasAnyActive').mockImplementation(async (ws: string) => landing.has(ws));
+  const fileLocks = new FileLockService(opts.realLocks ? makeFakeLockDb().db : ({} as Database));
+  const hasAnyActive = opts.realLocks
+    ? vi.spyOn(fileLocks, 'hasAnyActive')
+    : vi.spyOn(fileLocks, 'hasAnyActive').mockImplementation(async (ws: string) => landing.has(ws));
   const svc = new WorkflowService(
     fakeDb(rows),
     git as unknown as GitService,
@@ -209,7 +213,7 @@ function harness(opts: {
     openChangeGate(),
     { emit: (e: { kind: string; number?: number }) => void emitted.push(e) } as unknown as WorkflowEventBus,
   );
-  return { svc, git, fetch, deleted, fileLocks, emitted, hasAnyActive };
+  return { svc, git, fetch, deleted, emitted, hasAnyActive };
 }
 
 const merged = (number: number, source: string, sha: string | null): CrRow => ({
@@ -352,7 +356,7 @@ describe('deleteBranchChecked — an agent deletes a branch', () => {
     h.hasAnyActive.mockResolvedValue(false);
     let during: unknown = null;
     h.git.deleteBranch.mockImplementationOnce(async () => {
-      during = await h.fileLocks.acquire(workspaceIdForBranch('ali/draft'), 'ali/draft', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
+      during = await h.svc.acquireLock(workspaceIdForBranch('ali/draft'), 'ali/draft', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
       return { lastCommit: 'a1' };
     });
     await h.svc.deleteBranchChecked(ADMIN, 'ali/draft');
@@ -560,6 +564,46 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
     expect(rows.map((r) => r.state)).toEqual(['open', 'open']);
   });
 
+  it('names the person by id, never by email address, on the close, reopen and deletion lines', async () => {
+    // Log lines carry no email addresses: who acted is the user's id.
+    const rows = [open(21, 'ali/sync', DEFAULT)];
+    const h = harness({
+      rows,
+      branches: { 'ali/sync': clean('s1'), 'ali/old-draft': clean('a1') },
+      changes: { 'ali/sync': [] },
+      deleteFails: ['ali/sync'],
+    });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      await expect(h.svc.deleteBranchChecked(ADMIN, 'ali/sync')).rejects.toThrow(/stale info/);
+      await h.svc.deleteBranchChecked(ADMIN, 'ali/old-draft');
+    } finally {
+      spy.mockRestore();
+    }
+    const pick = (needle: string) => lines.filter((l) => l.includes(needle));
+    expect(pick('closed change request #21')).toEqual([expect.stringContaining(' by u-ana: ')]);
+    expect(pick('reopened change request #21')).toEqual([expect.stringContaining(' for u-ana: ')]);
+    expect(pick('branch deleted by')).toEqual(['[workflow] branch deleted by u-ana: "ali/old-draft" at a1']);
+    for (const line of lines) expect(line).not.toContain('@');
+  });
+
+  it("names the person by id on the close made when a request's page is opened", async () => {
+    const rows = [open(23, 'ali/page', DEFAULT)];
+    const h = harness({ rows, branches: { 'ali/page': clean('p1') }, changes: { 'ali/page': [] } });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      await expect(h.svc.closeEmptyChangeRequest(23, BOB)).resolves.toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.filter((l) => l.includes('closed change request #23'))).toEqual([
+      expect.stringContaining(' by u-bob: '),
+    ]);
+    for (const line of lines) expect(line).not.toContain('@');
+  });
+
   it('a request the caller may not see is not in the preview at all, and is refused on without its number or link', async () => {
     // #21 is empty and #25 live; the caller can see neither.
     const rows = [open(21, 'bob/sync', DEFAULT), open(25, 'ali/secret', 'bob/sync')];
@@ -656,7 +700,7 @@ describe('closeEmptyOpenChangeRequests — the background close', () => {
     const h = harness({ rows, branches: { 'ali/empty': clean('e1') }, changes: { 'ali/empty': [] } });
     let during: unknown = null;
     h.git.deleteBranch.mockImplementationOnce(async () => {
-      during = await h.fileLocks.acquire(workspaceIdForBranch('ali/empty'), 'ali/empty', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
+      during = await h.svc.acquireLock(workspaceIdForBranch('ali/empty'), 'ali/empty', 'KnowledgeBase/f.md', BOB).catch((e: unknown) => e);
       return { lastCommit: 'e1' };
     });
     await h.svc.closeEmptyOpenChangeRequests();
@@ -901,6 +945,58 @@ const GIT_ENV = {
 };
 const git = async (cwd: string, args: string[]) =>
   (await execFileAsync('git', args, { cwd, env: GIT_ENV })).stdout.trim();
+
+/**
+ * A file held through the app: the lock route hands the service the `:id`
+ * Express decoded, so a slashed branch's workspace arrives as `ali/draft`,
+ * not the `ali%2Fdraft` the deletion paths ask with. Over a real lock store,
+ * every deletion path has to see that hold.
+ */
+describe('a file held through the app on a slashed branch', () => {
+  const holdAsTheRouteDoes = (h: Harness, branch: string) =>
+    h.svc.acquireLock(branch, branch, 'KnowledgeBase/f.md', BOB);
+
+  it('refuses the agent delete, with or without discardUnmerged', async () => {
+    const h = harness({ realLocks: true, branches: { 'ali/draft': { exists: true, lastCommit: 'a3', unmergedCommits: 1 } } });
+    await expect(holdAsTheRouteDoes(h, 'ali/draft')).resolves.toMatchObject({ acquired: true });
+    for (const discardUnmerged of [false, true]) {
+      const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/draft', { discardUnmerged }));
+      expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'saves-landing' });
+    }
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('keeps an empty request into the branch being deleted open, and refuses on it', async () => {
+    const rows = [open(22, 'ali/feature', 'ali/sync')];
+    const h = harness({ realLocks: true, rows, branches: { 'ali/sync': clean('s1') }, changes: { 'ali/feature': [] } });
+    await holdAsTheRouteDoes(h, 'ali/feature');
+    const err = await refusal(h.svc.deleteBranchChecked(ADMIN, 'ali/sync'));
+    expect((err as BranchDeleteBlockedError).payload).toMatchObject({ reason: 'open-change-request', number: 22 });
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('the background close leaves the request open and its source branch in place', async () => {
+    const rows = [open(31, 'ali/saving', DEFAULT)];
+    const h = harness({ realLocks: true, rows, admins: [], branches: { 'ali/saving': clean('e1') }, changes: { 'ali/saving': [] } });
+    await holdAsTheRouteDoes(h, 'ali/saving');
+    await expect(h.svc.closeEmptyOpenChangeRequests()).resolves.toBe(0);
+    expect(rows[0]!.state).toBe('open');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('the leftover cleanup leaves the branch in place', async () => {
+    const h = harness({
+      realLocks: true,
+      rows: [merged(9, 'ali/saving', 'm9')],
+      branches: { 'ali/saving': clean('t9') },
+      ancestry: [['t9', 'm9']],
+    });
+    await holdAsTheRouteDoes(h, 'ali/saving');
+    await expect(h.svc.retireLeftoverMergedBranches()).resolves.toBe(0);
+    expect(h.deleted).toEqual([]);
+  });
+});
 
 describe('deleteBranchChecked over real git — a delete made from another workspace', () => {
   let root: string;

@@ -168,13 +168,49 @@ describe('EmbedService: minting', () => {
   /**
    * The token rides in the tool result and so in the chat transcript;
    * whoever holds it acts on that one file as its user until it expires.
-   * One hour (Razvan, 2026-10-09), down from the two the embed used before.
+   * Five minutes (Razvan, 2026-10-09): the chat view renews it through its
+   * host when a call is refused, so a short life costs the reader nothing.
    */
-  it('mints a token that lives one hour', async () => {
+  it('mints an open_page token that lives five minutes', async () => {
     const { service } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
+    expect(exp - iat).toBe(5 * 60);
+  });
+
+  /** The connector frames `/embed` and has no host to renew through: its hour stands. */
+  it('mints a connector token that keeps its one-hour lifetime', async () => {
+    const { service } = build();
+    const { token } = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+    const { iat, exp } = claimsOf(token) as { iat: number; exp: number };
     expect(exp - iat).toBe(60 * 60);
+  });
+
+  /**
+   * Both kinds are read by the same verification: each loads while it lives
+   * and is refused as a token once it has run out — the user's after five
+   * minutes, the connector's only after the hour.
+   */
+  it('reads both kinds while they live and refuses each once its own lifetime is over', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-09T10:00:00Z'));
+      const { service } = build();
+      const user = await service.mintForUser({ userId: USER.id, reference: REPO });
+      const connector = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+
+      vi.setSystemTime(new Date('2026-10-09T10:04:50Z'));
+      await expect(service.loadFile(user.token)).resolves.toMatchObject({ repoRelative: REPO });
+
+      vi.setSystemTime(new Date('2026-10-09T10:05:01Z'));
+      await expect(service.loadFile(user.token)).rejects.toThrow(EmbedTokenError);
+      await expect(service.loadFile(connector.token)).resolves.toMatchObject({ repoRelative: REPO });
+
+      vi.setSystemTime(new Date('2026-10-09T11:00:01Z'));
+      await expect(service.loadFile(connector.token)).rejects.toThrow(EmbedTokenError);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('mints for an outside account — the connector path, unchanged', async () => {
@@ -189,7 +225,9 @@ describe('EmbedService: minting', () => {
 
   it('keeps the token PSEUDONYMOUS — no address, no name', async () => {
     const { service } = build();
-    const { token } = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+    const { token, embedUrl } = await service.mintToken({ accountId: 'acc-1', email: USER.email, reference: REPO });
+    // The connector's host sizes its frame to the content: its view is told so.
+    expect(embedUrl).toBe(`https://hexis.example/embed?token=${encodeURIComponent(token)}&sizing=content`);
     expect(JSON.stringify(claimsOf(token))).not.toContain(USER.email);
     expect(JSON.stringify(claimsOf(token))).not.toContain(USER.name);
   });
@@ -708,6 +746,41 @@ describe('EmbedService: a switched-off account', () => {
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
     expect(workflowService.acquireLock).not.toHaveBeenCalled();
     expect(workflowService.commitChanges).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A distribution's own token-authed route beside the embed (a graph for a
+ * dashboard) asks who is looking before it serves anything, and must judge
+ * the viewer exactly as the embed does.
+ */
+describe('EmbedService: who is looking through a token', () => {
+  it('answers the linked user, their verdicts on the file, and the file', async () => {
+    const { service } = build({ canWrite: false });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: `${REPO}#intro` });
+    expect(await service.viewerOf(token)).toEqual({
+      linked: true,
+      user: expect.objectContaining({ id: USER.id, email: USER.email }),
+      canRead: true,
+      canWrite: false,
+      repoRelative: REPO,
+    });
+  });
+
+  it('answers nobody for an unlinked outside account, and refuses a switched-off one as the embed does', async () => {
+    const unlinked = build({ linkedUserId: null });
+    const outside = await unlinked.service.mintToken({ accountId: 'acc-1', reference: REPO });
+    expect(await unlinked.service.viewerOf(outside.token)).toEqual({
+      linked: false,
+      user: null,
+      canRead: false,
+      canWrite: false,
+      repoRelative: REPO,
+    });
+    const off = build({ active: false });
+    const { token } = await off.service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(off.service.viewerOf(token)).rejects.toThrow(ACCOUNT_DEACTIVATED_MESSAGE);
+    await expect(off.service.viewerOf('not-a-token')).rejects.toThrow(EmbedTokenError);
   });
 });
 

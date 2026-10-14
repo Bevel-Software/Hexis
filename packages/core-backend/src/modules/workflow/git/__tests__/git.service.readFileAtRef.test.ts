@@ -100,3 +100,45 @@ describe('GitService.readFileAtRef', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('GitService.commitAtRef', () => {
+  let root: string;
+  const workspaceId = 'ws-commit-at-ref-1';
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-commit-at-ref-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  function makeSvc(workspaceDir: string) {
+    return new GitService(
+      stubWorkspaceService(workspaceId, workspaceDir),
+      new WorkflowHooks(),
+      testKbContext({ kbDirName: PROCESS_MAP_DIR }),
+    );
+  }
+
+  it('answers the commit a ref names, and null for a ref that names none', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = makeSvc(workspaceDir);
+    // Unborn HEAD: a repository with no commit yet names none.
+    expect(await svc.commitAtRef(workspaceId, 'HEAD')).toBeNull();
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles: {}\n');
+    await runGit(repo, ['add', 'roles.yaml']);
+    await runGit(repo, ['commit', '-m', 'add roles']);
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo });
+    expect(await svc.commitAtRef(workspaceId, 'HEAD')).toBe(stdout.trim());
+    expect(await svc.commitAtRef(workspaceId, 'origin/does-not-exist')).toBeNull();
+  });
+
+  it('THROWS on a failure that is not "names no commit", such as no repository there', async () => {
+    // The workspace folder exists; the clone inside it does not. Git fails
+    // with "not a git repository", which must not read as an empty one.
+    const workspaceDir = path.join(root, workspaceId);
+    await fs.mkdir(path.join(workspaceDir, PROCESS_MAP_DIR), { recursive: true });
+    const svc = makeSvc(workspaceDir);
+    await expect(svc.commitAtRef(workspaceId, 'HEAD')).rejects.toThrow();
+  });
+});

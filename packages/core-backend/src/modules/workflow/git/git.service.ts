@@ -4139,6 +4139,29 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The commit `ref` names right now, or null when it names none (an unborn
+   * `HEAD`, a ref that does not exist). A caller that reads several things
+   * "at HEAD" pins the commit once with this and asks each read at that
+   * commit, so a commit landing between the reads cannot hand it one
+   * snapshot's files with another's rules.
+   *
+   * Null is ONLY "names no commit": `rev-parse --verify --quiet` says that
+   * with exit status 1 and nothing on stderr. Any other failure — no
+   * repository there, git itself failing, a deadline — is thrown, so a
+   * caller cannot read a broken clone as an empty one.
+   */
+  async commitAtRef(workspaceId: string, ref: string): Promise<string | null> {
+    const cwd = await this.repoDir(workspaceId);
+    try {
+      const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+      return stdout.trim() || null;
+    } catch (err) {
+      if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1 && !(err.stderr ?? '').trim()) return null;
+      throw err;
+    }
+  }
+
+  /**
    * A clean `git status` for a path has two honest readings (already
    * committed; a queued re-apply of something that landed) and one dishonest
    * one: the bytes exist, but BESIDE the repository, because a caller wrote a

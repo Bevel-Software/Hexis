@@ -29,7 +29,7 @@ import { NameWithBadges } from '../NameWithBadges';
  * ROUTE and not a bigger dialog is the OAuth round-trip: signing in leaves the
  * app entirely and comes back through the provider and our callback, which can
  * only return the browser to a URL. A dialog has no URL, so the old flow could
- * only ever land you back on `/connect`, away from what you were doing.
+ * only ever land you back on Connect your tools, away from what you were doing.
  *
  * Three signals gate what renders, and roles are none of them:
  *  - read access to the `.tool` — implied by the tool appearing in the secrets

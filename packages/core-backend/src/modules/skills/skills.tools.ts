@@ -95,32 +95,43 @@ export function registerSkillsTools(
    * default branch — one batch per call, whichever branch was read (see
    * `defaultBranchWriteVerdicts`).
    */
-  const verdictsFor = (ctx: ToolContext, paths: string[]): Promise<Map<string, boolean>> =>
+  const verdictsFor = (ctx: ToolContext, paths: string[], at?: string): Promise<Map<string, boolean>> =>
     writeVerdicts
-      ? defaultBranchWriteVerdicts(writeVerdicts, ctx, paths)
+      ? defaultBranchWriteVerdicts(writeVerdicts, ctx, paths, { ref: at })
       : Promise.resolve(new Map(paths.map((p) => [p, false])));
 
   /**
    * Every repo-relative file `get_skill`'s `canWrite` covers: the skill's
-   * `SKILL.md` and bundled files as the DEFAULT branch has them. `loaded` is
-   * reused when it already is the default branch's latest copy; otherwise the
-   * released skill is looked up, and the loaded copy stands in only when the
-   * default branch has no such skill (one that exists only on a draft). Null —
-   * judged `false` — when that lookup fails or refuses (fail closed), and
-   * without a lookup when the verdict cannot be anything but `false`.
+   * folder as COMMITTED on the default branch (`HEAD` of its clone), which is
+   * what a direct write is judged against — never the working tree, where a
+   * bundled file deleted but not yet committed would drop out of the verdict
+   * while `HEAD` still forbids changing it. A skill is committed there when
+   * its `SKILL.md` is — a folder of that name holding other tracked files is
+   * not the skill, and its files are not the skill's. A skill not committed
+   * there exists only on the branch read, and is judged by its files there,
+   * where they would land. The files are listed at ONE commit — the one
+   * `HEAD` names when asked, answered beside them — and the verdict is judged
+   * at that same commit, so a commit landing between the two cannot pair one
+   * snapshot's files with another's rules. Null — judged `false` — when
+   * `HEAD` names no commit or the listing fails (fail closed), and without
+   * one when the verdict cannot be anything but `false`.
    */
   const skillFilesOnDefault = async (
     ctx: ToolContext,
-    name: string,
     loaded: { path: string; files: string[] },
-    loadedElsewhere: boolean,
-  ): Promise<string[] | null> => {
-    if (!writeVerdicts || ctx.scope !== 'write') return null;
-    if (!loadedElsewhere) return [skillMdOf(loaded), ...loaded.files];
-    const released = await skillService.getSkill(ctx.user.email, name).catch(() => null);
-    if (released?.ok && released.kind === 'skill') return [skillMdOf(released.skill), ...released.skill.files];
-    if (released?.ok === false && released.error === 'not_found') return [skillMdOf(loaded), ...loaded.files];
-    return null;
+  ): Promise<{ paths: string[]; at: string } | null> => {
+    if (!writeVerdicts?.committedFiles || ctx.scope !== 'write') return null;
+    const workspaceId = writeVerdicts.defaultWorkspaceId();
+    let at: string | null;
+    let committed: string[];
+    try {
+      at = await writeVerdicts.committedFiles.commitAtRef(workspaceId, 'HEAD');
+      if (!at) return null;
+      committed = await writeVerdicts.committedFiles.listFilesAtRef(workspaceId, at, loaded.path);
+    } catch {
+      return null;
+    }
+    return { paths: committed.includes(skillMdOf(loaded)) ? committed : [skillMdOf(loaded), ...loaded.files], at };
   };
 
   registry.registerExternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
@@ -174,13 +185,16 @@ export function registerSkillsTools(
         return { ...result, file: { ...result.file, canWrite: verdicts.get(result.file.path) === true } };
       }
       // The whole skill: true only when every one of its files may be written —
-      // the files the skill has ON THE DEFAULT BRANCH, so a draft (or an older
-      // version) that drops a write-denied bundled file does not turn the
-      // verdict true. A skill only on the draft is judged by its draft files,
-      // where they would land.
-      const paths = await skillFilesOnDefault(ctx, name, result.skill, branch !== undefined || versioned);
-      const verdicts = paths === null ? new Map<string, boolean>() : await verdictsFor(ctx, paths);
-      const skill = { ...result.skill, canWrite: paths !== null && paths.every((p) => verdicts.get(p) === true) };
+      // the files the skill has COMMITTED on the default branch, so a draft, an
+      // older version, or a deletion not yet committed that drops a
+      // write-denied bundled file does not turn the verdict true. A skill only
+      // on the draft is judged by its draft files, where they would land.
+      const committed = await skillFilesOnDefault(ctx, result.skill);
+      const verdicts = committed === null ? new Map<string, boolean>() : await verdictsFor(ctx, committed.paths, committed.at);
+      const skill = {
+        ...result.skill,
+        canWrite: committed !== null && committed.paths.every((p) => verdicts.get(p) === true),
+      };
       if (!allowedTools) return { ...result, skill };
       return { ...result, skill, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
     }),

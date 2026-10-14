@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { configureEmbed, EMBED_HANDOFF_GLOBAL, readEmbedHandoff, resetEmbedConfig } from '../embed-config';
+import {
+  configureEmbed,
+  EMBED_HANDOFF_GLOBAL,
+  embedToken,
+  readEmbedHandoff,
+  resetEmbedConfig,
+  withEmbedToken,
+} from '../embed-config';
 import { embedRawUrl, loadEmbed, lockEmbed, saveEmbed } from '../services/embed.api';
 import { openThroughHost, resolveToAppUrl } from '../embed-host';
 
@@ -111,6 +118,14 @@ describe('the handoff the view leaves on the window', () => {
     expect(readEmbedHandoff()).toEqual({ baseUrl: BASE, token: 'tok', openLink });
   });
 
+  it('keeps the way to renew the token the view lent, and only a function', () => {
+    const renew = async () => 'tok-2';
+    set({ baseUrl: BASE, token: 'tok', renew });
+    expect(readEmbedHandoff()).toEqual({ baseUrl: BASE, token: 'tok', renew });
+    set({ baseUrl: BASE, token: 'tok', renew: 'tok-2' });
+    expect(readEmbedHandoff()).toEqual({ baseUrl: BASE, token: 'tok' });
+  });
+
   it('keeps the path prefix a deployment is served under', () => {
     set({ baseUrl: `${BASE}/hexis/`, token: 'tok' });
     expect(readEmbedHandoff()).toEqual({ baseUrl: `${BASE}/hexis`, token: 'tok' });
@@ -124,5 +139,66 @@ describe('the handoff the view leaves on the window', () => {
   ])('is refused with %s', (_label, value) => {
     set(value);
     expect(readEmbedHandoff()).toBeNull();
+  });
+});
+
+/**
+ * A call refused for its token is retried once with a fresh one — but only
+ * under the mount it was sent from. When another `open_page` in the chat
+ * replaced the mount meanwhile, the token now current is for another page,
+ * and an old draft must never be sent with it.
+ */
+describe('a refused call, retried only under its own mount', () => {
+  const refused = () => Object.assign(new Error('expired'), { status: 401 });
+
+  it('is retried once with the fresh token under the same mount', async () => {
+    configureEmbed({ baseUrl: BASE, token: 'tok-1', renew: async () => 'tok-2' });
+    const call = vi.fn(async (token: string) => {
+      if (token === 'tok-1') throw refused();
+      return token;
+    });
+    await expect(withEmbedToken(call)).resolves.toBe('tok-2');
+    expect(call.mock.calls.map((c) => c[0])).toEqual(['tok-1', 'tok-2']);
+  });
+
+  it('is not retried with the successor mount token when the mount was replaced while it ran', async () => {
+    configureEmbed({ baseUrl: BASE, token: 'page-a', renew: async () => 'page-a-2' });
+    let refuse!: () => void;
+    const call = vi.fn(
+      (token: string) =>
+        new Promise<string>((resolve, reject) => {
+          if (token !== 'page-a') return resolve(token);
+          refuse = () => reject(refused());
+        }),
+    );
+    const save = withEmbedToken(call);
+    // Another open_page in the chat: a new mount, for another page.
+    resetEmbedConfig();
+    configureEmbed({ baseUrl: BASE, token: 'page-b', renew: async () => 'page-b-2' });
+    refuse();
+    await expect(save).rejects.toMatchObject({ status: 401 });
+    expect(call.mock.calls.map((c) => c[0])).toEqual(['page-a']);
+  });
+
+  it('is not retried when the mount was replaced while its renewal ran', async () => {
+    let answer!: (token: string) => void;
+    configureEmbed({
+      baseUrl: BASE,
+      token: 'page-a',
+      renew: () => new Promise<string>((resolve) => (answer = resolve)),
+    });
+    const call = vi.fn(async (token: string) => {
+      if (token === 'page-a') throw refused();
+      return token;
+    });
+    const save = withEmbedToken(call);
+    await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
+    resetEmbedConfig();
+    configureEmbed({ baseUrl: BASE, token: 'page-b', renew: async () => 'page-b-2' });
+    answer('page-a-2');
+    await expect(save).rejects.toMatchObject({ status: 401 });
+    expect(call.mock.calls.map((c) => c[0])).toEqual(['page-a']);
+    // And the successor keeps its own token.
+    expect(embedToken()).toBe('page-b');
   });
 });
