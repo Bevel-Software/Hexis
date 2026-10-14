@@ -177,7 +177,9 @@ describe('groupsOfUser', () => {
     const workspaceDir = path.join(root, workspaceId);
     const repo = path.join(workspaceDir, KB_DIR);
     await fs.mkdir(repo, { recursive: true });
-    await fs.writeFile(path.join(repo, 'roles.yaml'), ROLES_YAML);
+    // `lee@x.io` holds Leads, the role that lists `group:Sales Team`, without
+    // being in the group: the role reaches the group, not the other way round.
+    await fs.writeFile(path.join(repo, 'roles.yaml'), ROLES_YAML.replace('    - group:Sales Team\n', '    - group:Sales Team\n    - lee@x.io\n'));
     await fs.writeFile(
       path.join(repo, 'groups.yaml'),
       `groups:\n  Sales Team:\n    - sam@x.io\n    - sue@x.io\n  Design:\n    - dee@x.io\n    - sue@x.io\n`,
@@ -201,5 +203,10 @@ describe('groupsOfUser', () => {
     const svc = await makeService();
     expect(await svc.groupsOfUser(workspaceId, 'eng@x.io')).toEqual([]);
     expect(await svc.groupsOfUser(workspaceId, 'admin@x.io')).toEqual([]);
+  });
+
+  it('does not count holding a role that names a group as being in it', async () => {
+    const svc = await makeService();
+    expect(await svc.groupsOfUser(workspaceId, 'lee@x.io')).toEqual([]);
   });
 });
