@@ -9,7 +9,6 @@ import {
 } from '../../workspace/state/workspace.context';
 import { AdminContext } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
-import type { ToolSecrets } from '../../secrets-vault';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
@@ -68,7 +67,10 @@ vi.mock('../../access/api', async (importOriginal) => {
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
-const tool = (over: Partial<ToolSecrets>): ToolSecrets => ({
+/** A tool as the catalog carries it — the shape the stubbed data hook answers with, nothing another module exports. */
+type CatalogTool = LibraryData['tools'][number];
+
+const tool = (over: Partial<CatalogTool>): CatalogTool => ({
   slug: 'heyreach',
   name: 'heyreach',
   path: 'Plugins/GTM/heyreach.tool',
