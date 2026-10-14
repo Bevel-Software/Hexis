@@ -170,10 +170,15 @@ docker compose exec db pg_dump -U bevel bevel > backup.sql
 The volumes, and what each holds:
 
 - **pgdata** — the Postgres data itself (what `backup.sql` above captures).
-- **workspaces** — per-branch working copies of the knowledge base, plus
-  scratch files. The copies re-clone from your git remote; only scratch
-  files outside the knowledge base are unique to the volume.
-- **backups** — the change-review backup ledger.
+- **workspaces** — per-branch working copies of the knowledge base (each a
+  git worktree of the repository below), plus scratch files. The copies are
+  recreated from your git remote; only scratch files outside the knowledge
+  base are unique to the volume.
+- **backups** — the change-review backup ledger, and the knowledge base's
+  one git repository (`.kb-repository/`) that every branch's working copy is
+  a worktree of. It holds commits that have not been pushed yet, so keep
+  this volume with the workspaces volume: a redeploy that loses it while
+  keeping the workspaces recreates the working copies from the remote.
 - **spills** — oversized tool results parked for re-reading; ephemeral.
 
 The database dump is the backup that matters — it is the only thing a

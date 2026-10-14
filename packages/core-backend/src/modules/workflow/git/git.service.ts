@@ -641,7 +641,7 @@ export class GitService implements IGitService {
       // result rather than firing a redundant network round-trip. Awaiting
       // the same promise also means subsequent listBranches calls see the
       // newly fetched refs.
-      await inFlight;
+      await this.mutex.whileParked(inFlight);
       return this.lastImplicitFetchOk.get(workspaceId) ?? false;
     }
 

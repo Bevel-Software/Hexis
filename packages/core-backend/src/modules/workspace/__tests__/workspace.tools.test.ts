@@ -118,6 +118,12 @@ let guideText = 'THE PLATFORM GUIDE\n';
  * branch-less `execute_command` falls back to the session's own workspace.
  */
 let focusedBranch: string | undefined;
+/**
+ * A workspace folder of its own for a branch, where a test needs two
+ * workspaces side by side (worktrees of one repository). A branch not named
+ * here resolves to `tempDir`, as every other test expects.
+ */
+let branchWorkspaceDirs = new Map<string, string>();
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
 /** The hook registry the tools were mounted against, so a test can register one. */
@@ -236,6 +242,7 @@ async function start(
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
+  branchWorkspaceDirs = new Map();
 
   const registry = new ToolRegistry();
   toolRegistry = registry;
@@ -251,7 +258,7 @@ async function start(
       // workspace for an invalid branch.
       getOrCreateForBranch: async (branch: string) => {
         workspacePathCalls.push(branch);
-        return { id: encodeURIComponent(branch), name: branch, absolutePath: tempDir, createdAt: '', kbDirName: KB_DIR };
+        return { id: encodeURIComponent(branch), name: branch, absolutePath: branchWorkspaceDirs.get(branch) ?? tempDir, createdAt: '', kbDirName: KB_DIR };
       },
       getWorkspacePath: async (id: string) => {
         workspacePathCalls.push(id);
@@ -816,6 +823,39 @@ describe('workspace file primitives', () => {
     const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'git log -1 --format=%s' })).json()) as { stdout: string; stderr: string; exitCode: number };
     expect(res.exitCode).toBe(0);
     expect(res.stdout.trim()).toBe('kb-seed');
+  });
+
+  it("execute_command's plain git acts on that branch's worktree only, never another branch's", async () => {
+    const base = await start();
+    // Production layout: every branch workspace is a worktree of ONE
+    // repository, its `.git` a file naming its folder there.
+    const run = promisify(execFile);
+    const id = ['-c', 'user.email=t@test', '-c', 'user.name=t'];
+    const repository = join(tempDir, 'repository.git');
+    const seed = join(tempDir, 'seed');
+    await mkdir(seed, { recursive: true });
+    await run('git', ['init', '-q', '-b', 'alice/a'], { cwd: seed });
+    await run('git', [...id, 'commit', '-q', '--allow-empty', '-m', 'on alice'], { cwd: seed });
+    await run('git', ['branch', 'bob/b'], { cwd: seed });
+    await run('git', ['checkout', '-q', 'bob/b'], { cwd: seed });
+    await run('git', [...id, 'commit', '-q', '--allow-empty', '-m', 'on bob'], { cwd: seed });
+    await run('git', ['clone', '-q', '--bare', seed, repository]);
+    for (const [branch, folder] of [['alice/a', 'ws-alice'], ['bob/b', 'ws-bob']] as const) {
+      await run('git', ['worktree', 'add', '-q', join(tempDir, folder, KB_DIR), branch], { cwd: repository });
+      branchWorkspaceDirs.set(branch, join(tempDir, folder));
+    }
+    await writeFile(join(tempDir, 'ws-bob', KB_DIR, 'bob-only.md'), 'dirt in bob\n');
+    await writeFile(join(tempDir, 'ws-alice', KB_DIR, 'alice-only.md'), 'dirt in alice\n');
+    type Res = { stdout: string; stderr: string; exitCode: number };
+    const exec = async (branch: string, command: string) =>
+      (await (await post(`${base}/api/agent/tools/execute_command`, { branch, command })).json()) as Res;
+
+    const log = await exec('alice/a', 'git log -1 --format=%s');
+    expect(log.exitCode).toBe(0);
+    expect(log.stdout.trim()).toBe('on alice');
+    const status = await exec('alice/a', 'git status --porcelain');
+    expect(status.stdout.trim()).toBe('?? alice-only.md');
+    expect((await exec('bob/b', 'git rev-parse --abbrev-ref HEAD')).stdout.trim()).toBe('bob/b');
   });
 
   // POSIX-only probes: `$GIT_DIR` expansion and `>/dev/null` are `sh`

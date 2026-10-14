@@ -360,7 +360,9 @@ export class KbRepository {
   async fetch(opts: FetchOptions): Promise<boolean> {
     const now = Date.now();
     if (!opts.force && now - this.lastSuccessAt < opts.maxAgeMs) return true;
-    if (this.inFlightFetch) return this.inFlightFetch;
+    // Joined PARKED: the fetch in flight may be waiting for every running
+    // worktree operation, and the caller may be one.
+    if (this.inFlightFetch) return this.mutex.whileParked(this.inFlightFetch);
     if (!opts.force && opts.failureBackoffMs && now - this.lastFailureAt < opts.failureBackoffMs) {
       return false;
     }

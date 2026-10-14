@@ -14,8 +14,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  */
 export const REPOSITORY_KEY = '\u0000repository';
 
-/** What the current async context holds of one mutex: nothing, a workspace key, or the repository. */
-type Held = 'workspace' | 'repository';
+/** What the current async context holds of one mutex: a workspace key (as its running token), or the repository. */
+type Held = { kind: 'workspace'; token: object } | { kind: 'repository' };
 
 /**
  * Serializes async operations by key. Two `run(k, ...)` calls with the same key
@@ -34,8 +34,17 @@ export class WorkspaceMutex {
   /** Which reservation the current async context is inside, if any. */
   private readonly held = new AsyncLocalStorage<Held>();
 
-  /** Workspace-key operations that are RUNNING (past the repository gate). */
-  private readonly running = new Set<Promise<void>>();
+  /** Workspace-key operations that are RUNNING (past the repository gate, and not parked). */
+  private readonly running = new Set<object>();
+  /** Told whenever an operation leaves the running set — what a repository operation's drain waits on. */
+  private runningLeft: Array<() => void> = [];
+
+  private leaveRunning(token: object): void {
+    if (!this.running.delete(token)) return;
+    const waiters = this.runningLeft;
+    this.runningLeft = [];
+    for (const wake of waiters) wake();
+  }
 
   /** Repository operations queued or running; while above zero, no workspace-key operation starts. */
   private repositoryWaiting = 0;
@@ -96,8 +105,9 @@ export class WorkspaceMutex {
     // every workspace operation, and held the rest back), so a workspace key
     // it needs is free by construction. Queuing on the key would wait for an
     // operation that is itself held back by this one.
-    if (this.held.getStore() === 'repository') return fn();
-    const nested = this.held.getStore() === 'workspace';
+    const holding = this.held.getStore();
+    if (holding?.kind === 'repository') return fn();
+    const nested = holding?.kind === 'workspace';
     const prev = Promise.all(
       distinct.map((k) => (this.tails.get(k) ?? Promise.resolve()).catch(() => undefined)),
     );
@@ -131,8 +141,8 @@ export class WorkspaceMutex {
    */
   async runRepository<T>(fn: () => Promise<T>): Promise<T> {
     const holding = this.held.getStore();
-    if (holding === 'repository') return fn();
-    if (holding === 'workspace') return this.afterRepositoryTail(fn);
+    if (holding?.kind === 'repository') return fn();
+    if (holding?.kind === 'workspace') return this.afterRepositoryTail(fn);
 
     if (this.repositoryWaiting++ === 0) {
       this.repositoryIdle = new Promise<void>((resolve) => {
@@ -144,9 +154,10 @@ export class WorkspaceMutex {
       // holding one: a running workspace operation may itself need the queue
       // for a nested fetch, and would wait for this, which waits for it.
       // Nothing joins the running set once the count above went up, except a
-      // nested call from an operation already in it.
+      // nested call from an operation already in it, or one coming back from
+      // being parked (see `whileParked`), which waits at the gate first.
       while (this.running.size > 0) {
-        await Promise.all([...this.running]);
+        await new Promise<void>((resolve) => this.runningLeft.push(resolve));
       }
       return await this.afterRepositoryTail(fn);
     } finally {
@@ -154,10 +165,32 @@ export class WorkspaceMutex {
     }
   }
 
+  /**
+   * Wait for `pending` — something another caller started and this one joins:
+   * a branch's first checkout being made, a fetch already in flight — WITHOUT
+   * counting as running meanwhile. Inside a workspace operation, the thing
+   * joined may be a repository operation that is waiting for every running
+   * workspace operation, this one included; counted as running, each would
+   * wait for the other forever. Parked, the repository operation goes ahead,
+   * and this one comes back through the repository gate before it carries on.
+   * Outside a workspace operation it is a plain wait.
+   */
+  async whileParked<T>(pending: Promise<T>): Promise<T> {
+    const holding = this.held.getStore();
+    if (holding?.kind !== 'workspace' || !this.running.has(holding.token)) return pending;
+    this.leaveRunning(holding.token);
+    try {
+      return await pending;
+    } finally {
+      while (this.repositoryWaiting > 0) await this.repositoryIdle;
+      this.running.add(holding.token);
+    }
+  }
+
   /** Run after every repository operation queued before it, as one of them. */
   private afterRepositoryTail<T>(fn: () => Promise<T>): Promise<T> {
     const prev = this.repositoryTail.catch(() => undefined);
-    const next = prev.then(() => this.held.run('repository', fn));
+    const next = prev.then(() => this.held.run({ kind: 'repository' }, fn));
     this.repositoryTail = next;
     return next;
   }
@@ -174,16 +207,12 @@ export class WorkspaceMutex {
     }
     // No await between the gate above and joining the running set: a
     // repository operation that queues after this line waits for this one.
-    let settle!: () => void;
-    const done = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
-    this.running.add(done);
+    const token = {};
+    this.running.add(token);
     try {
-      return await this.held.run('workspace', fn);
+      return await this.held.run({ kind: 'workspace', token }, fn);
     } finally {
-      this.running.delete(done);
-      settle();
+      this.leaveRunning(token);
     }
   }
 }

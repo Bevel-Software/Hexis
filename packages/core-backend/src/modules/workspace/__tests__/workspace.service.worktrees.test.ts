@@ -143,6 +143,24 @@ describe('opening a branch', () => {
     );
   });
 
+  it("lists and reads the worktree's files and never its `.git` file", async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    const id = workspaceIdForBranch('alice/a');
+
+    const names: string[] = [];
+    const walk = (entry: { name: string; children?: unknown[] }) => {
+      names.push(entry.name);
+      for (const child of (entry.children ?? []) as Array<{ name: string; children?: unknown[] }>) walk(child);
+    };
+    walk((await svc.listFiles(id)) as never);
+    expect(names).toContain('alice.md');
+    expect(names).not.toContain('.git');
+    const all = await svc.readAllKbFiles(id);
+    expect(Object.keys(all).some((p) => p.split('/').includes('.git'))).toBe(false);
+    expect(Object.keys(all).length).toBeGreaterThan(0);
+  });
+
   it('makes and fetches the repository for the first branch, and the second reuses it', async () => {
     const { runner, calls } = recordingRunner();
     const svc = service(runner);

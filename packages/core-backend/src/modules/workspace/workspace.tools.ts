@@ -4189,6 +4189,11 @@ export function registerWorkspaceTools(
       // `git …` invocation. Otherwise the KB repo context would (a) leak into a
       // chained step that spawns its own git — `git commit && npm ci` — and (b)
       // override a caller's explicit `git -C …` / `--git-dir` / `--work-tree`.
+      //
+      // The workspace is a WORKTREE of the knowledge base's one repository, so
+      // its `.git` is a file naming the worktree's own folder in there; git
+      // follows that file when it is GIT_DIR, and a standalone command acts on
+      // this branch's HEAD, index and working tree only — never another's.
       const command = (a.command as string).trim();
       const isStandaloneGit =
         /^git(\s|$)/.test(command) &&
