@@ -878,6 +878,68 @@ describe('a file deleted by someone else', () => {
     expect(disk.get('KB/Draft.md')).toBe('restored, edited');
   });
 
+  describe('a 404 from the branch just left', () => {
+    /** Switch to `feature` (workspace ws-2), where Draft.md still exists, and open it there. */
+    async function switchToFeature(result: Hook) {
+      apiMocks.getOrCreateWorkspace.mockResolvedValue({
+        workspace: { id: 'ws-2', name: 'Workspace', absolutePath: '/tmp/ws-2', createdAt: '2026-10-09T00:00:00.000Z' },
+        fileTree: treeOf(['KB/Draft.md']),
+      });
+      act(() => { result.current.setPersistenceBranch('feature'); });
+      await waitFor(() => expect(result.current.workspaceId).toBe('ws-2'));
+      await open(result, 'KB/Draft.md');
+    }
+    const changedOnFeature = () => ({ ...fileChanged('KB/Draft.md'), workspaceId: 'ws-2', branch: 'feature' }) as WorkflowEvent;
+
+    it("does not make this branch's read of the same path stale", async () => {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      const reloadOnMain = result.current.reloadTabFromDisk;
+      await switchToFeature(result);
+
+      let answerFound!: () => void;
+      let answerGoneOnMain!: () => void;
+      apiMocks.readFile
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          answerFound = () => resolve('changed on feature');
+        }))
+        .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+          answerGoneOnMain = () => reject(new WorkspaceApiError(404, 'Not found'));
+        }));
+      // This branch's change read is issued first; a read pinned to the
+      // branch just left is issued after it and answers 404 first.
+      act(() => bus.emit(changedOnFeature()));
+      let mainReload!: Promise<void>;
+      act(() => { mainReload = reloadOnMain('KB/Draft.md'); });
+      await act(async () => { answerGoneOnMain(); await mainReload; });
+      await act(async () => { answerFound(); });
+
+      await waitFor(() => expect(result.current.activeTab?.content).toBe('changed on feature'));
+      expect(result.current.activeTab?.deletedBy).toBeFalsy();
+    });
+
+    it("does not hold up or refuse a save on this branch", async () => {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      const reloadOnMain = result.current.reloadTabFromDisk;
+      await switchToFeature(result);
+
+      let answerGoneOnMain!: () => void;
+      apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        answerGoneOnMain = () => reject(new WorkspaceApiError(404, 'Not found'));
+      }));
+      let mainReload!: Promise<void>;
+      act(() => { mainReload = reloadOnMain('KB/Draft.md'); });
+      // Saved on feature while main's read is still out: not waited on.
+      await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited on feature'); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-2', 'KB/Draft.md', 'edited on feature');
+
+      await act(async () => { answerGoneOnMain(); await mainReload; });
+      await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited again'); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-2', 'KB/Draft.md', 'edited again');
+    });
+  });
+
   it('a lock released by a delete shows the open file as deleted, keeping its content', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');

@@ -78,6 +78,11 @@ function basename(path: string): string {
  * id, and the pair can never come apart mid-switch. `requested` is only the
  * fallback for a malformed id.
  */
+/** A file in one workspace: the same path on another branch is another file. */
+function existenceKey(workspaceId: string, path: string): string {
+  return `${workspaceId}\u0000${path}`;
+}
+
 function workspaceBranchOf(workspaceId: string, requested: string | undefined): string {
   try {
     return decodeURIComponent(workspaceId);
@@ -289,7 +294,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const deletedPathsRef = useRef<Set<string>>(new Set());
   /**
    * Reads in flight that decide whether an open tab's file still exists (a
-   * `file-changed` refetch, a tree refresh's check), by path, each settling
+   * `file-changed` refetch, a tree refresh's check), by workspace and path
+   * (`existenceKey`), each settling
    * to whether the file is gone (a 404). The tab is marked deleted only when
    * the read settles; `saveFile` waits on it first, so an editor unmounting
    * meanwhile (a tab switch, the tab closing) cannot write the file back in
@@ -304,37 +310,40 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const treeAbsentCheckedAtRef = useRef<Map<string, number>>(new Map());
   /**
-   * Tracked reads are numbered in the order they were issued. By path, the
-   * number of the latest-issued read that answered 404: a read issued before
+   * Tracked reads are numbered in the order they were issued. By workspace
+   * and path, the number of the latest-issued read that answered 404 — a
+   * 404 from the branch just left says nothing about this one's file: a read issued before
    * it that finds the file answers late, about a file since deleted, and
    * must not undo the delete (see `isStaleFind`).
    */
   const existenceReadSeqRef = useRef(0);
   const goneAtSeqRef = useRef<Map<string, number>>(new Map());
   const isStaleFind = useCallback(
-    (path: string, seq: number) => (goneAtSeqRef.current.get(path) ?? -1) > seq,
+    (readFrom: string, path: string, seq: number) =>
+      (goneAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
     [],
   );
-  const trackExistenceCheck = useCallback((path: string, read: Promise<unknown>): number => {
+  const trackExistenceCheck = useCallback((readFrom: string, path: string, read: Promise<unknown>): number => {
     const seq = ++existenceReadSeqRef.current;
+    const key = existenceKey(readFrom, path);
     const thisGone = read.then(
       () => false,
       (err: unknown) => {
         const isGone = err instanceof WorkspaceApiError && err.status === 404;
-        if (isGone && (goneAtSeqRef.current.get(path) ?? -1) < seq) goneAtSeqRef.current.set(path, seq);
+        if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
         return isGone;
       },
     );
     // A read already in flight for the path still counts: the check answers
     // "gone" if ANY of them finds the file gone, so a later read that finds
     // it cannot let a save through past an earlier one's 404.
-    const earlier = existenceChecksRef.current.get(path);
+    const earlier = existenceChecksRef.current.get(key);
     const gone = earlier
       ? Promise.all([earlier, thisGone]).then(([a, b]) => a || b)
       : thisGone;
-    existenceChecksRef.current.set(path, gone);
+    existenceChecksRef.current.set(key, gone);
     void gone.then(() => {
-      if (existenceChecksRef.current.get(path) === gone) existenceChecksRef.current.delete(path);
+      if (existenceChecksRef.current.get(key) === gone) existenceChecksRef.current.delete(key);
     });
     return seq;
   }, []);
@@ -544,12 +553,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         const present = collectPaths(tree);
         for (const tab of openTabsRef.current) {
           if (present.has(tab.path) || tab.deletedBy || isPendingDelete(tab.path)) continue;
-          if (existenceChecksRef.current.has(tab.path)) continue;
+          if (existenceChecksRef.current.has(existenceKey(workspaceId, tab.path))) continue;
           const checkedAt = treeAbsentCheckedAtRef.current.get(tab.path);
           if (checkedAt !== undefined && Date.now() - checkedAt < TREE_ABSENT_RECHECK_MS) continue;
           const readFrom = workspaceId;
           const read = readFile(readFrom, tab.path);
-          trackExistenceCheck(tab.path, read);
+          trackExistenceCheck(readFrom, tab.path, read);
           read.then(
             () => treeAbsentCheckedAtRef.current.set(tab.path, Date.now()),
             () => treeAbsentCheckedAtRef.current.delete(tab.path),
@@ -601,7 +610,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // A save of this path while the read is in flight (the editor writing
       // back as it unmounts) waits on its answer, as for every read here
       // that can learn the file is gone.
-      trackExistenceCheck(path, read);
+      trackExistenceCheck(readFrom, path, read);
       read.then((content) => {
         if (workspaceIdRef.current !== readFrom) return;
         setOpenTabs((prev) => prev.map((t) => (
@@ -1527,7 +1536,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const read = readFile(expectedWorkspaceId, relativePath);
       // Until this read answers, `saveFile` waits on it: a 404 marks the tab
       // deleted, and an editor unmounting meanwhile must not write it back.
-      trackExistenceCheck(relativePath, read);
+      trackExistenceCheck(expectedWorkspaceId, relativePath, read);
       const fresh = await read;
       if (workspaceIdRef.current !== expectedWorkspaceId) return;
       setOpenTabs((prev) => prev.map((t) => {
@@ -1579,12 +1588,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Its own answer, not the guard set: the tab may have closed meanwhile.
     // The newest check answers for every read in flight before it; one that
     // started while this save waited is waited on too.
-    let existenceCheck = existenceChecksRef.current.get(relativePath);
+    const checkKey = existenceKey(workspaceId, relativePath);
+    let existenceCheck = existenceChecksRef.current.get(checkKey);
     while (existenceCheck) {
       if (await existenceCheck) {
         throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
       }
-      const newer = existenceChecksRef.current.get(relativePath);
+      const newer = existenceChecksRef.current.get(checkKey);
       existenceCheck = newer !== existenceCheck ? newer : undefined;
     }
     if (deletedPathsRef.current.has(relativePath)) {
@@ -1727,7 +1737,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const read = readFile(expectedWorkspaceId, activePath);
       // The editor's write-back waits on this read too: a 404 it is about
       // to deliver refuses the write instead of re-creating the file.
-      trackExistenceCheck(activePath, read);
+      trackExistenceCheck(expectedWorkspaceId, activePath, read);
       read.then((content) => {
         if (workspaceIdRef.current !== expectedWorkspaceId) return;
         if (activeTabPathRef.current !== activePath) return;
@@ -1910,13 +1920,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // write) would silently end their review.
       if (matchingTab.pendingFileContent !== null) return;
       const read = readFile(subscribedWorkspaceId, event.path);
-      const seq = trackExistenceCheck(event.path, read);
+      const seq = trackExistenceCheck(subscribedWorkspaceId, event.path, read);
       read
         .then((content) => {
           // A read issued after this one already found the file gone: these
           // bytes predate the delete. Clearing the delete on them would let
           // the next save re-create the file; the notice and edits stay.
-          if (isStaleFind(event.path, seq)) return;
+          if (isStaleFind(subscribedWorkspaceId, event.path, seq)) return;
           if (workspaceIdRef.current === subscribedWorkspaceId) {
             // The file is there: writing it is no longer re-creating it.
             deletedPathsRef.current.delete(event.path);
@@ -2027,7 +2037,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // must show the notice over unsaved edits too.
       const existenceOnly = matchingTab.isDirty || matchingTab.pendingFileContent !== null;
       const read = readFile(subscribedWorkspaceId, event.path);
-      trackExistenceCheck(event.path, read);
+      trackExistenceCheck(subscribedWorkspaceId, event.path, read);
       read
         .then((content) => {
           if (workspaceIdRef.current !== subscribedWorkspaceId) return;
