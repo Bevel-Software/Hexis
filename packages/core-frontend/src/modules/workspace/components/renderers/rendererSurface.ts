@@ -67,6 +67,25 @@ export interface RendererSurface {
    * page perfectly fine. There is simply no download here.
    */
   offersDownload: boolean;
+  /**
+   * The knowledge graph as this surface's viewer may see it, for a renderer
+   * that draws it (a dashboard's HTML). Absent when the distribution
+   * registers no graph source (`AppRegistry.kbGraphSource`), and the
+   * renderer then draws its "open this in the app" fallback. The app reads
+   * it with the session, the embed with its token; the renderer never
+   * chooses an address itself — it asks `useKbGraphLoader`, which answers
+   * from here on a surface and from the registry's source in the app.
+   */
+  loadKbGraph?: () => Promise<unknown>;
+  /**
+   * Whether this surface's host grows with the content rather than giving
+   * the page a fixed pane to scroll in. A renderer that draws inside its own
+   * frame (the sandboxed HTML view) has no pane to fill there, so where this
+   * is true it gives its frame a standard height the reader can drag taller
+   * or shorter, and the host follows the frame; where it is false or absent,
+   * the frame fills its pane and scrolls inside it as it does in the app.
+   */
+  sizesToContent?: boolean;
 }
 
 export const RendererSurfaceContext = createContext<RendererSurface | null>(null);

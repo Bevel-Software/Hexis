@@ -19,7 +19,8 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:browser": "playwright test -c browser/playwright.config.ts"
   },
   "peerDependencies": {
     "react": "^19.0.0",
@@ -52,6 +53,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

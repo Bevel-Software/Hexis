@@ -35,9 +35,20 @@ export interface EmbedRuntimeConfig {
   token: string | null;
   /** How a link leaves the view, when the host lent a way; null means parent window or a new tab. */
   openLink: ((url: string) => void) | null;
+  /**
+   * Who decides the view's height. `'host'`: the host gives the view a fixed
+   * reading pane and the view scrolls inside it (the MCP App's pane). `'content'`:
+   * the host sizes its frame to the content and the view reports its height
+   * (the Atlassian issue panel, whose mint puts `sizing=content` on the
+   * view's address). Null means "read the page URL", which defaults to the
+   * host's pane.
+   */
+  sizing: EmbedSizing | null;
 }
 
-const UNCONFIGURED: EmbedRuntimeConfig = { baseUrl: '', token: null, openLink: null };
+export type EmbedSizing = 'host' | 'content';
+
+const UNCONFIGURED: EmbedRuntimeConfig = { baseUrl: '', token: null, openLink: null, sizing: null };
 
 let current: EmbedRuntimeConfig = UNCONFIGURED;
 
@@ -78,6 +89,15 @@ export function embedBaseUrl(): string {
 /** The token this view was minted with: handed over, or read from the page URL. */
 export function embedToken(): string {
   return current.token ?? new URLSearchParams(window.location.search).get('token') ?? '';
+}
+
+/**
+ * Who sizes the view: handed over, or read from the page URL
+ * (`sizing=content`), else the host's fixed pane. See {@link EmbedRuntimeConfig.sizing}.
+ */
+export function embedSizing(): EmbedSizing {
+  if (current.sizing) return current.sizing;
+  return new URLSearchParams(window.location.search).get('sizing') === 'content' ? 'content' : 'host';
 }
 
 /** The host's way of opening a link, when it lent one. */
