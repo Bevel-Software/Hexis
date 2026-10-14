@@ -67,18 +67,29 @@ import {
 } from './directory-sync-bot.js';
 
 /**
+ * What one spec of a batched read came back as: a blob's text, nothing at
+ * that path, or an object that is not a file (a directory, say). The last
+ * two are told apart on purpose: for the model at a commit, a path that is
+ * there but is not a file is not "absent", it is config the model cannot be
+ * read from.
+ */
+type CatFileOutcome =
+  | { kind: 'blob'; text: string }
+  | { kind: 'missing' }
+  | { kind: 'non-blob'; type: string };
+
+/**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
- * them — the blob's text, or null when the spec is missing/ambiguous at the
- * ref or resolves to a non-blob (e.g. a directory). Output protocol per
- * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
- * (the spec may itself contain spaces, hence the endsWith checks).
+ * them. Output protocol per request: `<oid> <type> <size>\n<size bytes>\n`,
+ * or `<spec> missing\n` (the spec may itself contain spaces, hence the
+ * endsWith checks).
  */
-async function catFileBatch(
+async function catFileBatchOutcomes(
   runner: IGitRunner,
   repoDir: string,
   specs: string[],
-): Promise<(string | null)[]> {
+): Promise<CatFileOutcome[]> {
   // Bytes, not text: every `<size>` in the header counts bytes, and the walk
   // below has to step by that count through content that is not all ASCII.
   // One spec per LINE is the protocol, and this walk depends on getting back
@@ -91,7 +102,7 @@ async function catFileBatch(
     input: `${specs.join('\n')}\n`,
     encoding: 'buffer',
   });
-  const results: (string | null)[] = [];
+  const results: CatFileOutcome[] = [];
   let off = 0;
   for (let i = 0; i < specs.length; i++) {
     const nl = out.indexOf(0x0a, off);
@@ -99,7 +110,7 @@ async function catFileBatch(
     const header = out.subarray(off, nl).toString('utf-8');
     off = nl + 1;
     if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-      results.push(null);
+      results.push({ kind: 'missing' });
       continue;
     }
     const parts = header.split(' ');
@@ -107,12 +118,31 @@ async function catFileBatch(
     if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
       throw new Error(`unexpected git cat-file header: ${header}`);
     }
-    // Non-blob (a directory path resolves to a tree) → null, but the
-    // payload still has to be skipped to stay aligned.
-    results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
+    // A non-blob (a directory path resolves to a tree) is reported as such,
+    // and its payload still has to be skipped to stay aligned.
+    results.push(
+      parts[1] === 'blob'
+        ? { kind: 'blob', text: out.subarray(off, off + size).toString('utf-8') }
+        : { kind: 'non-blob', type: parts[1]! },
+    );
     off += size + 1; // payload + trailing LF
   }
   return results;
+}
+
+/**
+ * {@link catFileBatchOutcomes} for callers that want text or nothing: the
+ * blob's text, or null when the spec is missing at the ref or resolves to a
+ * non-blob — the own-entries reads, where a directory where a file was
+ * named simply carries no entries.
+ */
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  const outcomes = await catFileBatchOutcomes(runner, repoDir, specs);
+  return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
 
@@ -2782,9 +2812,9 @@ export class AccessControlService implements IAccessControl {
       ...listed.accessFiles,
       ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
     ];
-    let texts: (string | null)[];
+    let outcomes: CatFileOutcome[];
     try {
-      texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${commit}:${p}`));
+      outcomes = await catFileBatchOutcomes(this.gitRunner, repoDir, wanted.map((p) => `${commit}:${p}`));
     } catch (err) {
       // The operational signal: one line per failed build, naming the commit,
       // so a run of these is visible in the logs.
@@ -2793,23 +2823,43 @@ export class AccessControlService implements IAccessControl {
       );
       throw new AccessUnreadableError(label, 'access tree (cat-file)');
     }
-    const fetched = new Map<string, string | null>();
-    wanted.forEach((p, i) => fetched.set(p, texts[i] ?? null));
-    // Everything the build reads was fetched above; a path it did not expect
-    // (none today) is read on its own, told apart from a git failure as before.
+    const fetched = new Map<string, CatFileOutcome>();
+    wanted.forEach((p, i) => fetched.set(p, outcomes[i] ?? { kind: 'missing' }));
+    const refuse = (relativePath: string, why: string): never => {
+      logger(`access@${tag}`).warn(`${relativePath} ${why}; refusing to decide from a partial tree`);
+      throw new AccessUnreadableError(label, relativePath);
+    };
+    // What the build reads. The groups sources are optional, so "missing" is
+    // an answer for them; a path the listing named (an access.md, a plugin
+    // manifest) is not optional, so one that comes back missing — which git
+    // reading one commit twice cannot produce — or that is not a file is a
+    // tree the model cannot be read from, and the build fails closed rather
+    // than drop what that file would deny. A path the build did not prefetch
+    // (none today) is read on its own, told apart from a git failure as
+    // before.
+    const optional = new Set([SYNCED_GROUPS_YAML, GROUPS_YAML]);
     const read = async (relativePath: string): Promise<string | null> => {
-      if (fetched.has(relativePath)) return fetched.get(relativePath) ?? null;
-      const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
-      if (outcome.kind === 'error') {
-        logger(`access@${tag}`).warn(`git read of ${relativePath} failed; refusing to decide from a partial tree`);
-        throw new AccessUnreadableError(label, relativePath);
+      const got = fetched.get(relativePath);
+      if (got === undefined) {
+        const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
+        if (outcome.kind === 'error') refuse(relativePath, 'could not be read');
+        return outcome.kind === 'text' ? outcome.text : null;
       }
-      return outcome.kind === 'text' ? outcome.text : null;
+      if (got.kind === 'blob') return got.text;
+      if (got.kind === 'non-blob') return refuse(relativePath, `is a ${got.type}, not a file`);
+      if (optional.has(relativePath)) return null;
+      return refuse(relativePath, 'was listed but has no blob at the commit');
     };
 
-    const rolesYaml = await read('roles.yaml');
-    if (rolesYaml === null) return 'no-roles';
-    const rolesParsed = parseRolesYaml(rolesYaml);
+    // roles.yaml decides the build's outcome, so its three states are read
+    // directly: absent is "no roles here" (the caller tries its next
+    // candidate ref); a directory of that name is as malformed as a file that
+    // does not parse (the caller answers null, and never falls through to a
+    // ref that might grant what this one does not).
+    const roles = fetched.get('roles.yaml') ?? { kind: 'missing' as const };
+    if (roles.kind === 'missing') return 'no-roles';
+    if (roles.kind === 'non-blob') return 'malformed';
+    const rolesParsed = parseRolesYaml(roles.text);
     if (!rolesParsed.ok) return 'malformed';
 
     // Same group loading as the working-tree model, read AT THE COMMIT — the
