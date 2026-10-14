@@ -432,6 +432,36 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(1);
   });
 
+  it('refuses to decide, twice, for a ref whose roles.yaml blob is lost, and never falls through to a granting origin', async () => {
+    // `feature` on origin carries a roles.yaml that grants the admin. The
+    // LOCAL `feature` is one commit ahead, with a roles.yaml of its own
+    // whose blob is then lost from the object store (real git: the loose
+    // object file removed). The tree still names roles.yaml, so the batch's
+    // "missing" is an unreadable file, not an absent one: the build must
+    // fail closed on both attempts, remember nothing for the commit, and
+    // never read the next candidate, origin/feature, which would grant.
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - razvan@bevel.software\n# on origin\n');
+    await git(repo, 'commit', '-qam', 'roles on origin/feature');
+    await git(repo, 'push', '-q', '-u', 'origin', 'feature');
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - razvan@bevel.software\n# local only\n');
+    await git(repo, 'commit', '-qam', 'roles on the local feature tip');
+    const lost = await git(repo, 'rev-parse', 'HEAD:roles.yaml');
+    await fs.rm(path.join(repo, '.git/objects', lost.slice(0, 2), lost.slice(2)));
+
+    spawnLog.length = 0;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    for (const attempt of [1, 2]) {
+      await expect(svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).rejects.toBeInstanceOf(
+        AccessUnreadableError,
+      );
+      // One listing per attempt: the local tip, and never origin/feature.
+      expect(lsTreeBuilds()).toBe(attempt);
+      expect(catFileBatches()).toBe(attempt);
+    }
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/roles\.yaml is in the tree but its blob could not be read/));
+  });
+
   it('refuses to decide when a groups source is a directory rather than a file', async () => {
     await pushFromOther('groups.yaml as a folder', async () => {
       await fs.mkdir(path.join(other, 'groups.yaml'));
@@ -445,9 +475,9 @@ describe('AccessControlService — at-ref model cache', () => {
   });
 
   it.each([
-    ['access.md', 'missing', /:Team\/access\.md$/, /Team\/access\.md was listed but has no blob/],
+    ['access.md', 'missing', /:Team\/access\.md$/, /Team\/access\.md is in the tree but its blob could not be read/],
     ['access.md', 'a tree', /:Team\/access\.md$/, /Team\/access\.md is a tree, not a file/],
-    ['plugin manifest', 'missing', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json was listed but has no blob/],
+    ['plugin manifest', 'missing', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json is in the tree but its blob could not be read/],
     ['plugin manifest', 'a tree', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json is a tree, not a file/],
   ])('refuses to decide when a listed %s comes back %s from the batch, and never caches it', async (_what, how, spec, warned) => {
     // A healthy git cannot be made to answer this: the listing names blobs

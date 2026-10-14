@@ -2649,20 +2649,25 @@ export class AccessControlService implements IAccessControl {
   private async listAccessFilesAtRef(
     repoDir: string,
     ref: string,
-  ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string> } | 'error'> {
     try {
       const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
+      // The fixed-name sources the tree carries (roles.yaml, the groups
+      // files): a read of one of these that comes back empty is "absent"
+      // only when the tree does not name it.
+      const named = new Set<string>();
       const { pluginsDir } = this.kb.layout;
       for (const p of stdout.split('\0')) {
         if (!p) continue;
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
+        else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         }
       }
-      return { accessFiles: out, pluginDirs };
+      return { accessFiles: out, pluginDirs, named };
     } catch {
       return 'error';
     }
@@ -2829,15 +2834,16 @@ export class AccessControlService implements IAccessControl {
       logger(`access@${tag}`).warn(`${relativePath} ${why}; refusing to decide from a partial tree`);
       throw new AccessUnreadableError(label, relativePath);
     };
-    // What the build reads. The groups sources are optional, so "missing" is
-    // an answer for them; a path the listing named (an access.md, a plugin
-    // manifest) is not optional, so one that comes back missing — which git
-    // reading one commit twice cannot produce — or that is not a file is a
-    // tree the model cannot be read from, and the build fails closed rather
-    // than drop what that file would deny. A path the build did not prefetch
-    // (none today) is read on its own, told apart from a git failure as
-    // before.
-    const optional = new Set([SYNCED_GROUPS_YAML, GROUPS_YAML]);
+    // What the build reads. "Missing" from the batch is "absent" only for a
+    // groups source the tree does not name. A path the tree names — an
+    // access.md, a plugin manifest, or a groups file the listing carried —
+    // that comes back missing has a blob git could not read (a lost object),
+    // and one that is not a file is a tree the model cannot be read from:
+    // either way the build fails closed rather than drop what that file
+    // would deny. A path the build did not prefetch (none today) is read on
+    // its own, told apart from a git failure as before.
+    const inTree = (relativePath: string) =>
+      listed.named.has(relativePath) || !(relativePath === SYNCED_GROUPS_YAML || relativePath === GROUPS_YAML);
     const read = async (relativePath: string): Promise<string | null> => {
       const got = fetched.get(relativePath);
       if (got === undefined) {
@@ -2847,17 +2853,23 @@ export class AccessControlService implements IAccessControl {
       }
       if (got.kind === 'blob') return got.text;
       if (got.kind === 'non-blob') return refuse(relativePath, `is a ${got.type}, not a file`);
-      if (optional.has(relativePath)) return null;
-      return refuse(relativePath, 'was listed but has no blob at the commit');
+      if (!inTree(relativePath)) return null;
+      return refuse(relativePath, 'is in the tree but its blob could not be read');
     };
 
-    // roles.yaml decides the build's outcome, so its three states are read
-    // directly: absent is "no roles here" (the caller tries its next
-    // candidate ref); a directory of that name is as malformed as a file that
-    // does not parse (the caller answers null, and never falls through to a
-    // ref that might grant what this one does not).
+    // roles.yaml decides the build's outcome, so its states are read
+    // directly. Absent from the tree is "no roles here" (the caller tries
+    // its next candidate ref). In the tree but unreadable refuses the build:
+    // answering "no roles" for it would be remembered for the commit and
+    // would send a short ref through to origin, which may grant. A directory
+    // of that name is as malformed as a file that does not parse (the caller
+    // answers null, and never falls through to a ref that might grant what
+    // this one does not).
     const roles = fetched.get('roles.yaml') ?? { kind: 'missing' as const };
-    if (roles.kind === 'missing') return 'no-roles';
+    if (roles.kind === 'missing') {
+      if (listed.named.has('roles.yaml')) refuse('roles.yaml', 'is in the tree but its blob could not be read');
+      return 'no-roles';
+    }
     if (roles.kind === 'non-blob') return 'malformed';
     const rolesParsed = parseRolesYaml(roles.text);
     if (!rolesParsed.ok) return 'malformed';
