@@ -828,6 +828,56 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.content).toBe('edited');
   });
 
+  it('an older read that found the file, answering after a newer 404, does not undo the delete', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'my unsaved edits');
+    apiMocks.writeFile.mockClear();
+
+    // A change event's read is issued while the file is still there; the
+    // delete's event follows, and its read answers 404 before the first.
+    let answerFound!: () => void;
+    let answerGone!: () => void;
+    apiMocks.readFile
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        answerFound = () => resolve('# Draft\n\nA page to delete, changed.');
+      }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        answerGone = () => reject(new WorkspaceApiError(404, 'Not found'));
+      }));
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+
+    await act(async () => { answerGone(); });
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+    await act(async () => { answerFound(); });
+    await settle();
+
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('my unsaved edits');
+    expect(result.current.activeTab?.changedOnBranch ?? null).toBeNull();
+    await expect(result.current.saveFile('KB/Draft.md', 'my unsaved edits')).rejects.toThrow('Draft.md was deleted from this branch');
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it('a read issued after the 404 that finds the file again ends the delete, as a restore does', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toBeTruthy());
+
+    disk.set('KB/Draft.md', 'restored');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toBeFalsy());
+    expect(result.current.activeTab?.content).toBe('restored');
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'restored, edited'); });
+    expect(disk.get('KB/Draft.md')).toBe('restored, edited');
+  });
+
   it('a lock released by a delete shows the open file as deleted, keeping its content', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
