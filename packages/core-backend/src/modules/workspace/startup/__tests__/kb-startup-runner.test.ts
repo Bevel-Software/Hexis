@@ -996,8 +996,11 @@ describe('KbStartupRunner — a working copy whose clone was never finished', ()
     // The clone is sound and has a commit, but git cannot read the branch it
     // is to follow: the ref the fetch updates is damaged. Not a state this
     // phase repairs, so the start stops, and says which working copy.
-    const refs = path.join(local(), '.git', 'refs', 'remotes', 'origin');
-    await fs.rm(path.join(local(), '.git', 'packed-refs'), { force: true });
+    // The refs are where git says they are: a worktree's live in the
+    // repository it shares with every other branch.
+    const gitDir = (await git(local(), ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const refs = path.join(gitDir, 'refs', 'remotes', 'origin');
+    await fs.rm(path.join(gitDir, 'packed-refs'), { force: true });
     await fs.mkdir(refs, { recursive: true });
     await fs.writeFile(path.join(refs, DEFAULT_BRANCH), 'not a commit id\n', 'utf8');
 

@@ -12,3 +12,15 @@ export {
   type ReadResult,
 } from './file-readers/file-reader.js';
 export { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
+/**
+ * The knowledge base's one repository, every branch workspace a worktree of
+ * it — and how a checkout folder's `.git` FILE names its folder in there, for
+ * a module that reads a worktree's HEAD without spawning git.
+ */
+export {
+  KbRepository,
+  readGitfile,
+  repositoryDirFor,
+  workingCopyShape,
+  type WorkingCopyShape,
+} from './kb-repository.js';

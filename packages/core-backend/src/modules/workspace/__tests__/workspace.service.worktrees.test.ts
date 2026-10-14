@@ -1,0 +1,334 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { WorkspaceService } from '../workspace.service.js';
+import { workingCopyShape } from '../kb-repository.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import type { IGitRunner } from '../../../shared/git.contract.js';
+
+/**
+ * Branch workspaces are WORKTREES of one repository per knowledge base, at the
+ * path a full clone had (`<workspacesRoot>/<branch id>/<kb folder>`). Real git
+ * throughout: what is under test is what git does with the layout.
+ */
+
+const execFileAsync = promisify(execFile);
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 't@x.com',
+      GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 't@x.com',
+    },
+  });
+  return stdout.toString();
+}
+
+/** Every git call the service makes, with when it started and ended. */
+interface Call {
+  cwd: string;
+  args: string[];
+  start: number;
+  end?: number;
+}
+
+function recordingRunner(delayFetchMs = 0): { runner: IGitRunner; calls: Call[] } {
+  const inner = new NodeGitRunner();
+  const calls: Call[] = [];
+  const runner = {
+    defaultTimeoutMs: inner.defaultTimeoutMs,
+    credentials: inner.credentials,
+    run: async (cwd: string, args: string[], opts?: object) => {
+      const call: Call = { cwd, args, start: performance.now() };
+      calls.push(call);
+      try {
+        if (delayFetchMs > 0 && args.includes('fetch')) await new Promise((r) => setTimeout(r, delayFetchMs));
+        return await inner.run(cwd, args, opts as never);
+      } finally {
+        call.end = performance.now();
+      }
+    },
+  } as unknown as IGitRunner;
+  return { runner, calls };
+}
+
+/** The repository-wide `fetch --prune origin` — the one every workspace shares. */
+const repositoryFetches = (calls: Call[]) =>
+  calls.filter((c) => c.args.includes('fetch') && c.args.includes('--prune') && c.args[c.args.length - 1] === 'origin');
+
+let root: string;
+let workspacesRoot: string;
+let upstream: string;
+let seed: string;
+
+beforeEach(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-worktrees-'));
+  workspacesRoot = path.join(root, 'workspaces');
+  await fs.mkdir(workspacesRoot, { recursive: true });
+  upstream = path.join(root, 'upstream.git');
+  await git(root, ['init', '--bare', '-b', 'main', upstream]);
+  seed = path.join(root, '.seed');
+  await fs.mkdir(seed);
+  await git(seed, ['init', '-b', 'main']);
+  await git(seed, ['remote', 'add', 'origin', upstream]);
+  await fs.writeFile(path.join(seed, 'shared.md'), 'on main\n');
+  await fs.mkdir(path.join(seed, 'Deep', 'Folder'), { recursive: true });
+  await fs.writeFile(path.join(seed, 'Deep', 'Folder', 'page.md'), 'deep\n');
+  await git(seed, ['add', '-A']);
+  await git(seed, ['commit', '-m', 'init']);
+  for (const branch of ['alice/a', 'bob/b', 'carol/c']) {
+    await git(seed, ['checkout', '-q', '-b', branch, 'main']);
+    await fs.writeFile(path.join(seed, `${branch.split('/')[0]}.md`), `${branch}\n`);
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', `on ${branch}`]);
+  }
+  await git(seed, ['checkout', '-q', 'main']);
+  await git(seed, ['push', '-q', 'origin', 'main', 'alice/a', 'bob/b', 'carol/c']);
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+const service = (runner: IGitRunner = new NodeGitRunner(), url = upstream, setAsideRoot?: string) =>
+  new WorkspaceService(workspacesRoot, url, testKbContext(), new NodeFs(), runner, setAsideRoot);
+
+const checkoutOf = (branch: string) => path.join(workspacesRoot, workspaceIdForBranch(branch), 'knowledge-base');
+
+/** Every folder named `objects` under `dir` — where a clone keeps its history. */
+async function objectStoresUnder(dir: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await fs.readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name === 'objects') found.push(path.join(entry.parentPath, entry.name));
+  }
+  return found;
+}
+
+describe('opening a branch', () => {
+  it('adds a worktree at the path a clone had, on its branch, tracking origin, with the files a fresh clone has — and copies no history', async () => {
+    const svc = service();
+    const info = await svc.getOrCreateForBranch('alice/a');
+    const checkout = checkoutOf('alice/a');
+
+    expect(info.absolutePath).toBe(path.join(workspacesRoot, workspaceIdForBranch('alice/a')));
+    expect(await workingCopyShape(checkout)).toBe('worktree');
+    expect((await fs.stat(path.join(checkout, '.git'))).isFile()).toBe(true);
+    expect((await git(checkout, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('alice/a');
+    expect((await git(checkout, ['rev-parse', '--abbrev-ref', '@{upstream}'])).trim()).toBe('origin/alice/a');
+
+    // Byte-identical to a fresh clone of the branch: same commit, same index, same bytes.
+    const fresh = path.join(root, 'fresh');
+    await git(root, ['clone', '-q', '-b', 'alice/a', upstream, fresh]);
+    expect(await git(checkout, ['rev-parse', 'HEAD'])).toBe(await git(fresh, ['rev-parse', 'HEAD']));
+    expect(await git(checkout, ['ls-files', '-s'])).toBe(await git(fresh, ['ls-files', '-s']));
+    for (const file of ['shared.md', 'alice.md', path.join('Deep', 'Folder', 'page.md')]) {
+      expect(await fs.readFile(path.join(checkout, file))).toEqual(await fs.readFile(path.join(fresh, file)));
+    }
+
+    // No history under the workspaces root: the objects are the repository's,
+    // and the repository is not under the root.
+    expect(await objectStoresUnder(workspacesRoot)).toEqual([]);
+    expect(path.relative(workspacesRoot, svc.repository.dir).startsWith('..')).toBe(true);
+    expect((await git(checkout, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim()).toBe(
+      await fs.realpath(svc.repository.dir),
+    );
+  });
+
+  it('makes and fetches the repository for the first branch, and the second reuses it', async () => {
+    const { runner, calls } = recordingRunner();
+    const svc = service(runner);
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+
+    expect(calls.filter((c) => c.args[0] === 'init')).toHaveLength(1);
+    expect(calls.filter((c) => c.args[0] === 'clone')).toHaveLength(0);
+    expect(calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'add')).toHaveLength(2);
+    const listed = await git(svc.repository.dir, ['worktree', 'list', '--porcelain']);
+    expect(listed).toContain(await fs.realpath(checkoutOf('alice/a')));
+    expect(listed).toContain(await fs.realpath(checkoutOf('bob/b')));
+  });
+
+  it('is treated as unfinished and recreated when the worktree has lost its link to the repository', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    const checkout = checkoutOf('alice/a');
+    // The repository's half of the link goes, as when a worktree is pruned
+    // from under its folder.
+    const gitdir = (await fs.readFile(path.join(checkout, '.git'), 'utf-8')).replace(/^gitdir:\s*/, '').trim();
+    await fs.rm(gitdir, { recursive: true, force: true });
+    expect(await workingCopyShape(checkout)).toBe('broken');
+
+    // A process that never saw it (a restart) opens the branch.
+    const after = service();
+    await after.getOrCreateForBranch('alice/a');
+    expect(await workingCopyShape(checkout)).toBe('worktree');
+    expect((await git(checkout, ['rev-parse', 'HEAD'])).trim()).toBe(
+      (await git(upstream, ['rev-parse', 'alice/a'])).trim(),
+    );
+  });
+});
+
+describe('fetching', () => {
+  it('runs ONE git fetch when three workspaces are active and a fetch is due, and every workspace sees what it brought', async () => {
+    const { runner, calls } = recordingRunner();
+    const svc = service(runner);
+    for (const b of ['alice/a', 'bob/b', 'carol/c']) await svc.getOrCreateForBranch(b);
+
+    // A change pushed to the remote, from outside.
+    await fs.writeFile(path.join(seed, 'shared.md'), 'moved on\n');
+    await git(seed, ['commit', '-qam', 'moved on']);
+    await git(seed, ['push', '-q', 'origin', 'main']);
+    const pushed = (await git(seed, ['rev-parse', 'HEAD'])).trim();
+
+    // The freshness window has run out.
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 60_000);
+    const before = repositoryFetches(calls).length;
+    await Promise.all(['alice/a', 'bob/b', 'carol/c'].map((b) => svc.ensureRemotesFetched(workspaceIdForBranch(b))));
+    expect(repositoryFetches(calls).length - before).toBe(1);
+    // And inside the window, none.
+    await Promise.all(['alice/a', 'bob/b', 'carol/c'].map((b) => svc.ensureRemotesFetched(workspaceIdForBranch(b))));
+    expect(repositoryFetches(calls).length - before).toBe(1);
+
+    for (const b of ['alice/a', 'bob/b', 'carol/c']) {
+      expect((await git(checkoutOf(b), ['rev-parse', 'origin/main'])).trim()).toBe(pushed);
+    }
+  });
+
+  it('makes a fetch and a worktree add requested at the same time wait for one another', async () => {
+    const { runner, calls } = recordingRunner(150);
+    const svc = service(runner);
+    await svc.getOrCreateForBranch('alice/a');
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 60_000);
+
+    await Promise.all([svc.ensureRemotesFetched(workspaceIdForBranch('alice/a')), svc.getOrCreateForBranch('bob/b')]);
+
+    const fetch = repositoryFetches(calls).at(-1)!;
+    const add = calls.find((c) => c.args[0] === 'worktree' && c.args[1] === 'add' && c.args.includes('bob/b'))!;
+    // One ran entirely before the other.
+    expect(fetch.end! <= add.start || add.end! <= fetch.start).toBe(true);
+  });
+});
+
+describe('deleting a branch workspace', () => {
+  it('removes and prunes its worktree and nothing else', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    const aliceTip = (await git(checkoutOf('alice/a'), ['rev-parse', 'HEAD'])).trim();
+    const aliceCheckout = await fs.realpath(checkoutOf('alice/a'));
+
+    await svc.deleteWorkspace(workspaceIdForBranch('alice/a'));
+
+    await expect(fs.access(path.join(workspacesRoot, workspaceIdForBranch('alice/a')))).rejects.toThrow();
+    expect(await git(svc.repository.dir, ['worktree', 'list', '--porcelain'])).not.toContain(aliceCheckout);
+    // The repository keeps its objects…
+    await git(svc.repository.dir, ['cat-file', '-e', `${aliceTip}^{commit}`]);
+    await git(svc.repository.dir, ['fsck', '--connectivity-only', '--no-dangling']);
+    // …and the other workspace answers as before.
+    expect(await svc.readFile(workspaceIdForBranch('bob/b'), 'knowledge-base/bob.md')).toBe('bob/b\n');
+    expect((await git(checkoutOf('bob/b'), ['status', '--porcelain'])).trim()).toBe('');
+  });
+
+  it('the orphan sweep removes the folders of branches that are gone and never the repository', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    const aliceCheckout = await fs.realpath(checkoutOf('alice/a'));
+
+    const { removed } = await svc.sweepOrphanedWorkspaces(['bob/b']);
+
+    expect(removed).toEqual([workspaceIdForBranch('alice/a')]);
+    expect(await svc.repository.exists()).toBe(true);
+    expect(await git(svc.repository.dir, ['worktree', 'list', '--porcelain'])).not.toContain(aliceCheckout);
+    expect(await svc.readFile(workspaceIdForBranch('bob/b'), 'knowledge-base/bob.md')).toBe('bob/b\n');
+  });
+});
+
+describe('commits the remote does not have', () => {
+  it('stay on the branch in the repository when a push fails, the next push carries them, and no other worktree sees them', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    const alice = checkoutOf('alice/a');
+    await fs.writeFile(path.join(alice, 'alice.md'), 'unpushed\n');
+    await git(alice, ['commit', '-qam', 'unpushed work']);
+    const commit = (await git(alice, ['rev-parse', 'HEAD'])).trim();
+
+    // The host refuses the push.
+    const hook = path.join(upstream, 'hooks', 'pre-receive');
+    await fs.writeFile(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    await expect(git(alice, ['push', '-q', 'origin', 'alice/a'])).rejects.toThrow();
+
+    expect((await git(svc.repository.dir, ['rev-parse', 'refs/heads/alice/a'])).trim()).toBe(commit);
+    await expect(git(checkoutOf('bob/b'), ['merge-base', '--is-ancestor', commit, 'HEAD'])).rejects.toThrow();
+
+    await fs.rm(hook);
+    await git(alice, ['push', '-q', 'origin', 'alice/a']);
+    expect((await git(upstream, ['rev-parse', 'alice/a'])).trim()).toBe(commit);
+  });
+});
+
+describe('the repository address changes', () => {
+  it('sets the repository and all its worktrees aside together, and the new address gets a fresh repository', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    const alice = checkoutOf('alice/a');
+    await fs.writeFile(path.join(alice, 'alice.md'), 'never pushed\n');
+    await git(alice, ['commit', '-qam', 'never pushed']);
+    const unpushed = (await git(alice, ['rev-parse', 'HEAD'])).trim();
+
+    // Another repository, with no history in common.
+    const other = path.join(root, 'other.git');
+    await git(root, ['init', '--bare', '-b', 'main', other]);
+    const otherSeed = path.join(root, '.other-seed');
+    await fs.mkdir(otherSeed);
+    await git(otherSeed, ['init', '-b', 'alice/a']);
+    await fs.writeFile(path.join(otherSeed, 'other.md'), 'other\n');
+    await git(otherSeed, ['add', '-A']);
+    await git(otherSeed, ['commit', '-m', 'other']);
+    await git(otherSeed, ['push', '-q', other, 'alice/a']);
+
+    const setAside = path.join(root, 'set-aside');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const moved = service(new NodeGitRunner(), other, setAside);
+    await moved.getOrCreateForBranch('alice/a');
+
+    const [stamp] = await fs.readdir(setAside);
+    const kept = path.join(setAside, stamp!);
+    expect((await fs.readdir(kept)).sort()).toEqual(
+      ['knowledge-base.git', workspaceIdForBranch('alice/a'), workspaceIdForBranch('bob/b')].sort(),
+    );
+    // Nothing deleted: the unpushed commit reads in the set-aside worktree.
+    expect((await git(path.join(kept, workspaceIdForBranch('alice/a')), ['rev-parse', 'HEAD'])).trim()).toBe(unpushed);
+    // The new address has its own repository and worktree.
+    expect(await fs.readFile(path.join(alice, 'other.md'), 'utf-8')).toBe('other\n');
+    expect((await git(moved.repository.dir, ['config', '--get', 'remote.origin.url'])).trim()).toBe(other);
+  });
+});
+
+describe('a deployment of full clones from an earlier release', () => {
+  it('is served as it is until the boot phase converts it', async () => {
+    await fs.mkdir(path.join(workspacesRoot, workspaceIdForBranch('alice/a')), { recursive: true });
+    await git(root, ['clone', '-q', '-b', 'alice/a', upstream, checkoutOf('alice/a')]);
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+
+    expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('clone');
+    expect(await workingCopyShape(checkoutOf('bob/b'))).toBe('worktree');
+    expect(await svc.readFile(workspaceIdForBranch('alice/a'), 'knowledge-base/alice.md')).toBe('alice/a\n');
+    await svc.ensureRemotesFetched(workspaceIdForBranch('alice/a'), { strict: true });
+  });
+});

@@ -378,7 +378,9 @@ export class GitService implements IGitService {
    * above rather than kept separately, so it cannot disagree with it.
    */
   lastRemoteContact(): { at: number; ok: boolean } | null {
-    let latest: { at: number; ok: boolean } | null = null;
+    // The repository's fetches are every worktree's; the per-workspace record
+    // is a full clone's.
+    let latest: { at: number; ok: boolean } | null = this.workspaceService.repository?.lastContact() ?? null;
     for (const [workspaceId, at] of this.lastImplicitFetchAt) {
       if (latest === null || at > latest.at) {
         latest = { at, ok: this.lastImplicitFetchOk.get(workspaceId) ?? false };
@@ -614,6 +616,20 @@ export class GitService implements IGitService {
     workspaceId: string,
     force = false,
   ): Promise<boolean> {
+    // A worktree's remote-tracking refs are the repository's: ONE fetch for
+    // every workspace, throttled, joined and reserved there. The per-workspace
+    // record below is for a full clone from an earlier release, which fetches
+    // on its own until the boot phase converts it.
+    const repository = (await this.workspaceService.repositoryOfCheckout?.(cwd)) ?? null;
+    if (repository) {
+      return repository.fetch({
+        maxAgeMs: GitService.IMPLICIT_FETCH_TTL_MS,
+        // A host that is down is not asked again by every poll inside the
+        // window, as the per-workspace record below stamps a failure too.
+        failureBackoffMs: GitService.IMPLICIT_FETCH_TTL_MS,
+        force,
+      });
+    }
     const last = this.lastImplicitFetchAt.get(workspaceId) ?? 0;
     if (!force && Date.now() - last < GitService.IMPLICIT_FETCH_TTL_MS) {
       return this.lastImplicitFetchOk.get(workspaceId) ?? true;
@@ -692,8 +708,9 @@ export class GitService implements IGitService {
       // navigation to the new draft's URL fails with
       // "Remote branch <name> not found in upstream origin". Roll the local
       // ref back on failure so a retry isn't blocked by "branch already exists".
+      // No `-u`: the local head is dropped right below, and its upstream with it.
       try {
-        await this.git(cwd, ['push', '-u', 'origin', name]);
+        await this.git(cwd, ['push', 'origin', name]);
       } catch (err) {
         await this.git(cwd, ['branch', '-D', name]).catch(() => undefined);
         throw err;
@@ -829,7 +846,14 @@ export class GitService implements IGitService {
       let localTip: string | null = null;
       if (await this.refExists(cwd, `refs/heads/${name}`)) {
         localTip = await this.revParseOrNull(cwd, `refs/heads/${name}`);
-        await this.git(cwd, ['branch', '-D', name]);
+        await this.git(cwd, ['branch', '-D', name]).catch((err: unknown) => {
+          // In a repository of worktrees the branch's local ref is shared, and
+          // git keeps it while the branch's own workspace has it checked out.
+          // Removing that workspace — which the caller does next — takes the
+          // worktree and the ref with it.
+          if (/checked out at|used by worktree/i.test(err instanceof Error ? err.message : String(err))) return;
+          throw err;
+        });
       }
       return { lastCommit: remoteTip ?? localTip };
     });
@@ -1409,7 +1433,14 @@ export class GitService implements IGitService {
         );
       }
 
-      await this.git(cwd, ['push', '-u', 'origin', branch]);
+      // No `-u`: it writes the upstream into the config during the push, and
+      // a worktree's config is the repository's, shared by every workspace —
+      // git refuses a second writer of it rather than waiting. The upstream is
+      // stamped after the push instead, as one short write under the
+      // repository reservation (see `git`).
+      await this.git(cwd, ['push', 'origin', branch]);
+      await this.git(cwd, ['config', '--replace-all', `branch.${branch}.remote`, 'origin']);
+      await this.git(cwd, ['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`]);
     }
   }
 
@@ -4097,7 +4128,7 @@ export class GitService implements IGitService {
    * from a real failure are unaffected.
    */
   private git(cwd: string, args: string[], opts?: Omit<GitRunOptions, 'encoding'>): Promise<GitRunResult> {
-    return this.gitRunner.run(cwd, args, {
+    const run = () => this.gitRunner.run(cwd, args, {
       ...opts,
       // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
       // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as glob
@@ -4112,6 +4143,12 @@ export class GitService implements IGitService {
       // a search for a file literally named that.
       env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
     });
+    // What rewrites state every worktree of the repository shares — the
+    // remote-tracking refs, `packed-refs`, the one config file — runs under
+    // the repository-level reservation. Inside a workspace operation (a pull's
+    // fetch, a merge's) that serializes it with the other repository
+    // operations; outside one (`fetchPrRefs`), with every worktree too.
+    return touchesSharedRepositoryState(args) ? this.mutex.runRepository(run) : run();
   }
 
   /**
@@ -4298,4 +4335,39 @@ export function parseNumstatZ(out: string): NumstatEntry[] {
     entries.push(entry);
   }
   return entries;
+}
+
+/**
+ * Whether a git command rewrites state that every worktree of the knowledge
+ * base's repository shares, and so must run under the repository-level
+ * reservation (`WorkspaceMutex.runRepository`): a fetch (remote-tracking refs,
+ * the object store, `packed-refs` when it prunes), a garbage collection, a
+ * worktree add/remove/prune, a remote change, a branch delete or rename
+ * (`packed-refs`, the branch's config section), and any WRITE to the config —
+ * one file for every worktree, which git refuses a second writer of rather
+ * than waiting. Reads of the config are not writes.
+ *
+ * Leading `-c key=value` / `-C dir` options are skipped to find the subcommand.
+ */
+export function touchesSharedRepositoryState(args: readonly string[]): boolean {
+  let i = 0;
+  while (i < args.length && (args[i] === '-c' || args[i] === '-C')) i += 2;
+  const sub = args[i];
+  const rest = args.slice(i + 1);
+  switch (sub) {
+    case 'fetch':
+    case 'gc':
+    case 'worktree':
+    case 'remote':
+    case 'pack-refs':
+      return true;
+    case 'config':
+      return !rest.some((a) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin)$/.test(a));
+    case 'branch':
+      return rest.some((a) => /^(-d|-D|--delete|-m|-M|--move|-u|--set-upstream-to=.*|--unset-upstream)$/.test(a));
+    case 'push':
+      return rest.some((a) => a === '-u' || a === '--set-upstream');
+    default:
+      return false;
+  }
 }

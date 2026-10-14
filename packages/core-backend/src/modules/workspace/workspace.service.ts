@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('workspace');
@@ -44,9 +45,9 @@ import {
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { normalizeRepositoryAddress, sameRepository } from '../kb-fs/remote-url.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-import { setAsideClone, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
+import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
+import { KbRepository, repositoryDirFor, workingCopyShape } from './kb-repository.js';
 import {
-  cloneCredentialArgs,
   cloneCredentialConfigArgs,
   credentialHelperValue,
   cloneTrackingConfigArgs,
@@ -72,12 +73,18 @@ interface HeldTurn {
  * Directory layout on disk:
  *   <workspacesRoot>/
  *     <encodeURIComponent(branch)>/
- *       knowledge-base/           # the git clone checked out to <branch>
+ *       knowledge-base/           # a worktree of the KB repository, on <branch>
+ *   <repository>/knowledge-base.git  # the one repository (see `kb-repository.ts`)
  *
- * Bootstrap is lazy: the first call to `getOrCreateForBranch(branch)` clones
- * the repo with `-b <branch>`. Subsequent callers — whether the same user or
- * a different one — share the same directory and the same git operations are
- * serialised through the workspace mutex elsewhere in the codebase.
+ * Bootstrap is lazy: the first call to `getOrCreateForBranch(branch)` adds
+ * the branch's worktree, which copies no history. Subsequent callers — whether
+ * the same user or a different one — share the same directory and the same
+ * git operations are serialised through the workspace mutex elsewhere in the
+ * codebase.
+ *
+ * A checkout folder that is still a full CLONE (from a release before
+ * worktrees, which the KB startup phase converts at boot) is served as it is
+ * until it is converted: every method here accepts both shapes.
  */
 
 export interface UnzipResult {
@@ -149,23 +156,6 @@ export class EntryExistsError extends WorkflowDomainError {
     this.name = 'EntryExistsError';
   }
 }
-
-/**
- * A floor under the git deadline for a clone: a first clone of a large
- * knowledge base over a slow link legitimately takes minutes, and the port's
- * default is sized for a running deployment's operations. A configured
- * ceiling above this applies as configured.
- */
-const CLONE_TIMEOUT_MS = 600_000;
-
-/**
- * Identity stamped on the per-branch clone's git config. Every workflow
- * commit overrides this with `--author=…` so the human shows up in
- * `git log`; this is just the fallback committer identity so plain
- * git operations have something to attribute to.
- */
-const BOT_NAME = 'Bevel Workflow';
-const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
 /** Redact the token the runner authenticates with from an error message. */
 function redactError(err: unknown, token: string | null): string {
@@ -348,8 +338,67 @@ export class WorkspaceService implements IWorkspaceService {
       _workspaceId,
       move,
     ) => move(),
+    /**
+     * The one repository every branch workspace is a worktree of — THE SAME
+     * INSTANCE THE KB STARTUP PHASE AND THE GIT LAYER USE, so that one fetch
+     * serves them all and its reservation is one. Absent, a repository next to
+     * the workspaces root (see `repositoryDirFor`).
+     */
+    repository?: KbRepository,
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
+    this.repository =
+      repository ??
+      new KbRepository({
+        dir: repositoryDirFor(workspacesRoot, kb.kbDirName),
+        kbRepoUrl: this.kbRepoUrl,
+        gitRunner,
+      });
+  }
+
+  /** The knowledge base's one repository — see `kb-repository.ts`. */
+  readonly repository: KbRepository;
+
+  /**
+   * Whether the checkout folder `repoDir` is a worktree (its `.git` a file)
+   * rather than a full clone. A stat, no git.
+   */
+  private async isWorktree(repoDir: string): Promise<boolean> {
+    // Synchronous on purpose: it is one stat of a local file, and it sits in
+    // front of the fetch joins (`ensureRemotesFetched`), where an await
+    // between two concurrent callers' in-flight checks is what lets both
+    // start a fetch.
+    try {
+      return statSync(path.join(repoDir, '.git')).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether `repoDir` holds a working copy that can be served: a worktree of
+   * the repository or a full clone. A worktree whose link to the repository is
+   * broken is NOT one — it is an unfinished checkout, recreated on the next
+   * open. Errors other than absence propagate.
+   */
+  private async hasWorkingCopy(repoDir: string): Promise<boolean> {
+    const shape = await workingCopyShape(repoDir);
+    return shape === 'worktree' || shape === 'clone';
+  }
+
+  /**
+   * The repository behind a workspace when it is a worktree of it; null for a
+   * full clone (which fetches on its own) or a workspace with no checkout.
+   * For the git layer, which keys its fetches on this.
+   */
+  async sharedRepositoryOf(workspaceId: string): Promise<KbRepository | null> {
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    return this.repositoryOfCheckout(path.join(workspaceDir, this.kbDirName));
+  }
+
+  /** {@link sharedRepositoryOf}, for a caller that already has the checkout folder. */
+  async repositoryOfCheckout(repoDir: string): Promise<KbRepository | null> {
+    return (await this.isWorktree(repoDir)) ? this.repository : null;
   }
 
   /**
@@ -489,63 +538,6 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * Build git clone args. Credentials go in as `clone --config`, which both
-   * authenticates this clone and leaves the helper in the new repo's config for
-   * every later push — and keeps the token itself out of the repo URL, out of
-   * argv, and out of `.git/config` (the helper reads it from the environment).
-   */
-  private gitCloneArgs(targetDir: string, branch: string, referenceRepo?: string): string[] {
-    // core.longpaths=true: KB has paths >260 chars; without this the clone silently drops those files on Windows.
-    const args = ['clone', '-c', 'core.longpaths=true', '-b', branch];
-    // Borrow the object database of an existing sibling clone. Every commit
-    // in the KB is already on disk locally, so object transfer drops to
-    // ~zero and a cold branch switch pays only the ref-negotiation
-    // round-trip instead of a full download. `--dissociate` copies the
-    // borrowed objects into the new repo and drops the alternates link, so
-    // the new clone stays independent even if the sibling is later swept
-    // or gc'd. Still a real clone of the real remote — all `refs/remotes/
-    // origin/*` are populated as usual.
-    if (referenceRepo) {
-      args.push('--reference', referenceRepo, '--dissociate');
-    }
-    // Persisted into the new repo's config (`clone --config`), not just applied
-    // to this invocation — every later push from this clone depends on finding
-    // the helper there. See `cloneCredentialArgs`.
-    args.push(...cloneCredentialArgs(this.gitRunner.credentials));
-    args.push(this.kbRepoUrl(), targetDir);
-    return args;
-  }
-
-  /**
-   * Find an existing workspace clone on disk to use as a `--reference` for
-   * a new clone. Any clone of the KB works — they all share the same object
-   * history. Returns the absolute path to the inner repo dir, or null when
-   * no sibling exists (the first branch after a cold start). Scans disk
-   * rather than the in-memory `branchDirs` map so clones that survived a
-   * process restart are still found.
-   */
-  private async findSiblingRepo(excludeBranch: string): Promise<string | null> {
-    const excludeId = workspaceIdForBranch(excludeBranch);
-    let entries: Array<{ name: string; isDirectory: () => boolean }>;
-    try {
-      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name === excludeId) continue;
-      const repoDir = path.join(this.workspacesRoot, entry.name, this.kbDirName);
-      try {
-        await fs.access(path.join(repoDir, '.git'));
-        return repoDir;
-      } catch {
-        // No `.git` — half-built or unrelated dir; keep looking.
-      }
-    }
-    return null;
-  }
-
-  /**
    * Return the id of any workspace already cloned on disk, or null if none
    * exists. Every clone tracks the same origin, so for a *repo-global* operation
    * that doesn't act on a particular draft — listing branches, reading or
@@ -578,12 +570,9 @@ export class WorkspaceService implements IWorkspaceService {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const repoDir = path.join(this.workspacesRoot, entry.name, this.kbDirName);
-      try {
-        await fs.access(path.join(repoDir, '.git'));
-      } catch {
-        // No `.git` — half-built or unrelated dir; keep looking.
-        continue;
-      }
+      // No working copy — half-built, a worktree whose repository is gone, or
+      // an unrelated dir; keep looking.
+      if (!(await this.hasWorkingCopy(repoDir).catch(() => false))) continue;
       await this.refreshCredentialHelperIfStale(branchForWorkspaceId(entry.name), repoDir);
       return entry.name;
     }
@@ -635,7 +624,9 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       try {
-        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
+        // A worktree whose repository is gone is not a working copy to pull:
+        // it is recreated when the branch is next opened.
+        if (!(await this.hasWorkingCopy(path.join(this.workspacesRoot, entry.name, this.kbDirName)))) continue;
       } catch (err) {
         if (isAbsence(err)) continue;
         cloned.push({
@@ -653,36 +644,6 @@ export class WorkspaceService implements IWorkspaceService {
       cloned.push({ id: entry.name, branch });
     }
     return cloned;
-  }
-
-  /**
-   * Run the clone. When a `referenceRepo` is supplied and the referenced
-   * clone fails (e.g. the sibling's object store is corrupt or mid-write),
-   * fall back once to a plain network clone so a bad sibling can never
-   * block a new branch from bootstrapping.
-   */
-  private async runClone(
-    targetDir: string,
-    branch: string,
-    referenceRepo: string | null,
-  ): Promise<void> {
-    // Long enough for a first clone, whatever the configured ceiling says.
-    const timeoutMs = Math.max(this.gitRunner.defaultTimeoutMs, CLONE_TIMEOUT_MS);
-    if (referenceRepo) {
-      try {
-        await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch, referenceRepo), {
-          timeoutMs,
-        });
-        return;
-      } catch (err) {
-        log.warn(`referenced clone for "${branch}" failed, retrying without reference:`, {
-          detail: redactError(err, this.gitRunner.credentials.token()),
-        });
-        // Clear any partial output so the retry clones into a clean dir.
-        await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
-      }
-    }
-    await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch), { timeoutMs });
   }
 
   /**
@@ -723,9 +684,11 @@ export class WorkspaceService implements IWorkspaceService {
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
 
-    // Check disk — the clone may have been bootstrapped by a previous
-    // process and survived a restart.
-    const onDisk = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+    // Check disk — the worktree (or a clone from an earlier release) may have
+    // been made by a previous process and survived a restart. A worktree whose
+    // repository is gone is not on disk in any useful sense: bootstrap below
+    // recreates it.
+    const onDisk = await this.hasWorkingCopy(repoDir).catch(() => false);
     // A clone fetches and pushes through the address stored in its OWN
     // `remote.origin.url`, which nothing rewrites when the configured
     // repository changes. Adopting one of the repository that was replaced is
@@ -772,6 +735,34 @@ export class WorkspaceService implements IWorkspaceService {
         // at this path NOW, which is the fresh clone the first caller is in
         // the middle of making. Nothing is left to move; the bootstrap below
         // waits for that clone.
+      } else if (await this.isWorktree(repoDir)) {
+        // A worktree of a repository of another address: the address is the
+        // REPOSITORY's, and its commits are the repository's, so the repository
+        // and every worktree of it are set aside together, into one folder.
+        const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp());
+        const ids = await this.worktreeIdsOnDisk();
+        if (!ids.includes(id)) ids.push(id);
+        let movedIds: string[] | null = null;
+        const move = async (): Promise<void> => {
+          if (this.discardsOf(id) !== discardsAtAdoption) return;
+          movedIds = await setAsideRepository(this.repository, this.workspacesRoot, this.kbDirName, kept);
+          for (const movedId of movedIds) this.forgetClone(movedId);
+        };
+        // What surrounds a set-aside is asked for every workspace that goes,
+        // nested, so the move runs once with all of them held.
+        const wrapped = ids.reduce<() => Promise<void>>((inner, wid) => () => this.aroundSetAside(wid, inner), move);
+        const moving = wrapped().finally(() => {
+          this.inFlightSetAsides.delete(branch);
+        });
+        this.inFlightSetAsides.set(branch, moving);
+        await moving;
+        if (movedIds) {
+          log.warn(
+            `the knowledge-base repository and its ${(movedIds as string[]).length} worktree(s) were of another ` +
+              `repository. Set aside together at ${kept}; nothing was deleted, and "${branch}" is being opened ` +
+              'fresh from the configured one. Work that was never pushed is in that folder.',
+          );
+        }
       } else {
         const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp(), id);
         // What surrounds the move may wait, and the startup phase may set
@@ -1064,6 +1055,20 @@ export class WorkspaceService implements IWorkspaceService {
    * tracking keys before it pulls.
    */
   private async normalizeCloneConfig(repoDir: string, branch: string): Promise<void> {
+    if (await this.isWorktree(repoDir)) {
+      // A worktree reads the repository's one config: the branch's keys are
+      // written there, one writer at a time, and the credential helper is the
+      // repository's, stamped once for every worktree.
+      try {
+        await this.repository.writeConfig(repoDir, cloneTrackingConfigArgs(branch));
+      } catch (err) {
+        log.warn(`could not normalize the config of the "${branch}" worktree:`, {
+          detail: redactError(err, this.gitRunner.credentials.token()),
+        });
+      }
+      await this.repository.refreshCredentials();
+      return;
+    }
     try {
       for (const args of cloneTrackingConfigArgs(branch)) {
         await this.gitRunner.run(repoDir, args);
@@ -1156,7 +1161,29 @@ export class WorkspaceService implements IWorkspaceService {
    */
   private async refreshCredentialHelperIfStale(branch: string, repoDir: string): Promise<void> {
     if (this.stampedCredentialFingerprint.get(branch) === this.credentialFingerprint()) return;
+    if (await this.isWorktree(repoDir)) {
+      // The repository's helper serves every worktree; it keeps its own
+      // fingerprint, and a no-op costs no git.
+      await this.repository.refreshCredentials();
+      return;
+    }
     await this.stampCredentialHelper(repoDir, branch);
+  }
+
+  /** The workspace ids whose checkout folder is a worktree (sound or broken) — a disk scan. */
+  private async worktreeIdsOnDisk(): Promise<string[]> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (await this.isWorktree(path.join(this.workspacesRoot, entry.name, this.kbDirName))) ids.push(entry.name);
+    }
+    return ids;
   }
 
   private async cloneProcessMapForBranch(workspaceDir: string, branch: string): Promise<void> {
@@ -1187,16 +1214,14 @@ export class WorkspaceService implements IWorkspaceService {
 
     if (target !== null) {
       // The directory exists, but a previous bootstrap may have crashed
-      // mid-clone — leaving a directory shell without `.git`. Treat
-      // anything missing `.git` as not-cloned and re-clone. (Can't be
-      // an active workspace either: every cloned repo has `.git` from
-      // step one.)
-      let alreadyCloned = false;
+      // midway — leaving a directory shell without `.git` — or it is a
+      // worktree whose link to the repository is broken (the repository was
+      // lost, or the worktree pruned from under it). Either is an unfinished
+      // checkout: wipe it and add the worktree again. A working worktree, or a
+      // full clone from an earlier release, is adopted as it is.
+      let shape;
       try {
-        const dotGit = await fs.stat(path.join(targetDir, '.git'));
-        if (dotGit.isDirectory() || dotGit.isFile()) {
-          alreadyCloned = true;
-        }
+        shape = await workingCopyShape(targetDir);
       } catch (err) {
         // Only treat "does-not-exist" as "half-built dir, wipe and
         // re-clone". A transient EACCES / EIO / EBUSY must NOT delete
@@ -1205,8 +1230,9 @@ export class WorkspaceService implements IWorkspaceService {
         // (`targetDir` is known to be a directory here, so ENOTDIR can only
         // mean `.git` itself vanished under us — an absence either way.)
         if (!isAbsence(err)) throw err;
+        shape = 'none' as const;
       }
-      if (alreadyCloned) {
+      if (shape === 'worktree' || shape === 'clone') {
         // We don't auto-pull because that could clobber another user's
         // in-progress lock-held edits. The CONFIG is re-stamped though — it
         // never touches the working tree, and a clone with drifted tracking
@@ -1214,31 +1240,25 @@ export class WorkspaceService implements IWorkspaceService {
         await this.normalizeCloneConfig(targetDir, branch);
         return;
       }
-      // Half-built dir — wipe and re-clone.
+      if (shape === 'broken') {
+        log.warn(`the "${branch}" worktree had lost its link to the repository; it is added again.`);
+      }
+      // Half-built dir — wipe and add the worktree again.
       await fs.rm(targetDir, { recursive: true, force: true });
     }
 
-    // Borrow an existing sibling clone's objects to skip the bulk download.
-    // Resolved before the clone so a failure mid-clone still rolls back cleanly.
-    const reference = await this.findSiblingRepo(branch);
     try {
-      await this.runClone(targetDir, branch, reference);
-      // Persist longpaths in the cloned repo's config so subsequent
-      // checkouts also honor it.
-      await this.gitRunner.run(targetDir, ['config', 'core.longpaths', 'true']);
-      // Generic bot identity for the clone — every workflow commit
-      // overrides via `--author=…` so the real human shows up in
-      // `git log`. This is purely the fallback committer.
-      await this.gitRunner.run(targetDir, ['config', 'user.name', BOT_NAME]);
-      await this.gitRunner.run(targetDir, ['config', 'user.email', BOT_EMAIL]);
-      // Pin the clone to exactly one fetch refspec and one upstream ref for
-      // this branch. `git clone -b` already produces that shape; stamping it
-      // explicitly means the shape is asserted rather than assumed, and the
-      // same call is what repairs an existing clone that drifted.
-      await this.normalizeCloneConfig(targetDir, branch);
-      log.info(`Cloned ${this.kbDirName} for branch "${branch}"` + (reference ? ' (referenced a sibling clone)' : ''));
-      // A fresh clone has already downloaded every ref — tell the git layer
-      // so the first `listBranches` skips the redundant implicit `git fetch`.
+      // A worktree of the one repository: no history is copied. The
+      // repository is created and fetched first if this is the first branch
+      // opened on the deployment, and the identity, the long-paths setting,
+      // the credential helper and the branch's tracking config are the
+      // repository's (see `KbRepository`). The add asks the remote for the
+      // branch, so the worktree starts at its tip as a fresh clone would.
+      await this.repository.addWorktree(branch, targetDir);
+      log.info(`Added the ${this.kbDirName} worktree for branch "${branch}"`);
+      // A working copy was just made — tell the git layer, so a fetch record
+      // it kept for this workspace id (a clone it replaced) is not read as
+      // this one's, and the first `listBranches` skips a redundant fetch.
       // Isolated from the clone-rollback `catch` below: a misbehaving listener
       // must not cause a successful clone to be wiped.
       try {
@@ -1252,6 +1272,7 @@ export class WorkspaceService implements IWorkspaceService {
       const redacted = redactError(err, this.gitRunner.credentials.token());
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+      await this.repository.prune().catch(() => {});
       // A branch origin does not have is a fact about the branch, not a
       // failure of ours — but WHICH fact depends on whether the platform ever
       // knew the name. A branch it cloned or listed and origin no longer has
@@ -1299,8 +1320,13 @@ export class WorkspaceService implements IWorkspaceService {
    */
   async deleteWorkspace(workspaceId: string): Promise<void> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    await fs.rm(workspaceDir, { recursive: true, force: true });
     const branch = branchForWorkspaceId(workspaceId);
+    const repoDir = path.join(workspaceDir, this.kbDirName);
+    // A worktree is removed through git and pruned from the repository, with
+    // its branch's local ref; the repository's objects and every other
+    // worktree are untouched.
+    if (await this.isWorktree(repoDir)) await this.repository.removeWorktree(repoDir, branch);
+    await fs.rm(workspaceDir, { recursive: true, force: true });
     this.branchDirs.delete(branch);
   }
 
@@ -1657,6 +1683,15 @@ export class WorkspaceService implements IWorkspaceService {
   ): Promise<void> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoDir = path.join(workspaceDir, this.kbDirName);
+    if (await this.isWorktree(repoDir)) {
+      // ONE fetch for every workspace: the repository's, throttled and joined
+      // there, under the repository reservation.
+      const ok = await this.repository.fetch({ maxAgeMs: FETCH_CACHE_TTL_MS, force: opts.force });
+      if (opts.strict && !ok) throw new Error('git fetch origin failed — remote refs could not be refreshed');
+      return;
+    }
+    // A full clone from an earlier release fetches on its own until the boot
+    // phase converts it.
     const now = Date.now();
     // The TTL is stamped only by a SUCCESSFUL fetch, so a fresh window is
     // itself the proof a strict caller wants.
@@ -2356,12 +2391,7 @@ export class WorkspaceService implements IWorkspaceService {
     } catch {
       return false;
     }
-    try {
-      await fs.access(path.join(workspaceDir, this.kbDirName, '.git'));
-      return true;
-    } catch {
-      return false;
-    }
+    return this.hasWorkingCopy(path.join(workspaceDir, this.kbDirName)).catch(() => false);
   }
 
   /**
@@ -2489,6 +2519,14 @@ export class WorkspaceService implements IWorkspaceService {
         log.warn(`sweep failed for ${entry.name}:`, { err });
       }
     }
+    // The repository is not under the root, so the sweep never touched it.
+    // What it forgets is the worktrees whose folders went, and their
+    // branches' local refs, as removing a clone took its branch with it.
+    if (removed.length > 0) {
+      await this.repository
+        .forgetWorktrees(removed.map((id) => branchForWorkspaceId(id)))
+        .catch((err: unknown) => log.warn('could not prune the swept worktrees from the repository:', { err }));
+    }
     return { removed };
   }
 
@@ -2550,12 +2588,11 @@ export class WorkspaceService implements IWorkspaceService {
       return this.branchDirs.get(branch)!;
     }
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
-    try {
-      await fs.access(path.join(workspaceDir, this.kbDirName, '.git'));
+    // A worktree whose link to the repository is broken falls through too:
+    // the bootstrap recreates it.
+    if (await this.hasWorkingCopy(path.join(workspaceDir, this.kbDirName)).catch(() => false)) {
       this.registerBranchDir(branch, workspaceDir);
       return workspaceDir;
-    } catch {
-      // Fall through to lazy bootstrap.
     }
     try {
       await this.getOrCreateForBranch(branch);

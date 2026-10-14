@@ -6,7 +6,7 @@ import { logger } from '../../../shared/logging.js';
 // callback of its own, and a module logger of the same name would be
 // shadowed exactly where it is meant to be the default.
 const startupLog = logger('kb-startup');
-import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { branchForWorkspaceId, workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
 import { GitRunError, type IGitRunner } from '../../../shared/git.contract.js';
@@ -20,7 +20,9 @@ import {
 } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
-import { setAsideClone, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
+import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
+import { KbRepository, repositoryDirFor, workingCopyShape } from '../kb-repository.js';
+import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -129,6 +131,12 @@ export interface KbStartupRunnerOptions {
    * minute; a suite passes a short one.
    */
   unfinishedCloneQuietMs?: number;
+  /**
+   * The knowledge base's one repository, every branch workspace a worktree of
+   * it — THE SAME INSTANCE THE WORKSPACE SERVICE IS GIVEN (see
+   * `kb-repository.ts`). Absent, one next to the workspaces root.
+   */
+  repository?: KbRepository;
 }
 
 const UNFINISHED_CLONE_QUIET_MS = 60_000;
@@ -140,10 +148,16 @@ const LONGEST_CLONE_MS = 600_000;
  * on every one of these is being worked on by something that will not stop.
  */
 const PASSES_OVER_ONE_WORKING_COPY = 4;
+/**
+ * How recent a fetch of the repository the phase takes as current. Every
+ * branch it visits is a worktree of the one repository, so one fetch serves
+ * them all; a boot that visits 142 branches fetches once, not 142 times.
+ */
+const STARTUP_FETCH_WINDOW_MS = 30_000;
 
-/** Whether `git clone` failed because its destination already held something, having written nothing. */
+/** Whether `git clone` or `git worktree add` failed because its destination already held something, having written nothing. */
 function refusedAnOccupiedFolder(err: unknown): boolean {
-  return err instanceof Error && /already exists and is not an empty directory/.test(err.message);
+  return err instanceof Error && /already exists and is not an empty directory|' already exists$/m.test(err.message);
 }
 
 /**
@@ -239,7 +253,17 @@ export interface RetryOptions {
 }
 
 export class KbStartupRunner {
-  constructor(private readonly opts: KbStartupRunnerOptions) {}
+  private readonly repository: KbRepository;
+
+  constructor(private readonly opts: KbStartupRunnerOptions) {
+    this.repository =
+      opts.repository ??
+      new KbRepository({
+        dir: repositoryDirFor(opts.workspacesRoot, opts.kbDirName),
+        kbRepoUrl: opts.kbRepoUrl,
+        gitRunner: opts.gitRunner,
+      });
+  }
 
   /** The run in progress, so two invokers share one rather than racing clones. */
   private inFlight: Promise<void> | null = null;
@@ -436,6 +460,10 @@ export class KbStartupRunner {
       // repository we can reach, so a clone of a different one is stale, not
       // a casualty of a typo in the address.
       await this.reconcileClonesWithConfiguredRepository();
+      // Full clones from a release before worktrees become worktrees of the
+      // one repository — after the address check, so a clone of another
+      // repository is set aside rather than imported.
+      await this.convertLegacyClones();
       const ctx = this.buildContext(heads, handles);
 
       for (const step of this.opts.steps) {
@@ -683,10 +711,14 @@ export class KbStartupRunner {
     // One folder per run, so what was set aside together stays together.
     const stamp = setAsideStamp();
     const setAsideRoot = setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot);
+    // The repository first: its address is every worktree's.
+    await this.reconcileRepositoryWithConfigured(configured, path.join(setAsideRoot, stamp));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const repoDir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);
-      const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+      // A full clone only: a worktree reads the repository's address, and went
+      // (or stayed) with it above.
+      const hasGit = await fs.stat(path.join(repoDir, '.git')).then((s) => s.isDirectory(), () => false);
       if (!hasGit) continue;
       let origin: string;
       try {
@@ -721,6 +753,158 @@ export class KbStartupRunner {
       await this.announceDiscarded(entry.name);
     }
   }
+  /**
+   * The repository's half of {@link reconcileClonesWithConfiguredRepository}.
+   * The address is the repository's, shared by every worktree, so it is
+   * decided once: the same repository at a new address is re-pointed and
+   * kept; another repository is set aside TOGETHER WITH EVERY WORKTREE OF IT,
+   * into `dest` — a worktree's commits live in the repository, so neither is
+   * of use without the other. Nothing is deleted.
+   */
+  private async reconcileRepositoryWithConfigured(configured: string, dest: string): Promise<void> {
+    const origin = await this.repository.originUrl();
+    if (origin === null || sameRepository(origin, configured)) return;
+    const was = this.redact(normalizeRepositoryAddress(origin));
+    // Any commit of ours will do: a common ancestor of one is a common
+    // ancestor of the repository's history.
+    const ours = (
+      await git(this.opts.gitRunner, this.repository.dir, [
+        'for-each-ref', '--count=1', '--format=%(objectname)', 'refs/heads', 'refs/remotes/origin',
+      ]).catch(() => '')
+    ).trim();
+    if (ours !== '' && (await this.sharesHistoryWithConfigured(this.repository.dir, configured, ours))) {
+      await this.repository.setOriginUrl(configured);
+      startupLog.warn(
+        `the knowledge-base repository was fetched from ${was}, whose history the configured repository holds: ` +
+          'the same repository at a new address. Pointed at the configured address and kept, with every worktree ' +
+          'and their unpushed work.',
+      );
+      return;
+    }
+    // Every worktree's work leaves first, and may stop the phase: see
+    // `beforeCloneSetAside`.
+    const worktreeIds: string[] = [];
+    for (const entry of await fs.readdir(this.opts.workspacesRoot, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);
+      if (await fs.stat(path.join(dir, '.git')).then((s) => s.isFile(), () => false)) worktreeIds.push(entry.name);
+    }
+    for (const id of worktreeIds) await this.opts.beforeCloneSetAside?.(id);
+    const moved = await setAsideRepository(this.repository, this.opts.workspacesRoot, this.opts.kbDirName, dest);
+    startupLog.warn(
+      `the knowledge-base repository is of another repository (${was}). It and its ${moved.length} worktree(s) were ` +
+        `set aside together at ${dest}; nothing was deleted, and a fresh repository is made from the configured ` +
+        'one. Work that was never pushed is in that folder: `git log` in a worktree there shows it.',
+    );
+    for (const id of moved) await this.announceDiscarded(id);
+  }
+
+  /**
+   * Convert every full clone under the workspaces root — what a release before
+   * worktrees left there — into a worktree of the one repository, ONE AT A
+   * TIME, without losing a commit:
+   *
+   *  1. the clone's branch tip is imported into the repository as the branch's
+   *     local ref (`git fetch <clone> +refs/heads/<b>:refs/heads/<b>`), so
+   *     commits the remote lacks are in the repository before anything moves;
+   *  2. the clone is moved aside, beside where it was (one rename);
+   *  3. the worktree is added at the imported tip, and checked to be there;
+   *  4. only then is the clone removed.
+   *
+   * A clone that cannot be converted — unreadable objects, uncommitted changes
+   * that are not anybody's to discard, a branch it is not on — is put back
+   * where it was and keeps working as a clone; the branch is logged, and the
+   * next boot tries again. One clone never stops the phase.
+   *
+   * A conversion a crash cut short is finished or undone first: the moved
+   * clone is removed when its worktree is in place (its tip was imported
+   * before it moved), and put back when it is not.
+   */
+  private async convertLegacyClones(): Promise<void> {
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(this.opts.workspacesRoot, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    let converted = 0;
+    const kept: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const workspaceDir = path.join(this.opts.workspacesRoot, entry.name);
+      const repoDir = path.join(workspaceDir, this.opts.kbDirName);
+      const aside = path.join(workspaceDir, `.${this.opts.kbDirName}.converting`);
+      await this.finishInterruptedConversion(repoDir, aside);
+      if ((await workingCopyShape(repoDir).catch(() => 'none')) !== 'clone') continue;
+      const branch = branchForWorkspaceId(entry.name);
+      try {
+        if (workspaceIdForBranch(branch) !== entry.name) continue;
+        assertValidBranchName(branch);
+      } catch {
+        continue;
+      }
+      // A clone with no commit on its branch is an unfinished one, which the
+      // branch's own pass sets aside: there is no tip to import.
+      const tip = await git(this.opts.gitRunner, repoDir, [
+        'for-each-ref', '--format=%(objectname)', `refs/heads/${branch}`,
+      ]).catch(() => 'unreadable');
+      if (tip.trim() === '') continue;
+      try {
+        await this.convertOneClone(branch, repoDir, aside);
+        converted++;
+      } catch (err) {
+        kept.push(branch);
+        startupLog.warn(
+          `the "${branch}" working copy is still a full clone: it could not be converted to a worktree (` +
+            `${this.redact(err instanceof Error ? err.message : String(err))}). It keeps working as a clone, ` +
+            'nothing in it was changed, and the next start tries again.',
+        );
+      }
+    }
+    if (converted > 0 || kept.length > 0) {
+      startupLog.info(
+        `converted ${converted} full clone(s) to worktrees of the knowledge-base repository` +
+          (kept.length > 0 ? `; ${kept.length} kept as clones (${kept.join(', ')})` : '') +
+          '.',
+      );
+    }
+  }
+
+  private async convertOneClone(branch: string, repoDir: string, aside: string): Promise<void> {
+    const onBranch = (await git(this.opts.gitRunner, repoDir, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim();
+    if (onBranch !== branch) throw new Error(`it is on "${onBranch}", not on its own branch`);
+    // Uncommitted work is in the working tree, not in a commit the import can
+    // carry; the clone keeps it, and is converted once it is committed.
+    const dirty = (await git(this.opts.gitRunner, repoDir, ['status', '--porcelain=v1'])).trim();
+    if (dirty !== '') throw new Error('it has uncommitted changes');
+    const tip = await this.repository.importBranch(repoDir, branch);
+    await fs.rename(repoDir, aside);
+    try {
+      await this.repository.addWorktree(branch, repoDir, { allowLocalOnly: true, keepLocalTip: true });
+      const head = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
+      if (head !== tip) throw new Error(`the worktree came up at ${head}, not at the clone's tip ${tip}`);
+    } catch (err) {
+      // Undone: the worktree goes, the clone comes back exactly as it was.
+      await fs.rm(repoDir, { recursive: true, force: true }).catch(() => undefined);
+      await this.repository.prune().catch(() => undefined);
+      await fs.rename(aside, repoDir);
+      throw err;
+    }
+    await fs.rm(aside, { recursive: true, force: true });
+  }
+
+  /** See {@link convertLegacyClones}: a conversion a crash cut short. */
+  private async finishInterruptedConversion(repoDir: string, aside: string): Promise<void> {
+    if (!(await fs.access(aside).then(() => true, () => false))) return;
+    if ((await workingCopyShape(repoDir).catch(() => 'none')) === 'worktree') {
+      await fs.rm(aside, { recursive: true, force: true });
+      return;
+    }
+    await fs.rm(repoDir, { recursive: true, force: true });
+    await this.repository.prune().catch(() => undefined);
+    await fs.rename(aside, repoDir);
+  }
+
 
   /**
    * Whether the configured repository holds history this clone has too —
@@ -733,7 +917,7 @@ export class KbStartupRunner {
    * a wrong true would push a stranger's commits into the configured
    * repository.
    */
-  private async sharesHistoryWithConfigured(repoDir: string, configured: string): Promise<boolean> {
+  private async sharesHistoryWithConfigured(repoDir: string, configured: string, ours = 'HEAD'): Promise<boolean> {
     const probe = 'refs/hexis-probe';
     let theirs: string[] = [];
     try {
@@ -746,7 +930,7 @@ export class KbStartupRunner {
       // One question for all of them: a common ancestor of HEAD and ANY of
       // their branches is a common ancestor of HEAD and their merge. Capped,
       // so a remote with thousands of branches cannot outgrow a command line.
-      await git(this.opts.gitRunner, repoDir, ['merge-base', 'HEAD', ...theirs.slice(0, 200)]);
+      await git(this.opts.gitRunner, repoDir, ['merge-base', ours, ...theirs.slice(0, 200)]);
       return true;
     } catch {
       return false;
@@ -800,8 +984,13 @@ export class KbStartupRunner {
     const workspaceDir = path.join(this.opts.workspacesRoot, workspaceIdForBranch(branch));
     const repoDir = path.join(workspaceDir, this.opts.kbDirName);
     for (let pass = 1; ; pass++) {
-      const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
-      if (hasGit && (await this.hasCommit(repoDir))) return this.updateClone(branch, repoDir);
+      // A worktree whose link to the repository is broken has a `.git` and is
+      // no working copy: it is set aside as an unfinished clone is, below.
+      const shape = await workingCopyShape(repoDir);
+      const hasGit = shape !== 'none';
+      if ((shape === 'worktree' || shape === 'clone') && (await this.hasCommit(repoDir))) {
+        return this.updateClone(branch, repoDir, shape === 'worktree');
+      }
       if (pass > PASSES_OVER_ONE_WORKING_COPY) {
         throw new Error('it kept changing while this start was preparing it; something else is working on it');
       }
@@ -862,8 +1051,9 @@ export class KbStartupRunner {
   }
 
   private async isUnfinishedClone(repoDir: string): Promise<boolean> {
-    const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
-    return hasGit && !(await this.hasCommit(repoDir));
+    const shape = await workingCopyShape(repoDir);
+    if (shape === 'broken') return true;
+    return shape !== 'none' && !(await this.hasCommit(repoDir));
   }
 
   /**
@@ -882,7 +1072,11 @@ export class KbStartupRunner {
     const giveUpAt = Date.now() + Math.max(this.opts.gitRunner.defaultTimeoutMs, LONGEST_CLONE_MS) + quietMs;
     for (;;) {
       if (!(await this.isUnfinishedClone(repoDir))) return false;
-      const lastWrite = await newestChangeUnder(path.join(repoDir, '.git'));
+      // A clone writes under its `.git` folder; a worktree being added
+      // writes its checkout, its `.git` being a file.
+      const dotGit = path.join(repoDir, '.git');
+      const watched = (await fs.stat(dotGit).then((s) => s.isDirectory(), () => false)) ? dotGit : repoDir;
+      const lastWrite = await newestChangeUnder(watched);
       const quietFor = Date.now() - lastWrite;
       if (quietFor >= quietMs) return true;
       if (Date.now() > giveUpAt) throw new Error('an unfinished clone at its path is still being written to');
@@ -914,16 +1108,17 @@ export class KbStartupRunner {
 
   private async cloneFresh(branch: string, workspaceDir: string, repoDir: string): Promise<string> {
     await fs.mkdir(workspaceDir, { recursive: true });
-    // Only what cannot be a clone is cleared out of the way: a folder that
-    // gained a `.git` since the caller looked is somebody's clone, and git
+    // Only what cannot be a working copy is cleared out of the way: a folder
+    // that gained a `.git` since the caller looked is somebody's, and git
     // refuses it below rather than this removing it.
     if (!(await fs.access(path.join(repoDir, '.git')).then(() => true, () => false))) {
       await fs.rm(repoDir, { recursive: true, force: true });
     }
-    await git(this.opts.gitRunner, workspaceDir, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
-    // Said as soon as the clone is there, before its configuration: if a
-    // command below fails, the clone stays on disk, and the retry finds it
-    // and never comes back through here.
+    // A worktree of the one repository, which is made (and fetched) by the
+    // first branch that needs it: no history is copied per branch. The
+    // repository carries the identity, the long-paths setting and the
+    // credential helper for every worktree.
+    await this.repository.addWorktree(branch, repoDir);
     try {
       this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
     } catch (err) {
@@ -931,13 +1126,21 @@ export class KbStartupRunner {
         detail: this.redact(err instanceof Error ? err.message : String(err)),
       });
     }
-    await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
-    await stampIdentity(this.opts.gitRunner, repoDir);
     return repoDir;
   }
 
-  private async updateClone(branch: string, repoDir: string): Promise<string> {
-    await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);
+  private async updateClone(branch: string, repoDir: string, worktree = false): Promise<string> {
+    if (worktree) {
+      // ONE fetch for every worktree the phase visits, within the window: the
+      // repository's. The phase is fail-closed, so a failed fetch stops it
+      // with git's words, as the clone's own fetch did.
+      if (!(await this.repository.fetch({ maxAgeMs: STARTUP_FETCH_WINDOW_MS }))) {
+        const raw = `git fetch origin failed: ${String(this.repository.lastFetchFailure() ?? 'unknown failure')}`;
+        throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
+      }
+    } else {
+      await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);
+    }
     const local = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
     const remote = (await git(this.opts.gitRunner, repoDir, ['rev-parse', `origin/${branch}`])).trim();
     if (local !== remote) {
@@ -976,7 +1179,9 @@ export class KbStartupRunner {
   private async finalize(h: BranchHandle): Promise<void> {
     if (!h.dirty) return;
     const repoDir = await h.repoDir();
-    await stampIdentity(this.opts.gitRunner, repoDir);
+    // A worktree's identity is the repository's, stamped when it was made; a
+    // config write from here would contend with every other worktree's.
+    if ((await workingCopyShape(repoDir)) !== 'worktree') await stampIdentity(this.opts.gitRunner, repoDir);
     // Drop any PRE-EXISTING index state first (a crashed tool may have left
     // edits staged): `git commit` publishes the whole index, and the phase
     // must commit exactly its own staged set. The edits stay in the working

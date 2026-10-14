@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readGitfile, type KbRepository } from './kb-repository.js';
 
 /**
  * Moving a working copy of a repository that is no longer the configured one
@@ -93,4 +94,60 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
     );
   }
   await fs.rm(repoDir, { recursive: true, force: true });
+}
+
+/**
+ * Set aside the knowledge base's repository AND EVERY WORKTREE OF IT, together,
+ * into `dest`: each worktree's folder as `dest/<workspace id>` (where a clone
+ * lands), the repository beside them under its own name.
+ *
+ * Together, because neither is any use without the other: a worktree's
+ * commits live in the repository, and a repository of another address is
+ * exactly as unusable as a clone of one. Nothing is deleted. The moved
+ * worktrees are re-linked to the moved repository where git can, so
+ * `git log` in `dest/<workspace id>` shows the work that was never pushed.
+ *
+ * A worktree is found by its `.git` FILE naming a folder inside the
+ * repository — whether or not that folder is still there — so a worktree
+ * git had already lost track of goes with the rest. Under the repository
+ * reservation: no fetch or worktree add runs while the folders move.
+ * Answers the workspace ids moved.
+ */
+export async function setAsideRepository(
+  repository: KbRepository,
+  workspacesRoot: string,
+  kbDirName: string,
+  dest: string,
+): Promise<string[]> {
+  return repository.mutex.runRepository(async () => {
+    const inside = (p: string): boolean => p === repository.dir || p.startsWith(repository.dir + path.sep);
+    const worktrees: Array<{ id: string; dir: string }> = [];
+    let entries: import('node:fs').Dirent[] = [];
+    try {
+      entries = await fs.readdir(workspacesRoot, { withFileTypes: true });
+    } catch {
+      // No workspaces root: only the repository to move.
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(workspacesRoot, entry.name, kbDirName);
+      const gitdir = await readGitfile(path.join(dir, '.git')).catch(() => null);
+      if (gitdir !== null && inside(path.resolve(gitdir))) worktrees.push({ id: entry.name, dir });
+    }
+    const repositoryThere = await fs.access(repository.dir).then(() => true, () => false);
+    if (!repositoryThere && worktrees.length === 0) return [];
+    for (const { id, dir } of worktrees) {
+      await setAsideClone(dir, path.join(dest, id));
+    }
+    const movedRepository = path.join(dest, path.basename(repository.dir));
+    if (repositoryThere) {
+      await setAsideClone(repository.dir, movedRepository);
+      await repository.repairMovedCopy(
+        movedRepository,
+        worktrees.map(({ id }) => path.join(dest, id)),
+      );
+    }
+    repository.forget();
+    return worktrees.map(({ id }) => id);
+  });
 }
