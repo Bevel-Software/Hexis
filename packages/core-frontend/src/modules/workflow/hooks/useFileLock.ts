@@ -403,9 +403,23 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     // 65 s): a hold was seen and hidden, and if the release failed no event
     // will ever correct the page. See the table on `requestsInFlight`.
     let retryTimer: number | undefined;
+    // Every `lock-acquired` / `lock-released` event moves this on. An answer
+    // to a lookup asked BEFORE the event is older than the event and must
+    // not be applied over it: a stale `null` would clear a hold that was
+    // just acquired and make Edit look available while the server refuses
+    // the write; a stale holder would bring back a notice for a hold that
+    // was just released.
+    let generation = 0;
+    const ask = () => {
+      const asked = generation;
+      return getLockApi(workspaceId, branch, path).then((lock) => {
+        if (asked !== generation) return undefined;
+        return lock;
+      });
+    };
     const reask = (failures = 0) => {
       if (cancelled) return;
-      getLockApi(workspaceId, branch, path)
+      ask()
         .then(onAnswer)
         .catch(() => {
           if (cancelled) return;
@@ -418,8 +432,9 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     const reaskOnceSettled = () => {
       void whenSettled(key).then(() => { if (!cancelled) reask(); });
     };
-    const onAnswer = (lock: FileLock | null) => {
-      if (cancelled) return;
+    /** `undefined` is an answer overtaken by an event: nothing to apply. */
+    const onAnswer = (lock: FileLock | null | undefined) => {
+      if (cancelled || lock === undefined) return;
       if (isMine(lock) && inFlight(key)) {
         setExternalLock(null);
         reaskOnceSettled();
@@ -427,7 +442,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
       }
       setExternalLock(lock);
     };
-    getLockApi(workspaceId, branch, path)
+    ask()
       .then(onAnswer)
       .catch(() => { /* network blip, nothing seen yet — events will catch us up */ });
     const stop = () => {
@@ -441,6 +456,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     const workspaceCanon = canonicalizeWorkspaceId(workspaceId);
     const offAcquired = bus.subscribe('lock-acquired', (e) => {
       if (e.branch !== branch || e.path !== path || canonicalizeWorkspaceId(e.workspaceId) !== workspaceCanon) return;
+      generation += 1;
       // SSE echoes our own acquire too. If the event is about a lock this
       // tab is taking right now (the echo can beat the response that flips
       // `holdingLock`), ignore it — and ask again once that acquire
@@ -466,6 +482,7 @@ export function useFileLock(args: UseFileLockArgs): UseFileLockReturn {
     });
     const offReleased = bus.subscribe('lock-released', (e) => {
       if (e.branch !== branch || e.path !== path || canonicalizeWorkspaceId(e.workspaceId) !== workspaceCanon) return;
+      generation += 1;
       // The hold ended while its notice was on screen: the notice goes and
       // Edit is available again, without a reload.
       setExternalLock(null);

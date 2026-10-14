@@ -209,6 +209,32 @@ describe('useFileLock — the notice clears when the hold ends', () => {
     expect(result.current.lockError).toBeNull();
   });
 
+  it('does not let a lookup answered after an event overwrite what the event said', async () => {
+    const { bus, publish } = makeBus();
+    let answer: (lock: FileLock | null) => void = () => undefined;
+    api.getLock.mockImplementationOnce(() => new Promise<FileLock | null>((resolve) => { answer = resolve; }));
+    const { result } = setup({ bus });
+
+    // Dana takes the page while the mount-time lookup is still out.
+    await act(async () => {
+      publish({
+        kind: 'lock-acquired',
+        workspaceId: 'ws',
+        branch: 'main',
+        path: 'kb/Knowledge/Foo.md',
+        holderUserId: 'u-dana',
+        holderName: 'Dana',
+      } as WorkflowEvent);
+    });
+    expect(result.current.externalLock?.holderName).toBe('Dana');
+
+    // The lookup, asked before the event, now answers "nobody": older than
+    // the event, so not believed — Edit must not look available while the
+    // server refuses the write.
+    await act(async () => { answer(null); });
+    expect(result.current.externalLock?.holderName).toBe('Dana');
+  });
+
   it('clears at expiry when no release ever arrives (a closed tab whose release was lost)', async () => {
     vi.useFakeTimers();
     api.acquireLock.mockResolvedValueOnce({ acquired: false, lock: lockHeldBy(ME, 'Juan', 20_000) });
