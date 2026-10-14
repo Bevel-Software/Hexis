@@ -48,16 +48,18 @@ const allowAll = {
   canReadBatch: async (_w: string, _u: string, paths: string[]) =>
     new Map(paths.map((p) => [p, true])),
   // The verbs `file_stat` and the move/delete preflight ask about. Allowing
-  // everything, and answering "no rules at HEAD" for the batch write check,
-  // keeps these tests about what they test rather than about access.
+  // everything keeps these tests about what they test rather than about
+  // access.
   canWrite: async () => true,
-  // The `canWrite` the read tools report, so a write-scope caller here gets a
-  // COMPUTED `true` — never the fail-closed `false` of a missing method.
   canWriteBatch: async (_w: string, _u: string, paths: string[]) =>
     new Map(paths.map((p) => [p, true])),
   canDownload: async () => true,
   canOwner: async () => true,
-  canWriteBatchAtRef: async () => null,
+  // The `canWrite` the read tools report is judged at the default branch's
+  // HEAD, so a write-scope caller here gets a COMPUTED `true` — never the
+  // fail-closed `false` of a missing method or an unresolvable ref.
+  canWriteBatchAtRef: async (_w: string, _r: string, _u: string, paths: string[]) =>
+    new Map(paths.map((p) => [p, true])),
   // The `after` half of a move's or copy's preview. Allowing everything here
   // keeps it the same answer as the four gates above; what the relocation of
   // a folder's `access.md` files actually does to it is exercised against

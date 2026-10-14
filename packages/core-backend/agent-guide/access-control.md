@@ -223,6 +223,10 @@ File-level write access decides how a change lands on the default branch:
   `canWrite: false` means use a branch and a change request; do not offer a
   direct write. `file_stat` with `explainAccess: true` says why, and — when
   you can manage that path's access — who holds each verb: who can approve.
+  The one exception is `roles.yaml`: a change request cannot carry that edit
+  (see above), so `canWrite: false` there means the change is an Admin's to
+  make, in the app's Roles page or directly on the default branch — do not
+  open a request for it.
 
 ### An agent proposes and syncs; a person merges
 

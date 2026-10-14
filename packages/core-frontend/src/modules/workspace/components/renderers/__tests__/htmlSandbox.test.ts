@@ -424,6 +424,15 @@ describe('buildSandboxedHtml', () => {
     expect(out).toContain('jumpTo(href)');
   });
 
+  it('injects no height reporter: the frame tells its parent where a link goes, never how tall it is', () => {
+    // The frame's height is the reader's (`frameResizeHandle.ts`), never
+    // read off the page: a page laid out in the frame and measured there
+    // feeds the frame's height back into itself.
+    const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
+    expect(out).not.toContain('bevel.height');
+    expect(out).not.toContain('ResizeObserver');
+  });
+
   // The bridge half of the one-rule promise. The sanitizer keeps a padded
   // href by reading past the padding; the bridge has to hand the parent the
   // same reading, or the resolver builds a path out of the spaces. A padded

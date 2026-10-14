@@ -13,12 +13,21 @@
  *  - `RendererWorkspaceContext`: the workspace a renderer believes it reads
  *    from, where there is none to dial.
  *  - `CanDownloadContext`: whether a renderer may offer Download.
+ *  - `useRendererSurface` and `useKbGraphLoader`: what a renderer mounted
+ *    there reads its surroundings with, for a renderer a distribution
+ *    registers (and for a stand-in one in a test).
  *  - `kbFileUrl` and `resolveKbHref`: the app's address for a file on a
  *    branch, and what a link in a page resolves to there, which a link out
  *    of such a mount has to name.
  */
-export { isViewOnlyFile, pickFileRenderer } from './components/renderers';
-export { CanDownloadContext } from './components/renderers/DownloadFileButton';
-export { RendererSurfaceContext, type RendererSurface } from './components/renderers/rendererSurface';
+export {
+  CanDownloadContext,
+  isViewOnlyFile,
+  pickFileRenderer,
+  RendererSurfaceContext,
+  useKbGraphLoader,
+  useRendererSurface,
+  type RendererSurface,
+} from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
 export { kbFileUrl, resolveKbHref } from './routing/kb-routes';

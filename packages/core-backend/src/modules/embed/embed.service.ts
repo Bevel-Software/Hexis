@@ -1,6 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { timingSafeStringEqual } from '../auth/password-hash.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, timingSafeStringEqual } from '../auth/index.js';
 import jwt from 'jsonwebtoken';
 import type { AuthUser, IGitService, IWorkflowService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
@@ -8,9 +7,9 @@ import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { changeRequestLink, changeRequestLinkBase } from '../workflow/git/change-request-link.js';
-import type { FileReaderRegistry } from '../workspace/file-readers/file-reader.js';
-import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
+import { changeRequestLink, changeRequestLinkBase } from '../workflow/index.js';
+import type { FileReaderRegistry } from '../workspace/index.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 import type {
   EmbedAuthPort,
   EmbedFileView,
@@ -21,6 +20,7 @@ import type {
   EmbedProposalResult,
   EmbedSubject,
   EmbedTokenResult,
+  EmbedViewer,
   IEmbedService,
 } from './embed.interface.js';
 import {
@@ -156,7 +156,11 @@ export class EmbedService implements IEmbedService {
     if (!this.authService.isEmailDomainAllowed(email ?? '')) {
       throw new EmbedAccessError('Your email domain is not permitted to view this content');
     }
-    return this.mint({ kind: 'atlassian', accountId: input.accountId }, input.reference);
+    const minted = await this.mint({ kind: 'atlassian', accountId: input.accountId }, input.reference);
+    // The connector's host sizes its frame to the content (the issue panel
+    // grows with the page), so its view is told to report its height; the
+    // MCP path says nothing, and its host's fixed reading pane stays.
+    return { ...minted, embedUrl: this.embedUrlFor(minted.token, { sizing: 'content' }) };
   }
 
   /**
@@ -209,9 +213,14 @@ export class EmbedService implements IEmbedService {
     return { token, embedUrl: this.embedUrlFor(token) };
   }
 
-  /** The view's address — what a host frames. */
-  embedUrlFor(token: string): string {
-    return `${this.config.publicFrontendUrl}/embed?token=${encodeURIComponent(token)}`;
+  /**
+   * The view's address — what a host frames. `sizing: 'content'` tells the
+   * view its host sizes the frame to the content and wants the height
+   * reported; absent, the host's fixed pane is kept.
+   */
+  embedUrlFor(token: string, opts: { sizing?: 'content' } = {}): string {
+    const sizing = opts.sizing === 'content' ? '&sizing=content' : '';
+    return `${this.config.publicFrontendUrl}/embed?token=${encodeURIComponent(token)}${sizing}`;
   }
 
   /** A file's address in the app — what a link opens in a new tab. */
@@ -564,6 +573,12 @@ export class EmbedService implements IEmbedService {
     if (!canWrite) throw new EmbedAccessError();
     await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
     return { claims, user, wsPath: this.wsPathFor(claims.repoRelative) };
+  }
+
+  async viewerOf(token: string): Promise<EmbedViewer> {
+    const claims = this.verifyToken(token);
+    const identity = await this.resolveIdentity(claims);
+    return { ...identity, repoRelative: claims.repoRelative };
   }
 
   /** Resolve the token's identity to a user + read/write verdicts. */
