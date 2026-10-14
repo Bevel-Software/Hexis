@@ -632,6 +632,62 @@ describe('a file deleted by someone else', () => {
     expect(disk.get('KB/Draft.md')).toBe('restored, edited');
   });
 
+  it('an Edit click whose reload finds the file gone marks the tab; it stays open and active', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md', 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+
+    // The Edit click's take-ownership re-read answers 404.
+    await act(async () => { await result.current.reloadTabFromDisk('KB/Draft.md'); });
+
+    // The address still names Draft.md and the active tab is still it, now
+    // marked: the file page shows the notice, not "Opening Draft.md…".
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null });
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.');
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Keep.md', 'KB/Draft.md']);
+  });
+
+  it('a reload after a sent proposal that finds the file gone keeps the unsaved edits on the marked tab', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nA page to delete.\n\nA paragraph I added.');
+    disk.delete('KB/Draft.md');
+
+    await act(async () => { await result.current.reloadTabFromDisk('KB/Draft.md'); });
+
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null });
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.\n\nA paragraph I added.');
+  });
+
+  it('a save while that reload is in flight waits for it and is refused when the file is gone', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      answer = () => reject(new WorkspaceApiError(404, 'Not found'));
+    }));
+    let reloading!: Promise<void>;
+    act(() => { reloading = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+    await act(async () => {
+      answer();
+      await reloading;
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(result.current.activeTab?.deletedBy).toBeTruthy();
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');

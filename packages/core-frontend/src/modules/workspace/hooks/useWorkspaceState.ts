@@ -1494,7 +1494,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // to a new-branch tab would silently corrupt the buffer.
     const expectedWorkspaceId = workspaceId;
     try {
-      const fresh = await readFile(expectedWorkspaceId, relativePath);
+      const read = readFile(expectedWorkspaceId, relativePath);
+      // Until this read answers, `saveFile` waits on it: a 404 marks the tab
+      // deleted, and an editor unmounting meanwhile must not write it back.
+      trackExistenceCheck(relativePath, read);
+      const fresh = await read;
       if (workspaceIdRef.current !== expectedWorkspaceId) return;
       setOpenTabs((prev) => prev.map((t) => {
         if (t.path !== relativePath) return t;
@@ -1517,18 +1521,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     } catch (err) {
       if (workspaceIdRef.current !== expectedWorkspaceId) return;
       if (err instanceof WorkspaceApiError && err.status === 404) {
-        // File vanished between Edit click and reload — drop the tab.
-        setOpenTabs((prev) => prev.filter((t) => t.path !== relativePath));
-        if (activeTabPathRef.current === relativePath) {
-          const surviving = openTabsRef.current.filter((t) => t.path !== relativePath);
-          setActiveTabPath(surviving[surviving.length - 1]?.path ?? null);
-        }
+        // The file vanished before the reload answered (an Edit click, a sent
+        // proposal). Dropping the tab here moved the active tab under an
+        // address that still named this file, and the page waited on it for
+        // good. Say what happened instead, keeping any unsaved edits; Close
+        // is the person's.
+        markTabDeleted(relativePath, null);
         return;
       }
       console.warn(`[workspace] reloadTabFromDisk failed for "${relativePath}":`, err);
       throw err;
     }
-  }, [workspaceId]);
+  }, [workspaceId, markTabDeleted, trackExistenceCheck]);
 
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;

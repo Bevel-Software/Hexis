@@ -398,7 +398,8 @@ export interface WorkspaceContextValue {
    * preview. Used when taking ownership of a file (clicking Edit) so the
    * user always starts from the canonical on-disk state — even if a
    * teammate's save echo via SSE hasn't landed yet. Silently no-ops if the
-   * tab isn't open or the workspace isn't ready.
+   * tab isn't open or the workspace isn't ready. A file found gone (a 404)
+   * marks the tab deleted, as someone else's delete does, rather than closing it.
    */
   reloadTabFromDisk: (relativePath: string) => Promise<void>;
   /** Dismiss the changed-on-branch banner of the tab at `relativePath`. */
