@@ -91,13 +91,15 @@ function catFileBatches(): number {
 
 /**
  * Single-file reads of the MODEL's files at a ref (roles, groups, any
- * access.md): none, since the build reads them in one batch. The one `show`
- * a single-path gate makes afterwards, for the asked file's own frontmatter,
- * is not the model's and is not counted.
+ * access.md, any plugin manifest): none, since the build reads them in one
+ * batch. The one `show` a single-path gate makes afterwards, for the asked
+ * file's own frontmatter, is not the model's and is not counted.
  */
 function fileShows(): number {
   return spawnLog.filter(
-    (argv) => argv.includes('show') && argv.some((a) => /:(roles\.yaml|groups\.yaml|synced-groups\.yaml|(.*\/)?access\.md)$/.test(a)),
+    (argv) =>
+      argv.includes('show') &&
+      argv.some((a) => /:(roles\.yaml|groups\.yaml|synced-groups\.yaml|(.*\/)?access\.md|.*\/plugin\.json)$/.test(a)),
   ).length;
 }
 
@@ -122,6 +124,8 @@ describe('AccessControlService — at-ref model cache', () => {
   const workspaceId = 'ws-atref-cache';
   const admin = 'razvan@bevel.software';
   const DOC = 'Team/Doc.md';
+  const QUOTED_DIR = 'Équipe';
+  const QUOTED_DOC = `${QUOTED_DIR}/Doc.md`;
 
   async function git(cwd: string, ...args: string[]): Promise<string> {
     const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf-8' });
@@ -149,6 +153,14 @@ describe('AccessControlService — at-ref model cache', () => {
     await fs.writeFile(path.join(repo, 'access.md'), '---\nwrite:\n  - Admin\n---\n');
     await fs.writeFile(path.join(repo, 'Team/access.md'), '---\nwrite:\n  - Admin\n---\n');
     await fs.writeFile(path.join(repo, DOC), '# doc\n');
+    // A folder git would C-quote in its default listing, with an access.md
+    // that DENIES the admin: read as it is, or the denial is missed.
+    await fs.mkdir(path.join(repo, QUOTED_DIR), { recursive: true });
+    await fs.writeFile(path.join(repo, QUOTED_DIR, 'access.md'), '---\nwrite:\n  - deny Admin\n---\n');
+    await fs.writeFile(path.join(repo, QUOTED_DOC), '# doc\n');
+    // A plugin, whose manifest the model reads too.
+    await fs.mkdir(path.join(repo, 'Plugins/Demo'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Plugins/Demo/plugin.json'), '{ "name": "Demo" }\n');
     await execFileAsync('git', ['init', '-b', 'main', repo]);
     await git(repo, 'config', 'user.email', 'test@example.com');
     await git(repo, 'config', 'user.name', 'Test');
@@ -315,6 +327,50 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(2);
     expect(catFileBatches()).toBe(2);
     expect(fileShows()).toBe(0);
+  });
+
+  it('honours an access.md under a folder git would quote in its listing', async () => {
+    // `git ls-tree` prints "\303\211quipe/access.md" unless told `-z`; read
+    // under that spelling nothing comes back, and a denial would be missed.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, QUOTED_DOC)).toBe(false);
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [QUOTED_DOC, DOC])).toEqual(
+      new Map([
+        [QUOTED_DOC, false],
+        [DOC, true],
+      ]),
+    );
+    expect(lsTreeBuilds()).toBe(1);
+    expect(fileShows()).toBe(0);
+  });
+
+  it('answers null for a ref whose roles.yaml is a directory, and never falls through to origin for it', async () => {
+    // `feature` on origin grants the admin; the LOCAL `feature` replaced
+    // roles.yaml with a directory of that name. That is malformed config, as
+    // a roles file that does not parse is: the gate answers null for the
+    // ref, rather than reading the next candidate and granting from it.
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await git(repo, 'push', '-q', '-u', 'origin', 'feature');
+    await git(repo, 'rm', '-q', 'roles.yaml');
+    await fs.mkdir(path.join(repo, 'roles.yaml'));
+    await fs.writeFile(path.join(repo, 'roles.yaml/README.md'), 'not roles\n');
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-qm', 'roles.yaml is a folder now');
+
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).toBeNull();
+    expect(lsTreeBuilds()).toBe(1);
+  });
+
+  it('refuses to decide when a groups source is a directory rather than a file', async () => {
+    await pushFromOther('groups.yaml as a folder', async () => {
+      await fs.mkdir(path.join(other, 'groups.yaml'));
+      await fs.writeFile(path.join(other, 'groups.yaml/README.md'), 'not groups\n');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+      AccessUnreadableError,
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/groups\.yaml is a tree, not a file; refusing to decide/));
   });
 
   it('holds the models of far more commits than one listing resolves', async () => {
