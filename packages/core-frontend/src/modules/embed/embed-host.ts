@@ -1,4 +1,4 @@
-import { kbFileUrl, resolveKbHref } from '../workspace/routing/kb-routes';
+import { kbFileUrl, resolveKbHref } from '../workspace';
 import { isOpenableExternalHref, normalizeHref } from '../../shared/markdown/hrefs';
 import { embedBaseUrl, embedOpenLink } from './embed-config';
 
