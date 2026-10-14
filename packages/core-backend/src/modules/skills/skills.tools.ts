@@ -105,7 +105,9 @@ export function registerSkillsTools(
    * folder as COMMITTED on the default branch (`HEAD` of its clone), which is
    * what a direct write is judged against — never the working tree, where a
    * bundled file deleted but not yet committed would drop out of the verdict
-   * while `HEAD` still forbids changing it. A skill with nothing committed
+   * while `HEAD` still forbids changing it. A skill is committed there when
+   * its `SKILL.md` is — a folder of that name holding other tracked files is
+   * not the skill, and its files are not the skill's. A skill not committed
    * there exists only on the branch read, and is judged by its files there,
    * where they would land. Null — judged `false` — when the listing fails
    * (fail closed), and without one when the verdict cannot be anything but
@@ -122,7 +124,7 @@ export function registerSkillsTools(
     } catch {
       return null;
     }
-    return committed.length > 0 ? committed : [skillMdOf(loaded), ...loaded.files];
+    return committed.includes(skillMdOf(loaded)) ? committed : [skillMdOf(loaded), ...loaded.files];
   };
 
   registry.registerExternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));

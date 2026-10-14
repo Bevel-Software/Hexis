@@ -351,6 +351,22 @@ describe('get_skill carries canWrite for the whole skill', () => {
     expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
   });
 
+  it('a folder of the skill\'s name holding other tracked files on the default branch is not the skill', async () => {
+    // The default branch has no shared-draft SKILL.md, only an unrelated file
+    // under that folder whose rules refuse Eng: not the skill, so the draft's
+    // own files are what is judged, and Eng may write those.
+    const stray = join(wsDir(MAIN), KB, 'Plugins/Shared/shared-draft/locked.md');
+    await mkdir(dirname(stray), { recursive: true });
+    await writeFile(stray, `---\nwrite:\n  - deny Eng <${ENG}>\n---\n# Not the skill\n`);
+    await commitMain('a stray under the draft-only skill\'s folder');
+    try {
+      expect((await call<Got>('get_skill', { name: 'shared-draft', branch: DRAFT }, ENG)).skill.canWrite).toBe(true);
+    } finally {
+      await rm(stray);
+      await commitMain('stray gone');
+    }
+  });
+
   it('a blank `version` is the latest default copy: no second lookup of the released skill', async () => {
     const loads = vi.spyOn(skills, 'getSkill');
     try {
