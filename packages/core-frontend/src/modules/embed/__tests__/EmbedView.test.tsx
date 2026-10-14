@@ -107,6 +107,23 @@ afterEach(() => {
   resetEmbedConfig();
 });
 
+/** Heartbeats captured instead of scheduled, so a test can fire one. */
+function captureHeartbeats(): Array<() => void> {
+  const ticks: Array<() => void> = [];
+  const realSetInterval = window.setInterval.bind(window);
+  vi.spyOn(window, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+    if (ms === 30_000) {
+      ticks.push(fn);
+      return 0;
+    }
+    return realSetInterval(fn, ms);
+  }) as typeof window.setInterval);
+  return ticks;
+}
+
+/** The page as a test edits it. */
+const EDITED = '# Thing\n\nWhat it is, edited.\n';
+
 /**
  * A host that sizes its frame to the content (the Atlassian issue panel)
  * follows the height the embed reports. Only when framed: with no host there
@@ -309,22 +326,6 @@ describe('a writer', () => {
    * stays open with the draft, Save becomes Send proposal, and the reader is
    * told why — never an editor that quietly stopped saving.
    */
-  /** Heartbeats captured instead of scheduled, so a test can fire one. */
-  function captureHeartbeats(): Array<() => void> {
-    const ticks: Array<() => void> = [];
-    const realSetInterval = window.setInterval.bind(window);
-    vi.spyOn(window, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
-      if (ms === 30_000) {
-        ticks.push(fn);
-        return 0;
-      }
-      return realSetInterval(fn, ms);
-    }) as typeof window.setInterval);
-    return ticks;
-  }
-
-  const EDITED = '# Thing\n\nWhat it is, edited.\n';
-
   async function editThenLoseWrite() {
     const ticks = captureHeartbeats();
     api.loadEmbed.mockResolvedValueOnce(view());
@@ -631,7 +632,6 @@ describe('the renderer', () => {
  * with it. The reader sees no expired sentence and loses nothing typed.
  */
 describe('a chat view whose token runs out', () => {
-  const EDITED = '# Thing\n\nWhat it is, edited.\n';
   const expired = () => new FakeEmbedApiError(401, 'Invalid or expired embed token');
 
   /** The chat view's handoff: a token, and a way to renew it. */
@@ -639,20 +639,6 @@ describe('a chat view whose token runs out', () => {
     const renewMock = vi.fn(renew);
     configureEmbed({ baseUrl: 'https://hexis.example', token: 'tok', renew: renewMock });
     return renewMock;
-  }
-
-  /** Heartbeats captured instead of scheduled, so a test can fire one. */
-  function captureHeartbeats(): Array<() => void> {
-    const ticks: Array<() => void> = [];
-    const realSetInterval = window.setInterval.bind(window);
-    vi.spyOn(window, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
-      if (ms === 30_000) {
-        ticks.push(fn);
-        return 0;
-      }
-      return realSetInterval(fn, ms);
-    }) as typeof window.setInterval);
-    return ticks;
   }
 
   async function editing() {
