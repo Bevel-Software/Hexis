@@ -47,6 +47,7 @@ import { normalizeRepositoryAddress, sameRepository } from '../kb-fs/remote-url.
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { KbRepository, repositoryDirFor, workingCopyShape } from './kb-repository.js';
+import type { IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
   credentialHelperValue,
@@ -344,7 +345,7 @@ export class WorkspaceService implements IWorkspaceService {
      * serves them all and its reservation is one. Absent, a repository next to
      * the workspaces root (see `repositoryDirFor`).
      */
-    repository?: KbRepository,
+    repository?: IKbRepository,
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
     this.repository =
@@ -357,7 +358,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /** The knowledge base's one repository — see `kb-repository.ts`. */
-  readonly repository: KbRepository;
+  readonly repository: IKbRepository;
 
   /**
    * Whether the checkout folder `repoDir` is a worktree (its `.git` a file)
@@ -391,13 +392,13 @@ export class WorkspaceService implements IWorkspaceService {
    * full clone (which fetches on its own) or a workspace with no checkout.
    * For the git layer, which keys its fetches on this.
    */
-  async sharedRepositoryOf(workspaceId: string): Promise<KbRepository | null> {
+  async sharedRepositoryOf(workspaceId: string): Promise<IKbRepository | null> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     return this.repositoryOfCheckout(path.join(workspaceDir, this.kbDirName));
   }
 
   /** {@link sharedRepositoryOf}, for a caller that already has the checkout folder. */
-  async repositoryOfCheckout(repoDir: string): Promise<KbRepository | null> {
+  async repositoryOfCheckout(repoDir: string): Promise<IKbRepository | null> {
     return (await this.isWorktree(repoDir)) ? this.repository : null;
   }
 

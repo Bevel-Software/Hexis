@@ -175,6 +175,33 @@ describe('a boot that opens every remote branch', () => {
     expect(log.mock.calls.flat().join('\n')).not.toMatch(/converted|Added the/);
     for (const branch of [...PROTECTED, ...DRAFTS]) expect(await workingCopyShape(checkoutOf(branch))).toBe('worktree');
   });
+
+  it('goes on when a branch is deleted on the remote after the boot listed it, and neither moves it nor brings it back', async () => {
+    await makeRunner([touchAll]).runAll();
+    const bobTip = await commitIn(checkoutOf('bob/b'), 'unpushed.md', 'kept');
+    // Deleted on the host between the boot's branch listing and the
+    // repository's fetch, which prunes its remote-tracking ref.
+    const deleteBobThenTouchAll = step('delete-then-touch-all', async (ctx) => {
+      await git(upstream, ['update-ref', '-d', 'refs/heads/bob/b']);
+      for (const h of await ctx.allBranches()) {
+        await h.repoDir();
+        h.write('maintained.md', 'by the boot');
+      }
+      return { outcome: 'ok' };
+    });
+
+    await makeRunner([deleteBobThenTouchAll]).runAll();
+
+    // Its worktree is as it was, the unpushed commit included.
+    expect(await workingCopyShape(checkoutOf('bob/b'))).toBe('worktree');
+    expect((await git(checkoutOf('bob/b'), ['rev-parse', 'HEAD'])).trim()).toBe(bobTip);
+    // The phase pushed nothing to it: the branch stays deleted.
+    expect((await git(upstream, ['branch', '--list', 'bob/b'])).trim()).toBe('');
+    // Every other branch was maintained as usual.
+    for (const branch of [...PROTECTED, 'alice/a', 'carol/c']) {
+      expect(await git(upstream, ['show', `${branch}:maintained.md`])).toBe('by the boot');
+    }
+  });
 });
 
 describe('a deployment upgraded over full clones', () => {

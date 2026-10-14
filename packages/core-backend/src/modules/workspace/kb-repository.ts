@@ -5,6 +5,7 @@ import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import {
   cloneCredentialConfigArgs,
@@ -151,20 +152,9 @@ export interface KbRepositoryOptions {
   mutex?: WorkspaceMutex;
 }
 
-export interface FetchOptions {
-  /** A fetch that SUCCEEDED this recently is fresh enough; nothing runs. */
-  maxAgeMs: number;
-  /** Skip the freshness window (the in-flight join still applies). */
-  force?: boolean;
-  /**
-   * A fetch that FAILED this recently is not retried: the answer is the
-   * failure. For pollers, so a host that is down is not asked again on every
-   * request. Absent, a failure is retried on the next call.
-   */
-  failureBackoffMs?: number;
-}
+export type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
 
-export class KbRepository {
+export class KbRepository implements IKbRepository {
   readonly dir: string;
   private readonly kbRepoUrl: () => string;
   private readonly gitRunner: IGitRunner;
@@ -481,7 +471,7 @@ export class KbRepository {
   async addWorktree(
     branch: string,
     checkoutDir: string,
-    opts: { allowLocalOnly?: boolean; keepLocalTip?: boolean; withinFetchWindowMs?: number } = {},
+    opts: AddWorktreeOptions = {},
   ): Promise<void> {
     await this.mutex.runRepository(async () => {
       await this.ensureHeld();

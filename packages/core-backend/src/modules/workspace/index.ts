@@ -24,3 +24,4 @@ export {
   workingCopyShape,
   type WorkingCopyShape,
 } from './kb-repository.js';
+export type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';

@@ -2,7 +2,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { readGitfile, type KbRepository } from './kb-repository.js';
+import { readGitfile } from './kb-repository.js';
+import type { IKbRepository } from './kb-repository.contract.js';
 
 const log = logger('set-aside');
 
@@ -164,7 +165,7 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
  * every one of them pointing at nothing.
  */
 export async function setAsideRepository(
-  repository: KbRepository,
+  repository: IKbRepository,
   workspacesRoot: string,
   kbDirName: string,
   dest: string,

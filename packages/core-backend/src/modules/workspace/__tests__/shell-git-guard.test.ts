@@ -76,4 +76,80 @@ describe('sharedRepositoryGitRefusal', () => {
       expect(sharedRepositoryGitRefusal(command), command).toBeNull();
     }
   });
+
+  it('reads the command as sh does: quotes and escapes inside a word do not hide the subcommand', () => {
+    for (const command of [
+      'git up"date"-ref refs/heads/bob/b HEAD',
+      "git up'date'-ref refs/heads/bob/b HEAD",
+      'git up\\date-ref refs/heads/bob/b HEAD',
+      '"git" "update-ref" refs/heads/bob/b HEAD',
+      'g""it update-ref refs/heads/bob/b HEAD',
+      'git "g"c',
+      'git branch "-"D bob/b',
+      'git push -"u" origin HEAD',
+      'git \\\nupdate-ref refs/heads/bob/b HEAD',
+      'echo "$(git update-ref refs/heads/x HEAD)"',
+      'echo `git gc`',
+      "sh -c 'git update-ref refs/heads/bob/b HEAD'",
+      'bash -lc "git up\\"\\"date-ref refs/heads/bob/b HEAD"',
+      "eval 'git gc'",
+      'nice -n 5 git gc',
+      'timeout 9 git prune',
+      'find . -maxdepth 0 -exec git gc \\;',
+      'git -c alias.u=update-ref u refs/heads/bob/b HEAD',
+      'git --config-env=alias.u=X u',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), command).not.toBeNull();
+    }
+  });
+
+  it('refuses what only the running shell can resolve where it could decide the outcome', () => {
+    for (const command of [
+      'git $SUB refs/heads/bob/b HEAD',
+      'git ${SUB} refs/heads/bob/b HEAD',
+      "git $'update-ref' refs/heads/bob/b HEAD",
+      'git "$(echo update-ref)" refs/heads/bob/b HEAD',
+      'git update-re? refs/heads/bob/b HEAD',
+      '$G update-ref refs/heads/bob/b HEAD',
+      'git branch $FLAGS bob/b',
+      'git push $OPTS origin HEAD',
+      'echo update-ref | xargs git',
+      'sh -c "$CMD"',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), command).not.toBeNull();
+    }
+  });
+
+  it('leaves expansions alone where they cannot change what git does to the shared repository', () => {
+    for (const command of [
+      'git add *.md',
+      'git commit -m "$MSG"',
+      'git log --format=%s "$(git merge-base HEAD origin/main)"..HEAD',
+      'git checkout -- *.md',
+      'git diff HEAD -- "$FILE"',
+      "sh -c 'git status'",
+      'cat notes.md > out.txt 2>&1',
+      'echo "git gc is the platform\'s job" > /dev/null',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), command).toBeNull();
+    }
+  });
+
+  it('reads the command as cmd.exe does on Windows', () => {
+    for (const command of [
+      'git update-ref refs/heads/bob/b HEAD',
+      'git up^date-ref refs/heads/bob/b HEAD',
+      'git up"date"-ref refs/heads/bob/b HEAD',
+      'C:\\Program Files\\Git\\cmd\\git.exe gc',
+      '"C:\\Program Files\\Git\\cmd\\git.exe" gc',
+      'cd kb & git gc',
+      'git %SUB% refs/heads/bob/b HEAD',
+      'cmd /c "git gc"',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'cmd'), command).not.toBeNull();
+    }
+    for (const command of ['git status', 'git log -1 --format=%s', "git commit -m 'fix'", 'dir & git diff']) {
+      expect(sharedRepositoryGitRefusal(command, 'cmd'), command).toBeNull();
+    }
+  });
 });

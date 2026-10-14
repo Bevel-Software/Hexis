@@ -18,6 +18,7 @@ import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { KbRepository, repositoryDirFor } from '../modules/workspace/kb-repository.js';
+import type { IKbRepository } from '../modules/workspace/kb-repository.contract.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
 import type { EmbedService } from '../modules/embed/embed.service.js';
 import { composeEmbedService } from './compose-embed.js';
@@ -592,7 +593,7 @@ export async function createCoreServices(
    * id — can. On hexis-cloud every tenant has its own backups root: one
    * repository per tenant.
    */
-  const kbRepository = new KbRepository({
+  const kbRepository: IKbRepository = new KbRepository({
     dir: repositoryDirFor(config.workspacesRoot, kbDirName, path.join(config.backupsRoot, '.kb-repository')),
     kbRepoUrl: () => repositorySource.url(),
     gitRunner,

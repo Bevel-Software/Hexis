@@ -22,6 +22,7 @@ import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js'
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
 import { KbRepository, repositoryDirFor, workingCopyShape } from '../kb-repository.js';
+import type { IKbRepository } from '../kb-repository.contract.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
 /**
@@ -136,7 +137,7 @@ export interface KbStartupRunnerOptions {
    * it — THE SAME INSTANCE THE WORKSPACE SERVICE IS GIVEN (see
    * `kb-repository.ts`). Absent, one next to the workspaces root.
    */
-  repository?: KbRepository;
+  repository?: IKbRepository;
 }
 
 const UNFINISHED_CLONE_QUIET_MS = 60_000;
@@ -253,7 +254,14 @@ export interface RetryOptions {
 }
 
 export class KbStartupRunner {
-  private readonly repository: KbRepository;
+  private readonly repository: IKbRepository;
+  /**
+   * Branches deleted on the remote after the phase listed them: the
+   * repository's fetch (`--prune`) took their `origin/<branch>` away. Their
+   * worktrees are left as they are, and the phase commits and pushes nothing
+   * to them — a push would bring a deleted branch back.
+   */
+  private readonly goneFromRemote = new Set<string>();
 
   constructor(private readonly opts: KbStartupRunnerOptions) {
     this.repository =
@@ -1161,6 +1169,14 @@ export class KbStartupRunner {
         const raw = `git fetch origin failed: ${String(this.repository.lastFetchFailure() ?? 'unknown failure')}`;
         throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
       }
+      // The branch was listed before the fetch and deleted on the remote
+      // since: nothing to move the worktree to. Its commits stay where they
+      // are, reachable from its branch, as any other branch's do.
+      if (!(await this.hasRemoteBranch(repoDir, branch))) {
+        this.goneFromRemote.add(branch);
+        startupLog.warn(`branch "${branch}" was deleted on the remote during this start: its working copy is left as it is`);
+        return repoDir;
+      }
     } else {
       await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);
     }
@@ -1174,6 +1190,22 @@ export class KbStartupRunner {
       // Ahead or diverged: committed-but-unpushed work lives here; not ours to discard.
     }
     return repoDir;
+  }
+
+  /**
+   * Whether the repository's remote-tracking ref for `branch` exists. False
+   * only when git answered that it does not (`--verify --quiet`, exit 1);
+   * any other failure is thrown.
+   */
+  private async hasRemoteBranch(repoDir: string, branch: string): Promise<boolean> {
+    try {
+      await git(this.opts.gitRunner, repoDir, ['rev-parse', '--quiet', '--verify', `refs/remotes/origin/${branch}^{commit}`]);
+      return true;
+    } catch (err) {
+      const ran = err instanceof Error ? err.cause : undefined;
+      if (ran instanceof GitRunError && !ran.timedOut && ran.exitCode === 1) return false;
+      throw err;
+    }
   }
 
   /**
@@ -1201,6 +1233,10 @@ export class KbStartupRunner {
   /** One commit per dirty branch; push; the replica carve-out on rejection. */
   private async finalize(h: BranchHandle): Promise<void> {
     if (!h.dirty) return;
+    if (this.goneFromRemote.has(h.name)) {
+      startupLog.warn(`${h.name}: deleted on the remote during this start; the phase's changes are not committed or pushed`);
+      return;
+    }
     const repoDir = await h.repoDir();
     // A worktree's identity is the repository's, stamped when it was made; a
     // config write from here would contend with every other worktree's.
