@@ -84,20 +84,32 @@ function lsTreeBuilds(): number {
   return spawnLog.filter((argv) => argv.includes('ls-tree')).length;
 }
 
-function rolesReads(): number {
-  return spawnLog.filter((argv) => argv.includes('show') && argv.some((a) => a.endsWith(':roles.yaml')))
-    .length;
+/** Batched reads of a commit's access tree: one per build. */
+function catFileBatches(): number {
+  return spawnLog.filter((argv) => argv.includes('cat-file')).length;
+}
+
+/**
+ * Single-file reads of the MODEL's files at a ref (roles, groups, any
+ * access.md): none, since the build reads them in one batch. The one `show`
+ * a single-path gate makes afterwards, for the asked file's own frontmatter,
+ * is not the model's and is not counted.
+ */
+function fileShows(): number {
+  return spawnLog.filter(
+    (argv) => argv.includes('show') && argv.some((a) => /:(roles\.yaml|groups\.yaml|synced-groups\.yaml|(.*\/)?access\.md)$/.test(a)),
+  ).length;
 }
 
 /**
  * The at-ref access model — `canWriteAtRef` / `canWriteBatchAtRef` /
  * `eligibleWritersForPathsAtRef`, the gates every change-request read and
  * every approval click run — is a pure function of the tree at the commit
- * the ref resolves to. Building it costs one `ls-tree` plus one `git show`
- * per `access.md`, so it must be built ONCE per commit and shared by every
- * gate call that lands on that commit, while a push that moves the ref is
- * still seen on the very next call, and a build that saw a git read fail
- * is never pinned.
+ * the ref resolves to. Building it costs two git calls, one `ls-tree` plus
+ * one `cat-file --batch` for every file the model reads, so it must be built
+ * ONCE per commit and shared by every gate call that lands on that commit,
+ * while a push that moves the ref is still seen on the very next call, and a
+ * build that saw a git read fail is never pinned.
  *
  * Every test seeds its own bare origin, workspace clone, and second clone
  * (`other`, standing in for another user's push), so each one holds alone.
@@ -233,10 +245,13 @@ describe('AccessControlService — at-ref model cache', () => {
     const map = await svc.eligibleWritersForPathsAtRef(workspaceId, 'feature', [DOC]);
     expect(map).not.toBeNull();
     expect(map!.get(DOC)!.roles).toContain('Admin');
-    expect(lsTreeBuilds()).toBe(1);
-    // ...and the fallthrough result is cached under origin/feature's commit.
+    // Two commits were read: the local tip, found to carry no roles.yaml,
+    // then origin/feature's.
+    expect(lsTreeBuilds()).toBe(2);
+    // ...and both answers are remembered: the fallthrough result under
+    // origin/feature's commit, the local tip as a commit with no roles.
     expect(await svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).toBe(true);
-    expect(lsTreeBuilds()).toBe(1);
+    expect(lsTreeBuilds()).toBe(2);
   });
 
   it('refuses to decide from a build that lost a git read, and never caches it', async () => {
@@ -246,18 +261,19 @@ describe('AccessControlService — at-ref model cache', () => {
       fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
     );
 
-    // Lose exactly that read, once, to a simulated transient failure. The
-    // gate must not answer from the partial tree (which would grant what the
-    // lost file denies): it fails closed with an AccessUnreadableError...
-    injected.failNext = (argv) => argv.includes('show') && argv.some((a) => a.endsWith(':Team/access.md'));
+    // Lose the batched read of the tree, once, to a simulated transient
+    // failure. The gate must not answer from a partial tree (which would
+    // grant what the lost file denies): it fails closed with an
+    // AccessUnreadableError...
+    injected.failNext = (argv) => argv.includes('cat-file');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
       AccessUnreadableError,
     );
     expect(injected.failNext).toBeNull();
     expect(lsTreeBuilds()).toBe(1);
-    // ...and says so in the logs, naming the read it lost.
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Team\/access\.md failed; refusing to decide/));
+    // ...and says so in the logs.
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/access tree failed; refusing to decide/));
 
     // Nothing was pinned: the next call rebuilds, answers correctly, and
     // that healthy build is the one that gets cached.
@@ -267,7 +283,7 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(2);
   });
 
-  it('does not cache a commit with no roles.yaml, and keeps answering null for it', async () => {
+  it('remembers a commit with no roles.yaml, and keeps answering null for it without another read', async () => {
     await git(other, 'checkout', '-qb', 'bare');
     await git(other, 'rm', '-q', 'roles.yaml');
     await git(other, 'commit', '-qm', 'no roles here');
@@ -276,9 +292,51 @@ describe('AccessControlService — at-ref model cache', () => {
     spawnLog.length = 0;
     expect(await svc.canWriteAtRef(workspaceId, 'origin/bare', admin, DOC)).toBeNull();
     expect(await svc.canWriteAtRef(workspaceId, 'origin/bare', admin, DOC)).toBeNull();
-    // Each call went back to git for roles.yaml (nothing was remembered),
-    // and neither ever got as far as walking the tree.
-    expect(rolesReads()).toBe(2);
-    expect(lsTreeBuilds()).toBe(0);
+    // Git said "missing" for roles.yaml at that commit once, which is as
+    // final as the commit; the second call read nothing.
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(1);
+    expect(fileShows()).toBe(0);
   });
+
+  it('reads the whole access tree at a commit in two git calls, never one per file', async () => {
+    // The seed holds roles.yaml and two access.md files; a read per file was
+    // what the build used to cost, and what a server forking a large heap
+    // cannot afford.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(1);
+    expect(fileShows()).toBe(0);
+    // Both access files were read through the batch: Team's denial is seen.
+    await pushFromOther('deny Admin in Team', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
+    );
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
+    expect(lsTreeBuilds()).toBe(2);
+    expect(catFileBatches()).toBe(2);
+    expect(fileShows()).toBe(0);
+  });
+
+  it('holds the models of far more commits than one listing resolves', async () => {
+    // A listing resolves access at every open change request's two refs: a
+    // knowledge base with a hundred open requests spans a hundred commits.
+    // Under the old bound of 64 that evicted in a cycle, so every listing
+    // rebuilt every model. Each commit here is a distinct tip; after seventy
+    // of them, past that old bound, the first is still held.
+    const shas: string[] = [];
+    for (let i = 0; i < 70; i++) {
+      await fs.writeFile(path.join(other, 'Team/Doc.md'), `# doc ${i}\n`);
+      await git(other, 'add', '-A');
+      await git(other, 'commit', '-qm', `edit ${i}`);
+      shas.push(await git(other, 'rev-parse', 'HEAD'));
+    }
+    await git(other, 'push', '-q', 'origin', 'HEAD');
+    await git(repo, 'fetch', '-q', 'origin');
+    spawnLog.length = 0;
+    for (const sha of shas) expect(await svc.canWriteAtRef(workspaceId, sha, admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(70);
+    expect(await svc.canWriteAtRef(workspaceId, shas[0]!, admin, DOC)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, shas[35]!, admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(70);
+  }, 120_000);
 });
