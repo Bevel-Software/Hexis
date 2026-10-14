@@ -134,22 +134,20 @@ export class WorkspaceMutex {
    * Called from INSIDE a workspace-key operation (a pull fetching before it
    * rebases, a merge fetching its two branches), it cannot wait for the
    * workspace operations that are running — the caller is one of them — so it
-   * serializes with the other repository operations only. Those are the ones
-   * that rewrite the same shared state; the caller's own worktree is held by
-   * the caller. Called from inside a repository operation it runs straight
-   * through: that reservation is already this one.
+   * serializes with the other repository operations, and with every
+   * workspace operation that has not started yet: it holds the gate as a
+   * top-level one does, so nothing new starts beside it. Only the operations
+   * already running (its caller among them) carry on. Called from inside a
+   * repository operation it runs straight through: that reservation is
+   * already this one.
    */
   async runRepository<T>(fn: () => Promise<T>): Promise<T> {
     const holding = this.held.getStore();
     if (holding?.kind === 'repository') return fn();
-    if (holding?.kind === 'workspace') return this.afterRepositoryTail(fn);
 
-    if (this.repositoryWaiting++ === 0) {
-      this.repositoryIdle = new Promise<void>((resolve) => {
-        this.releaseRepositoryIdle = resolve;
-      });
-    }
+    this.holdRepositoryGate();
     try {
+      if (holding?.kind === 'workspace') return await this.afterRepositoryTail(fn);
       // Drained BEFORE taking a place in the repository queue, never while
       // holding one: a running workspace operation may itself need the queue
       // for a nested fetch, and would wait for this, which waits for it.
@@ -162,6 +160,15 @@ export class WorkspaceMutex {
       return await this.afterRepositoryTail(fn);
     } finally {
       if (--this.repositoryWaiting === 0) this.releaseRepositoryIdle();
+    }
+  }
+
+  /** Count one more repository operation queued or running; the first closes the gate. */
+  private holdRepositoryGate(): void {
+    if (this.repositoryWaiting++ === 0) {
+      this.repositoryIdle = new Promise<void>((resolve) => {
+        this.releaseRepositoryIdle = resolve;
+      });
     }
   }
 

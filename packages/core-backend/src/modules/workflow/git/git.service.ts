@@ -497,12 +497,27 @@ export class GitService implements IGitService {
       // Union local heads with origin's remote-tracking refs: a fresh per-user
       // clone only has one local head (HEAD's default), so without this we'd hide
       // target-company-state and every draft pushed by another user.
+      //
+      // The workspace is a worktree of the one repository, which holds every
+      // OTHER worktree's local branch too. Those are not this workspace's: a
+      // clone never had them. A local head checked out in another worktree
+      // is read as that branch's remote-tracking ref alone (and not at all
+      // once origin no longer has it), so a branch deleted on origin is not
+      // kept alive by its own worktree's local ref — the orphan sweep reads
+      // this list. A branch is checked out in at most one worktree, so "not
+      // this one's HEAD" is "another's".
       const { stdout } = await this.git(cwd, [
         'for-each-ref',
-        '--format=%(refname:short)%09%(refname)',
+        '--format=%(refname:short)%09%(refname)%09%(worktreepath)',
         'refs/heads',
         'refs/remotes/origin',
       ]);
+      const ownBranch = (
+        await this.git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).then(
+          (r) => r.stdout,
+          () => '',
+        )
+      ).trim();
 
       type Row = { shortName: string; ref: string; hasLocal: boolean; hasRemote: boolean };
       const buckets = new Map<string, Row>();
@@ -512,7 +527,7 @@ export class GitService implements IGitService {
         const tab = trimmed.indexOf('\t');
         if (tab < 0) continue;
         const rawShort = trimmed.slice(0, tab);
-        const ref = trimmed.slice(tab + 1);
+        const [ref = '', worktreePath = ''] = trimmed.slice(tab + 1).split('\t');
         if (!rawShort || !ref) continue;
         // Skip symbolic refs up-front. Different git versions report
         // `refs/remotes/origin/HEAD` as either `origin` (older) or `origin/HEAD`
@@ -523,6 +538,7 @@ export class GitService implements IGitService {
         const isLocal = ref.startsWith('refs/heads/');
         const shortName = isLocal ? rawShort : rawShort.replace(/^origin\//, '');
         if (!shortName) continue;
+        if (isLocal && worktreePath !== '' && shortName !== ownBranch) continue;
         // Final guard: the strip above turns `origin/HEAD` into `HEAD`. Even
         // if a future git version lands us here, don't bucket it as a branch.
         if (shortName === 'HEAD') continue;

@@ -70,6 +70,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { sharedRepositoryGitRefusal } from './shell-git-guard.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
@@ -4173,6 +4174,20 @@ export function registerWorkspaceTools(
       // write anything.
       writePolicy.assertUnrestricted(ctx.sessionId);
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch);
+      // The workspace is a worktree: refs, objects and config are every
+      // branch's at once, and a command that rewrites them would act on
+      // branches this call was never authorized for (see `shell-git-guard.ts`).
+      const sharedGit = sharedRepositoryGitRefusal(a.command as string);
+      if (sharedGit !== null) {
+        throw new ToolError(
+          `execute_command refuses ${sharedGit}: every branch workspace is a worktree of one repository, and this ` +
+            "rewrites what all of them share (another branch's refs, the object store, the worktree list or the " +
+            'shared config), not only this branch. Commit, push, merge and rebase act on this branch only and run ' +
+            'as usual; the platform does the shared housekeeping itself.',
+          400,
+          { kind: 'shared-repository-git' },
+        );
+      }
       // Canonical per-branch bootstrap entry point — it owns the workspace-id
       // encoding and the single-flight clone, so the shell never derives a
       // workspace path by hand.

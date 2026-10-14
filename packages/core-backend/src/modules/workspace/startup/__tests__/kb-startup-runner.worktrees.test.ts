@@ -161,6 +161,8 @@ describe('a boot that opens every remote branch', () => {
     // The whole-remote fetch ran once — when the repository was made; every
     // branch after that was within its window.
     expect(calls.filter((args) => args.includes('fetch') && args.at(-1) === 'origin')).toHaveLength(1);
+    // And no branch asked the remote for itself on top of it.
+    expect(calls.filter((args) => args.includes('fetch') && args.some((a) => a.startsWith('+refs/heads/')))).toEqual([]);
     // The history is in the repository, once; the workspaces root holds checkouts.
     expect(await objectStoresUnder(workspacesRoot)).toEqual([]);
     expect(await sizeOf(workspacesRoot)).toBeLessThan(await sizeOf(path.join(repositoryDir(), 'objects')));
@@ -292,5 +294,28 @@ describe('the repository address changes', () => {
     // The configured address has a fresh repository and worktree.
     expect(await fs.readFile(path.join(checkoutOf(DEFAULT_BRANCH), 'marker.txt'), 'utf8')).toBe('replacement');
     expect((await git(repositoryDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
+  });
+
+  it('sets the repository aside even when the workspaces root is gone, so no later worktree fetches from the old address', async () => {
+    await makeRunner([touchDefault]).runAll();
+    await fs.rm(workspacesRoot, { recursive: true, force: true });
+    const replacement = path.join(root, 'replacement.git');
+    await git(root, ['init', '--bare', '-b', DEFAULT_BRANCH, replacement]);
+    const other = path.join(root, '.seed-replacement');
+    await fs.mkdir(other);
+    await git(other, ['init', '-b', DEFAULT_BRANCH]);
+    await fs.writeFile(path.join(other, 'marker.txt'), 'replacement', 'utf8');
+    await git(other, ['add', '-A']);
+    await git(other, ['commit', '-m', 'init']);
+    await git(other, ['branch', PROTECTED[1]!]);
+    await git(other, ['push', '-q', replacement, ...PROTECTED]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await makeRunner([], { kbRepoUrl: () => replacement }).runAll();
+
+    const [stamp] = await fs.readdir(path.join(root, 'set-aside'));
+    expect(await fs.readdir(path.join(root, 'set-aside', stamp!))).toEqual(['knowledge-base.git']);
+    const origin = await git(repositoryDir(), ['config', '--get', 'remote.origin.url']).catch(() => null);
+    expect(origin === null || origin.trim() === replacement).toBe(true);
   });
 });

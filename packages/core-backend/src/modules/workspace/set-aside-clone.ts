@@ -1,6 +1,9 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
 import { readGitfile, type KbRepository } from './kb-repository.js';
+
+const log = logger('set-aside');
 
 /**
  * Moving a working copy of a repository that is no longer the configured one
@@ -104,8 +107,14 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
  * Together, because neither is any use without the other: a worktree's
  * commits live in the repository, and a repository of another address is
  * exactly as unusable as a clone of one. Nothing is deleted. The moved
- * worktrees are re-linked to the moved repository where git can, so
- * `git log` in `dest/<workspace id>` shows the work that was never pushed.
+ * worktrees are re-linked to the moved repository, so `git log` in
+ * `dest/<workspace id>` shows the work that was never pushed.
+ *
+ * All or nothing: when a move fails part-way (the repository will not move
+ * after its worktrees did), the worktrees already moved are put back where
+ * they were, so a retry finds them with their repository and moves them
+ * together. A repository whose presence cannot be read (a permission or I/O
+ * error, not an absence) stops the call before anything moves.
  *
  * A worktree is found by its `.git` FILE naming a folder inside the
  * repository — whether or not that folder is still there — so a worktree
@@ -134,18 +143,36 @@ export async function setAsideRepository(
       const gitdir = await readGitfile(path.join(dir, '.git')).catch(() => null);
       if (gitdir !== null && inside(path.resolve(gitdir))) worktrees.push({ id: entry.name, dir });
     }
-    const repositoryThere = await fs.access(repository.dir).then(() => true, () => false);
+    const repositoryThere = await fs.access(repository.dir).then(
+      () => true,
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
+        throw err;
+      },
+    );
     if (!repositoryThere && worktrees.length === 0) return [];
-    for (const { id, dir } of worktrees) {
-      await setAsideClone(dir, path.join(dest, id));
-    }
+    const moved: Array<{ dir: string; to: string }> = [];
     const movedRepository = path.join(dest, path.basename(repository.dir));
+    try {
+      for (const { id, dir } of worktrees) {
+        const to = path.join(dest, id);
+        await setAsideClone(dir, to);
+        moved.push({ dir, to });
+      }
+      if (repositoryThere) await setAsideClone(repository.dir, movedRepository);
+    } catch (err) {
+      // Back where they were, beside the repository that did not move.
+      for (const { dir, to } of moved.reverse()) {
+        await setAsideClone(to, dir).catch((backErr: unknown) => {
+          log.error(`the set-aside worktree ${to} could not be put back at ${dir}; it is kept there:`, {
+            detail: backErr instanceof Error ? backErr.message : String(backErr),
+          });
+        });
+      }
+      throw err;
+    }
     if (repositoryThere) {
-      await setAsideClone(repository.dir, movedRepository);
-      await repository.repairMovedCopy(
-        movedRepository,
-        worktrees.map(({ id }) => path.join(dest, id)),
-      );
+      await repository.relinkMovedCopy(movedRepository, moved.map(({ to }) => to));
     }
     repository.forget();
     return worktrees.map(({ id }) => id);

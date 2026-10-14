@@ -702,17 +702,19 @@ export class KbStartupRunner {
    */
   private async reconcileClonesWithConfiguredRepository(): Promise<void> {
     const configured = this.opts.kbRepoUrl();
+    // One folder per run, so what was set aside together stays together.
+    const stamp = setAsideStamp();
+    const setAsideRoot = setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot);
+    // The repository first: its address is every worktree's. Even with no
+    // workspaces root — the repository lives outside it, and a worktree added
+    // later would fetch from whatever address it holds.
+    await this.reconcileRepositoryWithConfigured(configured, path.join(setAsideRoot, stamp));
     let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(this.opts.workspacesRoot, { withFileTypes: true });
     } catch {
       return; // no workspaces yet
     }
-    // One folder per run, so what was set aside together stays together.
-    const stamp = setAsideStamp();
-    const setAsideRoot = setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot);
-    // The repository first: its address is every worktree's.
-    await this.reconcileRepositoryWithConfigured(configured, path.join(setAsideRoot, stamp));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const repoDir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);
@@ -762,25 +764,35 @@ export class KbStartupRunner {
    * of use without the other. Nothing is deleted.
    */
   private async reconcileRepositoryWithConfigured(configured: string, dest: string): Promise<void> {
-    const origin = await this.repository.originUrl();
-    if (origin === null || sameRepository(origin, configured)) return;
-    const was = this.redact(normalizeRepositoryAddress(origin));
-    // Any commit of ours will do: a common ancestor of one is a common
-    // ancestor of the repository's history.
-    const ours = (
-      await git(this.opts.gitRunner, this.repository.dir, [
-        'for-each-ref', '--count=1', '--format=%(objectname)', 'refs/heads', 'refs/remotes/origin',
-      ]).catch(() => '')
-    ).trim();
-    if (ours !== '' && (await this.sharesHistoryWithConfigured(this.repository.dir, configured, ours))) {
-      await this.repository.setOriginUrl(configured);
-      startupLog.warn(
-        `the knowledge-base repository was fetched from ${was}, whose history the configured repository holds: ` +
-          'the same repository at a new address. Pointed at the configured address and kept, with every worktree ' +
-          'and their unpushed work.',
-      );
-      return;
-    }
+    // Read, probed and re-pointed under the repository reservation: the
+    // probe fetches into the repository and writes refs there, which no fetch
+    // or worktree change may run beside.
+    const verdict = await this.repository.mutex.runRepository(
+      async (): Promise<{ was: string } | 'keep' | 'repointed'> => {
+        const origin = await this.repository.originUrl();
+        if (origin === null || sameRepository(origin, configured)) return 'keep';
+        const was = this.redact(normalizeRepositoryAddress(origin));
+        // Any commit of ours will do: a common ancestor of one is a common
+        // ancestor of the repository's history.
+        const ours = (
+          await git(this.opts.gitRunner, this.repository.dir, [
+            'for-each-ref', '--count=1', '--format=%(objectname)', 'refs/heads', 'refs/remotes/origin',
+          ]).catch(() => '')
+        ).trim();
+        if (ours !== '' && (await this.sharesHistoryWithConfigured(this.repository.dir, configured, ours))) {
+          await this.repository.setOriginUrl(configured);
+          startupLog.warn(
+            `the knowledge-base repository was fetched from ${was}, whose history the configured repository ` +
+              'holds: the same repository at a new address. Pointed at the configured address and kept, with ' +
+              'every worktree and their unpushed work.',
+          );
+          return 'repointed';
+        }
+        return { was };
+      },
+    );
+    if (typeof verdict === 'string') return;
+    const { was } = verdict;
     // Every worktree's work leaves first, and may stop the phase: see
     // `beforeCloneSetAside`.
     const worktreeIds: string[] = [];
@@ -1118,7 +1130,11 @@ export class KbStartupRunner {
     // first branch that needs it: no history is copied per branch. The
     // repository carries the identity, the long-paths setting and the
     // credential helper for every worktree.
-    await this.repository.addWorktree(branch, repoDir);
+    // The phase opens every branch: the repository's one fetch in the window
+    // brought them all, so each add reads it instead of asking the remote
+    // for its branch again. A fetch that failed leaves the add to ask.
+    await this.repository.fetch({ maxAgeMs: STARTUP_FETCH_WINDOW_MS });
+    await this.repository.addWorktree(branch, repoDir, { withinFetchWindowMs: STARTUP_FETCH_WINDOW_MS });
     try {
       this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
     } catch (err) {

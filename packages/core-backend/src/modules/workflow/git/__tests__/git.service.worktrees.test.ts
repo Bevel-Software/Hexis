@@ -155,8 +155,17 @@ describe('GitService over worktrees', () => {
       gitService.listBranches(id(TARGET), { freshFetch: true }),
       gitService.status(id('bob/b')),
     ]);
-    const timedOut = new Promise((_, reject) => setTimeout(() => reject(new Error('deadlocked')), 20_000));
-    await Promise.race([all, timedOut]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        all,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('deadlocked')), 20_000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
     expect((await git(checkoutOf('bob/b'), ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('bob/b');
   });
 
@@ -165,6 +174,25 @@ describe('GitService over worktrees', () => {
     const branches = await gitService.listBranches(id(TARGET), { freshFetch: true, strictFetch: true });
     expect(branches.map((b) => b.name).sort()).toEqual(['alice/a', 'bob/b', TARGET].sort());
     expect(gitService.lastRemoteContact()?.ok).toBe(true);
+  });
+
+  it("does not list another worktree's local branch once origin no longer has it, so the orphan sweep can take it", async () => {
+    await workspaces.getOrCreateForBranch(TARGET);
+    await workspaces.getOrCreateForBranch('bob/b');
+    // Deleted on the host while its worktree stays open: the repository
+    // still holds bob/b's local ref, as bob's clone held it.
+    await git(upstream, ['branch', '-D', 'bob/b']);
+
+    const fromTarget = await gitService.listBranches(id(TARGET), { freshFetch: true, strictFetch: true });
+    expect(fromTarget.map((b) => b.name).sort()).toEqual(['alice/a', TARGET].sort());
+    // A clone never saw another branch's local ref either: listed from its
+    // own worktree, a branch is its own.
+    const fromBob = await gitService.listBranches(id('bob/b'), { freshFetch: true });
+    expect(fromBob.find((b) => b.name === 'bob/b')?.hasRemote).toBe(false);
+
+    const { removed } = await workspaces.sweepOrphanedWorkspaces(fromTarget.map((b) => b.name));
+    expect(removed).toEqual([id('bob/b')]);
+    await expect(git(workspaces.repository.dir, ['rev-parse', '--verify', 'refs/heads/bob/b'])).rejects.toThrow();
   });
 });
 

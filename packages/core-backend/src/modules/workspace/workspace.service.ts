@@ -720,7 +720,14 @@ export class WorkspaceService implements IWorkspaceService {
       // Someone else is moving it. Wait, then clone below; a move that failed
       // refuses this caller with the same reason.
       await this.repository.mutex.whileParked(setAsideInFlight);
-    } else if (onDisk && (await this.isCloneOfAnotherRepository(repoDir))) {
+    } else if (
+      onDisk
+        ? await this.isCloneOfAnotherRepository(repoDir)
+        : // Nothing of this branch on disk yet, but the worktree it is about to
+          // get would be of the one repository — whose address may be the
+          // replaced one, until the startup phase has been through.
+          await this.isRepositoryOfAnother()
+    ) {
       // Asked again: another caller may have started the move while the
       // address was being read.
       const startedMeanwhile = this.inFlightSetAsides.get(branch);
@@ -735,13 +742,13 @@ export class WorkspaceService implements IWorkspaceService {
         // at this path NOW, which is the fresh clone the first caller is in
         // the middle of making. Nothing is left to move; the bootstrap below
         // waits for that clone.
-      } else if (await this.isWorktree(repoDir)) {
+      } else if (!onDisk || (await this.isWorktree(repoDir))) {
         // A worktree of a repository of another address: the address is the
         // REPOSITORY's, and its commits are the repository's, so the repository
         // and every worktree of it are set aside together, into one folder.
         const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp());
         const ids = await this.worktreeIdsOnDisk();
-        if (!ids.includes(id)) ids.push(id);
+        if (onDisk && !ids.includes(id)) ids.push(id);
         let movedIds: string[] | null = null;
         const move = async (): Promise<void> => {
           if (this.discardsOf(id) !== discardsAtAdoption) return;
@@ -751,7 +758,7 @@ export class WorkspaceService implements IWorkspaceService {
         // What surrounds a set-aside is asked for every workspace that goes,
         // nested, so the move runs once with all of them held.
         const wrapped = ids.reduce<() => Promise<void>>((inner, wid) => () => this.aroundSetAside(wid, inner), move);
-        const moving = wrapped().finally(() => {
+        const moving = this.settleSetAside(wrapped(), () => movedIds !== null, branch).finally(() => {
           this.inFlightSetAsides.delete(branch);
         });
         this.inFlightSetAsides.set(branch, moving);
@@ -769,7 +776,7 @@ export class WorkspaceService implements IWorkspaceService {
         // this very copy aside meanwhile. Then there is nothing left to move:
         // the phase did it, and said so.
         let moved = false;
-        const moving = this.aroundSetAside(id, async () => {
+        const move = async (): Promise<void> => {
           if (this.discardsOf(id) !== discardsAtAdoption) return;
           await setAsideClone(repoDir, kept);
           moved = true;
@@ -778,7 +785,8 @@ export class WorkspaceService implements IWorkspaceService {
           // that looked at the old copy before this line knows its answer is
           // stale, however late it comes back.
           this.forgetClone(id);
-        }).finally(() => {
+        };
+        const moving = this.settleSetAside(this.aroundSetAside(id, move), () => moved, branch).finally(() => {
           this.inFlightSetAsides.delete(branch);
         });
         this.inFlightSetAsides.set(branch, moving);
@@ -957,7 +965,39 @@ export class WorkspaceService implements IWorkspaceService {
    * process that does not know where the repository is has no business
    * declaring a clone stale.
    */
-  private async isCloneOfAnotherRepository(repoDir: string): Promise<boolean> {
+  /**
+   * Wait for a set-aside. Its failure refuses the branch only while nothing
+   * has moved: once the move happened, what failed is what runs AFTER it
+   * around the move (`aroundSetAside` looking for the copy's work again,
+   * which already retries itself), and refusing then would report a move that
+   * did happen as one that did not. That failure is logged, and the branch is
+   * opened fresh.
+   */
+  private async settleSetAside(moving: Promise<void>, didMove: () => boolean, branch: string): Promise<void> {
+    try {
+      await moving;
+    } catch (err) {
+      if (!didMove()) throw err;
+      log.error(
+        `the working copy of "${branch}" was set aside, but what surrounds the move failed after it; the branch ` +
+          'is opened fresh:',
+        { detail: redactError(err, this.gitRunner.credentials.token()) },
+      );
+    }
+  }
+
+  /**
+   * Whether the one repository is on disk, finished, and of an address that
+   * is not the configured one. For a branch opened with nothing on disk: its
+   * worktree would be added to that repository and fetch from the old
+   * address.
+   */
+  private async isRepositoryOfAnother(): Promise<boolean> {
+    if (!(await this.repository.exists())) return false;
+    return this.isCloneOfAnotherRepository(this.repository.dir, 'knowledge-base repository');
+  }
+
+  private async isCloneOfAnotherRepository(repoDir: string, label?: string): Promise<boolean> {
     const configured = this.kbRepoUrl().trim();
     if (configured === '') return false;
     let origin: string;
@@ -973,7 +1013,7 @@ export class WorkspaceService implements IWorkspaceService {
     // signed URL — see `urlQuerySecrets`). So the address is scrubbed on the
     // way into the log, exactly as the startup phase scrubs its own.
     log.warn(
-      `the "${path.basename(path.dirname(repoDir))}" working copy is a clone of another repository ` +
+      `the ${label ?? `"${path.basename(path.dirname(repoDir))}" working copy`} is a clone of another repository ` +
         `(${redactSecret(normalizeRepositoryAddress(origin), urlQuerySecrets(origin))}).`,
     );
     return true;

@@ -8,6 +8,7 @@ import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workingCopyShape } from '../kb-repository.js';
+import { setAsideRepository } from '../set-aside-clone.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
@@ -19,6 +20,12 @@ import type { IGitRunner } from '../../../shared/git.contract.js';
  */
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * A path as git prints it: on Windows git writes `C:/x/y` where node writes
+ * `C:\x\y`, so both sides of a comparison go through this.
+ */
+const asGit = (p: string): string => p.replace(/\\/g, '/');
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, {
@@ -138,8 +145,8 @@ describe('opening a branch', () => {
     // and the repository is not under the root.
     expect(await objectStoresUnder(workspacesRoot)).toEqual([]);
     expect(path.relative(workspacesRoot, svc.repository.dir).startsWith('..')).toBe(true);
-    expect((await git(checkout, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim()).toBe(
-      await fs.realpath(svc.repository.dir),
+    expect(asGit((await git(checkout, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim())).toBe(
+      asGit(await fs.realpath(svc.repository.dir)),
     );
   });
 
@@ -170,9 +177,9 @@ describe('opening a branch', () => {
     expect(calls.filter((c) => c.args[0] === 'init')).toHaveLength(1);
     expect(calls.filter((c) => c.args[0] === 'clone')).toHaveLength(0);
     expect(calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'add')).toHaveLength(2);
-    const listed = await git(svc.repository.dir, ['worktree', 'list', '--porcelain']);
-    expect(listed).toContain(await fs.realpath(checkoutOf('alice/a')));
-    expect(listed).toContain(await fs.realpath(checkoutOf('bob/b')));
+    const listed = asGit(await git(svc.repository.dir, ['worktree', 'list', '--porcelain']));
+    expect(listed).toContain(asGit(await fs.realpath(checkoutOf('alice/a'))));
+    expect(listed).toContain(asGit(await fs.realpath(checkoutOf('bob/b'))));
   });
 
   it('is treated as unfinished and recreated when the worktree has lost its link to the repository', async () => {
@@ -238,18 +245,36 @@ describe('fetching', () => {
   });
 });
 
+describe('re-pointing the repository at a new address', () => {
+  it('forgets the fresh fetch from the old address, so the next one reaches the new address', async () => {
+    const { runner, calls } = recordingRunner();
+    const svc = service(runner);
+    await svc.getOrCreateForBranch('alice/a');
+    expect(await svc.repository.fetch({ maxAgeMs: 60_000, force: true })).toBe(true);
+    // The same repository, moved.
+    const moved = path.join(root, 'moved.git');
+    await fs.cp(upstream, moved, { recursive: true });
+    await svc.repository.setOriginUrl(moved);
+    expect(svc.repository.lastContact()).toBeNull();
+
+    const before = repositoryFetches(calls).length;
+    expect(await svc.repository.fetch({ maxAgeMs: 60_000 })).toBe(true);
+    expect(repositoryFetches(calls).length).toBe(before + 1);
+  });
+});
+
 describe('deleting a branch workspace', () => {
   it('removes and prunes its worktree and nothing else', async () => {
     const svc = service();
     await svc.getOrCreateForBranch('alice/a');
     await svc.getOrCreateForBranch('bob/b');
     const aliceTip = (await git(checkoutOf('alice/a'), ['rev-parse', 'HEAD'])).trim();
-    const aliceCheckout = await fs.realpath(checkoutOf('alice/a'));
+    const aliceCheckout = asGit(await fs.realpath(checkoutOf('alice/a')));
 
     await svc.deleteWorkspace(workspaceIdForBranch('alice/a'));
 
     await expect(fs.access(path.join(workspacesRoot, workspaceIdForBranch('alice/a')))).rejects.toThrow();
-    expect(await git(svc.repository.dir, ['worktree', 'list', '--porcelain'])).not.toContain(aliceCheckout);
+    expect(asGit(await git(svc.repository.dir, ['worktree', 'list', '--porcelain']))).not.toContain(aliceCheckout);
     // The repository keeps its objects…
     await git(svc.repository.dir, ['cat-file', '-e', `${aliceTip}^{commit}`]);
     await git(svc.repository.dir, ['fsck', '--connectivity-only', '--no-dangling']);
@@ -262,13 +287,13 @@ describe('deleting a branch workspace', () => {
     const svc = service();
     await svc.getOrCreateForBranch('alice/a');
     await svc.getOrCreateForBranch('bob/b');
-    const aliceCheckout = await fs.realpath(checkoutOf('alice/a'));
+    const aliceCheckout = asGit(await fs.realpath(checkoutOf('alice/a')));
 
     const { removed } = await svc.sweepOrphanedWorkspaces(['bob/b']);
 
     expect(removed).toEqual([workspaceIdForBranch('alice/a')]);
     expect(await svc.repository.exists()).toBe(true);
-    expect(await git(svc.repository.dir, ['worktree', 'list', '--porcelain'])).not.toContain(aliceCheckout);
+    expect(asGit(await git(svc.repository.dir, ['worktree', 'list', '--porcelain']))).not.toContain(aliceCheckout);
     expect(await svc.readFile(workspaceIdForBranch('bob/b'), 'knowledge-base/bob.md')).toBe('bob/b\n');
   });
 });
@@ -328,11 +353,65 @@ describe('the repository address changes', () => {
     expect((await fs.readdir(kept)).sort()).toEqual(
       ['knowledge-base.git', workspaceIdForBranch('alice/a'), workspaceIdForBranch('bob/b')].sort(),
     );
-    // Nothing deleted: the unpushed commit reads in the set-aside worktree.
-    expect((await git(path.join(kept, workspaceIdForBranch('alice/a')), ['rev-parse', 'HEAD'])).trim()).toBe(unpushed);
+    // Nothing deleted: the unpushed commit reads in the set-aside worktree,
+    // which is linked to the set-aside repository, both ways.
+    const keptAlice = path.join(kept, workspaceIdForBranch('alice/a'));
+    expect((await git(keptAlice, ['rev-parse', 'HEAD'])).trim()).toBe(unpushed);
+    expect(asGit((await git(keptAlice, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim())).toBe(
+      asGit(await fs.realpath(path.join(kept, 'knowledge-base.git'))),
+    );
+    const keptList = asGit(await git(path.join(kept, 'knowledge-base.git'), ['worktree', 'list', '--porcelain']));
+    expect(keptList).toContain(asGit(await fs.realpath(keptAlice)));
+    expect(keptList).not.toContain('prunable');
     // The new address has its own repository and worktree.
     expect(await fs.readFile(path.join(alice, 'other.md'), 'utf-8')).toBe('other\n');
     expect((await git(moved.repository.dir, ['config', '--get', 'remote.origin.url'])).trim()).toBe(other);
+  });
+});
+
+describe('the repository address changes, with nothing of the branch on disk yet', () => {
+  it('sets the repository aside before adding a worktree to it, rather than fetching from the old address', async () => {
+    await service().getOrCreateForBranch('alice/a');
+    const other = path.join(root, 'other.git');
+    await git(root, ['init', '--bare', '-b', 'main', other]);
+    const otherSeed = path.join(root, '.other-seed');
+    await fs.mkdir(otherSeed);
+    await git(otherSeed, ['init', '-b', 'carol/c']);
+    await fs.writeFile(path.join(otherSeed, 'other.md'), 'other\n');
+    await git(otherSeed, ['add', '-A']);
+    await git(otherSeed, ['commit', '-m', 'other']);
+    await git(otherSeed, ['push', '-q', other, 'carol/c']);
+
+    const setAside = path.join(root, 'set-aside');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const moved = service(new NodeGitRunner(), other, setAside);
+    await moved.getOrCreateForBranch('carol/c');
+
+    const [stamp] = await fs.readdir(setAside);
+    expect((await fs.readdir(path.join(setAside, stamp!))).sort()).toEqual(
+      ['knowledge-base.git', workspaceIdForBranch('alice/a')].sort(),
+    );
+    expect(await fs.readFile(path.join(checkoutOf('carol/c'), 'other.md'), 'utf-8')).toBe('other\n');
+    expect((await git(moved.repository.dir, ['config', '--get', 'remote.origin.url'])).trim()).toBe(other);
+  });
+});
+
+describe('setting the repository aside', () => {
+  it('puts the worktrees back when the repository cannot follow them, so nothing is split', async () => {
+    const svc = service();
+    await svc.getOrCreateForBranch('alice/a');
+    await svc.getOrCreateForBranch('bob/b');
+    const dest = path.join(root, 'set-aside', 'stamp');
+    // Somebody's earlier set-aside already holds the repository's name there.
+    await fs.mkdir(path.join(dest, 'knowledge-base.git'), { recursive: true });
+
+    await expect(setAsideRepository(svc.repository, workspacesRoot, 'knowledge-base', dest)).rejects.toThrow(
+      /already holds one/,
+    );
+    expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('worktree');
+    expect(await workingCopyShape(checkoutOf('bob/b'))).toBe('worktree');
+    expect((await fs.readdir(dest)).sort()).toEqual(['knowledge-base.git']);
+    expect((await git(checkoutOf('bob/b'), ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('bob/b');
   });
 });
 

@@ -856,6 +856,18 @@ describe('workspace file primitives', () => {
     const status = await exec('alice/a', 'git status --porcelain');
     expect(status.stdout.trim()).toBe('?? alice-only.md');
     expect((await exec('bob/b', 'git rev-parse --abbrev-ref HEAD')).stdout.trim()).toBe('bob/b');
+
+    // The refs are the repository's, every branch's at once: a command that
+    // would move Bob's branch from Alice's workspace is refused, and Bob's
+    // branch is where it was.
+    const bobTip = (await run('git', ['rev-parse', 'refs/heads/bob/b'], { cwd: repository })).stdout.trim();
+    const refused = await post(`${base}/api/agent/tools/execute_command`, {
+      branch: 'alice/a',
+      command: 'git update-ref refs/heads/bob/b HEAD',
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toMatch(/git update-ref/);
+    expect((await run('git', ['rev-parse', 'refs/heads/bob/b'], { cwd: repository })).stdout.trim()).toBe(bobTip);
   });
 
   // POSIX-only probes: `$GIT_DIR` expansion and `>/dev/null` are `sh`

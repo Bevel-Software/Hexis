@@ -105,6 +105,35 @@ describe('WorkspaceMutex — the repository reservation', () => {
     expect(order).toEqual(['pull-fetch-start', 'pull-fetch-end', 'worktree-add']);
   });
 
+  it('holds back a worktree operation that arrives while a nested repository operation runs', async () => {
+    const mtx = new WorkspaceMutex();
+    const order: string[] = [];
+    const releaseFetch = deferred();
+    const fetching = deferred();
+    // A pull fetching inside its own worktree's reservation.
+    const pull = mtx.run('alice%2Fa', async () => {
+      await mtx.runRepository(async () => {
+        order.push('pull-fetch-start');
+        fetching.resolve();
+        await releaseFetch.promise;
+        order.push('pull-fetch-end');
+      });
+      order.push('pull-rebase');
+    });
+    await fetching.promise;
+    // Another worktree's operation, arriving mid-fetch: it must not run
+    // beside the fetch, though its own key is free.
+    const other = mtx.run('bob%2Fb', async () => {
+      order.push('bob');
+    });
+    await settle();
+    expect(order).toEqual(['pull-fetch-start']);
+    releaseFetch.resolve();
+    await Promise.all([pull, other]);
+    expect(order.slice(0, 2)).toEqual(['pull-fetch-start', 'pull-fetch-end']);
+    expect(order.slice(2).sort()).toEqual(['bob', 'pull-rebase']);
+  });
+
   it('lets a repository operation reach into a worktree without waiting for itself', async () => {
     const mtx = new WorkspaceMutex();
     const queued = deferred();

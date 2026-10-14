@@ -455,11 +455,17 @@ export class KbRepository {
    * `keepLocalTip` (a conversion) leaves a local ref that is behind the
    * remote where it is: the worktree comes up at the clone's own tip, and the
    * phase's own update moves it on, as it moved the clone.
+   *
+   * `withinFetchWindowMs` (the startup phase, opening every branch) skips
+   * asking the remote when the repository's own fetch succeeded that recently
+   * and already has `origin/<branch>`: that fetch brought every branch, so
+   * opening a hundred branches costs one fetch, not a hundred. A branch it
+   * does not know yet is asked for as usual.
    */
   async addWorktree(
     branch: string,
     checkoutDir: string,
-    opts: { allowLocalOnly?: boolean; keepLocalTip?: boolean } = {},
+    opts: { allowLocalOnly?: boolean; keepLocalTip?: boolean; withinFetchWindowMs?: number } = {},
   ): Promise<void> {
     await this.mutex.runRepository(async () => {
       await this.ensureHeld();
@@ -470,15 +476,21 @@ export class KbRepository {
       // repository's tracking ref may be from before the branch moved, or was
       // deleted, on the host. One branch, not the whole remote.
       let missing = false;
-      try {
-        await this.git(['fetch', '--no-write-fetch-head', '--quiet', 'origin',
-          `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/couldn't find remote ref/i.test(message)) throw err;
-        missing = true;
-        // What the repository still says about it is stale.
-        await this.git(['update-ref', '-d', `refs/remotes/origin/${branch}`]).catch(() => undefined);
+      const fresh =
+        opts.withinFetchWindowMs !== undefined &&
+        Date.now() - this.lastSuccessAt < opts.withinFetchWindowMs &&
+        (await this.revParse(`refs/remotes/origin/${branch}`)) !== null;
+      if (!fresh) {
+        try {
+          await this.git(['fetch', '--no-write-fetch-head', '--quiet', 'origin',
+            `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (!/couldn't find remote ref/i.test(message)) throw err;
+          missing = true;
+          // What the repository still says about it is stale.
+          await this.git(['update-ref', '-d', `refs/remotes/origin/${branch}`]).catch(() => undefined);
+        }
       }
       const local = await this.revParse(`refs/heads/${branch}`);
       if (missing && !(opts.allowLocalOnly && local !== null)) {
@@ -595,19 +607,53 @@ export class KbRepository {
   /**
    * Re-link a repository and its worktrees that were moved together (set
    * aside), so `git log` in a moved worktree reads the moved repository.
-   * Best effort: a copy kept for a person, not one in use.
+   *
+   * Both links are written here rather than left to `git worktree repair`,
+   * which cannot follow a link whose two ends BOTH moved: the worktree's
+   * `.git` file names `<repository>/worktrees/<name>`, and that folder's
+   * `gitdir` names the worktree's `.git`. The name is the last part of the
+   * path the worktree's `.git` file still holds. Answers the moved worktrees
+   * that could not be re-linked (git had already lost track of them, or a
+   * write failed) — their files are all there, only `git` in them is not.
    */
-  async repairMovedCopy(movedRepository: string, movedWorktrees: readonly string[]): Promise<void> {
-    if (movedWorktrees.length === 0) return;
-    await this.gitRunner.run(movedRepository, ['worktree', 'repair', ...movedWorktrees]).catch((err: unknown) => {
-      log.warn('the set-aside worktrees could not be re-linked to the set-aside repository:', {
-        detail: this.redact(err instanceof Error ? err.message : String(err)),
-      });
-    });
+  async relinkMovedCopy(movedRepository: string, movedWorktrees: readonly string[]): Promise<string[]> {
+    const gitPath = (p: string): string => (process.platform === 'win32' ? p.replace(/\\/g, '/') : p);
+    const unlinked: string[] = [];
+    for (const worktree of movedWorktrees) {
+      try {
+        const gitfile = path.join(worktree, '.git');
+        const old = await readGitfile(gitfile);
+        if (old === null) throw new Error('its .git file names no folder');
+        const admin = path.join(movedRepository, 'worktrees', path.basename(old));
+        if (!(await fs.stat(admin).then((st) => st.isDirectory(), () => false))) {
+          throw new Error(`the repository has no ${admin}`);
+        }
+        await fs.writeFile(gitfile, `gitdir: ${gitPath(admin)}\n`);
+        await fs.writeFile(path.join(admin, 'gitdir'), `${gitPath(gitfile)}\n`);
+      } catch (err) {
+        unlinked.push(worktree);
+        log.warn(`the set-aside worktree ${worktree} could not be re-linked to the set-aside repository:`, {
+          detail: this.redact(err instanceof Error ? err.message : String(err)),
+        });
+      }
+    }
+    return unlinked;
   }
 
-  /** Point the repository at `url` — the same repository at a new address. */
+  /**
+   * Point the repository at `url` — the same repository at a new address.
+   * What this process knew of the old address's fetches is forgotten with it,
+   * so the next fetch reaches the new one rather than reading a success from
+   * the old one as fresh.
+   */
   async setOriginUrl(url: string): Promise<void> {
-    await this.mutex.runRepository(() => this.git(['remote', 'set-url', 'origin', url]));
+    await this.mutex.runRepository(async () => {
+      await this.git(['remote', 'set-url', 'origin', url]);
+      this.generation++;
+      this.lastSuccessAt = 0;
+      this.lastFailureAt = 0;
+      this.lastOk = null;
+      this.lastFailure = null;
+    });
   }
 }

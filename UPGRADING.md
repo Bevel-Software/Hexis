@@ -172,8 +172,9 @@ The volumes, and what each holds:
 - **pgdata** — the Postgres data itself (what `backup.sql` above captures).
 - **workspaces** — per-branch working copies of the knowledge base (each a
   git worktree of the repository below), plus scratch files. The copies are
-  recreated from your git remote; only scratch files outside the knowledge
-  base are unique to the volume.
+  recreated from the shared repository (which fetches from your git remote);
+  knowledge-base edits not yet committed (a write reaches disk before the
+  commit worker commits it) and scratch files live only in this volume.
 - **backups** — the change-review backup ledger, and the knowledge base's
   one git repository (`.kb-repository/`) that every branch's working copy is
   a worktree of. It holds commits that have not been pushed yet, so keep
@@ -181,12 +182,12 @@ The volumes, and what each holds:
   keeping the workspaces recreates the working copies from the remote.
 - **spills** — oversized tool results parked for re-reading; ephemeral.
 
-The database dump is the backup that matters — it is the only thing a
-restore below puts back. The other volumes are deliberately not part of it:
-workspace copies re-clone, spills expire, and the change-review ledger is a
-belt-and-braces safety copy whose history you lose on a fresh server without
-losing any reviewed content (it all lives in git). If you want the volumes
-anyway, archive them while the app is stopped:
+The database dump is the backup that matters. Everything that was pushed
+is in your git remote, so workspace copies re-clone and spills expire. What
+was NOT pushed yet — commits waiting on a push that failed — lives only in
+the repository on the **backups** volume (with the change-review ledger), so
+archive that volume too if you want those back; a restore without it starts
+from what the remote holds. Archive volumes while the app is stopped:
 
 ```sh
 docker compose down
@@ -203,6 +204,12 @@ To restore on a fresh server:
 
 1. Start only the database: `docker compose up -d db`, then feed it the dump:
    `docker compose exec -T db psql -U bevel bevel < backup.sql`
-2. Start the rest with the same `.env` (same secrets — they decrypt what the
+2. If you archived the backups volume, put it back BEFORE the app first
+   starts, so the repository with the unpushed commits is there when the
+   working copies are made:
+   `docker run --rm -v hexis_backups:/v -v "$PWD":/in alpine tar xzf /in/backups-volume.tgz -C /v`
+   (restore the workspaces volume the same way, from its own archive, for
+   edits that were not yet committed).
+3. Start the rest with the same `.env` (same secrets — they decrypt what the
    database holds): `docker compose up -d`
-3. The knowledge base re-clones from your git remote on first use.
+4. Otherwise the knowledge base is fetched from your git remote on first use.
