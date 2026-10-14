@@ -304,10 +304,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const treeAbsentCheckedAtRef = useRef<Map<string, number>>(new Map());
   const trackExistenceCheck = useCallback((path: string, read: Promise<unknown>) => {
-    const gone = read.then(
+    const thisGone = read.then(
       () => false,
       (err: unknown) => err instanceof WorkspaceApiError && err.status === 404,
     );
+    // A read already in flight for the path still counts: the check answers
+    // "gone" if ANY of them finds the file gone, so a later read that finds
+    // it cannot let a save through past an earlier one's 404.
+    const earlier = existenceChecksRef.current.get(path);
+    const gone = earlier
+      ? Promise.all([earlier, thisGone]).then(([a, b]) => a || b)
+      : thisGone;
     existenceChecksRef.current.set(path, gone);
     void gone.then(() => {
       if (existenceChecksRef.current.get(path) === gone) existenceChecksRef.current.delete(path);
@@ -1552,8 +1559,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // A read deciding whether the file still exists is in flight: its answer
     // first, so a 404 it is about to deliver refuses this write too.
     // Its own answer, not the guard set: the tab may have closed meanwhile.
-    const existenceCheck = existenceChecksRef.current.get(relativePath);
-    if (existenceCheck && (await existenceCheck)) {
+    // The newest check answers for every read in flight before it; one that
+    // started while this save waited is waited on too.
+    let existenceCheck = existenceChecksRef.current.get(relativePath);
+    while (existenceCheck) {
+      if (await existenceCheck) {
+        throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
+      }
+      const newer = existenceChecksRef.current.get(relativePath);
+      existenceCheck = newer !== existenceCheck ? newer : undefined;
+    }
+    if (deletedPathsRef.current.has(relativePath)) {
       throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     }
     await writeFile(workspaceId, relativePath, content);
@@ -2011,6 +2027,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             // Read access revoked underneath us — auto-close the tab.
             if (workspaceIdRef.current !== subscribedWorkspaceId) return;
             dropTabByPath(event.path);
+            return;
+          }
+          if (err instanceof WorkspaceApiError && err.status === 404) {
+            // The lock was released by a delete: say so on the page, as the
+            // other reads of an open tab do (`markTabDeleted` skips ours).
+            if (workspaceIdRef.current !== subscribedWorkspaceId) return;
+            markTabDeleted(event.path, null);
             return;
           }
           console.warn(`[workspace] refetch on lock-released failed for "${event.path}":`, err);

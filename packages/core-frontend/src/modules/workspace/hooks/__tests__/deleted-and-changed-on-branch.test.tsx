@@ -746,6 +746,103 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.content).toBe('typed during the read');
   });
 
+  it('a read that finds the file does not let a save through past an overlapping read that finds it gone', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    apiMocks.writeFile.mockClear();
+
+    // Two reads overlap: the first is answered after the delete (404), the
+    // second, answered first, still saw the file.
+    let answerGone!: () => void;
+    let answerFound!: () => void;
+    apiMocks.readFile
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        answerGone = () => reject(new WorkspaceApiError(404, 'Not found'));
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        answerFound = () => resolve('# Draft\n\nA page to delete.');
+      }));
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => { first = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    act(() => { second = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+    let settled = false;
+    void saving.then(() => { settled = true; }, () => { settled = true; });
+
+    await act(async () => { answerFound(); await second; });
+    // The found answer alone does not decide: the 404 is still to come.
+    expect(settled).toBe(false);
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+
+    disk.delete('KB/Draft.md');
+    await act(async () => {
+      answerGone();
+      await first;
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null });
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('edited');
+  });
+
+  it('a save waits on a read that started while it was already waiting, and is refused when that one finds the file gone', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    apiMocks.writeFile.mockClear();
+
+    let answerFound!: () => void;
+    let answerGone!: () => void;
+    apiMocks.readFile
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        answerFound = () => resolve('# Draft\n\nA page to delete.');
+      }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        answerGone = () => reject(new WorkspaceApiError(404, 'Not found'));
+      }));
+    let first!: Promise<void>;
+    act(() => { first = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+    let second!: Promise<void>;
+    act(() => { second = result.current.reloadTabFromDisk('KB/Draft.md'); });
+
+    disk.delete('KB/Draft.md');
+    await act(async () => {
+      answerFound();
+      await first;
+      answerGone();
+      await second;
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('edited');
+  });
+
+  it('a lock released by a delete shows the open file as deleted, keeping its content', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md', 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.');
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Keep.md', 'KB/Draft.md']);
+    await expect(result.current.saveFile('KB/Draft.md', 'written back')).rejects.toThrow('Draft.md was deleted from this branch');
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
