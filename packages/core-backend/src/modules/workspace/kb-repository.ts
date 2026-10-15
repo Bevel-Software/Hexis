@@ -71,6 +71,9 @@ const PACKED_REFS_TIMEOUT_MS = '10000';
 /** Written into the repository last, once its first fetch has landed — see `exists`. */
 const READY_MARKER = 'hexis-repository-ready';
 
+/** Where a converted clone's stash and other local refs are kept, per workspace (see `importLocalRefs`). */
+export const CONVERTED_REFS = 'refs/kb-converted';
+
 /** Fallback committer identity; every workflow commit overrides it with `--author`. */
 const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
@@ -681,6 +684,59 @@ export class KbRepository implements IKbRepository {
       throw new Error(`the repository holds ${imported ?? 'nothing'} for "${branch}" after the import, not ${tip}`);
     }
     return tip;
+  }
+
+  /**
+   * Bring what else the full clone at `cloneDir` holds of its own into the
+   * repository, under `refs/kb-converted/<workspaceId>/`, before the clone
+   * goes: every entry of its stash (`stash/0` the latest), and every local
+   * ref but its own branch's and the remote-tracking ones — other local
+   * branches, tags — that the repository does not already hold with the same
+   * value. Nothing in the clone changes: each object is pushed by its id.
+   * Answers the refs written, after checking the repository holds each at the
+   * clone's value; throws, the clone untouched, when one cannot be written.
+   *
+   * The refs are no workspace's: deleting the branch's workspace leaves them,
+   * and the repository's collection keeps what they reach.
+   */
+  async importLocalRefs(cloneDir: string, branch: string, workspaceId: string): Promise<string[]> {
+    await this.ensure();
+    const inClone = async (args: string[]) => (await this.gitRunner.run(cloneDir, args)).stdout;
+    const namespace = `${CONVERTED_REFS}/${workspaceId}`;
+    const wanted: { sha: string; dest: string }[] = [];
+    let stashTop: string | null = null;
+    for (const line of (await inClone(['for-each-ref', '--format=%(objectname) %(refname)'])).split('\n')) {
+      const [sha, name] = line.trim().split(' ');
+      if (!sha || !name) continue;
+      if (name === 'refs/stash') { stashTop = sha; continue; }
+      if (name.startsWith('refs/remotes/') || name === `refs/heads/${branch}`) continue;
+      if ((await this.refValue(name)) === sha) continue;
+      if (name.startsWith('refs/heads/') && (await this.refValue(`refs/remotes/origin/${name.slice('refs/heads/'.length)}`)) === sha) continue;
+      wanted.push({ sha, dest: `${namespace}/${name.slice('refs/'.length)}` });
+    }
+    if (stashTop !== null) {
+      // Every entry, not only the latest: the older ones are the stash's log.
+      const entries = (await inClone(['reflog', 'show', '--format=%H', 'refs/stash']).catch(() => ''))
+        .split('\n').map((l) => l.trim()).filter(Boolean);
+      (entries.length > 0 ? entries : [stashTop]).forEach((sha, i) => wanted.push({ sha, dest: `${namespace}/stash/${i}` }));
+    }
+    if (wanted.length === 0) return [];
+    await this.gitRunner.run(cloneDir, ['push', '--quiet', '--no-verify', this.dir,
+      ...wanted.map(({ sha, dest }) => `+${sha}:${dest}`)]);
+    for (const { sha, dest } of wanted) {
+      const held = await this.refValue(dest);
+      if (held !== sha) throw new Error(`the repository holds ${held ?? 'nothing'} at ${dest} after the import, not ${sha}`);
+    }
+    return wanted.map(({ dest }) => dest);
+  }
+
+  /** The object a ref names, as it is (a tag is not peeled), or null. */
+  private async refValue(ref: string): Promise<string | null> {
+    try {
+      return (await this.git(['rev-parse', '--verify', '--quiet', ref])).trim() || null;
+    } catch {
+      return null;
+    }
   }
 
   /**

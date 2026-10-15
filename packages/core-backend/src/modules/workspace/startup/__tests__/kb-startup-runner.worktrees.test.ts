@@ -308,6 +308,45 @@ describe('a deployment upgraded over full clones', () => {
     expect(await objectStoresUnder(workspacesRoot)).toEqual([]);
   });
 
+  it('keeps the stash and the other local refs of a clone it converts in the repository', async () => {
+    const alice = await legacyClone('alice/a');
+    // Two stash entries: recovery work set aside, in no branch.
+    await fs.writeFile(path.join(alice, 'draft.md'), 'stashed first', 'utf8');
+    await git(alice, ['stash', 'push', '-q', '-m', 'first']);
+    await fs.writeFile(path.join(alice, 'draft.md'), 'stashed second', 'utf8');
+    await git(alice, ['stash', 'push', '-q', '-m', 'second']);
+    // A local branch with a commit the remote lacks, and a local tag.
+    await git(alice, ['checkout', '-q', '-b', 'alice/side']);
+    const sideTip = await commitIn(alice, 'side.md', 'on a side branch');
+    await git(alice, ['tag', '-a', '-m', 'mark', 'alice-mark']);
+    const tagObject = (await git(alice, ['rev-parse', 'refs/tags/alice-mark'])).trim();
+    await git(alice, ['checkout', '-q', 'alice/a']);
+    // A local branch the remote has at the same tip: nothing of its own.
+    await git(alice, ['branch', '-q', 'bob/b', 'origin/bob/b']);
+    const stashes = (await git(alice, ['reflog', 'show', '--format=%H', 'refs/stash'])).trim().split('\n');
+    const info = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect(await workingCopyShape(alice)).toBe('worktree');
+    const ns = 'refs/kb-converted/alice%2Fa';
+    const held = (ref: string) => git(repositoryDir(), ['rev-parse', ref]).then((o) => o.trim());
+    expect(stashes).toHaveLength(2);
+    expect(await held(`${ns}/stash/0`)).toBe(stashes[0]);
+    expect(await held(`${ns}/stash/1`)).toBe(stashes[1]);
+    expect(await git(repositoryDir(), ['show', `${ns}/stash/0:draft.md`])).toBe('stashed second');
+    expect(await git(repositoryDir(), ['show', `${ns}/stash/1:draft.md`])).toBe('stashed first');
+    expect(await held(`${ns}/heads/alice/side`)).toBe(sideTip);
+    expect(await held(`${ns}/tags/alice-mark`)).toBe(tagObject);
+    await expect(held(`${ns}/heads/bob/b`)).rejects.toThrow();
+    // Read from the worktree as from any other ref of the repository.
+    expect(await git(alice, ['show', `${ns}/heads/alice/side:side.md`])).toBe('on a side branch');
+    expect(info.mock.calls.flat().join('\n')).toMatch(/"alice\/a" clone's stash and other local refs are kept/);
+    // The collection the startup phase runs keeps them.
+    await git(repositoryDir(), ['gc', '--prune=now', '--quiet']);
+    expect((await git(repositoryDir(), ['cat-file', '-t', stashes[1]!])).trim()).toBe('commit');
+  });
+
   it('keeps a clone it cannot convert working as a clone, says which branch, converts the rest, and tries again at the next boot', async () => {
     for (const branch of [DEFAULT_BRANCH, 'alice/a', 'bob/b']) await legacyClone(branch);
     const alice = checkoutOf('alice/a');

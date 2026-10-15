@@ -108,6 +108,12 @@ export interface IKbRepository {
   listWorktrees(): Promise<string[]>;
   /** Import the tip of `branch` from the full clone at `cloneDir` (unpushed commits included); answers the tip. */
   importBranch(cloneDir: string, branch: string): Promise<string>;
+  /**
+   * Import the full clone's stash entries and its other local refs (not its own
+   * branch, not remote-tracking ones) under `refs/kb-converted/<workspaceId>/`,
+   * leaving the clone as it was; answers the refs written.
+   */
+  importLocalRefs(cloneDir: string, branch: string, workspaceId: string): Promise<string[]>;
   /** The address the repository fetches from, or null when it cannot be read. */
   originUrl(): Promise<string | null>;
   /** Re-link a repository and its worktrees that were moved together; answers the worktrees that could not be. */

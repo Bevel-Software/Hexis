@@ -844,7 +844,9 @@ export class KbStartupRunner {
    *
    *  1. the clone's branch tip is imported into the repository as the branch's
    *     local ref (`git fetch <clone> +refs/heads/<b>:refs/heads/<b>`), so
-   *     commits the remote lacks are in the repository before anything moves;
+   *     commits the remote lacks are in the repository before anything moves,
+   *     and with it every stash entry and other local ref the clone holds,
+   *     under `refs/kb-converted/<workspace id>/`;
    *  2. the clone is moved aside, beside where it was (one rename);
    *  3. the worktree is added at the imported tip, and checked to be there;
    *  4. the files git ignores in the clone, in no commit, are copied into it;
@@ -948,6 +950,7 @@ export class KbStartupRunner {
     const dirty = (await git(this.opts.gitRunner, repoDir, ['status', '--porcelain=v1'])).trim();
     if (dirty !== '') throw new Error('it has uncommitted changes');
     const tip = await this.repository.importBranch(repoDir, branch);
+    await this.importLocalRefs(repoDir, branch);
     await fs.rename(repoDir, aside);
     try {
       await this.repository.addWorktree(branch, repoDir, { allowLocalOnly: true, keepLocalTip: true });
@@ -960,6 +963,19 @@ export class KbStartupRunner {
       throw err;
     }
     await this.removeConvertedClone(branch, converted);
+  }
+
+  /**
+   * The clone's stash and its other local refs, into the repository before
+   * the clone goes (see `KbRepository.importLocalRefs`), and said where.
+   */
+  private async importLocalRefs(cloneDir: string, branch: string): Promise<void> {
+    const kept = await this.repository.importLocalRefs(cloneDir, branch, workspaceIdForBranch(branch));
+    if (kept.length === 0) return;
+    startupLog.info(
+      `the "${branch}" clone's stash and other local refs are kept in the knowledge-base repository (${kept.length}): ` +
+        `${kept.join(', ')}. \`git log <ref>\` in its worktree shows each.`,
+    );
   }
 
   /** Undone: the worktree goes, the clone comes back exactly as it was. */
@@ -1013,6 +1029,9 @@ export class KbStartupRunner {
       // the copy is finished (over a partial one) as the conversion would
       // have, and undone when it cannot be.
       try {
+        // Imported before the clone moved; again, in case that was by a
+        // release that imported its branch only.
+        await this.importLocalRefs(aside, branchForWorkspaceId(path.basename(path.dirname(repoDir))));
         await this.copyIgnoredFiles(aside, repoDir);
         await fs.rename(aside, converted);
       } catch (err) {
