@@ -62,6 +62,10 @@ interface HarnessOpts {
   /** What the org-wide `everyone` principal reads. */
   everyone?: string[];
   email?: string | null;
+  /** Whether the caller is an admin, who is shown every group. Defaults to true. */
+  admin?: boolean;
+  /** The groups the caller is a member of, which is all a non-admin is shown. */
+  memberOf?: string[];
 }
 
 /** The org-wide entry every answer opens with — empty unless `everyone` says otherwise. */
@@ -82,6 +86,8 @@ async function harness(opts: HarnessOpts = {}) {
       opts.team && group in opts.team ? tableVerdict(opts.team[group], paths) : null,
     ),
     canReadAsEveryoneBatch: vi.fn(async (_w: string, paths: string[]) => tableVerdict(opts.everyone, paths)),
+    holdsAdminRootWrite: vi.fn(async () => opts.admin ?? true),
+    groupsOfUser: vi.fn(async () => opts.memberOf ?? []),
   } as unknown as IAccessControl;
   const index = { catalog: async () => CATALOG, invalidate: () => undefined } as IPluginIndexService;
   const skills = { listSkills: async () => SKILLS } as unknown as ISkillService;
@@ -240,6 +246,50 @@ describe('GET /api/teams', () => {
         'Skills/Finance/ledger/SKILL.md',
       ].sort(),
     );
+  });
+
+  it("shows someone who is not an admin only the groups they are in, never another group's name", async () => {
+    const h = await harness({
+      groups: ['Sales Team', 'Finance Team'],
+      caller: EVERYTHING,
+      team: {
+        'Sales Team': ['Plugins/GTM', 'Skills/Sales/outreach/SKILL.md', 'Plugins/GTM/mcp.json'],
+        'Finance Team': ['Plugins/Finance', 'Skills/Finance/ledger/SKILL.md', 'Plugins/Finance/books.tool'],
+      },
+      admin: false,
+      memberOf: ['Sales Team'],
+    });
+    const res = await h.get();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      teams: [
+        NOTHING_ORG_WIDE,
+        { name: 'Sales Team', plugins: ['gtm'], skills: ['outreach'], tools: ['hubspot'] },
+      ],
+    });
+    // A group that is not listed is not asked about either.
+    expect(h.accessControl.canReadAsGroupBatch).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Finance Team',
+      expect.anything(),
+    );
+  });
+
+  it('shows someone in no group, who is not an admin, Everyone alone', async () => {
+    const h = await harness({ groups: ['Sales Team'], caller: EVERYTHING, team: { 'Sales Team': [] }, admin: false });
+    expect(await (await h.get()).json()).toEqual({ teams: [NOTHING_ORG_WIDE] });
+  });
+
+  it('shows an admin every group, including ones they are not in', async () => {
+    const h = await harness({
+      groups: ['Sales Team', 'Finance Team'],
+      caller: EVERYTHING,
+      team: { 'Sales Team': [], 'Finance Team': [] },
+      admin: true,
+      memberOf: [],
+    });
+    const body = (await (await h.get()).json()) as { teams: { name: string }[] };
+    expect(body.teams.map((t) => t.name)).toEqual(['Everyone', 'Sales Team', 'Finance Team']);
   });
 
   it('is 401 without a caller', async () => {
