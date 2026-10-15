@@ -2037,13 +2037,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // must show the notice over unsaved edits too.
       const existenceOnly = matchingTab.isDirty || matchingTab.pendingFileContent !== null;
       const read = readFile(subscribedWorkspaceId, event.path);
-      trackExistenceCheck(subscribedWorkspaceId, event.path, read);
+      const seq = trackExistenceCheck(subscribedWorkspaceId, event.path, read);
       read
         .then((content) => {
           if (workspaceIdRef.current !== subscribedWorkspaceId) return;
           if (existenceOnly) return;
+          // A newer read found the file gone: these bytes predate the delete.
+          if (isStaleFind(subscribedWorkspaceId, event.path, seq)) return;
           setOpenTabs((tabs) => tabs.map((t) => {
             if (t.path !== event.path) return t;
+            // Re-checked against the tab as it is now, not as it was when the
+            // read was issued: edits typed while it was out, or a delete
+            // learned meanwhile, are never replaced by these bytes.
+            if (t.deletedBy || t.isDirty) return t;
             if (t.pendingFileContent !== null) return t;
             if (content === t.savedContent && content === t.content) return t;
             return {

@@ -989,6 +989,52 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nA page to delete.');
   });
 
+  describe('a lock released while the tab is clean, whose read answers late', () => {
+    /** The lock-released read is held until `answer` is called; later reads answer from `disk`. */
+    function holdLockReleasedRead() {
+      const held: { answer: () => void } = { answer: () => {} };
+      apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+        held.answer = () => resolve('# Draft\n\nA page to delete, changed.');
+      }));
+      act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+      return held;
+    }
+
+    it('does not replace edits typed while it was out, after a newer read found the file gone', async () => {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      const held = holdLockReleasedRead();
+      await typeInto(result, 'my unsaved edits');
+      apiMocks.writeFile.mockClear();
+      disk.delete('KB/Draft.md');
+      act(() => bus.emit(fileChanged('KB/Draft.md')));
+      await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+
+      await act(async () => { held.answer(); });
+      await settle();
+
+      // The notice stays, and Copy edits still holds what was typed.
+      expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
+      expect(result.current.activeTab?.isDirty).toBe(true);
+      expect(result.current.activeTab?.content).toBe('my unsaved edits');
+      await expect(result.current.saveFile('KB/Draft.md', 'my unsaved edits')).rejects.toThrow('Draft.md was deleted from this branch');
+      expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('does not replace edits typed while it was out on a file that is still there', async () => {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      const held = holdLockReleasedRead();
+      await typeInto(result, 'my unsaved edits');
+
+      await act(async () => { held.answer(); });
+      await settle();
+
+      expect(result.current.activeTab?.isDirty).toBe(true);
+      expect(result.current.activeTab?.content).toBe('my unsaved edits');
+    });
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
