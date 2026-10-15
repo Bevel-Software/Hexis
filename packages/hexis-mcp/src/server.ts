@@ -473,7 +473,12 @@ export async function createHexisMcpServer(
     catalogCheck?: false | { minIntervalMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
-  const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
+  const {
+    mcpUrl,
+    agentInstructions,
+    catalogRevision: catalogRevisionAdvertised,
+    toolHints: toolHintsAdvertised,
+  } = await resolveDeployment(config);
   // Fetched here rather than alongside the manuals below: it is part of the
   // handshake's own answer, so it cannot wait behind `ready` the way the
   // catalog can.
@@ -553,6 +558,15 @@ export async function createHexisMcpServer(
   let apps: McpAppManifest = { tools: {}, resources: [] };
   /** The read-only hints last read from the deployment, kept through a failed read. */
   let hints: Record<string, boolean> = {};
+  /**
+   * How many hint reads have started, and which of them last updated `hints`.
+   * Two listings can overlap, and their reads can finish out of order: only a
+   * read newer than the one already cached may replace it, so an older answer
+   * never reverts an admin's newer change — each listing still answers with
+   * the hints its own read returned.
+   */
+  let hintReadsStarted = 0;
+  let hintReadCached = 0;
   /**
    * The SDK server, declared up here rather than beside `shutdown`: the
    * catalog refresh below sends notifications on it, and a closure defined
@@ -1120,10 +1134,19 @@ export async function createHexisMcpServer(
       // the call handler gives: this server is going away.
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
       // The hints are read per listing, so an admin's change on the Tools page
-      // is in the very next one (see `fetchToolHints`).
-      hints = await fetchToolHints(config, hints);
+      // is in the very next one (see `fetchToolHints`) — from a deployment
+      // that serves them; an older one lists its platform tools unannotated.
+      let listedHints: Record<string, boolean> = {};
+      if (toolHintsAdvertised) {
+        const read = ++hintReadsStarted;
+        listedHints = await fetchToolHints(config, hints);
+        if (read > hintReadCached) {
+          hintReadCached = read;
+          hints = listedHints;
+        }
+      }
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools, apps.tools, hints) };
+      return { tools: listedTools(tools, apps.tools, listedHints) };
     });
 
     // The deployment's MCP App views, served from here so a host connected

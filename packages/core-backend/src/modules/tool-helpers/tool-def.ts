@@ -187,7 +187,9 @@ export function toolDef(spec: ToolDefSpec): UtcpTool {
     description: spec.description,
     inputs: wire,
     outputs: spec.outputs ?? { type: 'object', properties: {} },
-    tags: spec.tags ?? [],
+    // `write: true` is carried as the `write` tag too: the tag is what survives
+    // serialization, and what the write gate and the read-only hint read.
+    tags: spec.write ? [...new Set([...(spec.tags ?? []), 'write'])] : (spec.tags ?? []),
     tool_call_template: httpTemplate.validateDict({
       call_template_type: 'http',
       http_method: 'POST',

@@ -85,7 +85,14 @@ export class ToolReadOnlyHints {
    * by every request and are never written to.
    */
   async apply(tools: UtcpTool[]): Promise<UtcpTool[]> {
-    const overrides = await this.overrides();
+    // An override that cannot be read must not cost clients the manual: the
+    // tools go out on their built-in hints, as on a deployment with none.
+    let overrides: Record<string, boolean> = {};
+    try {
+      overrides = await this.overrides();
+    } catch (err) {
+      log.warn(`could not read ${TOOL_READ_ONLY_SETTING}; listing the built-in hints:`, { err });
+    }
     return tools.map((tool) => {
       const override = Object.hasOwn(overrides, tool.name) ? overrides[tool.name] : undefined;
       const readOnly = override ?? !declaresWrite(tool);
@@ -133,9 +140,11 @@ export class ToolReadOnlyHints {
     if (!known) throw new UnknownToolError(name);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const current = await this.settings.reload(TOOL_READ_ONLY_SETTING);
-      const map = { ...(parseToolReadOnlyOverrides(current) ?? {}) };
-      if (readOnly === null) delete map[name];
-      else map[name] = readOnly;
+      // Own properties throughout, so a name like `__proto__` is stored as itself.
+      const map = Object.fromEntries(
+        Object.entries(parseToolReadOnlyOverrides(current) ?? {}).filter(([key]) => key !== name),
+      );
+      if (readOnly !== null) Object.defineProperty(map, name, { value: readOnly, enumerable: true, writable: true, configurable: true });
       const next = Object.keys(map).length ? JSON.stringify(map) : null;
       const done = !current
         ? next === null || (await this.settings.recordIfAbsent(TOOL_READ_ONLY_SETTING, next, updatedBy))

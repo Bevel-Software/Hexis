@@ -137,6 +137,35 @@ describe('the Tools page, for an admin', () => {
     );
     expect(screen.queryByRole('button', { name: /Reset read_file/ })).toBeNull();
   });
+
+  it('keeps each tool busy until its own save settles, when two saves overlap', async () => {
+    serve(true, HINTS);
+    // Hold every PUT until the test releases it, by tool name.
+    const served = authFetch.getMockImplementation()!;
+    const release = new Map<string, () => void>();
+    authFetch.mockImplementation(async (url, init) => {
+      if (init?.method === 'PUT') {
+        const name = decodeURIComponent(url.split('/').pop()!);
+        await new Promise<void>((resolve) => release.set(name, resolve));
+      }
+      return served(url, init);
+    });
+    renderPage();
+    const readFile = await screen.findByRole('switch', { name: 'Read-only: read_file' });
+    const listTools = screen.getByRole('switch', { name: 'Read-only: list_tools' });
+    fireEvent.click(readFile);
+    await waitFor(() => expect(readFile).toBeDisabled());
+    fireEvent.click(listTools);
+    await waitFor(() => expect(listTools).toBeDisabled());
+    expect(readFile).toBeDisabled();
+
+    await waitFor(() => expect(release.has('list_tools') && release.has('read_file')).toBe(true));
+    release.get('list_tools')!();
+    await waitFor(() => expect(listTools).not.toBeDisabled());
+    expect(readFile).toBeDisabled();
+    release.get('read_file')!();
+    await waitFor(() => expect(readFile).not.toBeDisabled());
+  });
 });
 
 describe('the Tools page, for everyone else', () => {

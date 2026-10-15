@@ -167,6 +167,14 @@ export interface ResolvedDeployment {
    * would report a dead credential for a route that is merely not there.
    */
   catalogRevision: boolean;
+  /**
+   * Whether the deployment serves `GET /api/agent/tool-hints`, the read-only
+   * hint of every platform tool. Absent on an older deployment and, as above,
+   * absence is the ONLY signal: that deployment answers the unknown route with
+   * 401, and an OAuth config reads a 401 as an expired token — it would
+   * refresh its sign-in on every `tools/list`.
+   */
+  toolHints: boolean;
 }
 
 /**
@@ -177,11 +185,12 @@ export interface ResolvedDeployment {
 export async function resolveDeployment(config: HexisMcpConfig): Promise<ResolvedDeployment> {
   const body = (await getJson(`${config.baseUrl}/api/config`, {
     label: 'the deployment config',
-  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown };
+  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown; toolHints?: unknown };
   return {
     mcpUrl: mcpUrlFromConfig(config, body),
     agentInstructions: body?.agentInstructions === true,
     catalogRevision: body?.catalogRevision === true,
+    toolHints: body?.toolHints === true,
   };
 }
 
@@ -623,9 +632,11 @@ export async function fetchMcpApps(
  * whose `annotations` the UTCP MCP protocol drops on the way in. One small
  * read, beside the catalog check a listing already awaits.
  *
- * Never fatal, and never louder than once per kind of failure: a deployment
- * that predates the route answers 404, and the right listing for it is the one
- * it got before — no hints at all. A transient failure keeps `previous`, the
+ * Asked only of a deployment that advertises the route (`toolHints` in
+ * `/api/config`, see {@link ResolvedDeployment}). Never fatal, and never
+ * louder than once per kind of failure and deployment: a route that answers
+ * 404 anyway is treated as absent, and the right listing for it is the one an
+ * older deployment gets — no hints at all. A transient failure keeps `previous`, the
  * hints already served, so a deployment mid-redeploy does not flip every hint
  * off for one listing.
  */
@@ -643,11 +654,11 @@ export async function fetchToolHints(
     if (!tools || typeof tools !== 'object' || Array.isArray(tools)) {
       throw new Error('the answer is not a tool-hint map (expected { tools: { <name>: true | false } })');
     }
-    const hints: Record<string, boolean> = {};
-    for (const [name, value] of Object.entries(tools as Record<string, unknown>)) {
-      if (typeof value === 'boolean') hints[name] = value;
-    }
-    lastToolHintsFailure = null;
+    // Own properties (`fromEntries`), so no tool name reaches the prototype.
+    const hints = Object.fromEntries(
+      Object.entries(tools as Record<string, unknown>).filter(([, value]) => typeof value === 'boolean'),
+    ) as Record<string, boolean>;
+    lastToolHintsFailure.delete(config.baseUrl);
     return hints;
   } catch (err) {
     // A rejected key is the discovery's to report, as for the app manifest.
@@ -655,8 +666,8 @@ export async function fetchToolHints(
     const kept = gone ? {} : { ...previous };
     const reason = err instanceof Error ? err.message : String(err);
     const key = gone ? 'gone' : reason;
-    if (lastToolHintsFailure !== key) {
-      lastToolHintsFailure = key;
+    if (lastToolHintsFailure.get(config.baseUrl) !== key) {
+      lastToolHintsFailure.set(config.baseUrl, key);
       console.error(
         `[hexis-mcp] could not read the deployment's tool hints (${reason}); ` +
           (Object.keys(kept).length ? 'keeping the hints read before.' : 'tools are listed without a read-only hint.'),
@@ -666,5 +677,9 @@ export async function fetchToolHints(
   }
 }
 
-/** The last tool-hint failure logged, so a deployment without the route is said once, not per listing. */
-let lastToolHintsFailure: string | null = null;
+/**
+ * The last tool-hint failure logged, per deployment, so a failing route is said
+ * once rather than per listing — and one deployment's failure or recovery
+ * never silences or re-arms another's.
+ */
+const lastToolHintsFailure = new Map<string, string>();

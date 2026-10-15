@@ -57,8 +57,16 @@ const READERS = [
   'list_change_request_comments',
   'list_change_request_reviews',
   'get_agent_guide',
-  'ask',
 ];
+
+/**
+ * `ask`, the one reader the ticket names that core does not register: it comes
+ * from a deployment's agent overlay (`ext.tools`), which is not in this
+ * repository. What is pinned here is the RULE it rides on — an overlay tool
+ * that declares no write lists as a reader — through a stand-in; the real
+ * overlay's declaration is checked on a deployment that has it.
+ */
+const OVERLAY_READERS = ['ask'];
 
 /** The tools the ticket names as writers, every one of which must list `readOnlyHint: false`. */
 const WRITERS = [
@@ -129,8 +137,8 @@ function platformRegistry(): ToolRegistry {
     kb,
   });
   registerAgentGuideTool(registry, express.Router(), pass, handler, async () => []);
-  // `ask` is registered by the deployment's agent overlay (`ext.tools`), not
-  // by core; it declares itself the way every other non-writing tool does.
+  // A stand-in for `ask` (see OVERLAY_READERS): declared as an overlay
+  // declares a tool, through `toolDef` with no write.
   registry.registerExternalTool(
     toolDef({ name: 'ask', description: 'Ask the agent.', path: '/api/agent/tools/ask', inputs: { type: 'object', properties: {} } }),
   );
@@ -198,6 +206,18 @@ describe('the built-in hint of every platform tool', () => {
     for (const name of WRITERS.filter((n) => !INTERNAL_ONLY.has(n))) {
       expect(listing.get(name)?.annotations, name).toEqual({ readOnlyHint: false });
     }
+  });
+
+  it('lists an overlay tool that declares no write, like `ask`, as a reader — and one declaring `write: true` as a writer', async () => {
+    const registry = platformRegistry();
+    // Declared with `write: true` and no `write` tag: the boolean alone must
+    // keep it off the readers.
+    registry.registerExternalTool(
+      toolDef({ name: 'overlay_write', description: 'Writes.', path: '/api/agent/tools/overlay_write', inputs: { type: 'object', properties: {} }, write: true }),
+    );
+    const listing = await hostedListing(registry, new ToolReadOnlyHints(registry, memorySettings().port));
+    for (const name of OVERLAY_READERS) expect(listing.get(name)?.annotations, name).toEqual({ readOnlyHint: true });
+    expect(listing.get('overlay_write')?.annotations).toEqual({ readOnlyHint: false });
   });
 
   it('would list `switch_branch` as a writer: it declares one, and is served to no MCP client at all', async () => {
@@ -280,6 +300,31 @@ describe('an override', () => {
     expect(settings.state.writes).toBe(0);
   });
 
+  it('stores and reads back a valid name that is also an Object.prototype key', async () => {
+    const settings = memorySettings();
+    const hints = new ToolReadOnlyHints({ listExternal: async () => [
+      toolDef({ name: '__proto__', description: 'An odd name.', path: '/api/agent/tools/__proto__', inputs: { type: 'object', properties: {} } }),
+    ] }, settings.port);
+    expect(await hints.set('__proto__', false, ADMIN_ID)).toMatchObject({ override: false, readOnly: false });
+    expect(settings.state.value).toBe('{"__proto__":false}');
+    expect(Object.hasOwn(await hints.overrides(), '__proto__')).toBe(true);
+    expect((await hints.hints())['__proto__']).toBe(false);
+  });
+
+  it('lists the built-in hints, rather than failing the manual, when the overrides cannot be read', async () => {
+    const registry = platformRegistry();
+    const { port } = memorySettings('{"read_file":false}');
+    const hints = new ToolReadOnlyHints(registry, {
+      ...port,
+      reload: async () => {
+        throw new Error('connection terminated');
+      },
+    });
+    const listing = await hostedListing(registry, hints);
+    expect(listing.get('read_file')?.annotations).toEqual({ readOnlyHint: true });
+    expect(listing.get('write_file')?.annotations).toEqual({ readOnlyHint: false });
+  });
+
   it('reads an unreadable stored value as no override at all', async () => {
     const registry = platformRegistry();
     const hints = new ToolReadOnlyHints(registry, memorySettings('{"read_file":"yes"}').port);
@@ -294,6 +339,7 @@ describe('the setting holds only a map of tool names to booleans', () => {
       call_tool_chain: true,
     });
     expect(parseToolReadOnlyOverrides('')).toEqual({});
+    expect(Object.hasOwn(parseToolReadOnlyOverrides('{"__proto__":true}')!, '__proto__')).toBe(true);
   });
 
   it.each(['[]', 'true', '{"read_file":"false"}', '{"bad name":true}', 'not json'])('refuses %s', (raw) => {

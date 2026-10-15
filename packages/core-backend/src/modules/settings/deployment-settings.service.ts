@@ -133,12 +133,13 @@ export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean>
     return null;
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const out: Record<string, boolean> = {};
-  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  for (const [name, value] of entries) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(name) || typeof value !== 'boolean') return null;
-    out[name] = value;
   }
-  return out;
+  // Built with `fromEntries`, which defines own properties: assigning into a
+  // plain object would send a valid name like `__proto__` to its prototype.
+  return Object.fromEntries(entries) as Record<string, boolean>;
 }
 
 export const CORE_SETTINGS: SettingDef[] = [

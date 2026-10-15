@@ -360,7 +360,10 @@ export function ToolsExplorerPage() {
   const [filter, setFilter] = useState('');
   const [hints, setHints] = useState<ToolHints | null>(null);
   const [hintError, setHintError] = useState<string | null>(null);
-  const [savingHint, setSavingHint] = useState<string | null>(null);
+  // Every tool with a save in flight: saves of different tools may overlap,
+  // and each keeps its own control busy until its own request settles.
+  const [savingHints, setSavingHints] = useState<ReadonlySet<string>>(() => new Set());
+  const savingRef = useRef(new Set<string>());
   const confirm = useConfirm();
 
   // The read-only hints, with the session: the same for every key pasted
@@ -396,7 +399,10 @@ export function ToolsExplorerPage() {
           });
           if (!confirmed) return;
         }
-        setSavingHint(hint.name);
+        // A second click on a tool whose save is still in flight is dropped.
+        if (savingRef.current.has(hint.name)) return;
+        savingRef.current.add(hint.name);
+        setSavingHints(new Set(savingRef.current));
         setHintError(null);
         try {
           const saved = await setToolReadOnly(hint.name, readOnly);
@@ -404,7 +410,8 @@ export function ToolsExplorerPage() {
         } catch (err) {
           setHintError(err instanceof Error ? err.message : String(err));
         } finally {
-          setSavingHint(null);
+          savingRef.current.delete(hint.name);
+          setSavingHints(new Set(savingRef.current));
         }
       })();
     },
@@ -414,7 +421,7 @@ export function ToolsExplorerPage() {
   const hintControl = (name: string) => {
     const hint = hintByName.get(name);
     if (!hint || !hints) return undefined;
-    return <ReadOnlyControl hint={hint} canEdit={hints.canEdit} busy={savingHint === name} onSet={setHint} />;
+    return <ReadOnlyControl hint={hint} canEdit={hints.canEdit} busy={savingHints.has(name)} onSet={setHint} />;
   };
 
   const load = useCallback(async () => {
