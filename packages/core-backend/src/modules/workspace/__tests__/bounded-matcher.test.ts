@@ -94,6 +94,7 @@ describe('WorkerPatternMatcher', () => {
     expect(() => new WorkerPatternMatcher({ budgetMs: 0 })).toThrow(/budgetMs/);
     expect(() => new WorkerPatternMatcher({ maxWaiting: -1 })).toThrow(/maxWaiting/);
     expect(() => new WorkerPatternMatcher({ batchChars: Number.NaN })).toThrow(/batchChars/);
+    expect(() => new WorkerPatternMatcher({ batchLines: 0 })).toThrow(/batchLines/);
     expect(() => matcher({ maxWaiting: 0 })).not.toThrow();
   });
 
@@ -119,6 +120,22 @@ describe('WorkerPatternMatcher', () => {
     expect(expected.at(-1)! * filler.length).toBeGreaterThan(200);
     expect(await m.search('^hit', '').matchingLines(lines, 10_000)).toEqual(expected);
     expect(await m.search('^hit', '').matchingLines(lines, 3)).toEqual(expected.slice(0, 3));
+  });
+
+  it('caps a batch by its line count too, so a file of empty lines never goes over in one message', async () => {
+    const m = matcher({ batchLines: 100 });
+    const lines = Array.from({ length: 1_050 }, (_, i) => (i % 97 === 0 ? 'hit' : ''));
+    const expected = lines.flatMap((l, i) => (l === 'hit' ? [i] : []));
+    const posted = vi.spyOn(Worker.prototype, 'postMessage');
+    try {
+      expect(await m.search('^hit$', '').matchingLines(lines, 10_000)).toEqual(expected);
+      expect(await m.search('^$', '').matchingLines(lines, 10_000)).toHaveLength(lines.length - expected.length);
+      const postedLines = posted.mock.calls.map(([msg]) => ((msg as { lines?: string[] }).lines ?? []).length);
+      expect(postedLines.filter((n) => n > 0)).toHaveLength(2 * 11);
+      expect(Math.max(...postedLines)).toBeLessThanOrEqual(100);
+    } finally {
+      posted.mockRestore();
+    }
   });
 
   it('hands a line longer than one batch over in shared memory, never in a message, and matches it exactly', async () => {

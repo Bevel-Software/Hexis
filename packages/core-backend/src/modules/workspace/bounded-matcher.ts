@@ -51,6 +51,12 @@ export interface WorkerPatternMatcherOptions {
    * and the worker reads it from there. Default 1 MB.
    */
   batchChars?: number;
+  /**
+   * Lines handed to the worker in one message. Each line is an entry the
+   * copy has to walk whatever its length, so a file of empty lines is bounded
+   * by this, not by `batchChars`. Default 10,000.
+   */
+  batchLines?: number;
 }
 
 /**
@@ -101,6 +107,7 @@ export class WorkerPatternMatcher implements IPatternMatcher {
   private readonly maxWaiting: number;
   private readonly maxPatternLength: number;
   private readonly batchChars: number;
+  private readonly batchLines: number;
   private readonly idle: Worker[] = [];
   private readonly all = new Set<Worker>();
   private readonly waiting: Waiter[] = [];
@@ -115,6 +122,7 @@ export class WorkerPatternMatcher implements IPatternMatcher {
     this.maxWaiting = option('maxWaiting', opts.maxWaiting ?? 16, 0);
     this.maxPatternLength = option('maxPatternLength', opts.maxPatternLength ?? 1_000, 1);
     this.batchChars = option('batchChars', opts.batchChars ?? 1_000_000, 1);
+    this.batchLines = option('batchLines', opts.batchLines ?? 10_000, 1);
     this.lease = {
       acquire: () => this.acquire(),
       release: (w) => this.release(w),
@@ -149,13 +157,15 @@ export class WorkerPatternMatcher implements IPatternMatcher {
 
   /**
    * Where the batch starting at `from` ends: about `batchChars` characters on,
-   * and never empty. A batch of one line past `batchChars` is handed over
-   * through shared memory instead (see {@link BoundedSearch.matchBatch}).
+   * at most `batchLines` lines on, and never empty. A batch of one line past
+   * `batchChars` is handed over through shared memory instead (see
+   * {@link BoundedSearch.matchBatch}).
    */
   private batchEnd(lines: string[], from: number): number {
     let to = from;
     let chars = 0;
-    while (to < lines.length && (to === from || chars + lines[to]!.length <= this.batchChars)) chars += lines[to++]!.length;
+    const last = Math.min(lines.length, from + this.batchLines);
+    while (to < last && (to === from || chars + lines[to]!.length <= this.batchChars)) chars += lines[to++]!.length;
     return to;
   }
 
