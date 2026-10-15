@@ -31,6 +31,10 @@ async function makeHarness(opts: {
   files?: Record<string, string>;
   roles?: string[];
   groups?: string[];
+  /** Whether the caller is an admin, who is offered every group. Defaults to true. */
+  admin?: boolean;
+  /** The groups the caller is a member of — all a non-admin is offered, or may grant to. */
+  memberOf?: string[];
 }): Promise<{ server: Server; baseUrl: string; files: Map<string, string> }> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -46,6 +50,8 @@ async function makeHarness(opts: {
       groups: opts.groups ?? [],
       people: [],
     })),
+    holdsAdminRootWrite: vi.fn(async () => opts.admin ?? true),
+    groupsOfUser: vi.fn(async () => opts.memberOf ?? []),
     eligibleWriters: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
@@ -211,6 +217,49 @@ describe('group principals on the share surface', () => {
     expect(body.roles).toEqual(['Everyone', 'Product']);
     // Deprecated alias — keeps the shipped dialog alive for one release.
     expect(body.plugins).toEqual(body.roles);
+  });
+
+  it("suggest offers someone who is not an admin only the groups they are in, never another group's name", async () => {
+    h = await makeHarness({ roles: ['Everyone'], groups: ['GTM Team', 'Product'], admin: false, memberOf: ['Product'] });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { roles: string[]; groups: string[] };
+    expect(body.groups).toEqual(['Product']);
+    expect(body.roles).toEqual(['Everyone']); // roles are not withheld
+  });
+
+  it('suggest offers someone in no group, who is not an admin, no groups at all', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'], admin: false });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=`);
+    const body = (await res.json()) as { groups: string[] };
+    expect(body.groups).toEqual([]);
+  });
+
+  it('a non-admin grants to a group they are in', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'], admin: false, memberOf: ['Product'] });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'Product' },
+    });
+    expect(res.status).toBe(200);
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- Product');
+  });
+
+  it('a non-admin granting to a group they are not in is refused exactly like an unknown group', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'], admin: false, memberOf: ['Product'] });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'GTM Team' },
+    });
+    // Same status, same body as a group that does not exist: the grant route
+    // confirms no group name the picker would not have offered.
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ kind: 'unknown-group', group: 'GTM Team' });
+    expect(h.files.has(`${KB}/Sales/access.md`)).toBe(false);
   });
 
   it('revokes with a group principal (name-based, no existence check)', async () => {
