@@ -146,7 +146,9 @@ export interface ToolDefSpec {
   branch?: BranchDeclaration;
   /**
    * The tool writes. A `write` tag says the same. A writing tool cannot
-   * declare `defaults-to-default-branch`.
+   * declare `defaults-to-default-branch`. It is also the tool's built-in
+   * read-only hint to MCP clients: a tool that declares no write is listed
+   * `readOnlyHint: true` (see `tool-registry/read-only-hints.ts`).
    */
   write?: boolean;
 }
