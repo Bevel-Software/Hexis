@@ -9,7 +9,8 @@ import {
   type SkillToolWarning,
 } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
-import { postPrComment } from '../../pr/services/pr-comments.api';
+import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { editableDescription, updateChangeRequest } from '../../pr/services/pr-edit.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
 import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
 
@@ -189,7 +190,7 @@ export interface ProposeChangeInput {
   repoRelativePath: string;
   /** The file's full new text — what the author typed in the editor. */
   content: string;
-  /** Optional "why" — lands in the change-request description / a comment. */
+  /** Optional "why" — lands in the change-request description (appended on a later round). */
   note?: string;
   userEmail: string;
   userName: string;
@@ -232,8 +233,13 @@ export async function proposeChange(
   );
 
   if (input.existingCr) {
+    // A later round's "why" joins the request's description, after what is
+    // already there — the author may edit their own request, and the
+    // description is what the reviewer reads.
     if (input.note) {
-      await postPrComment(input.existingCr.number, { body: input.note });
+      const { number } = input.existingCr;
+      const current = editableDescription((await fetchPrDetail(number, { fresh: true })).body);
+      await updateChangeRequest(number, { description: current ? `${current}\n\n${input.note}` : input.note });
     }
   } else {
     await openChangeRequest({

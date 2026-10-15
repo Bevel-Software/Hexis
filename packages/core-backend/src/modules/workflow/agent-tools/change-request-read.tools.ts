@@ -22,21 +22,19 @@ import {
   pageOf,
   pagingOf,
   statesFor,
-  toCrComment,
   toCrDetail,
   toCrFile,
   toCrReviews,
   toCrSummary,
   toCrViewer,
   visibleBlockers,
-  visibleComments,
 } from './change-request-read-shape.js';
 
 /**
- * The five read tools over change requests, named and shaped after GitHub's
+ * The four read tools over change requests, named and shaped after GitHub's
  * pull-request API: `list_change_requests`, `get_change_request`,
- * `list_change_request_files`, `list_change_request_reviews` and
- * `list_change_request_comments`. The mapping lives in
+ * `list_change_request_files` and `list_change_request_reviews`. The mapping
+ * lives in
  * `change-request-read-shape.ts`; this file does the IO and the access
  * filtering.
  *
@@ -48,7 +46,7 @@ import {
  * The shape module's header says what that changed, field by field.
  *
  * None of them writes anything — every handler is registered `write: false`,
- * so a read-scoped connection key may call all five, and every service call
+ * so a read-scoped connection key may call all four, and every service call
  * below is a read.
  *
  * ## What the caller may see
@@ -57,7 +55,7 @@ import {
  * detail to any signed-in viewer; only the file CONTENT routes gate per path
  * (`canReadAtRef` at `origin/<base>`, with an unresolvable verdict as a
  * denial). These tools apply that same content gate to the whole payload,
- * because an agent's answer is the content: a file list, a reviewer's comment
+ * because an agent's answer is the content: a file list, an approval
  * and a gate warning all name paths, and an agent hands what it reads to
  * whoever it is talking to.
  *
@@ -74,9 +72,8 @@ import {
  *     answered 404 for;
  *   - files the caller may not read are left out and counted in
  *     `withheldFiles`, never named (decision 2 on the ticket);
- *   - comments on a withheld file, and gate blockers naming one, go the same
- *     way, with their own counts; a REPLY goes when the comment it replies to
- *     does, up the whole chain;
+ *   - approvals and gate blockers naming a withheld file go the same way, with
+ *     their own counts;
  *   - `body` is the author's own description, with the generated
  *     `## Affected owners` block cut off the end — see `authorsDescription`;
  *   - a request with no readable file and no claim of authorship answers 404,
@@ -171,7 +168,7 @@ export function registerChangeRequestReadTools(
     properties: {
       login: { type: 'string', description: 'Hash-derived login (`user-<12 hex>`); no raw address.' },
       name: { type: 'string' },
-      email: { type: 'string', description: 'Set for comment authors and approvers only.' },
+      email: { type: 'string', description: 'Set for approvers only.' },
     },
     required: ['login'],
   };
@@ -188,7 +185,7 @@ export function registerChangeRequestReadTools(
       sourceBranch: { type: 'string', description: 'The branch the change comes from.' },
       targetBranch: { type: 'string', description: 'The branch it would be applied to.' },
       createdAt: { type: 'string', description: 'ISO timestamp.' },
-      updatedAt: { type: 'string', description: 'ISO timestamp — the close time of a closed request, else the creation time.' },
+      updatedAt: { type: 'string', description: 'ISO timestamp — the latest moment the request itself changed: its close, its last title or description edit, else its creation.' },
       changedFiles: { type: 'integer', description: 'How many of its files YOU may read.' },
       withheldFiles: { type: 'integer', description: 'How many of its files you may not read. Never named.' },
       lastApplyFailure: {
@@ -293,7 +290,7 @@ export function registerChangeRequestReadTools(
       // move under its new name alone, so a file moved out of a folder this
       // caller cannot open looked readable here while the detail — which pairs
       // the two names — refused it: the list advertised a change request that
-      // all four by-number tools answered 404 for, and counted its withheld
+      // all three by-number tools answered 404 for, and counted its withheld
       // file as zero. One notion of a readable file, shared with the detail
       // through the same `fileIsReadable`, is what stops the two disagreeing.
       const byBase = new Map<string, string[]>();
@@ -500,9 +497,9 @@ export function registerChangeRequestReadTools(
       "List a change request's reviews (GitHub: list reviews): who approved what, and when. " +
       'Hexis approves per FILE, so each entry names a `reviewer`, the `files` they approved and ' +
       'the time of the latest of them; `stale` is true for approvals a later push invalidated. ' +
-      'Nothing records who DECLINED a request, so no entry reports one — a reviewer\'s objection ' +
-      'is a comment. Read-only: an entry keeps only the files you may read, and one with no ' +
-      'readable file at all is counted in `withheldReviews` rather than named.',
+      'Nothing records who DECLINED a request, so no entry reports one. Read-only: an entry keeps ' +
+      'only the files you may read, and one with no readable file at all is counted in ' +
+      '`withheldReviews` rather than named.',
     inputs: {
       type: 'object',
       properties: {
@@ -548,74 +545,11 @@ export function registerChangeRequestReadTools(
       return { reviews: items, withheldReviews, ...paging };
     },
   });
-
-  // ── list_change_request_comments ──────────────────────────────────────────
-
-  mount({
-    name: 'list_change_request_comments',
-    description:
-      "List a change request's comments (GitHub: list review comments and issue comments — Hexis " +
-      'keeps both in one thread). Each carries its `author`, `body`, `path` and `line` when it is ' +
-      'anchored to a file, `parentId` when it is a reply (the same id you pass to ' +
-      '`post_change_request_comment` to reply yourself), and its times. Read-only. A comment on a ' +
-      'file you may not read is left out and counted in `withheldComments`, and so is a reply to ' +
-      'a comment that was left out.',
-    inputs: {
-      type: 'object',
-      properties: {
-        number: { type: 'integer', minimum: 1, description: 'Change request number.' },
-        ...pagingInputs,
-      },
-      required: ['number'],
-      additionalProperties: false,
-    },
-    outputs: {
-      type: 'object',
-      properties: {
-        comments: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Pass as `parentId` to `post_change_request_comment` to reply.' },
-              author: userSchema,
-              body: { type: 'string' },
-              path: { type: 'string', description: 'Repository-relative path, on a file-level or inline comment.' },
-              line: { type: 'integer', description: 'Set on an inline comment.' },
-              parentId: { type: 'string', description: 'The comment this one replies to.' },
-              headSha: { type: 'string', description: 'The commit the comment was anchored to.' },
-              createdAt: { type: 'string', description: 'ISO timestamp.' },
-              updatedAt: { type: 'string', description: 'ISO timestamp; present once edited.' },
-            },
-            required: ['id', 'author', 'body', 'headSha', 'createdAt'],
-          },
-        },
-        withheldComments: { type: 'integer', description: 'Comments on a file you may not read, and replies to those.' },
-        ...pagingOutputs,
-      },
-      required: ['comments', 'withheldComments', ...pagingRequired],
-    },
-    handler: async (args, ctx: ToolContext) => {
-      const number = numberArg(args);
-      const { perPage, page } = pagingOf(args);
-      const scoped = await scopedDetail(ctx, number, { patches: false });
-      // A comment with no path is about the request as a whole; one with a path
-      // is as readable as that path is NAMEABLE here. A reply inherits its
-      // parent's verdict up the chain — see `visibleComments`.
-      const { visible, withheld } = visibleComments(scoped.detail.comments, scoped.mayShow);
-      const { items, ...paging } = pageOf(visible, perPage, page);
-      return {
-        comments: items.map(toCrComment),
-        withheldComments: withheld,
-        ...paging,
-      };
-    },
-  });
 }
 
 /**
  * The detail of request `number` with the access filter applied, or a 404 —
- * the one place the four by-number tools get their data, so they cannot
+ * the one place the three by-number tools get their data, so they cannot
  * drift on who may see what.
  */
 export interface ScopedDetail {
@@ -633,8 +567,8 @@ export interface ScopedDetail {
    * The two differ on exactly one shape, and it is the shape that leaks: a
    * file moved out of a folder the caller may not read is readable under
    * its NEW name, yet `fileIsReadable` withholds it whole (its diff shows the
-   * old path's content). Anything keyed on that new path — an approval, a
-   * comment anchored to it — would otherwise say the request touches a file
+   * old path's content). Anything keyed on that new path — an approval of
+   * it — would otherwise say the request touches a file
    * the file tool refuses to list, under a name it refuses to print.
    */
   mayShow: (path: string) => boolean;
@@ -704,15 +638,10 @@ export function changeRequestScope(
     });
     if (!detail) throw notFound(number);
     const viewerIsAuthor = isAuthor(detail, ctx.user.email);
-    // Comment paths join the batch: a comment may name a file the request no
-    // longer changes, and without a verdict of its own it would be withheld
-    // from a caller who can read it perfectly well.
-    const commentPaths = detail.comments.map((c) => c.path).filter((p): p is string => !!p);
     // BOTH names of every file: a move is judged on its old path as well as
     // its new one, because the diff of a move shows what was at the old one.
     const readable = await readablePaths(ctx, workspaceId, detail.base, [
       ...detail.files.flatMap(pathsOf),
-      ...commentPaths,
     ]);
     const mayRead = (path: string) => readable.has(path);
     const readableFiles = detail.files.filter((f) => fileIsReadable(f, mayRead));
@@ -721,7 +650,7 @@ export function changeRequestScope(
     }
     // Every name a withheld file goes by, so a gate warning quoting either
     // spelling is caught by the blocker filter — and so `mayShow` catches
-    // whichever spelling an approval or a comment happens to use.
+    // whichever spelling an approval happens to use.
     const withheldFilePaths = detail.files
       .filter((f) => !fileIsReadable(f, mayRead))
       .flatMap(pathsOf);

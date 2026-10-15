@@ -3,7 +3,6 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import type {
   AuthUser,
   ChangeInput,
-  PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -229,10 +228,6 @@ function makePrs(): PullRequestService {
 
 function makeReviewWorkflow(): IReviewWorkflowService {
   return {
-    listComments: vi.fn(),
-    postComment: vi.fn(),
-    editComment: vi.fn(),
-    deleteComment: vi.fn(),
     getApprovalStates: vi.fn(),
     approveFile: vi.fn(),
     unapproveFile: vi.fn(),
@@ -315,21 +310,6 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     const svc = new WorkflowService(makeDb(), makeGit(), prs, makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
     await svc.listChangeRequests({ fresh: true });
     expect(prs.listOpenPrs).toHaveBeenCalledWith({ fresh: true });
-  });
-
-  it('postComment delegates AND invalidates the PR detail cache', async () => {
-    const prs = makePrs();
-    const reviewWorkflow = makeReviewWorkflow();
-    const comment = { id: 'c1' };
-    const input: PostChangeRequestCommentInput = { body: 'hi' };
-    (reviewWorkflow.postComment as ReturnType<typeof vi.fn>).mockResolvedValue(comment);
-
-    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
-    const user = makeUser();
-    await expect(svc.postComment(42, user, input, 'sha1')).resolves.toBe(comment);
-    expect(reviewWorkflow.postComment).toHaveBeenCalledWith(42, user, input, 'sha1');
-    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(42);
-    expect(prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
   });
 
   it('approveFile invalidates the PR detail cache exactly once', async () => {

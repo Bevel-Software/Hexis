@@ -3,7 +3,6 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type {
   ChangeRequest,
-  ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestState,
   ChangedFile,
@@ -28,7 +27,6 @@ const TOOLS = [
   'get_change_request',
   'list_change_request_files',
   'list_change_request_reviews',
-  'list_change_request_comments',
 ] as const;
 
 // ── The world each test sets up ─────────────────────────────────────────────
@@ -65,18 +63,6 @@ function approval(path: string, over: Partial<FileApproval> = {}): FileApproval 
     isApproved: false,
     inMergeGate: true,
     viewerCanApprove: false,
-    ...over,
-  };
-}
-
-/** A comment as the detail carries one. Module-level: the rename suite needs it too. */
-function comment(over: Partial<ChangeRequestComment>): ChangeRequestComment {
-  return {
-    id: 'c-1',
-    author: { email: VIEWER, name: 'Mia' },
-    body: 'This line is out of date.',
-    headSha: 'head-1',
-    createdAt: '2026-09-29T08:00:00.000Z',
     ...over,
   };
 }
@@ -126,7 +112,6 @@ function detail(over: Partial<ChangeRequestDetail> = {}): ChangeRequestDetail {
     headSha: 'head-1',
     baseSha: 'base-1',
     files,
-    comments: [],
     approvals: files.map((f) => approval(f.path)),
     mergeableInBevel: false,
     mergeBlockedReasons: [],
@@ -274,7 +259,7 @@ afterEach(async () => {
 
 // ── The catalog ─────────────────────────────────────────────────────────────
 
-describe('the five read tools', () => {
+describe('the four read tools', () => {
   it('are all registered, on both surfaces, by their GitHub-counterpart names', async () => {
     await start();
     const internal = (await registryRef!.listInternal()).map((t) => t.name);
@@ -282,6 +267,15 @@ describe('the five read tools', () => {
     for (const name of TOOLS) {
       expect(internal, name).toContain(name);
       expect(external, name).toContain(name);
+    }
+  });
+
+  // Change-request comments were removed (no screen ever showed one), and the
+  // tool that listed them went with them.
+  it('offers no comment tool on either surface', async () => {
+    await start();
+    for (const list of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+      expect(list.map((t) => t.name).filter((n) => n.includes('comment'))).toEqual([]);
     }
   });
 
@@ -891,109 +885,6 @@ describe('list_change_request_reviews', () => {
   });
 });
 
-// ── Scenario: comments ──────────────────────────────────────────────────────
-
-describe('list_change_request_comments', () => {
-  // WHEN a reviewer left an inline comment and a reply followed THEN
-  // `list_change_request_comments` returns both, the reply with `parentId`.
-  it('returns the inline comment and its reply, the reply carrying parentId', async () => {
-    const base = await start();
-    details.set(
-      12,
-      detail({
-        comments: [
-          comment({ id: 'c-1', path: 'Knowledge/A.md', line: 14 }),
-          comment({
-            id: 'c-2',
-            author: { email: AUTHOR, name: 'Juan' },
-            body: 'Fixed.',
-            path: 'Knowledge/A.md',
-            line: 14,
-            parentId: 'c-1',
-            createdAt: '2026-09-29T09:00:00.000Z',
-          }),
-        ],
-      }),
-    );
-    const { status, json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect(status).toBe(200);
-    expect(json.comments).toHaveLength(2);
-    expect(json.comments[0]).toMatchObject({
-      id: 'c-1',
-      author: { name: 'Mia', email: VIEWER },
-      body: 'This line is out of date.',
-      path: 'Knowledge/A.md',
-      line: 14,
-      headSha: 'head-1',
-      createdAt: '2026-09-29T08:00:00.000Z',
-    });
-    expect(json.comments[1]).toMatchObject({ id: 'c-2', parentId: 'c-1' });
-    expect(json.withheldComments).toBe(0);
-  });
-
-  it('keeps a general comment, which belongs to the request rather than a file', async () => {
-    const base = await start();
-    details.set(12, detail({ comments: [comment({ id: 'c-9', body: 'Ready for review.' })] }));
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect(json.comments).toHaveLength(1);
-    expect((json.comments as unknown as { path?: string }[])[0].path).toBeUndefined();
-  });
-
-  it('leaves out a comment on a file the caller may not read, and counts it', async () => {
-    const base = await start();
-    readable = ['Knowledge/A.md'];
-    details.set(
-      12,
-      detail({
-        files: [file('Knowledge/A.md'), file('Payroll/Rates.md')],
-        comments: [
-          comment({ id: 'c-1', path: 'Knowledge/A.md', line: 1 }),
-          comment({ id: 'c-2', path: 'Payroll/Rates.md', line: 2, body: 'The band is wrong.' }),
-        ],
-      }),
-    );
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-1']);
-    expect(json.withheldComments).toBe(1);
-    expect(JSON.stringify(json)).not.toContain('Payroll');
-    expect(JSON.stringify(json)).not.toContain('band is wrong');
-  });
-
-  it('keeps a comment on a file the request no longer changes but the caller may read', async () => {
-    const base = await start();
-    readable = ['Knowledge/A.md', 'Knowledge/Gone.md'];
-    details.set(12, detail({ comments: [comment({ id: 'c-7', path: 'Knowledge/Gone.md', line: 3 })] }));
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-7']);
-    expect(json.withheldComments).toBe(0);
-  });
-
-  it('pages the comments', async () => {
-    const base = await start();
-    details.set(
-      12,
-      detail({
-        comments: Array.from({ length: 40 }, (_, i) =>
-          comment({ id: `c-${i}`, createdAt: `2026-09-29T08:00:${String(i).padStart(2, '0')}.000Z` }),
-        ),
-      }),
-    );
-    const first = await call(base, 'list_change_request_comments', { number: 12 });
-    expect(first.json.comments).toHaveLength(30);
-    expect(first.json.hasNextPage).toBe(true);
-    const second = await call(base, 'list_change_request_comments', { number: 12, page: 2 });
-    expect(second.json.comments).toHaveLength(10);
-    expect(second.json.hasNextPage).toBe(false);
-  });
-
-  it('answers not found when the caller may read none of its files', async () => {
-    const base = await start();
-    readable = [];
-    details.set(12, detail({ comments: [comment({ id: 'c-1' })] }));
-    expect((await call(base, 'list_change_request_comments', { number: 12 })).status).toBe(404);
-  });
-});
-
 /**
  * Reproductions of what Local Testing found on sha ae2f49d9, through the HTTP
  * tool surface it found them on — not just the pure mapper underneath.
@@ -1060,7 +951,7 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     expect(json).toMatchObject({ withheldMergeBlockedReasons: 1 });
   });
 
-  it('no tool of the five names the withheld file, in any field', async () => {
+  it('no tool of the four names the withheld file, in any field', async () => {
     const base = await start();
     mixedAccessRequest();
     summaries = [details.get(1)!];
@@ -1157,35 +1048,6 @@ describe('a file renamed out of a folder the caller may not read', () => {
     });
     expect(json.files[0]).not.toHaveProperty('status');
     expect(json.withheldFiles).toBe(0);
-  });
-
-  it('keeps a comment anchored to the withheld rename out of the comment list', async () => {
-    const base = await start();
-    renameRequest();
-    details.set(
-      12,
-      detail({
-        files: [
-          file('Knowledge/Open.md', { status: 'renamed', previousPath: 'Payroll/Rates.md' }),
-          file('Knowledge/Plain.md'),
-        ],
-        approvals: [approval('Knowledge/Open.md'), approval('Knowledge/Plain.md')],
-        comments: [
-          comment({ id: 'c-1', path: 'Knowledge/Plain.md', line: 4 }),
-          comment({ id: 'c-2', path: 'Knowledge/Open.md', line: 9, body: 'Rate band looks off.' }),
-        ],
-      }),
-    );
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    // `Knowledge/Open.md` passes a bare read check — it is the file's new name —
-    // but the file is withheld whole, so a comment on it is withheld too. Were
-    // it kept, it would print the name the files tool refuses to print.
-    expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-1']);
-    expect(json.withheldComments).toBe(1);
-    const whole = JSON.stringify(json);
-    expect(whole).not.toContain('Knowledge/Open.md');
-    expect(whole).not.toContain('Payroll');
-    expect(whole).not.toContain('Rate band');
   });
 
   it('keeps the withheld rename out of the files a review names, and counts it', async () => {
@@ -1470,85 +1332,5 @@ describe('reading a request that is no longer open', () => {
     const mine = await call(base, 'get_change_request', { number: 21 });
     expect(mine.status).toBe(200);
     expect(mine.json).toMatchObject({ state: 'closed', changedFiles: 0, viewer: { isAuthor: true } });
-  });
-});
-
-/**
- * Scenario (Razvan's review, 2026-10-02, finding 3): a reply is shown only when
- * the comment it replies to is.
- *
- * `post_change_request_comment` takes `parentId` without requiring `path`, so a
- * reply to a comment on a withheld file has no path of its own — and judged on
- * itself it looked like a general comment about the whole request. It came back
- * with its body and a `parentId` naming a comment the caller cannot see.
- */
-describe('a reply is shown only when the comment it replies to is', () => {
-  /** A request whose two files the caller can read one of. */
-  function threadRequest(comments: ChangeRequestComment[]) {
-    readable = ['Knowledge/Open.md'];
-    details.set(
-      12,
-      detail({
-        files: [file('Knowledge/Open.md'), file('Payroll/Rates.md')],
-        approvals: [approval('Knowledge/Open.md'), approval('Payroll/Rates.md')],
-        comments,
-      }),
-    );
-  }
-
-  it('withholds a pathless reply to a comment on a file the caller may not read', async () => {
-    const base = await start();
-    threadRequest([
-      comment({ id: 'c-1', path: 'Payroll/Rates.md', line: 3, body: 'This band is wrong.' }),
-      comment({ id: 'c-2', parentId: 'c-1', body: 'Agreed, the band moved in April.' }),
-    ]);
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect(json.comments).toEqual([]);
-    expect(json.withheldComments).toBe(2);
-    const whole = JSON.stringify(json);
-    // Neither the parent's path, nor the reply's body, nor the id it answers.
-    expect(whole).not.toContain('Payroll');
-    expect(whole).not.toContain('band moved');
-    expect(whole).not.toContain('c-1');
-  });
-
-  it('withholds every reply down the thread, however deep it runs', async () => {
-    const base = await start();
-    threadRequest([
-      comment({ id: 'c-1', path: 'Payroll/Rates.md', body: 'This band is wrong.' }),
-      comment({ id: 'c-2', parentId: 'c-1', body: 'Which one?' }),
-      comment({ id: 'c-3', parentId: 'c-2', body: 'The senior one.' }),
-    ]);
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect(json.comments).toEqual([]);
-    expect(json.withheldComments).toBe(3);
-    expect(JSON.stringify(json)).not.toContain('senior');
-  });
-
-  it('keeps a thread on a file the caller may read, replies and all', async () => {
-    const base = await start();
-    threadRequest([
-      comment({ id: 'c-1', path: 'Knowledge/Open.md', line: 4, body: 'Out of date.' }),
-      comment({ id: 'c-2', parentId: 'c-1', body: 'Fixed.' }),
-      comment({ id: 'c-3', parentId: 'c-2', body: 'Thanks.' }),
-    ]);
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual([
-      'c-1',
-      'c-2',
-      'c-3',
-    ]);
-    expect(json.withheldComments).toBe(0);
-  });
-
-  it('keeps a general comment and its replies — neither is about a file', async () => {
-    const base = await start();
-    threadRequest([
-      comment({ id: 'c-1', body: 'Ready for review.' }),
-      comment({ id: 'c-2', parentId: 'c-1', body: 'Looking now.' }),
-    ]);
-    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
-    expect(json.comments).toHaveLength(2);
-    expect(json.withheldComments).toBe(0);
   });
 });

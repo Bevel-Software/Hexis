@@ -5,7 +5,7 @@
  *
  * URL layout:
  *   /workspace/:id/workflow/...     — workspace-scoped ops (branches, changes, locks, compare)
- *   /workflow/change-requests/...   — change-request ops (list/detail/comments/approvals/merge/reject)
+ *   /workflow/change-requests/...   — change-request ops (list/detail/edit/approvals/merge/reject)
  *
  * Workspace ids are `encodeURIComponent(branch)` (PLAN §3) — branches are
  * shared by every user editing them, so route handlers gate on
@@ -29,7 +29,6 @@ import type {
   ChangeRequestApplyFailureKind,
   IWorkflowService,
   OpenChangeRequestInput,
-  PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -840,6 +839,42 @@ export function createWorkflowRoutes(
   });
 
   /**
+   * Change an open request's title and/or description. Its author, or anyone
+   * who may merge it (an admin, or the holder of write on every changed file);
+   * anyone else gets a worded 403, and a merged or closed request a worded
+   * 409 — `WorkflowService.updateChangeRequest` decides both. Answers the
+   * updated request.
+   */
+  router.patch('/workflow/change-requests/:number', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const body = (req.body ?? {}) as { title?: unknown; description?: unknown };
+    if (
+      (body.title !== undefined && typeof body.title !== 'string') ||
+      (body.description !== undefined && typeof body.description !== 'string')
+    ) {
+      res.status(400).json({ error: 'title and description must be strings' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const updated = await workflow.updateChangeRequest(num, user, {
+        title: body.title as string | undefined,
+        description: body.description as string | undefined,
+      });
+      const [scoped] = await scopeApplyFailures(req, [updated], user);
+      res.json(scoped);
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
    * Decline ONE file of a change request: restore its merge-base version on
    * the source branch, dropping it from the request's diff. Takes the same
    * permission as approving the file. When the last file is declined the
@@ -983,98 +1018,6 @@ export function createWorkflowRoutes(
       }
       const content = await workflow.fileAtForkPoint(workspace.id, cr.base, forkSha, repoPath);
       res.json({ content, forkSha });
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
-  router.get('/workflow/change-requests/:number/comments', async (req, res) => {
-    const num = parsePrNumber(req.params.number);
-    if (num === null) {
-      res.status(400).json({ error: 'invalid change request number' });
-      return;
-    }
-    try {
-      res.json(await workflow.listComments(num));
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
-  router.post('/workflow/change-requests/:number/comments', async (req, res) => {
-    const num = parsePrNumber(req.params.number);
-    if (num === null) {
-      res.status(400).json({ error: 'invalid change request number' });
-      return;
-    }
-    const user = await requireUser(req, res);
-    if (!user) return;
-    const body = (req.body ?? {}) as Partial<PostChangeRequestCommentInput>;
-    if (typeof body.body !== 'string') {
-      res.status(400).json({ error: 'body is required' });
-      return;
-    }
-    try {
-      // Resolve the current head from the detail endpoint so the comment
-      // anchors against what the user is actually viewing. Mirrors the
-      // legacy /pr/:n/comments handler.
-      const detail = await workflow.getChangeRequestDetail(num, { fresh: true });
-      if (!detail) {
-        res.status(404).json({ error: 'change request not found' });
-        return;
-      }
-      const comment = await workflow.postComment(
-        num,
-        user,
-        {
-          body: body.body,
-          path: body.path,
-          line: body.line,
-          parentId: body.parentId,
-        },
-        detail.headSha,
-      );
-      res.json(comment);
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
-  router.patch('/workflow/change-requests/:number/comments/:id', async (req, res) => {
-    const num = parsePrNumber(req.params.number);
-    if (num === null) {
-      res.status(400).json({ error: 'invalid change request number' });
-      return;
-    }
-    const user = await requireUser(req, res);
-    if (!user) return;
-    const body = (req.body ?? {}) as { body?: unknown };
-    if (typeof body.body !== 'string') {
-      res.status(400).json({ error: 'body is required' });
-      return;
-    }
-    try {
-      res.json(await workflow.editComment(req.params.id, num, user, body.body));
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
-  router.delete('/workflow/change-requests/:number/comments/:id', async (req, res) => {
-    const num = parsePrNumber(req.params.number);
-    if (num === null) {
-      res.status(400).json({ error: 'invalid change request number' });
-      return;
-    }
-    const user = await requireUser(req, res);
-    if (!user) return;
-    try {
-      await workflow.deleteComment(req.params.id, num, user);
-      res.json({ status: 'deleted' });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

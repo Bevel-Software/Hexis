@@ -44,7 +44,6 @@ import type {
   ChangeInput,
   ChangeRequest,
   ChangeRequestApplyFailureKind,
-  ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestUpdateResult,
   ChangeRequestState,
@@ -59,8 +58,8 @@ import type {
   MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
-  PostChangeRequestCommentInput,
   RemoteSyncPullResult,
+  UpdateChangeRequestInput,
 } from '@bevel-software/platform-shared';
 import {
   isFolderPlaceholder,
@@ -84,6 +83,7 @@ import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
+import { replaceAuthorsDescription } from './agent-tools/change-request-read-shape.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
@@ -184,6 +184,26 @@ function redactTokens(msg: string, token: string | null | undefined): string {
  * files) makes the whole command exceed the OS arg limit and fail with E2BIG.
  */
 export const MAX_AFFECTED_PATHS_LISTED = 50;
+
+/**
+ * Only an open request's title and description may change: an applied one is
+ * history, and a closed one is no longer asking anything. A worded 409 either
+ * way, so the refusal says which.
+ */
+function assertEditable(state: string): void {
+  if (state === 'merged') {
+    throw new WorkflowDomainError(
+      'This change request has already been applied; its title and description can no longer be changed.',
+      409,
+    );
+  }
+  if (state !== 'open') {
+    throw new WorkflowDomainError(
+      'This change request is closed; its title and description can no longer be changed.',
+      409,
+    );
+  }
+}
 
 type EligibleWriters = Map<
   string,
@@ -2661,37 +2681,6 @@ export class WorkflowService implements IWorkflowService {
     return { ...refreshed, updatedPaths };
   }
 
-  listComments(number: number): Promise<ChangeRequestComment[]> {
-    return this.reviewWorkflow.listComments(number);
-  }
-
-  async postComment(
-    number: number,
-    user: AuthUser,
-    input: PostChangeRequestCommentInput,
-    headSha: string,
-  ): Promise<ChangeRequestComment> {
-    const comment = await this.reviewWorkflow.postComment(number, user, input, headSha);
-    this.prs.invalidateDetailCache(number);
-    return comment;
-  }
-
-  async editComment(
-    commentId: string,
-    number: number,
-    user: AuthUser,
-    body: string,
-  ): Promise<ChangeRequestComment> {
-    const updated = await this.reviewWorkflow.editComment(commentId, number, user, body);
-    this.prs.invalidateDetailCache(number);
-    return updated;
-  }
-
-  async deleteComment(commentId: string, number: number, user: AuthUser): Promise<void> {
-    await this.reviewWorkflow.deleteComment(commentId, number, user);
-    this.prs.invalidateDetailCache(number);
-  }
-
   async approveFile(
     number: number,
     path: string,
@@ -3337,6 +3326,134 @@ export class WorkflowService implements IWorkflowService {
       }
     }
     await this.retireMergedSourceBranch(number, summary.base, user);
+  }
+
+  /**
+   * Change an OPEN request's title and/or description. Who may: the people
+   * who may close it (`rejectChangeRequest`) — its author, an admin (write on
+   * `roles.yaml` at `origin/<base>`), or the holder of write on every file it
+   * changes at `origin/<base>`, i.e. anyone who may merge it. What a request
+   * asks belongs to the same people who may decide it.
+   *
+   * `description` replaces the author's part of the body only; the generated
+   * `## Affected owners` block and Hexis's own markers stay (see
+   * `replaceAuthorsDescription`).
+   */
+  async updateChangeRequest(
+    number: number,
+    user: AuthUser,
+    input: UpdateChangeRequestInput,
+  ): Promise<ChangeRequest> {
+    const title = input.title === undefined ? undefined : input.title.trim();
+    const description = input.description === undefined ? undefined : input.description.trim();
+    if (title === undefined && description === undefined) {
+      throw new WorkflowValidationError('Give a new title, a new description, or both.');
+    }
+    if (title !== undefined && title.length === 0) {
+      throw new WorkflowValidationError('A change request needs a title; it cannot be empty.');
+    }
+
+    const summary = await this.prs.getPr(number);
+    if (!summary) throw new WorkflowDomainError('change request not found', 404);
+    assertEditable(summary.state);
+
+    const callerIsAuthor = !!(summary.authorId && summary.authorId === hashEmail(user.email));
+    if (!callerIsAuthor) {
+      // The grants beyond authorship are read at `origin/<base>`, never a local
+      // ref, behind a STRICT fetch: a right revoked a moment ago must not still
+      // pass against a stale tree. A base that cannot be read kicks the
+      // deleted-branch sweep, as delete and reject do.
+      let workspaceId: string;
+      let isAdmin: boolean | null;
+      let writesAll = false;
+      try {
+        workspaceId = (await this.workspaceService.getOrCreateForBranch(summary.base)).id;
+        try {
+          await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true });
+        } catch {
+          throw new WorkflowDomainError(
+            `Could not verify the base branch "${summary.base}" — origin was unreachable. Retry in a moment.`,
+            409,
+          );
+        }
+        isAdmin = await this.accessControl.canWriteAtRef(
+          workspaceId,
+          `origin/${summary.base}`,
+          user.email,
+          'roles.yaml',
+        );
+        if (isAdmin !== true) {
+          const detail = await this.prs.getPrDetail(number, {
+            fresh: true,
+            workspaceId,
+            viewerEmail: user.email,
+            patches: false,
+          });
+          const paths = detail?.files.map((f) => f.path) ?? [];
+          if (paths.length > 0) {
+            const writeMap = await this.accessControl.canWriteBatchAtRef(
+              workspaceId,
+              `origin/${summary.base}`,
+              user.email,
+              paths,
+            );
+            writesAll = !!writeMap && paths.every((p) => writeMap.get(p) === true);
+          }
+        }
+      } catch (err) {
+        this.kickDeletedBranchSweep();
+        throw err;
+      }
+      if (isAdmin !== true && !writesAll) {
+        if (isAdmin === null) {
+          this.kickDeletedBranchSweep();
+          throw new WorkflowDomainError(
+            `The base branch "${summary.base}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
+            409,
+          );
+        }
+        throw new WorkflowDomainError(
+          "Only the request's author, an admin, or someone who may approve every file it changes can edit its title and description.",
+          403,
+        );
+      }
+    }
+
+    // The body is rewritten from the row as stored, not from the summary read
+    // above, and the write is guarded on `open`: a merge or close that won the
+    // race refuses the edit instead of being written over.
+    let updated = false;
+    const [row] = await this.db
+      .select({ body: changeRequests.body })
+      .from(changeRequests)
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .limit(1);
+    if (row) {
+      const now = new Date();
+      const written = await this.db
+        .update(changeRequests)
+        .set({
+          ...(title !== undefined ? { title } : {}),
+          ...(description !== undefined
+            ? { body: replaceAuthorsDescription(row.body, description) }
+            : {}),
+          updatedAt: now,
+        })
+        .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+        .returning({ id: changeRequests.id });
+      updated = written.length > 0;
+    }
+    this.prs.invalidateDetailCache(number);
+    if (!updated) {
+      const fresh = await this.prs.getPr(number);
+      assertEditable(fresh?.state ?? 'closed');
+      throw new WorkflowDomainError('This change request changed while it was being edited. Retry in a moment.', 409);
+    }
+    crLog.info(`#${number} title/description edited`);
+    this.events?.emit({ kind: 'change-request-edited', number });
+    const fresh = await this.prs.getPr(number);
+    if (!fresh) throw new WorkflowDomainError('change request not found', 404);
+    return fresh;
   }
 
   /**

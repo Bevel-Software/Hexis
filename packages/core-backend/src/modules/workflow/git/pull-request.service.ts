@@ -7,7 +7,6 @@ import type {
   ChangedPathPair,
   FileApprovalState,
   IPullRequestService,
-  PrReviewComment,
   PullRequestDetail,
   PullRequestFile,
   PullRequestState,
@@ -28,9 +27,9 @@ import { changeRequestLink, changeRequestLinkBase } from './change-request-link.
  * The latest moment a change-request row records — its close time when it has
  * one, else its creation time, with `updated_at` folded in for the day
  * something writes it. Deliberately derived from the ROW alone: a time taken
- * from the newest comment or approval would make the same request report
- * different "last changed" moments to a list (which reads no comments) and a
- * detail (which does).
+ * from the newest approval would make the same request report different
+ * "last changed" moments to a list (which reads no approvals) and a detail
+ * (which does).
  */
 function latestRowMoment(row: {
   createdAt: Date;
@@ -148,7 +147,6 @@ export function changeSourceFor(row: {
  * relationship in the composition root is explicit and minimal.
  */
 export interface PrDetailEnricher {
-  listComments(prNumber: number): Promise<PrReviewComment[]>;
   /**
    * Per-file approval state. `baseBranch` selects the access tree (resolved
    * against `origin/<baseBranch>`); `workspaceId` is optional and gates the
@@ -184,8 +182,8 @@ export interface PrDetailEnricher {
  *
  * The durable facts (pairing, title/body, author, state) live in the row; the
  * head/base SHAs, file list, and diffs are derived live from git so a new commit
- * or force-push is always reflected. Comments + per-file approvals + the merge
- * gate are stitched in from the review-workflow service (also DB-backed).
+ * or force-push is always reflected. Per-file approvals and the merge gate
+ * are stitched in from the review-workflow service (also DB-backed).
  */
 export class PullRequestService implements IPullRequestService {
   /**
@@ -827,16 +825,11 @@ export class PullRequestService implements IPullRequestService {
       })),
     );
 
-    // Comments + approvals come from our own DB via the review-workflow service.
-    // The enricher is optional — if it isn't wired yet (startup ordering,
-    // isolated tests) we return empty lists rather than blocking the fetch.
-    const [comments, approvals] = this.detailEnricher
-      ? await Promise.all([
-          this.detailEnricher.listComments(prNumber).catch((err) => {
-            log.warn(`listComments failed for #${prNumber}:`, { err });
-            return [] as PrReviewComment[];
-          }),
-          this.detailEnricher
+    // Approvals come from our own DB via the review-workflow service. The
+    // enricher is optional — if it isn't wired yet (startup ordering, isolated
+    // tests) we return an empty list rather than blocking the fetch.
+    const approvals = this.detailEnricher
+      ? await this.detailEnricher
             .getApprovalStates(
               prNumber,
               files,
@@ -853,9 +846,8 @@ export class PullRequestService implements IPullRequestService {
               if (err instanceof AccessUnreadableError) throw err;
               log.warn(`getApprovalStates failed for #${prNumber}:`, { err });
               return [] as FileApprovalState[];
-            }),
-        ])
-      : [[] as PrReviewComment[], [] as FileApprovalState[]];
+            })
+      : ([] as FileApprovalState[]);
 
     const gate = this.detailEnricher
       ? this.detailEnricher.evaluateMergeGate({
@@ -926,7 +918,6 @@ export class PullRequestService implements IPullRequestService {
       headSha,
       baseSha,
       files,
-      comments,
       approvals,
       mergeableInBevel: gate.mergeable,
       mergeBlockedReasons: gate.reasons,
@@ -941,6 +932,10 @@ export class PullRequestService implements IPullRequestService {
       viewerCanUpdate,
       viewerIsAuthor,
       viewerCanDelete,
+      // Who may close a request may also change what it asks: the same
+      // grants, so the same predicate (`WorkflowService.updateChangeRequest`
+      // enforces it).
+      viewerCanEdit: viewerCanCancel,
     };
 
     // A patch-less detail is an internal read; it must not be served to the
