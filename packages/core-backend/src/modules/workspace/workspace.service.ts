@@ -710,7 +710,7 @@ export class WorkspaceService implements IWorkspaceService {
     if (setAsideInFlight) {
       // Someone else is moving it. Wait, then clone below; a move that failed
       // refuses this caller with the same reason.
-      await this.repository.mutex.whileParked(setAsideInFlight);
+      await setAsideInFlight;
     } else if (
       onDisk
         ? await this.isCloneOfAnotherRepository(repoDir)
@@ -723,7 +723,7 @@ export class WorkspaceService implements IWorkspaceService {
       // address was being read.
       const startedMeanwhile = this.inFlightSetAsides.get(branch);
       if (startedMeanwhile) {
-        await this.repository.mutex.whileParked(startedMeanwhile);
+        await startedMeanwhile;
       } else if (this.discardsOf(id) !== discardsAtAdoption) {
         // The copy whose address this call read is no longer there: a move
         // began AND ended while it was being read. An in-flight entry is
@@ -836,7 +836,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     const existingBootstrap = this.inFlightBootstraps.get(branch);
     if (existingBootstrap) {
-      await this.repository.mutex.whileParked(existingBootstrap);
+      await existingBootstrap;
       this.adoptBootstrapped(branch, workspaceDir, discardsAtBootstrap);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
@@ -935,10 +935,7 @@ export class WorkspaceService implements IWorkspaceService {
     const pending = this.inFlightBootstraps.get(branch);
     if (!pending) return;
     try {
-      // Parked, not running, while it waits: the bootstrap may be adding a
-      // worktree, which waits for every running git operation — the caller
-      // may be one (a git operation resolving its own new workspace).
-      await this.repository.mutex.whileParked(pending);
+      await pending;
     } catch (err) {
       this.branchDirs.delete(branch);
       throw err;
@@ -1729,7 +1726,7 @@ export class WorkspaceService implements IWorkspaceService {
     const repoDir = path.join(workspaceDir, this.kbDirName);
     if (await this.isWorktree(repoDir)) {
       // ONE fetch for every workspace: the repository's, throttled and joined
-      // there, under the repository reservation.
+      // there.
       const ok = await this.repository.fetch({ maxAgeMs: FETCH_CACHE_TTL_MS, force: opts.force });
       if (opts.strict && !ok) throw new Error('git fetch origin failed — remote refs could not be refreshed');
       return;

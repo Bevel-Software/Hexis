@@ -526,6 +526,11 @@ export class KbStartupRunner {
       for (const h of handles.values()) {
         await this.finalize(h);
       }
+      // The repository's garbage collection, once per boot, with every
+      // branch's work landed and nothing served yet: automatic collection is
+      // off on the repository, where a commit in one worktree would collect
+      // beside every other worktree's work.
+      await this.repository.maintain();
     } catch (err) {
       // Every exit carries a scrubbed message: the port scrubs only what the
       // environment holds, and a token saved on the setup screen is the one
@@ -783,10 +788,11 @@ export class KbStartupRunner {
    * of use without the other. Nothing is deleted.
    */
   private async reconcileRepositoryWithConfigured(configured: string, dest: string): Promise<void> {
-    // Read, probed and re-pointed under the repository reservation: the
-    // probe fetches into the repository and writes refs there, which no fetch
-    // or worktree change may run beside.
-    const verdict = await this.repository.mutex.runRepository(
+    // Read and probed as itself (reads, and a probe fetch into a throwaway
+    // ref, which git locks); the one write, the re-pointing, is made by
+    // `setOriginUrl` as the repository's administrator. The phase runs before
+    // anything is served, so nothing opens a branch between the two.
+    const verdict = await (
       async (): Promise<{ was: string } | 'keep' | 'repointed'> => {
         const origin = await this.repository.originUrl();
         if (origin === null || sameRepository(origin, configured)) return 'keep';
@@ -808,8 +814,8 @@ export class KbStartupRunner {
           return 'repointed';
         }
         return { was };
-      },
-    );
+      }
+    )();
     if (typeof verdict === 'string') return;
     const { was } = verdict;
     // Every worktree's work leaves first, and may stop the phase: see
