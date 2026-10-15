@@ -7,7 +7,6 @@ import {
   isKnowledgeView,
   mirrorFiles,
   readEmbeddedSnapshot,
-  replaceEmbeddedSnapshot,
   type KbReader,
   type Selection,
 } from '../views/snapshot.js';
@@ -45,6 +44,28 @@ describe('buildSnapshot (port of build_snapshot.py)', () => {
     // Only edges between kept nodes, inbound ones pointing at the linking node.
     expect(snap.edges).toEqual([
       { source: `${ONT}/Knowledge/Tasks/Dentist.md`, target: `${ONT}/Knowledge/Tasks/Bread.md`, label: 'Dentist', category: 'inbound' },
+    ]);
+  });
+
+  it("reads a field's links the way the app does (platform-shared scanMarkdownLinks and resolveMdLink)", () => {
+    const errand = `${ONT}/Knowledge/Tasks/Errand.md`;
+    const files = {
+      ...FILES,
+      [errand]: [
+        '---',
+        'nodeType: "[Task](../../NodeTypes/Task.md)"',
+        '---',
+        '# Name',
+        'Errand',
+        '# Project',
+        // A link with an anchor, one written with an escape, and one in code, which the app does not read as a link.
+        'For [Groceries](../Projects/Groceries.md#goal) and [Big shop](../Projects/Big%20Shop.md), not `[Code](../Projects/Code.md)`.',
+      ].join('\n'),
+    };
+    const built = buildSnapshot(files, { type: ['Task'], fields: 'Name,Project' }, 'main');
+    expect(built.nodes[errand]!.links.outbound).toEqual([
+      { text: 'Groceries', path: `${ONT}/Knowledge/Projects/Groceries.md` },
+      { text: 'Big shop', path: `${ONT}/Knowledge/Projects/Big Shop.md` },
     ]);
   });
 
@@ -138,22 +159,13 @@ describe('the page and its bridge', () => {
     expect(isKnowledgeView('<html></html>')).toBe(false);
   });
 
-  it('reads back a snapshot whose data holds <!--, which the page carries escaped', () => {
-    const next = buildSnapshot(FILES, { type: ['Task'], fields: 'Name' }, 'main', '2026-10-07');
-    next.nodes[`${ONT}/Knowledge/Tasks/Bread.md`]!.fields.Name = { text: 'see <!-- the note -->' };
-    const html = replaceEmbeddedSnapshot(page({ format: 'hexis-kb-snapshot/1' }), next);
-    expect(html).toContain('<\\!--');
-    expect(readEmbeddedSnapshot(html)?.nodes?.[`${ONT}/Knowledge/Tasks/Bread.md`]?.fields.Name).toEqual({
-      text: 'see <!-- the note -->',
-    });
-  });
-
-  it('swaps the snapshot a page carries, safely inside <script>', () => {
-    const next = buildSnapshot(FILES, { type: ['Task'], fields: 'Name' }, 'main', '2026-10-07');
-    next.nodes[`${ONT}/Knowledge/Tasks/Bread.md`]!.fields.Name = { text: '</script><b>x</b>' };
-    const html = replaceEmbeddedSnapshot(page({ format: 'hexis-kb-snapshot/1' }), next);
-    expect(html).not.toContain('</script><b>');
-    expect(readEmbeddedSnapshot(html)?.nodes?.[`${ONT}/Knowledge/Tasks/Bread.md`]?.fields.Name?.text).toBe('</script><b>x</b>');
+  it('reads back a snapshot as build_snapshot.py writes it, with </ and <!-- escaped', () => {
+    const snapshot = { format: 'hexis-kb-snapshot/1', nodes: { a: { fields: { Name: { text: 'see <!-- the note --> </script>' } } } } };
+    // build_snapshot.py's `serialise`: no `</` and no `<!--` inside the <script>.
+    const written = JSON.stringify(snapshot).replace(/<\//g, '<\\/').replace(/<!--/g, '<\\!--');
+    const html = `<!doctype html><html><body><script id="kb-snapshot">\nwindow.KB_SNAPSHOT = ${written};\n</script></body></html>`;
+    expect(html).not.toContain('</script> ');
+    expect(readEmbeddedSnapshot(html)).toEqual(snapshot);
   });
 
   it('injects the bridge as the first script, with its config safe inside <script>', () => {

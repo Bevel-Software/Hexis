@@ -16,7 +16,13 @@
  * difference.
  */
 
-import { extractFrontmatter } from '@bevel-software/platform-shared';
+import {
+  MD_ID_LINK_RE,
+  extractFrontmatter,
+  resolveMdLink,
+  resolveMdRelativePath,
+  scanMarkdownLinks,
+} from '@bevel-software/platform-shared';
 
 export const SNAPSHOT_FORMAT = 'hexis-kb-snapshot/1';
 
@@ -81,8 +87,6 @@ export interface KbReader {
 }
 
 // Regexes mirror build_snapshot.py one for one (which mirrors parser.ts).
-const LINK_RE = /\[([^\]]*)\]\((?:<([^<>\n]+\.md)>|((?:[^()]|\([^()]*\))+?\.md))\)/g;
-const ID_LINK_RE = /\[([^\]]*)\]\(([^)\s/:#.]+)\)/g;
 const NODETYPE_RE = /^nodeType:\s*["']?\[([^\]]+)\]\(([^)]+)\)["']?\s*$/;
 const ID_RE = /^id:\s*["']?([^"'\s]+)["']?\s*$/;
 const OWNER_RE = /^owner:\s*["']?(.*?)["']?\s*$/;
@@ -105,36 +109,43 @@ const stem = (p: string): string => {
   return dot > 0 ? base.slice(0, dot) : base;
 };
 
-export function resolveLink(rel: string, sourceFile: string): string {
-  const out = sourceFile.split('/').slice(0, -1);
-  for (const seg of rel.replace(/\\/g, '/').split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') {
-      if (!out.length) return rel; // would escape the repo root
-      out.pop();
-    } else {
-      out.push(seg);
-    }
-  }
-  return out.join('/');
-}
-
 interface Link {
   text: string;
   path: string;
   _id: string | null;
 }
 
+/**
+ * The links in a field's text, read the way the app reads a page's links
+ * (platform-shared `scanMarkdownLinks`, `resolveMdLink` and the id-link
+ * rule): an inline link to a `.md` file, resolved against the file it sits
+ * in, or an id link (`[Dentist](task-dentist)`). Code is not read for links,
+ * as in the app. Path links come first, then id links, as build_snapshot.py
+ * lists them.
+ */
 function extractLinks(text: string, sourceFile: string): Link[] {
-  const links: Link[] = [];
-  for (const m of text.matchAll(LINK_RE)) {
-    const rel = (m[2] ?? m[3] ?? '').replace(/\\/g, '/');
-    links.push({ text: m[1] ?? '', path: resolveLink(rel, sourceFile), _id: null });
+  const byPath: Link[] = [];
+  const byId: Link[] = [];
+  for (const span of scanMarkdownLinks(text)) {
+    if (span.kind !== 'link') continue;
+    const label = labelOf(text, span.start);
+    const destination = span.destination.trim();
+    if (MD_ID_LINK_RE.test(destination)) {
+      byId.push({ text: label, path: '', _id: destination.split('#')[0]! });
+      continue;
+    }
+    const target = resolveMdLink(destination, { basePath: sourceFile, kbDirName: null });
+    if (target && /\.md$/i.test(target.path)) byPath.push({ text: label, path: stripKbDir(target.path), _id: null });
   }
-  for (const m of text.matchAll(ID_LINK_RE)) {
-    links.push({ text: m[1] ?? '', path: '', _id: m[2] ?? null });
-  }
-  return links;
+  return [...byPath, ...byId];
+}
+
+/** The text of the inline link whose destination starts at `start`: between its `[` and `](`. */
+function labelOf(text: string, start: number): string {
+  const close = text.lastIndexOf('](', start);
+  if (close < 0) return '';
+  const open = text.lastIndexOf('[', close);
+  return open < 0 ? '' : text.slice(open + 1, close);
 }
 
 interface Frontmatter {
@@ -331,7 +342,7 @@ export function parseGraph(files: Record<string, string>): Record<string, Parsed
   for (const rel of Object.keys(files).filter((p) => KNOWLEDGE_PATH_RE.test(p)).sort()) {
     const fm = parseFrontmatter(files[rel]!);
     if (!fm) continue;
-    const typePath = resolveLink(fm.typeLink.replace(/\\/g, '/'), rel);
+    const typePath = resolveMdRelativePath(rel, fm.typeLink.replace(/\\/g, '/'));
     const fields = parseFields(fm.body, rel);
     const definition = types[typePath];
     const links: Record<string, Link[]> = {};
@@ -560,7 +571,7 @@ export async function mirrorFiles(reader: KbReader, config: MirrorConfig, concur
     if (!nt) return false;
     if (filtered && types.length && !types.includes(nt.name)) return false;
     files[path] = reduceToFields(text, want);
-    typePaths.add(resolveLink(nt.link, path));
+    typePaths.add(resolveMdRelativePath(path, nt.link));
     return true;
   };
 
@@ -625,22 +636,13 @@ export function readEmbeddedSnapshot(html: string): Partial<Snapshot> | null {
   const body = block[2]!.trim().match(/window\.KB_SNAPSHOT\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
   if (!body) return null;
   try {
-    // `serialise` (like build_snapshot.py) writes `<!--` as `<\!--`, which
-    // JavaScript reads as `<!--` and JSON rejects. `<` occurs only inside JSON
-    // strings, so this undoes exactly that escape.
+    // build_snapshot.py writes `<!--` as `<\!--` to keep it out of the
+    // <script>, which JavaScript reads as `<!--` and JSON rejects. `<` occurs
+    // only inside JSON strings, so this undoes exactly that escape.
     return JSON.parse(body[1]!.replace(/<\\!--/g, '<!--')) as Partial<Snapshot>;
   } catch {
     return null;
   }
-}
-
-/** JSON that is safe inside a <script>: no `</script`, no `<!--` (build_snapshot.py's `serialise`). */
-const serialise = (snapshot: unknown): string => JSON.stringify(snapshot).replace(/<\//g, '<\\/').replace(/<!--/g, '<\\!--');
-
-/** The page with its snapshot block holding `snapshot` instead (build_snapshot.py's `inject`). */
-export function replaceEmbeddedSnapshot(html: string, snapshot: Snapshot): string {
-  return html.replace(SNAPSHOT_BLOCK, (_m, open: string, _body: string, close: string) =>
-    `${open}\nwindow.KB_SNAPSHOT = ${serialise(snapshot)};\n${close}`);
 }
 
 /** True when the page is an html-knowledge-view page (it has a snapshot block). */
