@@ -25,7 +25,7 @@ import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
-import { readRefSha } from '../../kb-fs/ref-files.js';
+import { readRefSha } from '../../kb-fs/index.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,

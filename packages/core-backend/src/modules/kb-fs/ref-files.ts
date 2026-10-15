@@ -173,7 +173,7 @@ export async function readRefSha(repoDir: string, ref: string): Promise<RefFileA
  * id or its abbreviation, a `<rev>^{...}` or `@{...}` form, an empty or
  * option-looking name — which the caller sends to git.
  */
-export function refNameCandidates(ref: string): string[] | null {
+function refNameCandidates(ref: string): string[] | null {
   if (!ref || ref.startsWith('-')) return null;
   if (ref === 'HEAD') return ['HEAD'];
   if (ref.startsWith('refs/')) return [ref];

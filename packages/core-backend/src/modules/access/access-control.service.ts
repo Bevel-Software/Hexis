@@ -8,7 +8,7 @@ import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.
 import { assertOneSpecPerLine, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
-import { readRevSha } from '../kb-fs/ref-files.js';
+import { readRevSha } from '../kb-fs/index.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,

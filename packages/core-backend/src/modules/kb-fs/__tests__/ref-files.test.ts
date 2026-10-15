@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import { readRefSha, readRevSha, refNameCandidates } from '../ref-files.js';
+import { readRefSha, readRevSha } from '../index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -176,26 +176,25 @@ describe('readRevSha', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('spells out the candidates git tries, in git\'s order, and none for what it does not resolve', () => {
-    expect(refNameCandidates('main')).toEqual([
-      'refs/main',
-      'refs/tags/main',
-      'refs/heads/main',
-      'refs/remotes/main',
-      'refs/remotes/main/HEAD',
-    ]);
-    expect(refNameCandidates('origin/main')).toEqual([
-      'refs/origin/main',
-      'refs/tags/origin/main',
-      'refs/heads/origin/main',
-      'refs/remotes/origin/main',
-      'refs/remotes/origin/main/HEAD',
-    ]);
-    expect(refNameCandidates('HEAD')).toEqual(['HEAD']);
-    expect(refNameCandidates('refs/heads/main')).toEqual(['refs/heads/main']);
-    for (const rev of ['', '-x', 'main^{commit}', 'HEAD~1', 'main@{1}', 'abc1234', 'a'.repeat(40), 'a b']) {
-      expect(refNameCandidates(rev)).toBeNull();
-    }
+  it("takes the candidates in git's order when real refs compete for a name", async () => {
+    const want = async (rev: string) => ({ sha: await git(clone, 'rev-parse', '--verify', `${rev}^{commit}`) });
+    const first = await git(clone, 'rev-parse', 'origin/main');
+    const second = await git(clone, 'rev-parse', 'origin/feature');
+    // A local branch literally named `origin/main`, beside the remote-tracking
+    // ref: git takes refs/heads before refs/remotes, and so does the reader.
+    await git(clone, 'branch', 'origin/main', second);
+    expect(await readRevSha(clone, 'origin/main')).toEqual(await want('origin/main'));
+    expect(await readRevSha(clone, 'origin/main')).toEqual({ sha: second });
+    // A ref directly under refs/ comes before every namespace.
+    await git(clone, 'update-ref', 'refs/main', second);
+    expect(await readRevSha(clone, 'main')).toEqual(await want('main'));
+    expect(await readRevSha(clone, 'main')).toEqual({ sha: second });
+    expect(first).not.toBe(second);
+    // A tag named like a branch comes before the branch — and a tag is git's
+    // to peel, so the reader steps aside rather than answer the branch.
+    await git(clone, 'tag', 'feature', first);
+    await git(clone, 'branch', 'feature', second);
+    expect(await readRevSha(clone, 'feature')).toBe('unreadable');
   });
 
   it('resolves the names a gate holds the way rev-parse does', async () => {
@@ -229,8 +228,9 @@ describe('readRevSha', () => {
   });
 
   it('hands git what it does not resolve itself', async () => {
-    expect(await readRevSha(clone, 'main^{commit}')).toBe('unreadable');
-    expect(await readRevSha(clone, 'abc1234')).toBe('unreadable');
+    for (const rev of ['', '-x', 'main^{commit}', 'HEAD~1', 'main@{1}', 'abc1234', 'a'.repeat(40), 'a b']) {
+      expect(await readRevSha(clone, rev)).toBe('unreadable');
+    }
     expect(await readRevSha(path.join(root, 'nowhere'), 'main')).toBe('unreadable');
   });
 });
