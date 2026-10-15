@@ -270,7 +270,9 @@ describe('the view catalog', () => {
     const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
     const tools = await views.listTools();
     expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
-    expect(tools[0]).toMatchObject({ title: 'To-do list', _meta: { ui: { resourceUri: 'ui://hexis/views/to_do_list.html' } } });
+    expect(tools[0]).toMatchObject({ _meta: { ui: { resourceUri: 'ui://hexis/views/to_do_list.html' } } });
+    // The page's own title, once its page has been read behind the listing.
+    await vi.waitFor(async () => expect((await views.listTools())[0]?.title).toBe('To-do list'));
     expect(tools[1]!._meta).toEqual({ ui: { visibility: ['app'] } });
     expect(views.handles('show_to_do_list')).toBe(true);
     expect((await views.listResources()).resources[0]).toMatchObject({ uri: 'ui://hexis/views/to_do_list.html', mimeType: VIEW_MIME_TYPE });
@@ -357,10 +359,18 @@ describe('the view catalog', () => {
         `<SCRIPT ID="kb-snapshot">\nwindow.KB_SNAPSHOT = ${JSON.stringify(snapshotOnPage)};\n</SCRIPT>\n</BODY></HTML>`,
     };
     const kb = searchableKb(files);
-    const tools = await createViewCatalog(CONFIG, { callKb: kb, cacheDir: null }).listTools();
+    const onChange = vi.fn();
+    const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null, onChange });
+    // Listed at once under their file names, then titled from their pages, which is announced.
+    expect((await views.listTools()).map((t) => [t.name, t.title])).toEqual([
+      ['show_to_do_list', 'To Do List'],
+      ['show_board', 'Board'],
+      [VIEW_DATA_TOOL, 'Knowledge view data'],
+    ]);
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
     expect(kb.mock.calls.filter(([tool]) => tool === 'grep')).toHaveLength(1);
     // In path order: KnowledgeBase/Juan/... before KnowledgeBase/Ops/...
-    expect(tools.map((t) => [t.name, t.title])).toEqual([
+    expect((await views.listTools()).map((t) => [t.name, t.title])).toEqual([
       ['show_to_do_list', 'To-do list'],
       ['show_board', 'Ops board'],
       [VIEW_DATA_TOOL, 'Knowledge view data'],
@@ -374,6 +384,18 @@ describe('the view catalog', () => {
     files[VIEW] = page(snapshotOnPage);
     const tools = await createViewCatalog(CONFIG, { callKb: searchableKb(files), cacheDir: null }).listTools();
     expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+  });
+
+  it('lists the views without waiting for their pages', async () => {
+    const kb = searchableKb({ [VIEW]: page(snapshotOnPage) });
+    const search = kb.getMockImplementation()!;
+    // A page read that never answers, as a slow deployment's would not within a listing.
+    kb.mockImplementation(async (tool, args) => (tool === 'read_file' ? new Promise(() => {}) : search(tool, args)));
+    const tools = await createViewCatalog(CONFIG, { callKb: kb, cacheDir: null }).listTools();
+    expect(tools.map((t) => [t.name, t.title])).toEqual([
+      ['show_to_do_list', 'To Do List'],
+      [VIEW_DATA_TOOL, 'Knowledge view data'],
+    ]);
   });
 
   it('keeps the views a capped search did not reach', async () => {
@@ -434,7 +456,9 @@ describe('the view catalog', () => {
       const onChange = vi.fn();
       const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null, onChange });
       await views.listTools();
-      expect(onChange).not.toHaveBeenCalled(); // the first list is not a change
+      // The first list is not a change; its page then naming the view is.
+      await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+      onChange.mockClear();
       kb.mockImplementation(async (tool: string) =>
         tool === 'start_session' ? { sessionId: 's-1' } : { matches: [] },
       );

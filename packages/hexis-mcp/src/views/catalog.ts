@@ -294,26 +294,26 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
           console.error('[hexis-mcp] the views search hit its result cap; views it did not reach are kept from before.');
           paths = [...new Set([...paths, ...(views ?? []).map((v) => v.path)])].sort();
         }
+        // Each view keeps the title it was last served with; a new one starts
+        // with its file's name until its page names it (see `titlePages`).
+        const known = new Map((views ?? []).map((v) => [v.path, v.title]));
         const taken = new Set<string>();
         const next: ViewEntry[] = paths.map((p) => {
           const tool = viewToolName(p, taken);
-          return { tool, uri: `${URI_PREFIX}${tool.slice(VIEW_TOOL_PREFIX.length)}.html`, path: p, title: titleFromPath(p) };
+          return {
+            tool,
+            uri: `${URI_PREFIX}${tool.slice(VIEW_TOOL_PREFIX.length)}.html`,
+            path: p,
+            title: known.get(p) ?? titleFromPath(p),
+          };
         });
-        // Each title from its page, which this also warms so the first view
-        // opened is served from memory. A page that cannot be read keeps the
-        // title its file name gives.
-        await Promise.all(
-          next.map(async (v) => {
-            const title = await page(v, DEFAULT_BRANCH).then((html) => html.match(TITLE_LINE)?.[1]?.trim(), () => undefined);
-            if (title) v.title = title;
-          }),
-        );
         const changed = views !== null && !sameViews(views, next);
         views = next;
         viewsAt = Date.now();
         save();
         console.error(`[hexis-mcp] ${next.length} knowledge view(s) served as MCP Apps.`);
         if (changed) options.onChange?.();
+        void titlePages(next);
         return next;
       } catch (err) {
         console.error(`[hexis-mcp] knowledge views unavailable: ${err instanceof Error ? err.message : String(err)}`);
@@ -325,6 +325,30 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     })();
     return refreshing;
   };
+  /**
+   * Titles the views from their pages, behind the listing: a listing never
+   * waits on a page read, which can take as long as the deployment's fetch
+   * timeout. Reading the pages also warms them, so the first view opened is
+   * served from memory. A title that changed is announced like any other
+   * change to the list; a page that cannot be read keeps the title it has.
+   */
+  async function titlePages(list: ViewEntry[]): Promise<void> {
+    let renamed = false;
+    await Promise.all(
+      list.map(async (v) => {
+        const title = await page(v, DEFAULT_BRANCH).then((html) => html.match(TITLE_LINE)?.[1]?.trim(), () => undefined);
+        if (title && title !== v.title) {
+          v.title = title;
+          renamed = true;
+        }
+      }),
+    );
+    // Only for the list still served: a newer search has titled its own.
+    if (renamed && views === list) {
+      save();
+      options.onChange?.();
+    }
+  }
   /** The views now: the known list at once (refreshed behind it when old), or the first search. */
   const current = async (): Promise<ViewEntry[]> => {
     if (views === null) return refresh();
