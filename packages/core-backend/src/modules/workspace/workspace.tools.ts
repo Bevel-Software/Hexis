@@ -70,6 +70,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { BoundedMatcher, PatternTooExpensiveError } from './bounded-matcher.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
@@ -674,7 +675,7 @@ type FileGrepOutcome =
 async function grepOneFile(
   fs: LocalFilesystem,
   path: string,
-  re: RegExp,
+  matcher: BoundedMatcher,
   out: { path: string; line: number; text: string }[],
   max: number,
   docs: DocGrepState,
@@ -697,9 +698,8 @@ async function grepOneFile(
   }
   if (content === null) return 'no-text';
   const lines = content.split('\n');
-  for (let i = 0; i < lines.length && out.length < max; i++) {
-    re.lastIndex = 0;
-    if (re.test(lines[i])) out.push({ path, line: i + 1, text: lines[i].slice(0, 300) });
+  for (const i of await matcher.matchingLines(lines, max - out.length)) {
+    out.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
   }
   return 'searched';
 }
@@ -742,7 +742,7 @@ async function searchRootKind(
 async function grepWalk(
   fs: LocalFilesystem,
   dir: string,
-  re: RegExp,
+  matcher: BoundedMatcher,
   out: { path: string; line: number; text: string }[],
   max: number,
   depth: number,
@@ -768,7 +768,7 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+      await grepWalk(fs, p, matcher, out, max, depth + 1, gate, notifyRead, docs, skip);
     } else if (skip(p)) {
       continue;
     } else {
@@ -778,9 +778,12 @@ async function grepWalk(
       await notifyRead(p);
       // A file the walk cannot read is silently skipped: one unreadable entry
       // must not fail a search over the whole tree.
+      // A pattern too expensive to finish is not an unreadable file: it ends
+      // the whole search.
       try {
-        await grepOneFile(fs, p, re, out, max, docs);
-      } catch {
+        await grepOneFile(fs, p, matcher, out, max, docs);
+      } catch (err) {
+        if (err instanceof PatternTooExpensiveError) throw err;
         continue;
       }
     }
@@ -2422,12 +2425,9 @@ export function registerWorkspaceTools(
     },
     write: false,
     handler: async (a, ctx: ToolContext) => {
-      let re: RegExp;
-      try {
-        re = new RegExp(a.pattern as string, a.ignore_case ? 'i' : '');
-      } catch (err) {
-        throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
-      }
+      // The caller's pattern never runs on the request thread: a backtracking
+      // one would hold the event loop for everyone (see BoundedMatcher).
+      const matcher = new BoundedMatcher(a.pattern as string, a.ignore_case ? 'i' : '');
       // No path means the whole REPOSITORY, not the workspace directory above
       // it. The workspace root also holds whatever an older build left beside
       // the checkout, and the read gate has no rules for a path outside the
@@ -2485,7 +2485,7 @@ export function registerWorkspaceTools(
           await grepWalk(
             fs,
             searchRoot,
-            re,
+            matcher,
             out,
             max,
             0,
@@ -2496,15 +2496,14 @@ export function registerWorkspaceTools(
           );
         }
         const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
-        for (let i = 0; i < lines.length && out.length < max; i++) {
-          re.lastIndex = 0;
-          if (re.test(lines[i]!)) out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
+        for (const i of await matcher.matchingLines(lines, max - out.length)) {
+          out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
         }
       } else if (kind === 'directory') {
         await grepWalk(
           fs,
           searchRoot,
-          re,
+          matcher,
           out,
           max,
           0,
@@ -2526,7 +2525,7 @@ export function registerWorkspaceTools(
         // cannot tell from "the pattern is not in this file".
         const outcome = await orNotFound(
           searchRoot,
-          () => grepOneFile(fs, searchRoot, re, out, max, docs),
+          () => grepOneFile(fs, searchRoot, matcher, out, max, docs),
           'Nothing to search',
         );
         if (outcome === 'no-text') {

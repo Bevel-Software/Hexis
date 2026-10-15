@@ -1511,6 +1511,59 @@ describe('grep with a path that names a file', () => {
 });
 
 /**
+ * A caller's pattern runs off the event loop under a budget (BoundedMatcher):
+ * one that backtracks for ever is stopped with a worded 400, and every other
+ * request keeps being served meanwhile — here, a `read_file` on the same
+ * server, which shares the one loop the pattern used to hold.
+ */
+describe('a pattern too expensive to match', () => {
+  const LONG_LINE = `${'a'.repeat(39)}!`;
+
+  it('answers 400 "too expensive" fast over a 40-character line, while other calls stay under a second', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `intro\n${LONG_LINE}\n`);
+    const started = Date.now();
+    const searching = post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$', path: `${KB_DIR}/redos.md` }).then(
+      async (res) => ({ status: res.status, body: (await res.json()) as { error: string; code?: string }, took: Date.now() - started }),
+    );
+    // Probe while the search runs: each read must answer within a second.
+    const probes: number[] = [];
+    let done = false;
+    void searching.finally(() => (done = true));
+    while (!done) {
+      const t = Date.now();
+      const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` });
+      expect(res.status).toBe(200);
+      probes.push(Date.now() - t);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const { status, body, took } = await searching;
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/^Pattern too expensive: /);
+    expect(body.code).toBe('pattern_too_expensive');
+    expect(took).toBeLessThan(3_000);
+    expect(probes.length).toBeGreaterThan(0);
+    expect(Math.max(...probes)).toBeLessThan(1_000);
+  });
+
+  it('stops it in a directory walk too, rather than skipping the file as unreadable', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `${LONG_LINE}\n`);
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$' });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/^Pattern too expensive: /);
+  });
+
+  it('a control pattern over the same line still matches', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `intro\n${LONG_LINE}\n`);
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: '^a+!$', path: `${KB_DIR}/redos.md` });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { matches: unknown[] }).matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 2, text: LONG_LINE }]);
+  });
+});
+
+/**
  * Document reading: read_file/grep consume the doc-extract service for office
  * documents and PDFs; the agent text-editing tools refuse them. Fixtures are
  * REAL files built in-test (a docx is just a zip with word/document.xml).
