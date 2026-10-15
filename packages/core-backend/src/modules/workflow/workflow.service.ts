@@ -65,6 +65,7 @@ import {
   isFolderPlaceholder,
   folderPlaceholderPath,
   isPlatformRestoreShape,
+  CHANGE_REQUEST_TITLE_MAX,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
@@ -83,7 +84,7 @@ import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
-import { replaceAuthorsDescription } from './agent-tools/change-request-read-shape.js';
+import { authorsDescription, replaceAuthorsDescription } from './agent-tools/change-request-read-shape.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
@@ -3346,11 +3347,28 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<ChangeRequest> {
     const title = input.title === undefined ? undefined : input.title.trim();
     const description = input.description === undefined ? undefined : input.description.trim();
-    if (title === undefined && description === undefined) {
+    const appended = input.appendDescription === undefined ? undefined : input.appendDescription.trim();
+    if (title === undefined && description === undefined && appended === undefined) {
       throw new WorkflowValidationError('Give a new title, a new description, or both.');
+    }
+    if (description !== undefined && appended !== undefined) {
+      throw new WorkflowValidationError('Give either a new description or text to append to it, not both.');
     }
     if (title !== undefined && title.length === 0) {
       throw new WorkflowValidationError('A change request needs a title; it cannot be empty.');
+    }
+    if (title !== undefined && title.length > CHANGE_REQUEST_TITLE_MAX) {
+      throw new WorkflowValidationError(
+        `A change request's title is at most ${CHANGE_REQUEST_TITLE_MAX} characters; this one has ${title.length}.`,
+      );
+    }
+    // The body's LAST `## Affected owners` line is where the generated block
+    // starts (`authorsDescription`), so the author's text may not carry one:
+    // it would cut the description short the next time it is read.
+    if ([description, appended].some((d) => d !== undefined && d.split('\n').includes('## Affected owners'))) {
+      throw new WorkflowValidationError(
+        'A description cannot contain a line reading exactly "## Affected owners" — that heading marks the generated owners block. Reword the heading.',
+      );
     }
 
     const summary = await this.prs.getPr(number);
@@ -3420,26 +3438,38 @@ export class WorkflowService implements IWorkflowService {
     }
 
     // The body is rewritten from the row as stored, not from the summary read
-    // above, and the write is guarded on `open`: a merge or close that won the
-    // race refuses the edit instead of being written over.
+    // above, and the write is guarded on `open` AND on that very body: a merge
+    // or close that won the race refuses the edit instead of being written
+    // over, and a body another edit changed meanwhile is re-read and the edit
+    // re-applied to it — so two appends racing each other both land.
     let updated = false;
-    const [row] = await this.db
-      .select({ body: changeRequests.body })
-      .from(changeRequests)
-      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
-      .limit(1);
-    if (row) {
-      const now = new Date();
+    for (let attempt = 0; attempt < 3 && !updated; attempt++) {
+      const [row] = await this.db
+        .select({ body: changeRequests.body })
+        .from(changeRequests)
+        .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+        .limit(1);
+      if (!row) break;
+      const newDescription =
+        appended === undefined
+          ? description
+          : [authorsDescription(row.body), appended].filter((s) => s.length > 0).join('\n\n');
       const written = await this.db
         .update(changeRequests)
         .set({
           ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined
-            ? { body: replaceAuthorsDescription(row.body, description) }
+          ...(newDescription !== undefined
+            ? { body: replaceAuthorsDescription(row.body, newDescription) }
             : {}),
-          updatedAt: now,
+          updatedAt: new Date(),
         })
-        .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+        .where(
+          and(
+            eq(changeRequests.number, number),
+            eq(changeRequests.state, 'open'),
+            eq(changeRequests.body, row.body),
+          ),
+        )
         .returning({ id: changeRequests.id });
       updated = written.length > 0;
     }

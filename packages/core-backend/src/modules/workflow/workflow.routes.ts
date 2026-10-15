@@ -843,7 +843,8 @@ export function createWorkflowRoutes(
    * who may merge it (an admin, or the holder of write on every changed file);
    * anyone else gets a worded 403, and a merged or closed request a worded
    * 409 — `WorkflowService.updateChangeRequest` decides both. Answers the
-   * updated request.
+   * updated request. `appendDescription` (the app's own later-round note) adds
+   * a paragraph to the description as stored, instead of replacing it.
    */
   router.patch('/workflow/change-requests/:number', async (req, res) => {
     const num = parsePrNumber(req.params.number);
@@ -851,12 +852,13 @@ export function createWorkflowRoutes(
       res.status(400).json({ error: 'invalid change request number' });
       return;
     }
-    const body = (req.body ?? {}) as { title?: unknown; description?: unknown };
+    const body = (req.body ?? {}) as { title?: unknown; description?: unknown; appendDescription?: unknown };
     if (
       (body.title !== undefined && typeof body.title !== 'string') ||
-      (body.description !== undefined && typeof body.description !== 'string')
+      (body.description !== undefined && typeof body.description !== 'string') ||
+      (body.appendDescription !== undefined && typeof body.appendDescription !== 'string')
     ) {
-      res.status(400).json({ error: 'title and description must be strings' });
+      res.status(400).json({ error: 'title, description and appendDescription must be strings' });
       return;
     }
     const user = await requireUser(req, res);
@@ -865,6 +867,7 @@ export function createWorkflowRoutes(
       const updated = await workflow.updateChangeRequest(num, user, {
         title: body.title as string | undefined,
         description: body.description as string | undefined,
+        appendDescription: body.appendDescription as string | undefined,
       });
       const [scoped] = await scopeApplyFailures(req, [updated], user);
       res.json(scoped);

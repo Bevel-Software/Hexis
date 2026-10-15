@@ -199,6 +199,40 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     await expect(h.svc.updateChangeRequest(9, user(AUTHOR), { title: '   ' })).rejects.toMatchObject({ status: 400 });
     expect(h.db.update).not.toHaveBeenCalled();
   });
+
+  it('refuses a title past 256 characters with 400 — the agent tool’s limit, for the route too', async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { title: 'x'.repeat(256) });
+    await expect(h.svc.updateChangeRequest(9, user(AUTHOR), { title: 'x'.repeat(257) })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('at most 256 characters'),
+    });
+    expect(h.written).toHaveLength(1);
+  });
+
+  it('refuses a description holding the generated block’s heading, which would cut it short on read', async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    for (const input of [
+      { description: `Mine.\n\n${GENERATED}` },
+      { appendDescription: '## Affected owners\n\nme' },
+    ]) {
+      await expect(h.svc.updateChangeRequest(9, user(AUTHOR), input)).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('## Affected owners'),
+      });
+    }
+    // A heading that merely mentions it is the author's own.
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { description: '## Affected owners, informally\n\nMine.' });
+    expect(h.written).toHaveLength(1);
+  });
+
+  it('refuses a replacement and an append together with 400', async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    await expect(
+      h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'a', appendDescription: 'b' }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(h.db.update).not.toHaveBeenCalled();
+  });
 });
 
 describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
@@ -227,6 +261,24 @@ describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
     });
     await h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'Please, for the Q3 review.' });
     expect(h.written[0].body).toBe('<!--hexis:access-request-level:owner-->\n\nPlease, for the Q3 review.');
+  });
+
+  it('appends to the description as stored, keeping the generated owners block', async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: '  Round two.  ' });
+    expect(h.written[0].body).toBe(`Old reason.\n\nRound two.\n\n${GENERATED}`);
+  });
+
+  it('re-applies an append to a body another edit changed meanwhile, so neither is lost', async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    (h.db.limit as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([{ body: `Old reason.\n\n${GENERATED}` }])
+      .mockResolvedValueOnce([{ body: `Old reason.\n\nRound one.\n\n${GENERATED}` }]);
+    (h.db.returning as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'row-9' }]);
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: 'Round two.' });
+    expect(h.written).toHaveLength(2);
+    expect(h.written[1].body).toBe(`Old reason.\n\nRound one.\n\nRound two.\n\n${GENERATED}`);
+    expect(h.emitted).toEqual([{ kind: 'change-request-edited', number: 9 }]);
   });
 
   it('drops the cached reads and tells every session, so readers see the new text at once', async () => {

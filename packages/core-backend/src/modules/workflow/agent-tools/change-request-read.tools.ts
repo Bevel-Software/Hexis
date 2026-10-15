@@ -185,7 +185,7 @@ export function registerChangeRequestReadTools(
       sourceBranch: { type: 'string', description: 'The branch the change comes from.' },
       targetBranch: { type: 'string', description: 'The branch it would be applied to.' },
       createdAt: { type: 'string', description: 'ISO timestamp.' },
-      updatedAt: { type: 'string', description: 'ISO timestamp — the latest moment the request itself changed: its close, its last title or description edit, else its creation.' },
+      updatedAt: { type: 'string', description: 'ISO timestamp — the latest of the request\'s creation time, its row `updated_at` (a title or description edit, a reopen) and its close time; approvals do not affect it.' },
       changedFiles: { type: 'integer', description: 'How many of its files YOU may read.' },
       withheldFiles: { type: 'integer', description: 'How many of its files you may not read. Never named.' },
       lastApplyFailure: {

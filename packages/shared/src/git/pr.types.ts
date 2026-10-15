@@ -409,11 +409,24 @@ export interface PullRequestDetail extends PullRequestSummary {
  * Body of `PATCH /api/workflow/change-requests/:number`. At least one field;
  * an absent field keeps its current text. `description` replaces the author's
  * part of the body only — the generated `## Affected owners` block stays.
+ * `appendDescription` instead adds a paragraph after the description as the
+ * server holds it at the moment of the write, so two appends racing each
+ * other both land (never together with `description`). A title is at most
+ * {@link CHANGE_REQUEST_TITLE_MAX} characters, and no description may hold a
+ * line reading exactly `## Affected owners` — that heading marks the
+ * generated block.
+ *
+ * A plain interface, not a union of the allowed shapes: the body arrives as
+ * untrusted JSON, so the server's worded 400 is the contract either way.
  */
 export interface UpdateChangeRequestInput {
   title?: string;
   description?: string;
+  appendDescription?: string;
 }
+
+/** Longest title a change request may carry — the route and the agent tool alike. */
+export const CHANGE_REQUEST_TITLE_MAX = 256;
 
 /**
  * Result of a successful merge via the in-app gate. `sha` is the merge commit

@@ -889,9 +889,16 @@ export function ChangeRequestDialog({
   const [saving, setSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const shownTitle = detail?.title ?? cr.title;
+  // The text the form opened with. A save sends only the fields the reader
+  // changed FROM it — not from `detail`, which a remote edit may refresh
+  // while the form is open — so the untouched field is never written back
+  // with a stale draft.
+  const editBaseline = useRef({ title: '', description: '' });
   function startEditing() {
-    setDraftTitle(shownTitle);
-    setDraftDescription(editableDescription(detail?.body));
+    const baseline = { title: shownTitle, description: editableDescription(detail?.body) };
+    editBaseline.current = baseline;
+    setDraftTitle(baseline.title);
+    setDraftDescription(baseline.description);
     setEditError(null);
     setEditing(true);
   }
@@ -900,8 +907,8 @@ export function ChangeRequestDialog({
     const title = draftTitle.trim();
     const description = draftDescription.trim();
     const changes = {
-      ...(title !== shownTitle ? { title } : {}),
-      ...(description !== editableDescription(detail.body) ? { description } : {}),
+      ...(title !== editBaseline.current.title ? { title } : {}),
+      ...(description !== editBaseline.current.description ? { description } : {}),
     };
     if (Object.keys(changes).length === 0) {
       setEditing(false);
@@ -911,17 +918,23 @@ export function ChangeRequestDialog({
     setEditError(null);
     try {
       await updateChangeRequest(cr.number, changes);
-      // The dialog shows the new text from a fresh read, and every list on
-      // the page re-reads too — this tab does not wait on its own broadcast.
-      const seq = ++detailSeq.current;
-      const fresh = await fetchPrDetail(cr.number, { fresh: true });
-      if (seq === detailSeq.current) setDetail(fresh);
-      window.dispatchEvent(new Event(PR_STALE_EVENT));
-      setEditing(false);
     } catch (err) {
       setEditError(err instanceof Error ? err.message : "Couldn't save the change request.");
-    } finally {
       setSaving(false);
+      return;
+    }
+    // Saved. Every list on the page re-reads — this tab does not wait on its
+    // own broadcast — and the dialog shows the new text from a fresh read; a
+    // failed read leaves the saved edit saved and shows the last text known.
+    window.dispatchEvent(new Event(PR_STALE_EVENT));
+    setEditing(false);
+    setSaving(false);
+    const seq = ++detailSeq.current;
+    try {
+      const fresh = await fetchPrDetail(cr.number, { fresh: true });
+      if (seq === detailSeq.current) setDetail(fresh);
+    } catch {
+      // The server's `change-request-edited` broadcast re-reads it again.
     }
   }
 

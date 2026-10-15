@@ -9,8 +9,7 @@ import {
   type SkillToolWarning,
 } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { editableDescription, updateChangeRequest } from '../../pr/services/pr-edit.api';
+import { updateChangeRequest } from '../../pr/services/pr-edit.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
 import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
 
@@ -235,11 +234,10 @@ export async function proposeChange(
   if (input.existingCr) {
     // A later round's "why" joins the request's description, after what is
     // already there — the author may edit their own request, and the
-    // description is what the reviewer reads.
+    // description is what the reviewer reads. The server appends to the text
+    // as it holds it at the write, so a note or edit landing meanwhile stays.
     if (input.note) {
-      const { number } = input.existingCr;
-      const current = editableDescription((await fetchPrDetail(number, { fresh: true })).body);
-      await updateChangeRequest(number, { description: current ? `${current}\n\n${input.note}` : input.note });
+      await updateChangeRequest(input.existingCr.number, { appendDescription: input.note });
     }
   } else {
     await openChangeRequest({

@@ -24,9 +24,9 @@ import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
 /**
- * The latest moment a change-request row records — its close time when it has
- * one, else its creation time, with `updated_at` folded in for the day
- * something writes it. Deliberately derived from the ROW alone: a time taken
+ * The latest moment a change-request row records — the latest of its creation,
+ * its `updated_at` (a title or description edit) and its close time.
+ * Deliberately derived from the ROW alone: a time taken
  * from the newest approval would make the same request report different
  * "last changed" moments to a list (which reads no approvals) and a detail
  * (which does).

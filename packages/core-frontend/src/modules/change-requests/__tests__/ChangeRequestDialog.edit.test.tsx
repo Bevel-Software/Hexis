@@ -126,6 +126,25 @@ describe('ChangeRequestDialog: editing the title and description', () => {
     window.removeEventListener(PR_STALE_EVENT, stale);
   });
 
+  it('a saved edit stays saved when the follow-up read fails — no error, and every list still refreshes', async () => {
+    detailMock.fetchPrDetail.mockResolvedValueOnce(detail());
+    editApi.updateChangeRequest.mockResolvedValue({ ...CR, title: 'New title' });
+    detailMock.fetchPrDetail.mockRejectedValueOnce(new Error('network down'));
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), { target: { value: 'New title' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Title' })).not.toBeInTheDocument());
+    expect(stale).toHaveBeenCalled();
+    expect(screen.queryByText(/Couldn't save/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/network down/)).not.toBeInTheDocument();
+    window.removeEventListener(PR_STALE_EVENT, stale);
+  });
+
   it("shows the server's refusal in its words and keeps the draft", async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detail());
     editApi.updateChangeRequest.mockRejectedValue(
