@@ -182,4 +182,15 @@ describe('WorkerPatternMatcher', () => {
     expect(Date.now() - started).toBeLessThan(1_000);
     await expect(m.search('b', '').matchingLines(['b'], 1)).rejects.toMatchObject({ status: 503 });
   });
+
+  it('answers busy at once when closed while a long line is still being written to shared memory', async () => {
+    // A line of a million characters written ten at a time: many turns of the loop to close in.
+    const m = matcher({ budgetMs: 3_000, batchChars: 10 });
+    const running = m.search('nowhere', '').matchingLines(['a'.repeat(1_000_000)], 1);
+    await new Promise((r) => setTimeout(r, 20));
+    const started = Date.now();
+    await m.close();
+    await expect(running).rejects.toMatchObject({ status: 503, details: { code: 'search_busy' } });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
 });

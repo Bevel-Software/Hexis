@@ -236,7 +236,7 @@ class BoundedSearch implements IPatternSearch {
   private async matchBatch(w: Worker, lines: string[], limit: number): Promise<number[]> {
     if (this.spentMs >= this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
     const oversized = lines.length === 1 && lines[0]!.length > this.pool.batchChars;
-    const payload = oversized ? { shared: await shareLine(lines[0]!, this.pool.batchChars) } : { lines };
+    const payload = oversized ? { shared: await shareLine(w, lines[0]!, this.pool.batchChars) } : { lines };
     const remaining = this.budgetMs - this.spentMs;
     const reply = await run(w, { source: this.source, flags: this.flags, ...payload, limit }, remaining + TRANSFER_GRACE_MS);
     if (reply === 'timeout') {
@@ -256,15 +256,30 @@ class BoundedSearch implements IPatternSearch {
  * the event loop between, so a line of any length never holds the request
  * thread for longer than one chunk. Raw code units keep the line exact, lone
  * surrogates included.
+ *
+ * The worker it is meant for can be terminated by `close()` during those turns,
+ * before {@link run} listens for its exit; a message posted to it then would
+ * never be answered. So its exit is watched here too: writing stops and the
+ * search is answered busy, as one terminated under `run` is.
  */
-async function shareLine(line: string, chunkChars: number): Promise<SharedArrayBuffer> {
-  const shared = new SharedArrayBuffer(line.length * 2);
-  const bytes = Buffer.from(shared);
-  for (let at = 0; at < line.length; at += chunkChars) {
-    if (at > 0) await new Promise<void>((resolve) => setImmediate(resolve));
-    bytes.write(line.slice(at, at + chunkChars), at * 2, 'utf16le');
+async function shareLine(w: Worker, line: string, chunkChars: number): Promise<SharedArrayBuffer> {
+  let exited = false;
+  const onExit = () => {
+    exited = true;
+  };
+  w.once('exit', onExit);
+  try {
+    const shared = new SharedArrayBuffer(line.length * 2);
+    const bytes = Buffer.from(shared);
+    for (let at = 0; at < line.length && !exited; at += chunkChars) {
+      if (at > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      bytes.write(line.slice(at, at + chunkChars), at * 2, 'utf16le');
+    }
+    if (exited) throw new SearchBusyError();
+    return shared;
+  } finally {
+    w.off('exit', onExit);
   }
-  return shared;
 }
 
 function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'timeout'> {
