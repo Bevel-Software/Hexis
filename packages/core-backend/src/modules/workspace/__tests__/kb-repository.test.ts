@@ -318,3 +318,34 @@ describe('KbRepository.addWorktree', () => {
     expect((await git(repository.dir, ['config', '--get', 'branch.alice/a.merge'])).trim()).toBe('refs/heads/alice/a');
   });
 });
+
+describe('KbRepository.importLocalRefs', () => {
+  it('throws when the stash log cannot be read, rather than keep only its latest entry', async () => {
+    const inner = new NodeGitRunner();
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (args[0] === 'reflog') throw new Error('git reflog timed out');
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const repository = new KbRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner,
+    });
+    const clone = path.join(root, 'clone');
+    await git(root, ['clone', '-q', '-b', 'alice/a', upstream, clone]);
+    for (const text of ['first', 'second']) {
+      await fs.writeFile(path.join(clone, 'draft.md'), text);
+      await git(clone, ['stash', 'push', '-q', '-u', '-m', text]);
+    }
+
+    await expect(repository.importLocalRefs(clone, 'alice/a', 'alice%2Fa')).rejects.toThrow(/reflog timed out/);
+    // Nothing was taken for the whole stash.
+    await expect(git(repository.dir, ['rev-parse', '--verify', '--quiet', 'refs/kb-converted/alice%2Fa/stash/0']))
+      .rejects.toThrow();
+    expect((await git(clone, ['stash', 'list'])).trim().split('\n')).toHaveLength(2);
+  });
+});

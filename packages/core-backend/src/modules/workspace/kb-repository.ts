@@ -716,7 +716,9 @@ export class KbRepository implements IKbRepository {
     }
     if (stashTop !== null) {
       // Every entry, not only the latest: the older ones are the stash's log.
-      const entries = (await inClone(['reflog', 'show', '--format=%H', 'refs/stash']).catch(() => ''))
+      // A failed read throws, the clone kept: an empty answer here would keep
+      // only the latest entry. A stash with no log reads as empty.
+      const entries = (await inClone(['reflog', 'show', '--format=%H', 'refs/stash']))
         .split('\n').map((l) => l.trim()).filter(Boolean);
       (entries.length > 0 ? entries : [stashTop]).forEach((sha, i) => wanted.push({ sha, dest: `${namespace}/stash/${i}` }));
     }
