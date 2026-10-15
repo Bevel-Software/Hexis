@@ -103,7 +103,7 @@ export class WorkerPatternMatcher implements IPatternMatcher {
   };
 
   constructor(opts: WorkerPatternMatcherOptions = {}) {
-    this.budgetMs = option('budgetMs', opts.budgetMs ?? 5_000, 1);
+    this.budgetMs = option('budgetMs', opts.budgetMs ?? 5_000, 1, MAX_TIMER_MS - TRANSFER_GRACE_MS);
     // A pool of none would leave every search waiting for a worker that never comes.
     this.poolMax = option('poolMax', opts.poolMax ?? 4, 1);
     // No queue at all is allowed: every search past the pool is refused busy.
@@ -250,10 +250,16 @@ function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'ti
   });
 }
 
-/** A sizing option as given, refused at construction unless it is an integer of at least `min`. */
-function option(name: string, value: number, min: number): number {
-  if (!Number.isInteger(value) || value < min) {
-    throw new RangeError(`WorkerPatternMatcher: ${name} must be an integer of at least ${min}, got ${value}.`);
+/**
+ * The longest delay `setTimeout` honours. A longer one fires after 1 ms, so a
+ * budget past this (less the grace added to it) would stop every search at once.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** A sizing option as given, refused at construction unless it is an integer from `min` to `max`. */
+function option(name: string, value: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new RangeError(`WorkerPatternMatcher: ${name} must be an integer from ${min} to ${max}, got ${value}.`);
   }
   return value;
 }

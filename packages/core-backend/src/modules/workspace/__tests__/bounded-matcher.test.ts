@@ -86,12 +86,18 @@ describe('WorkerPatternMatcher', () => {
   });
 
   it('refuses a sizing that could never serve a search when it is built, not when a search hangs on it', () => {
-    expect(() => new WorkerPatternMatcher({ poolMax: 0 })).toThrow(/poolMax must be an integer of at least 1/);
+    expect(() => new WorkerPatternMatcher({ poolMax: 0 })).toThrow(/poolMax must be an integer from 1 /);
+    // Past the longest delay setTimeout honours, the timer would fire after 1 ms and stop every search.
+    expect(() => new WorkerPatternMatcher({ budgetMs: 2_147_483_647 })).toThrow(/budgetMs must be an integer from 1 to 2147483397/);
     expect(() => new WorkerPatternMatcher({ poolMax: 1.5 })).toThrow(RangeError);
     expect(() => new WorkerPatternMatcher({ budgetMs: 0 })).toThrow(/budgetMs/);
     expect(() => new WorkerPatternMatcher({ maxWaiting: -1 })).toThrow(/maxWaiting/);
     expect(() => new WorkerPatternMatcher({ batchChars: Number.NaN })).toThrow(/batchChars/);
     expect(() => matcher({ maxWaiting: 0 })).not.toThrow();
+  });
+
+  it('serves an ordinary search under the largest budget the timer can hold', async () => {
+    expect(await matcher({ budgetMs: 2_147_483_647 - 250 }).search('b', '').matchingLines(['a', 'b'], 10)).toEqual([1]);
   });
 
   it('refuses invalid syntax with the 400 grep always gave', () => {
