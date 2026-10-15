@@ -384,6 +384,28 @@ describe('a deployment upgraded over full clones', () => {
       expect(warn.mock.calls.flat().join('\n')).toMatch(/interrupted conversion of the "alice\/a" working copy/);
     },
   );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'names a working copy whose link cannot be read, leaves it as it is, and looks again at the next boot',
+    async () => {
+      await makeRunner([touchAll]).runAll();
+      const alice = checkoutOf('alice/a');
+      await fs.writeFile(path.join(alice, 'unsaved.md'), 'kept');
+      const gitdir = (await fs.readFile(path.join(alice, '.git'), 'utf-8')).replace(/^gitdir:\s*/, '').trim();
+      const records = path.dirname(gitdir);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await fs.chmod(records, 0o000);
+      try {
+        await makeRunner([]).runAll();
+      } finally {
+        await fs.chmod(records, 0o755);
+      }
+
+      expect(await fs.readFile(path.join(alice, 'unsaved.md'), 'utf-8')).toBe('kept');
+      expect(await workingCopyShape(alice)).toBe('worktree');
+      expect(warn.mock.calls.flat().join('\n')).toMatch(/"alice\/a" working copy could not be inspected for conversion/);
+    },
+  );
 });
 
 describe('the repository address changes', () => {

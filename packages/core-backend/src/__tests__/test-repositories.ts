@@ -17,6 +17,6 @@ export async function removeTestRepositoryRoots(): Promise<void> {
   const pending = [...roots];
   roots.clear();
   await Promise.all(
-    pending.map((root) => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined)),
+    pending.map((root) => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })),
   );
 }

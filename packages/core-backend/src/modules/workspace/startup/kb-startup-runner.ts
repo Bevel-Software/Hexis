@@ -21,7 +21,7 @@ import {
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
-import { workingCopyShape } from '../kb-repository.js';
+import { workingCopyShape, type WorkingCopyShape } from '../kb-repository.js';
 import type { FetchOptions, IKbRepository } from '../kb-repository.contract.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
@@ -876,8 +876,21 @@ export class KbStartupRunner {
         );
         continue;
       }
-      if ((await workingCopyShape(repoDir).catch(() => 'none')) !== 'clone') continue;
       const branch = branchForWorkspaceId(entry.name);
+      let shape: WorkingCopyShape;
+      try {
+        shape = await workingCopyShape(repoDir);
+      } catch (err) {
+        // A `.git` that could not be read has shown nothing: left as it is,
+        // named, and looked at again by the next start.
+        kept.push(branch);
+        startupLog.warn(
+          `the "${branch}" working copy could not be inspected for conversion (` +
+            `${this.redact(err instanceof Error ? err.message : String(err))}). It is left as it is, and the next start tries again.`,
+        );
+        continue;
+      }
+      if (shape !== 'clone') continue;
       try {
         if (workspaceIdForBranch(branch) !== entry.name) continue;
         assertValidBranchName(branch);
