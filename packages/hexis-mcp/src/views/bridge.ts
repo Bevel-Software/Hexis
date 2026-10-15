@@ -20,6 +20,7 @@
  * kit decides whether a bridge exists.
  */
 
+import { HTML_NAV_BRIDGE } from '@bevel-software/platform-shared';
 import { nativeMarkup } from './native.js';
 
 export interface BridgeConfig {
@@ -27,12 +28,12 @@ export interface BridgeConfig {
   view: string;
   /** The app-only tool that returns a view's live snapshot. */
   dataTool: string;
+  /** The app-only tool that turns a link the page follows into the address to open (the app's grammar). */
+  linkTool: string;
   /** Repo path of the page, e.g. `KnowledgeBase/.../To-Do-List.html`. */
   pagePath: string;
   branch: string;
-  /** The Hexis web app's origin, for opening a knowledge-base file. */
-  webBase: string;
-  /** The repository's folder in workspace URLs (`/workspace/<branch>/<kbDir>/<path>`). */
+  /** The repository's folder, the first segment of an app path (`<kbDir>/<pagePath>`). */
   kbDir: string;
 }
 
@@ -102,15 +103,17 @@ const BRIDGE_SOURCE = String.raw`
     const timer = setTimeout(() => reject(new Error(message)), ms);
     promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
   });
+  // A call to the server, through the host. Tried even when the host does not
+  // advertise serverTools: hosts that proxy calls do not all say so. One that
+  // neither says so nor answers is given up on, so the view says why instead
+  // of waiting forever.
+  const callServer = (name, args, what) => {
+    const call = request('tools/call', { name, arguments: args });
+    return hostCaps.serverTools ? call : within(call, UNADVERTISED_CALL_MS, 'the host did not answer the request for ' + what);
+  };
   async function fetchLive() {
-    // Tried even when the host does not advertise serverTools: hosts that
-    // proxy calls do not all say so. One that neither says so nor answers is
-    // given up on, so the view shows why instead of loading forever.
     try {
-      const call = request('tools/call', { name: CFG.dataTool, arguments: { view: CFG.view, branch: CFG.branch } });
-      const result = await (hostCaps.serverTools
-        ? call
-        : within(call, UNADVERTISED_CALL_MS, 'the host did not answer the request for live data'));
+      const result = await callServer(CFG.dataTool, { view: CFG.view, branch: CFG.branch }, 'live data');
       const snap = snapshotOf(result);
       deliver(snap, snap ? null : errorOf(result));
     } catch (e) {
@@ -229,38 +232,28 @@ const BRIDGE_SOURCE = String.raw`
     } catch (e) { /* leave the page's own fallback in charge */ }
   })();
 
-  // A knowledge-base link would navigate this frame to nothing: open it in Hexis.
-  function resolveFrom(rel, fromFile) {
-    const out = fromFile.split('/').slice(0, -1);
-    for (const seg of rel.replace(/\\/g, '/').split('/')) {
-      if (seg === '' || seg === '.') continue;
-      if (seg === '..') { if (!out.length) return rel; out.pop(); } else out.push(seg);
+  // A link the page follows (an anchor, window.bevel.openNode / navigate) is
+  // opened OUT of the frame, where the same link goes in the app: the server
+  // resolves it with the app's own grammar and scheme allowlist (the link
+  // tool), and the host opens the address. A link it refuses opens nothing.
+  async function openHref(href) {
+    try {
+      const result = await callServer(CFG.linkTool, { view: CFG.view, href, branch: CFG.branch }, 'a link');
+      const url = result && result.structuredContent && result.structuredContent.url;
+      if (typeof url !== 'string' || !url) {
+        const text = result && Array.isArray(result.content) ? result.content.filter((c) => c && c.type === 'text').map((c) => c.text).join(' ') : '';
+        toast(text || 'This link cannot be opened.');
+        return;
+      }
+      if (hostCaps.openLinks) await openLink(url).catch(() => toast('Could not open ' + url));
+      else toast(url);
+    } catch (e) {
+      toast('Could not open the link: ' + (e && e.message ? e.message : e));
     }
-    return out.join('/');
   }
-  const kbUrl = (repoPath, anchor) => CFG.webBase + '/workspace/' + encodeURIComponent(CFG.branch) + '/' + CFG.kbDir + '/' +
-    repoPath.split('/').map(encodeURIComponent).join('/') + (anchor ? '#' + anchor : '');
-  async function openKbFile(repoPath) {
-    const url = kbUrl(repoPath);
-    try { await openLink(url); } catch (e) { toast(url); }
-  }
-  document.addEventListener('click', (event) => {
-    const a = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-    if (!a) return;
-    const href = a.getAttribute('href') || '';
-    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
-    event.preventDefault();
-    let url = href;
-    // A root-relative link is a path in the web app (/workspace/<branch>/...),
-    // which is what it means on the page there too.
-    if (/^\/(?!\/)/.test(href)) url = CFG.webBase + href;
-    else if (!/^(https?:|mailto:)/i.test(href)) {
-      const [path, anchor] = href.split('#');
-      url = kbUrl(resolveFrom(decodeURIComponent(path), CFG.pagePath), anchor);
-    }
-    if (hostCaps.openLinks) openLink(url).catch(() => toast('Could not open ' + url));
-    else toast(url);
-  }, true);
+  // A file of the knowledge base, by its path in the repository's folder: a
+  // root-relative link, which the grammar reads as exactly that path.
+  const openKbFile = (repoPath) => openHref('/' + CFG.kbDir + '/' + repoPath);
 
   // -- size, display mode and the host's look ------------------------------------
   // The page as written is tall (and often 100vh); the compact presentation is
@@ -336,6 +329,13 @@ const BRIDGE_SOURCE = String.raw`
   });
 
   window.bevel = Object.assign(window.bevel || {}, { buildGraph, sendToChat, openLink });
+  // The app's own navigation runtime (platform-shared HTML_NAV_BRIDGE), the
+  // same source the app's sandboxed frame runs: window.bevel.openNode and
+  // navigate, anchor clicks, fragments scrolled in the frame. Its parent is
+  // this bridge, which opens what it posts.
+  (function (parent) {
+${HTML_NAV_BRIDGE}
+  })({ postMessage: (msg) => { if (msg && msg.type === 'bevel.navigate' && typeof msg.href === 'string') openHref(msg.href); } });
   window.__hexis = {
     cfg: CFG,
     context: () => hostContext,

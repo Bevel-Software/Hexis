@@ -19,6 +19,7 @@ import {
   viewPathsFromGrep,
   viewToolName,
   VIEW_DATA_TOOL,
+  VIEW_LINK_TOOL,
   VIEW_MIME_TYPE,
 } from '../views/catalog.js';
 
@@ -189,9 +190,9 @@ describe('the page and its bridge', () => {
     const html = injectBridge(page({}), {
       view: 'show_x',
       dataTool: VIEW_DATA_TOOL,
+      linkTool: VIEW_LINK_TOOL,
       pagePath: 'KnowledgeBase/</script><script>alert(1)</script>.html',
       branch: 'main',
-      webBase: 'https://kb.example',
       kbDir: 'knowledge-base',
     });
     expect(html.indexOf('data-hexis-bridge')).toBeGreaterThan(html.indexOf('<head>'));
@@ -269,11 +270,12 @@ describe('the view catalog', () => {
   it('lists a tool per view that points at its ui:// page, plus the app-only data tool', async () => {
     const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
     const tools = await views.listTools();
-    expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+    expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
     expect(tools[0]).toMatchObject({ _meta: { ui: { resourceUri: 'ui://hexis/views/to_do_list.html' } } });
     // The page's own title, once its page has been read behind the listing.
     await vi.waitFor(async () => expect((await views.listTools())[0]?.title).toBe('To-do list'));
     expect(tools[1]!._meta).toEqual({ ui: { visibility: ['app'] } });
+    expect(tools[2]!._meta).toEqual({ ui: { visibility: ['app'] } });
     expect(views.handles('show_to_do_list')).toBe(true);
     expect((await views.listResources()).resources[0]).toMatchObject({ uri: 'ui://hexis/views/to_do_list.html', mimeType: VIEW_MIME_TYPE });
   });
@@ -294,6 +296,36 @@ describe('the view catalog', () => {
     const { contents } = await views.readResource('ui://hexis/views/to_do_list.html');
     const served = readEmbeddedSnapshot((contents[0] as { text: string }).text);
     expect(Object.keys(served?.nodes ?? {})).toHaveLength(2);
+  });
+
+  /**
+   * A link followed in a view goes where the same link goes in the app: the
+   * app's grammar (platform-shared resolveKbHref), against the page the link
+   * sits in, and the app's scheme allowlist, since the host opens the answer.
+   */
+  it.each([
+    ['../Tasks/Bread.md#due', {}, 'https://kb.example/workspace/main/knowledge-base/KnowledgeBase/Juan/Tasks/Bread.md#due'],
+    ['#overview', {}, 'https://kb.example/workspace/main/knowledge-base/KnowledgeBase/Juan/Dashboards/To-Do-List.html#overview'],
+    ['/knowledge-base/KnowledgeBase/Ops/A.md', {}, 'https://kb.example/workspace/main/knowledge-base/KnowledgeBase/Ops/A.md'],
+    ['/workspace/dev/knowledge-base/KnowledgeBase/Ops/A.md', {}, 'https://kb.example/workspace/dev/knowledge-base/KnowledgeBase/Ops/A.md'],
+    ['../Tasks/Bread.md', { branch: 'dev' }, 'https://kb.example/workspace/dev/knowledge-base/KnowledgeBase/Juan/Tasks/Bread.md'],
+    ['  https://example.com/x  ', {}, 'https://example.com/x'],
+    ['//cdn.example.com/x', {}, '//cdn.example.com/x'],
+  ])('opens %s where the app does', async (href, extra, url) => {
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+    await views.listTools();
+    const result = await views.callTool(VIEW_LINK_TOOL, { view: 'show_to_do_list', href, ...extra });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({ url });
+  });
+
+  it.each(['javascript:alert(1)', 'data:text/html,hi', ''])('refuses to open %j', async (href) => {
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+    await views.listTools();
+    const result = await views.callTool(VIEW_LINK_TOOL, { view: 'show_to_do_list', href });
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toBe(`This link cannot be opened: ${href}`);
+    expect(result.structuredContent).toBeUndefined();
   });
 
   it('reads the view live: a summary for the model, the snapshot for the page', async () => {
@@ -366,6 +398,7 @@ describe('the view catalog', () => {
       ['show_to_do_list', 'To Do List'],
       ['show_board', 'Board'],
       [VIEW_DATA_TOOL, 'Knowledge view data'],
+      [VIEW_LINK_TOOL, 'Knowledge view link'],
     ]);
     await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
     expect(kb.mock.calls.filter(([tool]) => tool === 'grep')).toHaveLength(1);
@@ -374,6 +407,7 @@ describe('the view catalog', () => {
       ['show_to_do_list', 'To-do list'],
       ['show_board', 'Ops board'],
       [VIEW_DATA_TOOL, 'Knowledge view data'],
+      [VIEW_LINK_TOOL, 'Knowledge view link'],
     ]);
   });
 
@@ -383,7 +417,7 @@ describe('the view catalog', () => {
     for (let i = 0; i < 1200; i++) files[`Data/PR-Overviews/PR-${i}.html`] = `<html><head><title>PR ${i}</title></head></html>`;
     files[VIEW] = page(snapshotOnPage);
     const tools = await createViewCatalog(CONFIG, { callKb: searchableKb(files), cacheDir: null }).listTools();
-    expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+    expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
   });
 
   it('lists the views without waiting for their pages', async () => {
@@ -395,6 +429,7 @@ describe('the view catalog', () => {
     expect(tools.map((t) => [t.name, t.title])).toEqual([
       ['show_to_do_list', 'To Do List'],
       [VIEW_DATA_TOOL, 'Knowledge view data'],
+      [VIEW_LINK_TOOL, 'Knowledge view link'],
     ]);
   });
 
@@ -402,7 +437,7 @@ describe('the view catalog', () => {
     const other = 'KnowledgeBase/Ops/Board.html';
     const kb = searchableKb({ [VIEW]: page(snapshotOnPage), [other]: page(snapshotOnPage) });
     const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null });
-    expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL]);
+    expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
     // The next search stops after one view.
     const full = kb.getMockImplementation()!;
     kb.mockImplementation(async (tool, args) =>
@@ -411,7 +446,7 @@ describe('the view catalog', () => {
     // An unknown view makes the catalog search again before it answers.
     await expect(views.readResource('ui://hexis/views/nope.html')).rejects.toThrow(/Unknown resource/);
     expect(kb.mock.calls.filter(([tool]) => tool === 'grep')).toHaveLength(2);
-    expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL]);
+    expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
   });
 
   describe('kept between runs', () => {
@@ -436,7 +471,7 @@ describe('the view catalog', () => {
       const never = vi.fn(async () => new Promise<unknown>(() => {}));
       const second = createViewCatalog(CONFIG, { callKb: never, cacheDir: dir });
       const tools = await second.listTools(); // the search below never answers
-      expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+      expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
       const { contents } = await second.readResource('ui://hexis/views/to_do_list.html');
       expect(Object.keys(readEmbeddedSnapshot((contents[0] as { text: string }).text)?.nodes ?? {})).toHaveLength(2);
       vi.useFakeTimers({ toFake: ['setTimeout'] });
@@ -482,7 +517,7 @@ describe('the view catalog', () => {
       const config = { ...CONFIG, connectionKey: 'key-a' };
       const kb = fakeKb(page(snapshotOnPage));
       const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
-      expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+      expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
       await views.callTool('show_to_do_list', {});
       config.connectionKey = 'key-b';
       kb.mockImplementation(refusing());

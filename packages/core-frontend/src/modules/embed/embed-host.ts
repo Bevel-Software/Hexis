@@ -1,4 +1,4 @@
-import { kbFileUrl, resolveKbHref } from '../workspace';
+import { kbHrefToAppUrl } from '@bevel-software/platform-shared';
 import { isOpenableExternalHref, normalizeHref } from '../../shared/markdown/hrefs';
 import { embedBaseUrl, embedOpenLink } from './embed-config';
 
@@ -104,26 +104,14 @@ export function resolveToAppUrl(
     // so; the embed never builds one, so it is refused rather than relayed.
     return !url.startsWith('//') && isOpenableExternalHref(url) ? url : null;
   }
-  const target = resolveKbHref(href, { basePath, kbDirName: kb.kbDirName });
-  if (target === null) return null;
   /**
-   * An external destination goes to the host — but only one from the SCHEME
-   * ALLOWLIST, and in its normalised spelling.
-   *
-   * This is load-bearing rather than belt-and-braces. The embed asks its host
-   * to open whatever it hands over, and a host obliges: `javascript:alert(1)`
-   * is a destination the link grammar happily calls "external", and relaying
-   * it would be asking the host to run it. The app's own link handler
-   * (`openExternalHref`) applies exactly this allowlist for exactly this
-   * reason; the embed's has to apply it too, because the embed's links come
-   * from a knowledge-base page an agent may have written.
+   * An external destination goes to the host only from the SCHEME ALLOWLIST,
+   * in its normalised spelling: the embed asks its host to open whatever it
+   * hands over, and a host obliges, so relaying `javascript:alert(1)` would be
+   * asking the host to run it. A link that named its own branch keeps it;
+   * everything else opens on the branch the embed rendered. `kbHrefToAppUrl`
+   * (platform-shared) holds both rules, for the local MCP server's knowledge
+   * views too.
    */
-  if (target.kind === 'external') {
-    return isOpenableExternalHref(href) ? normalizeHref(href) : null;
-  }
-  if (target.kind !== 'workspace') return null;
-  // A link that named its own branch keeps it; everything else opens on the
-  // branch the embed rendered, which is the default branch.
-  const branch = target.branch ?? kb.branch;
-  return `${embedBaseUrl()}${kbFileUrl(branch, target.path)}${target.hash}`;
+  return kbHrefToAppUrl(href, { basePath, kbDirName: kb.kbDirName, branch: kb.branch, base: embedBaseUrl() });
 }

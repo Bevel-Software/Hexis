@@ -15,8 +15,10 @@
  * - a `ui://hexis/views/<name>.html` resource: the page as committed, with the
  *   bridge (bridge.ts) and the compact presentation (native.ts) injected.
  *
- * And one app-only tool, `hexis_view_data`, the bridge's fallback for live
- * data when no tool result reached it.
+ * And two app-only tools: `hexis_view_data`, the bridge's fallback for live
+ * data when no tool result reached it, and `hexis_view_link`, which turns a
+ * link the person followed in a view into the address to open, by the app's
+ * own link grammar (platform-shared `kbHrefToAppUrl`).
  *
  * Reads go through the caller's own KB tools (`/api/agent/tools/*`), so the
  * caller's read access decides what a view can show, exactly as in the app.
@@ -41,6 +43,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Resource, Tool as McpTool, CallToolResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { kbHrefToAppUrl } from '@bevel-software/platform-shared';
 import type { HexisMcpConfig } from '../config.js';
 import { callKbTool } from '../deployment.js';
 import { hexisHome, hostKey } from '../materialize.js';
@@ -59,6 +62,7 @@ import {
 /** The MCP Apps resource type (`text/html;profile=mcp-app`). */
 export const VIEW_MIME_TYPE = 'text/html;profile=mcp-app';
 export const VIEW_DATA_TOOL = 'hexis_view_data';
+export const VIEW_LINK_TOOL = 'hexis_view_link';
 const VIEW_TOOL_PREFIX = 'show_';
 const URI_PREFIX = 'ui://hexis/views/';
 /** The repository's folder in KB tool paths and workspace URLs, until a search names it. */
@@ -498,6 +502,25 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     _meta: { ui: { visibility: ['app'] } },
   };
 
+  const linkTool: McpTool = {
+    name: VIEW_LINK_TOOL,
+    title: 'Knowledge view link',
+    description:
+      'Used by Hexis knowledge views to open a link the person followed in a view. Not for direct use: call a show_* tool to show a view.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        view: { type: 'string', description: "The view's show_* tool name." },
+        href: { type: 'string', description: 'The link as the page wrote it.' },
+        branch: { type: 'string', description: `Branch the view was shown from (default ${DEFAULT_BRANCH}).` },
+      },
+      required: ['view', 'href'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    _meta: { ui: { visibility: ['app'] } },
+  };
+
   const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
   return {
@@ -515,17 +538,33 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
 
     handles: (tool) => {
       forgetAnotherReader();
-      return tool === VIEW_DATA_TOOL || (views ?? []).some((v) => v.tool === tool);
+      return tool === VIEW_DATA_TOOL || tool === VIEW_LINK_TOOL || (views ?? []).some((v) => v.tool === tool);
     },
 
     async listTools() {
       forgetAnotherReader();
       const list = await current();
-      return list.length ? [...list.map(viewTool), dataTool] : [];
+      return list.length ? [...list.map(viewTool), dataTool, linkTool] : [];
     },
 
     async callTool(tool, args) {
       forgetAnotherReader();
+      if (tool === VIEW_LINK_TOOL) {
+        const view = await byTool(String(args.view ?? ''));
+        if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
+        const href = String(args.href ?? '');
+        // Where the same link goes in the app: its grammar, against the page
+        // the link sits in (an app path starts with the repository's folder),
+        // and its scheme allowlist, since the host opens what this answers.
+        const url = kbHrefToAppUrl(href, {
+          basePath: `${kbDir}/${view.path}`,
+          kbDirName: kbDir,
+          branch: branchOf(args),
+          base: webBase,
+        });
+        if (url === null) return { isError: true, content: [{ type: 'text', text: `This link cannot be opened: ${href}` }] };
+        return { content: [{ type: 'text', text: url }], structuredContent: { url } };
+      }
       if (tool === VIEW_DATA_TOOL) {
         const view = await byTool(String(args.view ?? ''));
         if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
@@ -597,9 +636,9 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
       const bridge: BridgeConfig = {
         view: view.tool,
         dataTool: VIEW_DATA_TOOL,
+        linkTool: VIEW_LINK_TOOL,
         pagePath: view.path,
         branch: DEFAULT_BRANCH,
-        webBase,
         kbDir,
       };
       return {

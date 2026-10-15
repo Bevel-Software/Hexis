@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { HTML_NAV_BRIDGE } from '@bevel-software/platform-shared';
 import { bridgeScript, type BridgeConfig } from '../views/bridge.js';
 import { nativeMarkup } from '../views/native.js';
 
@@ -67,9 +68,9 @@ afterEach(() => {
 const CONFIG: BridgeConfig = {
   view: 'show_to_do_list',
   dataTool: 'hexis_view_data',
+  linkTool: 'hexis_view_link',
   pagePath: 'KnowledgeBase/Juan/Dashboards/To-Do-List.html',
   branch: 'main',
-  webBase: 'https://hexis.example',
   kbDir: 'knowledge-base',
 };
 
@@ -151,21 +152,85 @@ const bevel = (): { buildGraph(): Promise<{ nodes: Map<string, unknown> }> } =>
   (window as unknown as { bevel: { buildGraph(): Promise<{ nodes: Map<string, unknown> }> } }).bevel;
 
 describe('links in a view', () => {
-  it('opens a workspace URL in the web app as it is, and a relative link against the page', async () => {
-    const h = fakeHost({ 'ui/initialize': initialize({ openLinks: {} }), 'ui/open-link': () => ({}) });
-    mount(
-      h.host,
-      '<a id="abs" href="/workspace/main/knowledge-base/KnowledgeBase/Ops/Knowledge/Tasks/Bread.md">Bread</a>' +
-        '<a id="rel" href="../Tasks/Milk.md#due">Milk</a>',
-    );
+  /**
+   * A host whose server answers the link tool with an address of its own, so
+   * each test sees the bridge open exactly what the server said. What the
+   * server answers for each kind of link is pinned in views.test.ts (the
+   * link tool) and end to end in views.host.test.ts.
+   */
+  const linkHost = (answer?: Answer) =>
+    fakeHost({
+      'ui/initialize': initialize({ openLinks: {}, serverTools: {} }),
+      'tools/call': (params) =>
+        params?.name === 'hexis_view_link'
+          ? (answer?.(params) ??
+            { content: [], structuredContent: { url: `https://hexis.example/opened?${String((params.arguments as { href: string }).href)}` } })
+          : undefined,
+      'ui/open-link': () => ({}),
+    });
+  const linkCalls = (h: ReturnType<typeof fakeHost>) =>
+    h.requests('tools/call').filter((m) => m.params?.name === 'hexis_view_link').map((m) => (m.params?.arguments as { href: string }).href);
+
+  it("runs the app's own navigation runtime, verbatim", () => {
+    expect(bridgeScript(CONFIG)).toContain(HTML_NAV_BRIDGE);
+  });
+
+  it('opens an anchor where the server says the link goes, sending the link as the page wrote it', async () => {
+    const h = linkHost();
+    mount(h.host, '<a id="rel" href="../Tasks/Milk.md#due">Milk</a>');
     await h.initialized();
-    click('#abs');
     click('#rel');
+    await vi.waitFor(() => expect(h.requests('ui/open-link')).toHaveLength(1));
+    expect(h.requests('tools/call')[0]?.params).toEqual({
+      name: 'hexis_view_link',
+      arguments: { view: 'show_to_do_list', href: '../Tasks/Milk.md#due', branch: 'main' },
+    });
+    expect(h.requests('ui/open-link')[0]?.params?.url).toBe('https://hexis.example/opened?../Tasks/Milk.md#due');
+  });
+
+  it('gives scripts window.bevel.openNode and navigate, which open a link the same way', async () => {
+    const h = linkHost();
+    mount(h.host);
+    await h.initialized();
+    const api = window as unknown as { bevel: { openNode(href: string): void; navigate(href: string): void } };
+    api.bevel.openNode('/workspace/main/knowledge-base/KnowledgeBase/Ops/A.md');
+    api.bevel.navigate('https://example.com/x');
     await vi.waitFor(() => expect(h.requests('ui/open-link')).toHaveLength(2));
-    expect(h.requests('ui/open-link').map((m) => m.params?.url)).toEqual([
-      'https://hexis.example/workspace/main/knowledge-base/KnowledgeBase/Ops/Knowledge/Tasks/Bread.md',
-      'https://hexis.example/workspace/main/knowledge-base/KnowledgeBase/Juan/Tasks/Milk.md#due',
-    ]);
+    expect(linkCalls(h)).toEqual(['/workspace/main/knowledge-base/KnowledgeBase/Ops/A.md', 'https://example.com/x']);
+  });
+
+  it('scrolls a fragment inside the frame and asks the server nothing', async () => {
+    const h = linkHost();
+    mount(h.host, '<a id="jump" href="#due">Due</a><h2 id="due">Due</h2>');
+    await h.initialized();
+    const scrolled = vi.fn();
+    document.getElementById('due')!.scrollIntoView = scrolled;
+    click('#jump');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(linkCalls(h)).toEqual([]);
+  });
+
+  it('leaves a click the page already handled to the page', async () => {
+    const h = linkHost();
+    mount(h.host, '<a id="own" href="../Tasks/Milk.md">Milk</a>');
+    await h.initialized();
+    document.getElementById('own')!.addEventListener('click', (e) => e.preventDefault());
+    click('#own');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(linkCalls(h)).toEqual([]);
+    expect(h.requests('ui/open-link')).toHaveLength(0);
+  });
+
+  it('opens nothing the server refuses, and says so', async () => {
+    const h = linkHost(() => ({ isError: true, content: [{ type: 'text', text: 'This link cannot be opened: javascript:alert(1)' }] }));
+    mount(h.host, '<a id="bad" href="javascript:alert(1)">Run</a>');
+    await h.initialized();
+    click('#bad');
+    await vi.waitFor(() =>
+      expect(document.getElementById('hexis-bridge-toast')?.textContent).toBe('This link cannot be opened: javascript:alert(1)'),
+    );
+    expect(h.requests('ui/open-link')).toHaveLength(0);
   });
 });
 

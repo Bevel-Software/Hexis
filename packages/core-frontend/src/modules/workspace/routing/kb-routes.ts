@@ -4,13 +4,23 @@ import { GitContext } from '../../git/state/git.context';
 import { WorkspaceContext } from '../state/workspace.context';
 import { useRendererSurface } from '../components/renderers/rendererSurface';
 import { authFetch } from '../../../lib/api';
+import { isOpenableExternalHref, normalizeHref } from '../../../shared/markdown/hrefs';
 import {
-  isExternalHref,
-  isOpenableExternalHref,
-  normalizeHref,
-} from '../../../shared/markdown/hrefs';
+  KB_ROUTE_PREFIX,
+  kbFileUrl,
+  resolveKbHref,
+  resolveRelativePath,
+  safeDecode,
+  stripJunkBeforeKbDir,
+  type KbHref,
+} from '@bevel-software/platform-shared';
 
-export const KB_ROUTE_PREFIX = '/workspace';
+// The link grammar lives in platform-shared (workspace/kb-hrefs.ts), where the
+// local MCP server's knowledge views resolve links with it too. Re-exported so
+// the app's callers keep importing it from here.
+export { KB_ROUTE_PREFIX, kbFileUrl, resolveKbHref, resolveRelativePath, safeDecode, stripJunkBeforeKbDir };
+export type { KbHref };
+
 
 /**
  * The open change request, in the URL. A proposed row opens the shared
@@ -35,33 +45,6 @@ export const CR_FILE_PARAM = 'file';
  */
 export const NODE_ID_LINK_RE = /^[a-z0-9][a-z0-9_-]*(#[^/]+)?$/;
 
-/**
- * Self-heal a workspace-relative path the model may have mangled when it wrote
- * a citation link. The LLM sometimes corrupts the URL by inserting a junk
- * segment before the KB dir — e.g. `bevel-process-of-truth/knowledge-base/…`,
- * a blend of the branch name and the dir name — which then 404s. A well-formed
- * KB path has `<kbDirName>/` as its first segment, so when that segment shows up
- * *later* in the path we drop everything before it. No-op when the path is
- * already well-formed (kbDirName first) or has no `<kbDirName>` segment at all
- * (a non-repo file like `my-notes.txt`). Segment-exact match avoids the
- * `<kbDirName>-backup/…` substring foot-gun.
- */
-export function stripJunkBeforeKbDir(path: string, kbDirName: string | null): string {
-  if (!kbDirName) return path;
-  const segs = path.split('/');
-  const idx = segs.indexOf(kbDirName);
-  return idx > 0 ? segs.slice(idx).join('/') : path;
-}
-
-export function kbFileUrl(branch: string, relativePath: string = ''): string {
-  const branchPart = encodeURIComponent(branch);
-  if (!relativePath) return `${KB_ROUTE_PREFIX}/${branchPart}`;
-  const pathPart = relativePath
-    .split('/')
-    .map(encodeURIComponent)
-    .join('/');
-  return `${KB_ROUTE_PREFIX}/${branchPart}/${pathPart}`;
-}
 
 /**
  * The canonical URL for a node: `/workspace/<branch>/<id>`. A bare id segment is
@@ -168,126 +151,6 @@ export function useCanonicalFileUrl(workspacePath: string | null): string | null
   return `${window.location.origin}${relative}`;
 }
 
-export function safeDecode(s: string): string {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
-}
-
-/**
- * Resolve a relative path against a base file path (like `path.resolve`, but for
- * workspace-relative paths). Used to turn an internal link's href
- * (`../NodeTypes/Process.md`) into a workspace-relative path before navigating.
- */
-export function resolveRelativePath(basePath: string, relative: string): string {
-  // Root-relative hrefs (`/Knowledge/Node.md`) are anchored at the workspace
-  // root, not the current file — resolve against an empty base so the leading
-  // `/` doesn't get appended onto `baseDir` (`Knowledge/Knowledge/Node.md`).
-  const baseDir =
-    relative.startsWith('/')
-      ? ''
-      : basePath.includes('/')
-        ? basePath.slice(0, basePath.lastIndexOf('/'))
-        : '';
-  const parts = baseDir ? baseDir.split('/') : [];
-  for (const segment of relative.split('/')) {
-    if (segment === '..') parts.pop();
-    else if (segment !== '.' && segment !== '') parts.push(segment);
-  }
-  return parts.join('/');
-}
-
-/**
- * A link destination as written in a knowledge page, classified and resolved.
- */
-export type KbHref =
-  | { kind: 'external' }
-  | { kind: 'workspace'; branch: string | null; path: string; hash: string };
-
-/**
- * The grammar of a link or image destination, as one function. `basePath` is
- * the file the link sits in; `kbDirName` drives the junk-segment repair.
- *
- *   href                                    kind       branch    path                  hash
- *   ──────────────────────────────────────  ─────────  ────────  ────────────────────  ──────
- *   https://x.y/z, mailto:a@b, tel:…        external
- *   //cdn.x.y/z  (protocol-relative)        external
- *   /workspace/<b>/<p>#h  (absolute app)    workspace  <b>       <p>, junk stripped    #h
- *   /workspace/<b>                          workspace  <b>       ''
- *   ../NodeTypes/Process.md#goal            workspace  null      resolved vs basePath  #goal
- *   /KB/x.png  (root-relative)              workspace  null      KB/x.png
- *   #overview  (same document)              workspace  null      basePath              #overview
- *   ''  (empty)                             null
- *
- * Percent-escapes are decoded (react-markdown encodes the spaces in a
- * destination; the file on disk has real spaces); a malformed escape is left
- * as-is, the tolerance `safeDecode` has always given the URL form. `branch` is
- * null for a relative link: the caller supplies the branch it is standing on.
- *
- * `repairMangledPath` runs {@link stripJunkBeforeKbDir} on the result. It is on
- * for a LINK, which may have been written by a model that mangled the path,
- * and off for an IMAGE, which was not: the repair rewrites any path whose
- * later segment happens to equal `kbDirName`, so on an image source it
- * truncates a correctly-authored `./assets/knowledge-base/shot.png` down to
- * `knowledge-base/shot.png` and the reader gets a placeholder where a picture
- * belongs. Same reasoning as `openWorkspacePath` below: a destination nobody
- * garbled needs no repair, and applying one can only find the wrong file.
- *
- * THE BRANCH RULE. A link handler navigates with the URL's branch, as
- * `openFile` always has: an absolute citation URL names the branch the cited
- * node lives on. An IMAGE resolver takes the path and ignores the branch: the
- * bytes come from the workspace the page is rendered from, so a cross-branch
- * image URL shows that tree's copy, or the placeholder when there is none.
- * Serving bytes at another branch is the `?ref=` item in TODOS.md.
- */
-export function resolveKbHref(
-  rawHref: string,
-  {
-    basePath,
-    kbDirName,
-    repairMangledPath = true,
-  }: { basePath: string; kbDirName: string | null; repairMangledPath?: boolean },
-): KbHref | null {
-  // Read the href the way a browser reads it BEFORE anything is parsed out of
-  // it, not just before the scheme check. An href written on its own line in
-  // generated markup arrives padded, and `sanitizeAgentHtml` keeps it on that
-  // reading — so every row of the table above has to see the same string, or a
-  // padded `'  Board.html  '` resolves to a filename with spaces nobody wrote,
-  // a padded `'  /workspace/…'` misses the prefix and resolves as a relative
-  // path, and a padded `'  #goal'` loses its same-document row.
-  const href = normalizeHref(rawHref);
-  if (!href) return null;
-  if (isExternalHref(href)) return { kind: 'external' };
-  const hashIdx = href.indexOf('#');
-  const hash = hashIdx >= 0 ? href.slice(hashIdx) : '';
-  const location = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
-  const repair = (path: string) => (repairMangledPath ? stripJunkBeforeKbDir(path, kbDirName) : path);
-  // Same document: `#overview` names a heading in the file the link sits in,
-  // not a destination to resolve. Without this row an empty location falls
-  // through to `resolveRelativePath`, which drops the file segment off
-  // `basePath` and hands the caller the PARENT DIRECTORY — a reader who
-  // clicked a section link lands on a folder listing.
-  if (!location) return { kind: 'workspace', branch: null, path: basePath, hash };
-  if (location.startsWith(`${KB_ROUTE_PREFIX}/`)) {
-    const rest = location.slice(KB_ROUTE_PREFIX.length + 1);
-    const slashIdx = rest.indexOf('/');
-    if (slashIdx < 0) return { kind: 'workspace', branch: safeDecode(rest), path: '', hash };
-    return {
-      kind: 'workspace',
-      branch: safeDecode(rest.slice(0, slashIdx)),
-      path: repair(safeDecode(rest.slice(slashIdx + 1))),
-      hash,
-    };
-  }
-  return {
-    kind: 'workspace',
-    branch: null,
-    path: repair(resolveRelativePath(basePath, safeDecode(location))),
-    hash,
-  };
-}
 
 /**
  * Open an external destination in a new tab, the one way this app does it.
