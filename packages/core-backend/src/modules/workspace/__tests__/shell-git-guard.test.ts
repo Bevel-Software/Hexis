@@ -135,6 +135,65 @@ describe('sharedRepositoryGitRefusal', () => {
     }
   });
 
+  it('refuses a program a wrapper runs from an operand only the shell can resolve', () => {
+    for (const command of [
+      'G=git; env "$G" gc',
+      'nice -n 5 $G gc',
+      'command "$G" update-ref refs/heads/bob/b HEAD',
+      'timeout 9 ${G} prune',
+      'find . -maxdepth 0 -exec "$G" gc \\;',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), command).not.toBeNull();
+    }
+    for (const command of ['env FOO=1 git status', 'nice -n 5 git log', 'find . -name "$PAT"', 'cp "$SRC" "$DST"']) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), command).toBeNull();
+    }
+  });
+
+  it('finds the end of a command substitution as sh does: a quoted or nested ")" does not close it', () => {
+    for (const command of [
+      'echo "$(printf ")" ; git update-ref refs/heads/x HEAD)"',
+      "echo $(printf ')' ; git gc)",
+      'echo "$(echo "$(printf ")")"; git gc)"',
+      'echo $(echo \\) ; git gc)',
+      `echo $(printf ")" ; git gc ; echo "'")`,
+      'echo $(# )\ngit gc)',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), JSON.stringify(command)).not.toBeNull();
+    }
+  });
+
+  it('reads a here-document body as data, and what follows its delimiter as commands', () => {
+    for (const command of [
+      "cat <<'EOF'\n'\nEOF\ngit gc",
+      'cat <<EOF\n"\nEOF\ngit gc',
+      'cat <<-EOF > notes.md\n\t\'\n\tEOF\ngit update-ref refs/heads/x HEAD',
+      'cat <<EOF\n$(git gc)\nEOF',
+      'cat <<EOF\n`git gc`\nEOF',
+      'echo "$(cat <<EOF\n)\nEOF\n)"; git gc',
+      'cat <<$D\nx\n$D',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), JSON.stringify(command)).not.toBeNull();
+    }
+    for (const command of [
+      "cat <<'EOF' > notes.md\nit's $(git gc) here, `git gc` there\nEOF",
+      "git commit -m \"$(cat <<'EOF'\nfix: the thing (finally)\n\nIt's done.\nEOF\n)\"",
+      'cat <<EOF\nupdate-ref gc prune\nEOF\ngit status',
+      'git log --format=%s <<<"x"',
+    ]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), JSON.stringify(command)).toBeNull();
+    }
+  });
+
+  it('reads a comment as sh does: a quote in it does not hide the next line', () => {
+    for (const command of ["# '\ngit gc", 'echo hi # "\ngit gc', "true; # it's\ngit update-ref refs/heads/x HEAD"]) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), JSON.stringify(command)).not.toBeNull();
+    }
+    for (const command of ['# git gc', 'git status # then git gc', 'echo a#b', 'git log -1 # it\'s fine']) {
+      expect(sharedRepositoryGitRefusal(command, 'posix'), JSON.stringify(command)).toBeNull();
+    }
+  });
+
   it('reads the command as cmd.exe does on Windows', () => {
     for (const command of [
       'git update-ref refs/heads/bob/b HEAD',

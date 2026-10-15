@@ -36,8 +36,12 @@ export interface IKbRepository {
   /** The bare repository's folder. */
   readonly dir: string;
   /**
-   * The mutex the git layer serializes worktree operations under; every
-   * repository operation runs under its repository-level reservation.
+   * The mutex the git layer serializes worktree operations under. Every
+   * operation that writes what the worktrees share — the fetch, a worktree
+   * add, remove or prune, a config write, the set-aside — runs under its
+   * repository-level reservation; the reads (`exists`, `listWorktrees`,
+   * `originUrl`) take none, and a caller that must act on what they answer
+   * reads them again under the reservation.
    */
   readonly mutex: WorkspaceMutex;
 

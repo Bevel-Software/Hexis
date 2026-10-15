@@ -223,12 +223,14 @@ export class KbRepository implements IKbRepository {
     // cleared and made again.
     await fs.rm(this.dir, { recursive: true, force: true });
     await fs.mkdir(this.dir, { recursive: true });
+    let fetchedAt = Date.now();
     try {
       await this.gitRunner.run(this.dir, ['init', '--bare', '--quiet', this.dir]);
       for (const args of this.configArgs(url)) await this.gitRunner.run(this.dir, args);
       for (const args of cloneCredentialConfigArgs(this.gitRunner.credentials)) {
         await this.gitRunner.run(this.dir, args).catch(() => undefined);
       }
+      fetchedAt = Date.now();
       await this.gitRunner.run(this.dir, ['fetch', '--prune', '--no-write-fetch-head', '--quiet', 'origin'], {
         timeoutMs: Math.max(this.gitRunner.defaultTimeoutMs, FIRST_FETCH_TIMEOUT_MS),
       });
@@ -242,7 +244,7 @@ export class KbRepository implements IKbRepository {
     }
     this.configStamped = true;
     this.stampedCredentials = this.credentialFingerprint();
-    this.noteFetched(true);
+    this.noteFetched(true, fetchedAt);
     log.info(`created the knowledge-base repository at ${this.dir}`);
   }
 
@@ -333,11 +335,15 @@ export class KbRepository implements IKbRepository {
     });
   }
 
-  private noteFetched(ok: boolean): void {
-    const now = Date.now();
+  /**
+   * `at` for a success is when its fetch STARTED: the refs it wrote are at
+   * least that fresh, and no fresher — a deletion on the remote while it ran
+   * may be missing from them.
+   */
+  private noteFetched(ok: boolean, at = Date.now()): void {
     this.lastOk = ok;
-    if (ok) this.lastSuccessAt = now;
-    else this.lastFailureAt = now;
+    if (ok) this.lastSuccessAt = at;
+    else this.lastFailureAt = at;
   }
 
   /** The last time the repository reached the remote and whether it worked; null before any attempt. */
@@ -373,8 +379,10 @@ export class KbRepository implements IKbRepository {
       return false;
     }
     const generation = this.generation;
+    let startedAt = Date.now();
     const promise = this.mutex
       .runRepository(async () => {
+        startedAt = Date.now();
         if (!(await this.exists())) {
           await this.ensureHeld();
           return;
@@ -390,7 +398,7 @@ export class KbRepository implements IKbRepository {
       })
       .then(
         () => {
-          if (generation === this.generation) this.noteFetched(true);
+          if (generation === this.generation) this.noteFetched(true, startedAt);
           return true;
         },
         (err: unknown) => {

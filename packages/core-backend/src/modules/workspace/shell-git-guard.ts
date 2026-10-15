@@ -35,8 +35,11 @@
  * running shell can resolve — a variable, a command substitution, a glob —
  * is refused where it could decide the outcome (the program, git's
  * subcommand, or the flags of a subcommand whose refusal depends on them),
- * rather than guessed at. Command substitutions and command lines handed to
- * another shell (`sh -c`, `eval`, `cmd /c`) are read and checked as well. A
+ * rather than guessed at — and so is such a word among the operands of a
+ * program that runs another (`env "$G" gc`). Command substitutions and
+ * command lines handed to another shell (`sh -c`, `eval`, `cmd /c`) are read
+ * and checked as well; comments and here-document bodies are skipped as `sh`
+ * skips them, except the substitutions an unquoted here-document runs. A
  * refusal of something that only looked like such a command (`echo git gc`)
  * costs nothing.
  *
@@ -157,9 +160,74 @@ const UNREADABLE = 'a git command whose arguments are only known when the shell 
  * The bodies of command substitutions (`$(…)`, backquotes) are commands too,
  * returned for the caller to check.
  */
-function lex(src: string, dialect: ShellDialect): { commands: Word[][]; substitutions: string[] } {
+interface Heredoc {
+  delimiter: string;
+  /** `<<-`: leading tabs are stripped from the body's lines, the delimiter's too. */
+  stripTabs: boolean;
+  /** Any part of the delimiter quoted: the body is taken literally, no substitution in it runs. */
+  quoted: boolean;
+}
+
+/**
+ * The here-document operator `<<` at `i` (POSIX): its delimiter word, quotes
+ * removed, and the index after it. `readable` is false for a delimiter only
+ * the running shell could settle (empty, or with an expansion in it).
+ */
+function readHeredoc(src: string, i: number): { doc: Heredoc; end: number; readable: boolean } {
+  let j = i + 2;
+  const stripTabs = src[j] === '-';
+  if (stripTabs) j++;
+  while (src[j] === ' ' || src[j] === '\t') j++;
+  let delimiter = '';
+  let quoted = false;
+  let readable = true;
+  while (j < src.length && !' \t\n;&|()<>'.includes(src[j]!)) {
+    const c = src[j]!;
+    if (c === "'" || c === '"') {
+      const close = src.indexOf(c, j + 1);
+      delimiter += src.slice(j + 1, close < 0 ? src.length : close);
+      quoted = true;
+      j = close < 0 ? src.length : close + 1;
+    } else if (c === '\\') {
+      delimiter += src[j + 1] ?? '';
+      quoted = true;
+      j += 2;
+    } else {
+      if (c === '$' || c === '`') readable = false;
+      delimiter += c;
+      j++;
+    }
+  }
+  if (delimiter === '') readable = false;
+  return { doc: { delimiter, stripTabs, quoted }, end: j, readable };
+}
+
+/**
+ * A here-document's body starting at `from`, up to its delimiter line:
+ * where the body ends, and where the shell reads commands again.
+ */
+function heredocBody(src: string, from: number, doc: Heredoc): { end: number; next: number } {
+  let pos = from;
+  while (pos < src.length) {
+    const eol = src.indexOf('\n', pos);
+    const line = src.slice(pos, eol < 0 ? src.length : eol);
+    const next = eol < 0 ? src.length : eol + 1;
+    if ((doc.stripTabs ? line.replace(/^\t+/, '') : line) === doc.delimiter) return { end: pos, next };
+    pos = next;
+  }
+  return { end: src.length, next: src.length };
+}
+
+function lex(
+  src: string,
+  dialect: ShellDialect,
+): { commands: Word[][]; substitutions: string[]; unreadable: boolean } {
   const commands: Word[][] = [];
   const substitutions: string[] = [];
+  /** Shell syntax this reader cannot settle, where it could hide what runs. */
+  let unreadable = false;
+  /** Here-documents opened on the current line: their bodies follow its newline. */
+  let pendingHeredocs: Heredoc[] = [];
   let cur: Word[] = [];
   let text = '';
   let opaque = false;
@@ -175,17 +243,80 @@ function lex(src: string, dialect: ShellDialect): { commands: Word[][]; substitu
     if (cur.length > 0) commands.push(cur);
     cur = [];
   };
-  /** The index of the `)` closing a `$(` whose body starts at `from`. */
+  /** Whether the character at `j` begins a word, so that a `#` there opens a comment (`a#b` is one word). */
+  const startsWord = (j: number, from = 0): boolean => j === from || /[\s;&|()]/.test(src[j - 1]!);
+  /**
+   * The index of the `)` closing a `$(` whose body starts at `from`. A `)`
+   * that is quoted, escaped, in a comment, in a here-document or in a nested
+   * substitution does not close it: `$(printf ")"; git gc)` runs `git gc`.
+   */
   const closeParen = (from: number): number => {
     let depth = 1;
+    let docs: Heredoc[] = [];
     for (let j = from; j < src.length; j++) {
       const c = src[j];
       if (c === '\\') j++;
       else if (c === "'") j = src.indexOf("'", j + 1) < 0 ? src.length : src.indexOf("'", j + 1);
-      else if (c === '(') depth++;
+      else if (c === '"') j = closeDoubleQuote(j + 1);
+      else if (c === '`') j = closeBackquote(j + 1);
+      else if (c === '#' && startsWord(j, from)) {
+        const eol = src.indexOf('\n', j);
+        j = eol < 0 ? src.length : eol - 1;
+      } else if (c === '<' && src[j + 1] === '<' && src[j + 2] !== '<') {
+        const read = readHeredoc(src, j);
+        if (!read.readable) unreadable = true;
+        docs.push(read.doc);
+        j = read.end - 1;
+      } else if (c === '<' && src[j + 1] === '<') j += 2;
+      else if (c === '\n' && docs.length > 0) {
+        let next = j + 1;
+        for (const doc of docs) next = heredocBody(src, next, doc).next;
+        docs = [];
+        j = next - 1;
+      } else if (c === '(') depth++;
       else if (c === ')' && --depth === 0) return j;
     }
     return src.length;
+  };
+  /** The index of the `"` closing one whose body starts at `from`. */
+  const closeDoubleQuote = (from: number): number => {
+    for (let j = from; j < src.length; j++) {
+      const c = src[j];
+      if (c === '\\') j++;
+      else if (c === '"') return j;
+      else if (c === '`') j = closeBackquote(j + 1);
+      else if (c === '$' && src[j + 1] === '(') j = closeParen(j + 2);
+    }
+    return src.length;
+  };
+  /**
+   * Past the bodies of the here-documents opened on the line that ended just
+   * before `from`: where the shell reads commands again. A body is data, but
+   * with an unquoted delimiter its command substitutions run — those are
+   * returned for checking with the others.
+   */
+  const skipHeredocBodies = (from: number): number => {
+    let next = from;
+    for (const doc of pendingHeredocs) {
+      const body = heredocBody(src, next, doc);
+      if (!doc.quoted) {
+        for (let k = next; k < body.end; k++) {
+          if (src[k] === '\\') k++;
+          else if (src[k] === '$' && src[k + 1] === '(') {
+            const close = closeParen(k + 2);
+            substitutions.push(src.slice(k + 2, close));
+            k = close;
+          } else if (src[k] === '`') {
+            const close = closeBackquote(k + 1);
+            substitutions.push(src.slice(k + 1, close));
+            k = close;
+          }
+        }
+      }
+      next = body.next;
+    }
+    pendingHeredocs = [];
+    return next;
   };
   /** The index of the backquote closing one whose body starts at `from`. */
   const closeBackquote = (from: number): number => {
@@ -258,9 +389,22 @@ function lex(src: string, dialect: ShellDialect): { commands: Word[][]; substitu
         opaque = true;
         inWord = true;
         i = close + 1;
-      } else if (';&|()\n'.includes(c)) {
+      } else if (c === '\n') {
+        endCommand();
+        i = pendingHeredocs.length > 0 ? skipHeredocBodies(i + 1) : i + 1;
+      } else if (';&|()'.includes(c)) {
         endCommand();
         i++;
+      } else if (c === '#' && !inWord && startsWord(i)) {
+        // A comment runs to the end of the line; a quote in it is not syntax.
+        const eol = src.indexOf('\n', i);
+        i = eol < 0 ? src.length : eol;
+      } else if (c === '<' && src[i + 1] === '<' && src[i + 2] !== '<') {
+        endWord();
+        const read = readHeredoc(src, i);
+        if (!read.readable) unreadable = true;
+        pendingHeredocs.push(read.doc);
+        i = read.end;
       } else if (c === '<' || c === '>') {
         endWord();
         i += src[i + 1] === '&' || src[i + 1] === c ? 2 : 1;
@@ -317,7 +461,7 @@ function lex(src: string, dialect: ShellDialect): { commands: Word[][]; substitu
     }
   }
   endCommand();
-  return { commands, substitutions };
+  return { commands, substitutions, unreadable };
 }
 
 const basename = (word: string): string => word.replace(/^.*[\\/]/, '').toLowerCase();
@@ -325,6 +469,17 @@ const isGit = (w: Word): boolean => !w.opaque && /^git(?:\.exe)?$/.test(basename
 const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'busybox']);
 /** Words that may stand before a command and are not it. */
 const PREFIX_WORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'time']);
+/**
+ * Programs that run another program named among their operands. An operand
+ * only the shell can resolve may be that program — `env "$G" gc` runs
+ * `git gc` when `G=git`.
+ */
+const WRAPPERS = new Set([
+  'env', 'command', 'exec', 'builtin', 'nice', 'nohup', 'timeout', 'xargs', 'sudo', 'doas', 'su', 'runuser',
+  'stdbuf', 'ionice', 'setsid', 'setpriv', 'chrt', 'taskset', 'flock', 'chroot', 'unshare', 'nsenter', 'watch',
+  'parallel', 'strace', 'ltrace', 'time', 'busybox', 'script', 'start', 'call',
+]);
+const FIND_RUNS = /^-(?:exec|execdir|ok|okdir)$/;
 
 function commandRefusal(words: Word[], dialect: ShellDialect, depth: number): string | null {
   let i = 0;
@@ -335,6 +490,9 @@ function commandRefusal(words: Word[], dialect: ShellDialect, depth: number): st
     const w = words[j]!;
     if (w.opaque) continue;
     const name = basename(w.text).replace(/\.exe$/, '');
+    const runsAnOperand =
+      WRAPPERS.has(name) || (name === 'find' && words.some((a, n) => n > j && !a.opaque && FIND_RUNS.test(a.text)));
+    if (runsAnOperand && words.slice(j + 1).some((a) => a.opaque)) return UNREADABLE;
     // Every `git` in the command, wherever it stands — `nice -n 5 git gc`,
     // `find . -exec git gc \;`, `timeout 9 git prune` all reach the same
     // repository. A word that only looks like one (`echo git gc`) is refused
@@ -370,7 +528,8 @@ function commandRefusal(words: Word[], dialect: ShellDialect, depth: number): st
 }
 
 function refusalIn(command: string, dialect: ShellDialect, depth: number): string | null {
-  const { commands, substitutions } = lex(command, dialect);
+  const { commands, substitutions, unreadable } = lex(command, dialect);
+  if (unreadable) return UNREADABLE;
   for (const words of commands) {
     const reason = commandRefusal(words, dialect, depth);
     if (reason !== null) return reason;

@@ -262,6 +262,12 @@ export class KbStartupRunner {
    * to them — a push would bring a deleted branch back.
    */
   private readonly goneFromRemote = new Set<string>();
+  /**
+   * When this run listed the remote's branches. A fetch that started before
+   * it may lack a deletion the listing already saw, so only a fetch since
+   * counts as current for the branches the run opens (`fetchWindowMs`).
+   */
+  private listedAt = 0;
 
   constructor(private readonly opts: KbStartupRunnerOptions) {
     this.repository =
@@ -463,6 +469,10 @@ export class KbStartupRunner {
             'screen or GITHUB_TOKEN instead.',
         );
       }
+      // What a previous run found deleted may have been pushed again since:
+      // each run asks afresh.
+      this.goneFromRemote.clear();
+      this.listedAt = Date.now();
       const heads = await this.ensureRemote();
       // AFTER the remote answered: the configured address is known to be a
       // repository we can reach, so a clone of a different one is stale, not
@@ -1148,8 +1158,8 @@ export class KbStartupRunner {
     // The phase opens every branch: the repository's one fetch in the window
     // brought them all, so each add reads it instead of asking the remote
     // for its branch again. A fetch that failed leaves the add to ask.
-    await this.repository.fetch({ maxAgeMs: STARTUP_FETCH_WINDOW_MS });
-    await this.repository.addWorktree(branch, repoDir, { withinFetchWindowMs: STARTUP_FETCH_WINDOW_MS });
+    await this.repository.fetch({ maxAgeMs: this.fetchWindowMs() });
+    await this.repository.addWorktree(branch, repoDir, { withinFetchWindowMs: this.fetchWindowMs() });
     try {
       this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
     } catch (err) {
@@ -1160,12 +1170,17 @@ export class KbStartupRunner {
     return repoDir;
   }
 
+  /** How old a fetch of the repository may be and still count for this run: never older than its listing. */
+  private fetchWindowMs(): number {
+    return Math.max(0, Math.min(STARTUP_FETCH_WINDOW_MS, Date.now() - this.listedAt));
+  }
+
   private async updateClone(branch: string, repoDir: string, worktree = false): Promise<string> {
     if (worktree) {
       // ONE fetch for every worktree the phase visits, within the window: the
       // repository's. The phase is fail-closed, so a failed fetch stops it
       // with git's words, as the clone's own fetch did.
-      if (!(await this.repository.fetch({ maxAgeMs: STARTUP_FETCH_WINDOW_MS }))) {
+      if (!(await this.repository.fetch({ maxAgeMs: this.fetchWindowMs() }))) {
         const raw = `git fetch origin failed: ${String(this.repository.lastFetchFailure() ?? 'unknown failure')}`;
         throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
       }
@@ -1177,6 +1192,7 @@ export class KbStartupRunner {
         startupLog.warn(`branch "${branch}" was deleted on the remote during this start: its working copy is left as it is`);
         return repoDir;
       }
+      this.goneFromRemote.delete(branch);
     } else {
       await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);
     }

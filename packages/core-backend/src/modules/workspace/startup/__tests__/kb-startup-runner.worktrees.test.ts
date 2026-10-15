@@ -202,6 +202,59 @@ describe('a boot that opens every remote branch', () => {
       expect(await git(upstream, ['show', `${branch}:maintained.md`])).toBe('by the boot');
     }
   });
+
+  it('does not take a fetch from before its listing as current: a branch deleted since is not brought back', async () => {
+    const steps: OnServerStart[] = [touchAll];
+    const runner = makeRunner(steps);
+    // The same process ran the phase moments ago: its repository fetched
+    // well within the window.
+    await runner.runAll();
+    const deleteBobThenWriteAll = step('delete-then-write-all', async (ctx) => {
+      await git(upstream, ['update-ref', '-d', 'refs/heads/bob/b']);
+      for (const h of await ctx.allBranches()) {
+        await h.repoDir();
+        h.write('maintained.md', 'by the boot');
+      }
+      return { outcome: 'ok' };
+    });
+    steps.splice(0, steps.length, deleteBobThenWriteAll);
+
+    await runner.runAll();
+
+    expect((await git(upstream, ['branch', '--list', 'bob/b'])).trim()).toBe('');
+    expect(await git(upstream, ['show', 'alice/a:maintained.md'])).toBe('by the boot');
+  });
+
+  it('maintains a branch again at the next run once it is back on the remote', async () => {
+    const steps: OnServerStart[] = [touchAll];
+    const runner = makeRunner(steps);
+    await runner.runAll();
+    const bobTip = (await git(upstream, ['rev-parse', 'bob/b'])).trim();
+    steps.splice(
+      0,
+      steps.length,
+      step('delete-then-write-all', async (ctx) => {
+        await git(upstream, ['update-ref', '-d', 'refs/heads/bob/b']);
+        for (const h of await ctx.allBranches()) await h.repoDir();
+        return { outcome: 'ok' };
+      }),
+    );
+    await runner.runAll();
+    expect((await git(upstream, ['branch', '--list', 'bob/b'])).trim()).toBe('');
+
+    // Pushed again by its owner; the next run of the same process writes to it.
+    await git(upstream, ['update-ref', 'refs/heads/bob/b', bobTip]);
+    steps.splice(0, steps.length, step('write-all', async (ctx) => {
+      for (const h of await ctx.allBranches()) {
+        await h.repoDir();
+        h.write('maintained.md', 'by the boot');
+      }
+      return { outcome: 'ok' };
+    }));
+    await runner.runAll();
+
+    expect(await git(upstream, ['show', 'bob/b:maintained.md'])).toBe('by the boot');
+  });
 });
 
 describe('a deployment upgraded over full clones', () => {
