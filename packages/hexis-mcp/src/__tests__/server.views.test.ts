@@ -36,10 +36,13 @@ let httpServer: http.Server | null = null;
 let base = '';
 /** Holds the deployment's MCP App manifest back, and with it the end of discovery, until released. */
 let appsGate: Promise<void> = Promise.resolve();
+/** When set, the deployment's MCP endpoint fails, so tool discovery does. */
+let mcpBroken = false;
 
 afterEach(() => {
   vi.restoreAllMocks();
   appsGate = Promise.resolve();
+  mcpBroken = false;
 });
 
 beforeAll(async () => {
@@ -55,6 +58,7 @@ beforeAll(async () => {
         };
         if (pathname === '/api/config') return json(200, { mcpUrl: `${base}/api/mcp`, agentInstructions: false });
         if (pathname === '/api/mcp') {
+          if (mcpBroken) return json(500, { error: 'down' });
           const parsed = body ? (JSON.parse(body) as { method?: string }) : undefined;
           const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
           mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -193,6 +197,25 @@ describe('knowledge views beside the deployment\'s own view', () => {
       expect(discovered()).toBe(false);
     } finally {
       release();
+      await shutdown();
+    }
+  });
+
+  /**
+   * The views read through the deployment's KB tools, not through the tools
+   * discovery loads, so a failed discovery is no reason to lose them.
+   */
+  it('keeps the knowledge views listed and callable when the workspace tools could not be loaded', { timeout: 60_000 }, async () => {
+    mcpBroken = true;
+    const { client, shutdown } = await connect();
+    try {
+      const names = (await client.listTools()).tools.map((t) => t.name);
+      expect(names).toContain('show_to_do_list');
+      expect(names).not.toContain('open_page');
+      const result = await client.callTool({ name: 'show_to_do_list', arguments: {} });
+      expect(result.isError).toBeFalsy();
+      expect((result.content as { text: string }[])[0]?.text).toContain('To-do list');
+    } finally {
       await shutdown();
     }
   });

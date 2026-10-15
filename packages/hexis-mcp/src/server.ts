@@ -1112,7 +1112,9 @@ export async function createHexisMcpServer(
       // The failure goes IN the listing, not into an empty one: an empty
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
-      if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
+      // The knowledge views stay listed beside it: they read through the
+      // deployment's KB tools directly, so a failed discovery leaves them working.
+      if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError), ...(await views.listTools())] };
       // Shutdown can land DURING discovery: every phase boundary then returns
       // early, which is a clean return — no error, and `tools` still empty.
       // Answering that with an empty listing would show the reader exactly
@@ -1168,18 +1170,19 @@ export async function createHexisMcpServer(
       // must not be told it does not exist because the catalog is still
       // arriving. (After the first list this is already settled.)
       await ready;
+      // A knowledge view, or its data tool, unless a discovered tool owns the
+      // name (the listing gives it to the discovered tool too). Views read
+      // through the deployment directly, so neither a failed discovery nor the
+      // re-registration gate below stands in their way.
+      const requested = request.params.name;
+      if (views.handles(requested) && !tools.some((t) => t.mcpName === requested)) {
+        return views.callTool(requested, request.params.arguments ?? {});
+      }
       if (discoveryError !== null) {
         throw new McpError(
           ErrorCode.InternalError,
           `hexis-mcp could not load this workspace's tools: ${discoveryError}`,
         );
-      }
-      // A knowledge view, or its data tool, unless a discovered tool owns the
-      // name (the listing gives it to the discovered tool too). Views read
-      // through the deployment directly, so no re-registration gate applies.
-      const requested = request.params.name;
-      if (views.handles(requested) && !tools.some((t) => t.mcpName === requested)) {
-        return views.callTool(requested, request.params.arguments ?? {});
       }
       // Never start a call mid-re-registration — a swap or a recovery may have
       // the manual between its deregister and its register, where a repository
