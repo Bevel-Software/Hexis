@@ -51,6 +51,7 @@
   "devDependencies": {
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.0.0",
+    "happy-dom": "^20.11.1",
     "typescript": "^5.8.0",
     "vitest": "^3.2.6"
   },

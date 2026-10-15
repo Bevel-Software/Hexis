@@ -96,10 +96,21 @@ const BRIDGE_SOURCE = String.raw`
     const text = result && Array.isArray(result.content) ? result.content.filter((c) => c && c.type === 'text').map((c) => c.text).join(' ') : '';
     return result && result.isError ? (text || 'the server could not load live data') : null;
   };
+  // How long a host that does not advertise serverTools gets to answer before the view says why it has no data.
+  const UNADVERTISED_CALL_MS = 15000;
+  const within = (promise, ms, message) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+  });
   async function fetchLive() {
-    if (!hostCaps.serverTools) return deliver(null, 'this host cannot call tools for a view');
+    // Tried even when the host does not advertise serverTools: hosts that
+    // proxy calls do not all say so. One that neither says so nor answers is
+    // given up on, so the view shows why instead of loading forever.
     try {
-      const result = await request('tools/call', { name: CFG.dataTool, arguments: { view: CFG.view, branch: CFG.branch } });
+      const call = request('tools/call', { name: CFG.dataTool, arguments: { view: CFG.view, branch: CFG.branch } });
+      const result = await (hostCaps.serverTools
+        ? call
+        : within(call, UNADVERTISED_CALL_MS, 'the host did not answer the request for live data'));
       const snap = snapshotOf(result);
       deliver(snap, snap ? null : errorOf(result));
     } catch (e) {
@@ -240,7 +251,10 @@ const BRIDGE_SOURCE = String.raw`
     if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
     event.preventDefault();
     let url = href;
-    if (!/^(https?:|mailto:)/i.test(href)) {
+    // A root-relative link is a path in the web app (/workspace/<branch>/...),
+    // which is what it means on the page there too.
+    if (/^\/(?!\/)/.test(href)) url = CFG.webBase + href;
+    else if (!/^(https?:|mailto:)/i.test(href)) {
       const [path, anchor] = href.split('#');
       url = kbUrl(resolveFrom(decodeURIComponent(path), CFG.pagePath), anchor);
     }

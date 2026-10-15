@@ -549,11 +549,19 @@ function nativeApp(): void {
       render();
     } else if (act === 'send') {
       const text = instructions();
+      // What this message carries. An edit made while it is out is not in it,
+      // so it stays queued for the next one.
+      const batch = new Map([...pending].map(([path, e]) => [path, { ...e.sets }]));
       el.setAttribute('disabled', '');
       H!.sendToChat(text).then(
         () => {
-          for (const [path, e] of pending) sent.set(path, { ...(sent.get(path) ?? {}), ...e.sets });
-          pending.clear();
+          for (const [path, sets] of batch) {
+            sent.set(path, { ...(sent.get(path) ?? {}), ...sets });
+            const e = pending.get(path);
+            if (!e) continue;
+            for (const [k, v] of Object.entries(sets)) if (e.sets[k] === v) delete e.sets[k];
+            if (!Object.keys(e.sets).length) pending.delete(path);
+          }
           render();
         },
         () => {
@@ -626,11 +634,22 @@ function nativeApp(): void {
     if (native) render();
     else H!.reportSize();
   }
+  /** The display mode this view asked the host for, while that request is out. */
+  let requested: string | null = null;
+  /** A display-mode change the person asked for here, which must not undo their choice of view. */
+  async function requestMode(mode: string): Promise<void> {
+    requested = mode;
+    try {
+      await H!.requestDisplayMode(mode);
+    } finally {
+      requested = null;
+    }
+  }
   async function showPage(): Promise<void> {
     override = 'page';
     if (canFullscreen() && H!.context().displayMode !== 'fullscreen') {
       try {
-        await H!.requestDisplayMode('fullscreen');
+        await requestMode('fullscreen');
       } catch {
         /* stays inline: the page shows there */
       }
@@ -641,18 +660,20 @@ function nativeApp(): void {
     const act = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-act]')?.dataset.act;
     if (act === 'compact') {
       override = 'native';
-      if (H!.context().displayMode === 'fullscreen') void H!.requestDisplayMode('inline').catch(() => {});
+      if (H!.context().displayMode === 'fullscreen') void requestMode('inline').catch(() => {});
       applyMode();
     } else if (act === 'fullscreen') {
       const full = H!.context().displayMode === 'fullscreen';
-      void H!.requestDisplayMode(full ? 'inline' : 'fullscreen').catch(() => {}).then(applyMode);
+      void requestMode(full ? 'inline' : 'fullscreen').catch(() => {}).then(applyMode);
     }
   });
 
   H.on('context', () => {
     const display = H.context().displayMode;
-    // A display-mode change is a fresh start: the host (or the person) chose a size.
-    if (display !== lastDisplay) override = null;
+    // A display-mode change is a fresh start: the host (or the person, through
+    // the host) chose a size. Not one this view asked for: that change carries
+    // out the choice the person just made here.
+    if (display !== lastDisplay && display !== requested) override = null;
     lastDisplay = display;
     applyMode();
   });
