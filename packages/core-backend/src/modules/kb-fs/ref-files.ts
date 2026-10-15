@@ -15,10 +15,13 @@ import { isAbsence } from '../../shared/fs.contract.js';
  * tens of milliseconds of the main thread on a server holding a large heap.
  *
  * What is read, in git's own order: a loose file under the common directory
- * (a worktree shares `refs/` with the repository it belongs to; only `HEAD`
- * is its own), then `packed-refs`. A symbolic ref (`ref: refs/heads/main`)
- * is followed. A tag is never decided here: its file may hold a tag object,
- * and what that peels to is git's to say.
+ * (a worktree shares `refs/` with the repository it belongs to), then
+ * `packed-refs`. `HEAD` and the per-worktree namespaces (`refs/worktree/`,
+ * `refs/bisect/`, `refs/rewritten/`) are a worktree's own: read loose from
+ * its git directory, never from the common directory, and never packed. A
+ * symbolic ref (`ref: refs/heads/main`) is followed. A tag is never decided
+ * here: its file may hold a tag object, and what that peels to is git's to
+ * say.
  *
  * The answer is one of three things, and the caller treats them differently:
  * `{ sha }` is what git would answer too; `'missing'` means every file git
