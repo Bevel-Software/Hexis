@@ -32,6 +32,8 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * request carrying a credential asks, so the answer is kept briefly rather
  * than read each time; switching an account off or on in THIS process
  * forgets it at once, and another replica sees the change within this long.
+ * A session token never waits on it: {@link AuthService.resolveSession}
+ * reads the row each time, so a password change ends it everywhere at once.
  */
 const ACTIVE_CACHE_MS = 30_000;
 
@@ -467,15 +469,20 @@ export class AuthService implements IAccountSwitchGuard {
     await this.assertAdmitted(normalizedEmail, 'admin-create');
     const passwordHash = await hashPassword(password);
     const displayName = normalizedEmail.split('@')[0] || normalizedEmail;
+    // A first password on an existing account is a password write like any
+    // other, so the session generation moves on with it: a self-service
+    // first password that read the row before this one is refused rather
+    // than overwriting it (see {@link changePassword}).
     const [row] = await this.db
       .insert(users)
       .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
       .onConflictDoUpdate({
         target: users.emailBidx,
-        set: { passwordHash, updatedAt: new Date() },
+        set: { passwordHash, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: new Date() },
         setWhere: and(isNull(users.passwordHash), isNull(users.deactivatedAt)),
       })
       .returning({ ...getTableColumns(users), created: CREATED });
+    if (row) this.activeCache.delete(row.id);
     if (row) return { user: this.toClientUser(row), created: row.created === true, passwordSet: true, deactivated: false };
     // The conflicting account has a password or is switched off: untouched.
     const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
@@ -643,8 +650,8 @@ export class AuthService implements IAccountSwitchGuard {
       .where(and(eq(users.id, userId), eq(users.sessionVersion, user.sessionVersion)))
       .returning();
     if (!changed) throw new PasswordChangedMeanwhileError();
-    // Forgotten at once, so this process refuses the old sessions on their
-    // very next request rather than once the cached generation expires.
+    // Sessions read the row fresh (see resolveSession); the cached entry is
+    // dropped so nothing in this process keeps the old generation either.
     this.activeCache.delete(userId);
     return { token: this.signToken(changed) };
   }
@@ -785,7 +792,10 @@ export class AuthService implements IAccountSwitchGuard {
     const { sessionVersion, ...claim } = this.decodeSession(token);
     let account: { active: boolean; sessionVersion: number };
     try {
-      account = await this.accountState(claim.userId);
+      // Read fresh, never from the cache: a password changed on another
+      // replica must end this token at its very next request, and only the
+      // row can say it was.
+      account = await this.accountState(claim.userId, { fresh: true });
     } catch (err) {
       // The token is fine; the database is not. Said apart from a refusal, so
       // an outage is a 500 and not a sign-out (see `AuthBackendError`).
@@ -824,12 +834,17 @@ export class AuthService implements IAccountSwitchGuard {
   /**
    * {@link isActive}'s answer and the session generation the account is at,
    * read and cached together; a password change in this process forgets the
-   * entry at once, as switching an account off does.
+   * entry at once, as switching an account off does. `fresh` reads the row
+   * whatever the cache holds (and refreshes it): {@link resolveSession}'s
+   * question, since a session's generation must hold on every replica.
    */
-  private async accountState(userId: string): Promise<{ active: boolean; sessionVersion: number }> {
+  private async accountState(
+    userId: string,
+    { fresh = false }: { fresh?: boolean } = {},
+  ): Promise<{ active: boolean; sessionVersion: number }> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
-    if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit;
+    if (!fresh && hit && now - hit.at < ACTIVE_CACHE_MS) return hit;
     const [found] = await this.db
       .select({
         id: users.id,

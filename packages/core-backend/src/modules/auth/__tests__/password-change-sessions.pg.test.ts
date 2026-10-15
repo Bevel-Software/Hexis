@@ -221,4 +221,51 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
     },
     PG_TEST_TIMEOUT,
   );
+
+  it(
+    'ends the old sessions on another replica at their next request too',
+    async () => {
+      // A second process on the same database, with its own cache, which has
+      // just seen the session live.
+      const replica = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+      await auth.createAccount('omar@acme.test', 'Omar', 'old-password-1');
+      const laptop = await signIn('omar@acme.test', 'old-password-1');
+      const changer = await signIn('omar@acme.test', 'old-password-1');
+      await expect(replica.resolveSession(laptop.token)).resolves.toMatchObject({ email: 'omar@acme.test' });
+
+      const res = await changePassword(changer.token, 'old-password-1', 'new-password-1');
+      expect(res.status).toBe(200);
+      const { token } = (await res.json()) as { token: string };
+
+      await expect(replica.resolveSession(laptop.token)).rejects.toThrow(/Session ended/);
+      await expect(replica.resolveSession(token)).resolves.toMatchObject({ email: 'omar@acme.test' });
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'refuses a first password set from the Account page when an admin set a starting one meanwhile',
+    async () => {
+      // Single sign-on only: no password yet, so the Account page asks for no current one.
+      const { token: sso } = await auth.loginWithSso('pia@acme.test', 'Pia', { admittedByProvider: true });
+      expect(await meWithBearer(sso)).toBe(200);
+
+      beforeNextHash.run = async () => {
+        const set = await auth.createAccountWithStartingPassword('pia@acme.test', 'starting-password-1');
+        expect(set.passwordSet).toBe(true);
+      };
+      const raced = await fetch(`${base}/api/auth/change-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sso}` },
+        body: JSON.stringify({ newPassword: 'self-new-password' }),
+      });
+      expect(raced.status).toBe(409);
+
+      const row = await storedRow('pia@acme.test');
+      expect(await verifyPassword('starting-password-1', row.passwordHash!)).toBe(true);
+      expect(row.sessionVersion).toBe(1);
+      expect(await meWithBearer(sso)).toBe(401);
+    },
+    PG_TEST_TIMEOUT,
+  );
 });

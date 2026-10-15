@@ -613,7 +613,8 @@ describe('AuthService.changePassword — the sessions opened before it', () => {
       [{ ...ROW, passwordHash }], // sign-in
       [{ ...ROW, passwordHash }], // the change reads the row...
       CHANGED, // ...and writes it one generation on
-      [{ ...ON, ...CHANGED[0] }], // the next session lookup
+      [{ ...ON, ...CHANGED[0] }], // the old token's lookup...
+      [{ ...ON, ...CHANGED[0] }], // ...and the new one's: a session is never answered from the cache
     ]);
     const svc = new AuthService(db, makeConfig());
     const before = await svc.loginWithPassword('alice@example.com', 'old-password');
