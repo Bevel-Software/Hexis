@@ -22,7 +22,8 @@ export interface FetchOptions {
   /**
    * An instant: a success counts as fresh only when its fetch started at or
    * after it, however young it is (a fetch from before a listing may lack
-   * what the listing saw).
+   * what the listing saw). A fetch in flight that started before it is
+   * waited for, not joined, and a fresh one runs.
    */
   fetchedSince?: number;
   /** Skip the freshness window (the in-flight join still applies). */

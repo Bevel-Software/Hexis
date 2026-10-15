@@ -846,7 +846,8 @@ export class KbStartupRunner {
    *     commits the remote lacks are in the repository before anything moves;
    *  2. the clone is moved aside, beside where it was (one rename);
    *  3. the worktree is added at the imported tip, and checked to be there;
-   *  4. only then is the clone removed.
+   *  4. the files git ignores in the clone, in no commit, are copied into it;
+   *  5. only then is the clone removed.
    *
    * A clone that cannot be converted — unreadable objects, uncommitted changes
    * that are not anybody's to discard, a branch it is not on — is put back
@@ -943,6 +944,7 @@ export class KbStartupRunner {
       await this.repository.addWorktree(branch, repoDir, { allowLocalOnly: true, keepLocalTip: true });
       const head = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
       if (head !== tip) throw new Error(`the worktree came up at ${head}, not at the clone's tip ${tip}`);
+      await this.copyIgnoredFiles(aside, repoDir);
     } catch (err) {
       // Undone: the worktree goes, the clone comes back exactly as it was.
       await fs.rm(repoDir, { recursive: true, force: true }).catch(() => undefined);
@@ -953,12 +955,32 @@ export class KbStartupRunner {
     await fs.rm(aside, { recursive: true, force: true });
   }
 
+  /**
+   * Copy the files git ignores in the clone at `from` into the worktree at
+   * `to`: they are in no commit the import carried, yet they are the
+   * clone's. Copied, not moved, so an undo puts the clone back whole; a file
+   * already there (a copy a crash cut short) is left as it is.
+   */
+  private async copyIgnoredFiles(from: string, to: string): Promise<void> {
+    const ignored = (
+      await git(this.opts.gitRunner, from, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])
+    )
+      .split('\0')
+      .map((rel) => rel.replace(/\/$/, ''))
+      .filter(Boolean);
+    for (const rel of ignored) {
+      await fs.mkdir(path.dirname(path.join(to, rel)), { recursive: true });
+      await fs.cp(path.join(from, rel), path.join(to, rel), { recursive: true, force: false, verbatimSymlinks: true });
+    }
+  }
+
   /** See {@link convertLegacyClones}: a conversion a crash cut short. */
   private async finishInterruptedConversion(repoDir: string, aside: string): Promise<void> {
     if (!(await fs.access(aside).then(() => true, () => false))) return;
     // Only a checkout shown to be no worktree is removed: a link that could
     // not be read has shown nothing, and the error leaves both folders alone.
     if ((await workingCopyShape(repoDir)) === 'worktree') {
+      await this.copyIgnoredFiles(aside, repoDir);
       await fs.rm(aside, { recursive: true, force: true });
       return;
     }

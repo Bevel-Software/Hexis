@@ -358,6 +358,38 @@ describe('a deployment upgraded over full clones', () => {
     await expect(fs.access(path.join(path.dirname(alice), '.knowledge-base.converting'))).rejects.toThrow();
   });
 
+  it('keeps the files git ignores in a clone it converts', async () => {
+    const alice = await legacyClone('alice/a');
+    await commitIn(alice, '.gitignore', '*.local\ncache/\n');
+    await fs.writeFile(path.join(alice, 'notes.local'), 'not in any commit', 'utf8');
+    await fs.mkdir(path.join(alice, 'cache', 'deep'), { recursive: true });
+    await fs.writeFile(path.join(alice, 'cache', 'deep', 'index.bin'), 'cached', 'utf8');
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect(await workingCopyShape(alice)).toBe('worktree');
+    expect(await fs.readFile(path.join(alice, 'notes.local'), 'utf8')).toBe('not in any commit');
+    expect(await fs.readFile(path.join(alice, 'cache', 'deep', 'index.bin'), 'utf8')).toBe('cached');
+    expect((await git(alice, ['status', '--porcelain=v1'])).trim()).toBe('');
+    await expect(fs.access(path.join(path.dirname(alice), '.knowledge-base.converting'))).rejects.toThrow();
+  });
+
+  it('keeps the ignored files of a clone a crash left beside its worktree before it removes the clone', async () => {
+    await makeRunner([touchAll]).runAll();
+    const alice = checkoutOf('alice/a');
+    // A crash after the worktree came up, before the clone's ignored files were copied.
+    const aside = path.join(path.dirname(alice), '.knowledge-base.converting');
+    await git(root, ['clone', '-q', '-b', 'alice/a', upstream, aside]);
+    await fs.appendFile(path.join(aside, '.git', 'info', 'exclude'), '\nnotes.local\n', 'utf8');
+    await fs.writeFile(path.join(aside, 'notes.local'), 'not in any commit', 'utf8');
+
+    await makeRunner([]).runAll();
+
+    expect(await workingCopyShape(alice)).toBe('worktree');
+    expect(await fs.readFile(path.join(alice, 'notes.local'), 'utf8')).toBe('not in any commit');
+    await expect(fs.access(aside)).rejects.toThrow();
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'leaves both folders of a cut-short conversion alone when the worktree\'s link cannot be read (EACCES is not absence)',
     async () => {

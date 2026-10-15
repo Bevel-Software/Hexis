@@ -190,6 +190,8 @@ export class KbRepository implements IKbRepository {
   private lastFailureAt = 0;
   private lastOk: boolean | null = null;
   private inFlightFetch: Promise<boolean> | null = null;
+  /** When the fetch in flight started: a caller that needs one from `fetchedSince` on joins only a later one. */
+  private inFlightStartedAt = 0;
   /**
    * Bumped whenever the repository is taken away (set aside): a fetch that was
    * in flight for the one that went must not stamp its result on the new one.
@@ -418,7 +420,14 @@ export class KbRepository implements IKbRepository {
     ) {
       return true;
     }
-    if (this.inFlightFetch) return this.inFlightFetch;
+    if (this.inFlightFetch) {
+      if (opts.fetchedSince === undefined || this.inFlightStartedAt >= opts.fetchedSince) return this.inFlightFetch;
+      // Started before the caller's instant: its refs may be older than what
+      // the caller must see (a branch deleted since). Waited for, then asked
+      // again; the next fetch starts after the instant, so this ends.
+      await this.inFlightFetch;
+      return this.fetch(opts);
+    }
     if (!opts.force && opts.failureBackoffMs && now - this.lastFailureAt < opts.failureBackoffMs) {
       return false;
     }
@@ -461,6 +470,7 @@ export class KbRepository implements IKbRepository {
         if (this.inFlightFetch === promise) this.inFlightFetch = null;
       });
     this.inFlightFetch = promise;
+    this.inFlightStartedAt = startedAt;
     return promise;
   }
 
@@ -613,11 +623,16 @@ export class KbRepository implements IKbRepository {
    */
   async forgetWorktrees(branches: readonly string[]): Promise<void> {
     if (!(await this.exists())) return;
-    await this.prune();
-    for (const branch of branches) {
-      if ((await this.revParse(`refs/heads/${branch}`)) === null) continue;
-      await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
-    }
+    // As the administrator, prune and deletes together: the worktree list is
+    // the repository's to serialize, and a branch delete writes the shared
+    // config (see `removeWorktree`).
+    await this.exclusive(async () => {
+      await this.git(['worktree', 'prune']);
+      for (const branch of branches) {
+        if ((await this.revParse(`refs/heads/${branch}`)) === null) continue;
+        await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
+      }
+    });
   }
 
   /**
