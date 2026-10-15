@@ -154,8 +154,7 @@ describe('live data a view asks for itself', () => {
 
 describe('the compact presentation', () => {
   it('keeps the full page after "Full page" asks the host for fullscreen on a phone', async () => {
-    let h: ReturnType<typeof fakeHost>;
-    h = fakeHost({
+    const h: ReturnType<typeof fakeHost> = fakeHost({
       'ui/initialize': initialize({}, { platform: 'mobile', displayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen'] }),
       'ui/request-display-mode': (params) => {
         // A real host answers, then tells the view its new context too.
