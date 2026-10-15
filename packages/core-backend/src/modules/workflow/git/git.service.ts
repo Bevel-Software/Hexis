@@ -310,6 +310,8 @@ export class GitService implements IGitService {
    * all of them. Bounded FIFO; the bound only caps memory.
    */
   private readonly changedEntriesByCommits = new Map<string, NameStatusEntry[]>();
+  /** Diffs being read right now, so concurrent misses on one pair share one `git diff`. */
+  private readonly changedEntriesInFlight = new Map<string, Promise<NameStatusEntry[]>>();
   private static readonly CHANGED_ENTRIES_MAX = 4096;
 
   constructor(
@@ -3280,13 +3282,23 @@ export class GitService implements IGitService {
     const key = `${baseSha}\0${headSha}`;
     const known = this.changedEntriesByCommits.get(key);
     if (known) return known;
-    const entries = await this.prChangedEntriesAt(cwd, baseSha, headSha);
-    if (this.changedEntriesByCommits.size >= GitService.CHANGED_ENTRIES_MAX) {
-      const oldest = this.changedEntriesByCommits.keys().next().value;
-      if (oldest !== undefined) this.changedEntriesByCommits.delete(oldest);
+    let pending = this.changedEntriesInFlight.get(key);
+    if (!pending) {
+      pending = this.prChangedEntriesAt(cwd, baseSha, headSha)
+        .then((entries) => {
+          if (this.changedEntriesByCommits.size >= GitService.CHANGED_ENTRIES_MAX) {
+            const oldest = this.changedEntriesByCommits.keys().next().value;
+            if (oldest !== undefined) this.changedEntriesByCommits.delete(oldest);
+          }
+          this.changedEntriesByCommits.set(key, entries);
+          return entries;
+        })
+        .finally(() => {
+          if (this.changedEntriesInFlight.get(key) === pending) this.changedEntriesInFlight.delete(key);
+        });
+      this.changedEntriesInFlight.set(key, pending);
     }
-    this.changedEntriesByCommits.set(key, entries);
-    return entries;
+    return pending;
   }
 
   /**

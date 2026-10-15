@@ -56,6 +56,7 @@ describe('a change request is diffed once per pair of commits', () => {
   let other: string;
   let svc: GitService;
   const workspaceId = 'ws-main';
+  const secondWorkspaceId = 'ws-two';
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-changed-memo-'));
@@ -79,10 +80,15 @@ describe('a change request is diffed once per pair of commits', () => {
     await runGit(root, ['clone', upstream, repo]);
     other = path.join(root, 'other');
     await runGit(root, ['clone', upstream, other]);
+    // A second workspace of the same knowledge base, with its own reservation.
+    const secondDir = path.join(root, secondWorkspaceId);
+    await fs.mkdir(secondDir, { recursive: true });
+    await runGit(root, ['clone', upstream, path.join(secondDir, 'knowledge-base')]);
     const workspace = {
       getWorkspacePath: async (id: string) => {
-        if (id !== workspaceId) throw new Error(`unexpected workspace ${id}`);
-        return workspaceDir;
+        if (id === workspaceId) return workspaceDir;
+        if (id === secondWorkspaceId) return secondDir;
+        throw new Error(`unexpected workspace ${id}`);
       },
     } as unknown as WorkspaceService;
     svc = new GitService(
@@ -136,6 +142,18 @@ describe('a change request is diffed once per pair of commits', () => {
     spawnLog.length = 0;
     expect(await svc.changedPathsAndPairsForPr(workspaceId, 'main', 'feature', { fetch: false })).toEqual(after);
     expect(spawnLog).toEqual([]);
+  });
+
+  it('shares one diff between concurrent reads of a pair nobody has seen, even from two workspaces', async () => {
+    // Two workspaces take two reservations, so nothing serialises the two
+    // reads but the in-flight diff itself: both answer, one `diff` runs.
+    const [a, b] = await Promise.all([
+      svc.changedPathsAndPairsForPr(workspaceId, 'main', 'feature', { fetch: false }),
+      svc.changedPathsAndPairsForPr(secondWorkspaceId, 'main', 'feature', { fetch: false }),
+    ]);
+    expect(a).toEqual(b);
+    expect(a.paths).toEqual(['one.md']);
+    expect(spawnsOf('diff')).toBe(1);
   });
 
   it('still asks git about a branch the ref files do not hold, and answers as before', async () => {
