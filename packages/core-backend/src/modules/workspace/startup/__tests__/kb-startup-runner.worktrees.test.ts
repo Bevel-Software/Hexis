@@ -394,6 +394,7 @@ describe('a deployment upgraded over full clones', () => {
       const gitdir = (await fs.readFile(path.join(alice, '.git'), 'utf-8')).replace(/^gitdir:\s*/, '').trim();
       const records = path.dirname(gitdir);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const log = vi.spyOn(console, 'log');
       await fs.chmod(records, 0o000);
       try {
         await makeRunner([]).runAll();
@@ -404,6 +405,10 @@ describe('a deployment upgraded over full clones', () => {
       expect(await fs.readFile(path.join(alice, 'unsaved.md'), 'utf-8')).toBe('kept');
       expect(await workingCopyShape(alice)).toBe('worktree');
       expect(warn.mock.calls.flat().join('\n')).toMatch(/"alice\/a" working copy could not be inspected for conversion/);
+      // The summary does not call a worktree it could not read a clone.
+      const summary = log.mock.calls.flat().join('\n');
+      expect(summary).toMatch(/left as they are, to be tried again at the next start \([^)]*alice\/a/);
+      expect(summary).not.toMatch(/kept as clones/);
     },
   );
 });

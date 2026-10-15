@@ -918,7 +918,7 @@ export class KbStartupRunner {
     if (converted > 0 || kept.length > 0) {
       startupLog.info(
         `converted ${converted} full clone(s) to worktrees of the knowledge-base repository` +
-          (kept.length > 0 ? `; ${kept.length} kept as clones (${kept.join(', ')})` : '') +
+          (kept.length > 0 ? `; ${kept.length} left as they are, to be tried again at the next start (${kept.join(', ')})` : '') +
           '.',
       );
     }
