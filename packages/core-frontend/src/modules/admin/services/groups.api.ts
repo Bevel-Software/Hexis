@@ -18,8 +18,16 @@ export interface GroupRosterEntry {
   canonical: string;
   displayName: string;
   members: string[];
-  /** Every access rule referencing this group — drives the delete warning. */
+  /**
+   * Every access rule referencing this group in a file the viewer can read —
+   * drives the delete warning.
+   */
   referencedBy: { path: string; verb: string }[];
+  /**
+   * How many more rules reference this group in files the viewer cannot read
+   * (counted, never named). Optional defensively, like `assignedToRoles`.
+   */
+  referencesHidden?: number;
   /**
    * Canonical names of roles carrying an assignment to this group — deleting
    * the group also unassigns it from these roles (they lose the members they

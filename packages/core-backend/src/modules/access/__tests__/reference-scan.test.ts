@@ -8,9 +8,15 @@ import {
   KbReferenceScanner,
   findRoleRefsInText,
   rewriteRoleTokensInText,
+  type PathVisibility,
 } from '../reference-scan.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
+
+/** A renaming person who may read every path. */
+const ALL_VISIBLE: PathVisibility = async (paths) => new Map(paths.map((p) => [p, true]));
+/** A renaming person who may read none of them. */
+const NONE_VISIBLE: PathVisibility = async (paths) => new Map(paths.map((p) => [p, false]));
 
 /**
  * Unit tests for the shared reference scanner's parse rules (comments,
@@ -174,7 +180,7 @@ describe('KbReferenceScanner — .tool frontmatter is scanned and rewritten like
       const hits = (byToken.get('gtm team') ?? []).map((h) => h.path).sort();
       expect(hits).toEqual(['Plugins/GTM/crm.tool', 'Plugins/GTM/notes.md']);
 
-      const writes = await scanner.rewriteReferences('ws-1', 'gtm team', 'Go To Market', (m) => new Error(m));
+      const writes = await scanner.rewriteReferences('ws-1', 'gtm team', 'Go To Market', (m) => new Error(m), ALL_VISIBLE);
       const toolWrite = writes.find((w) => w.repoRelativePath === 'Plugins/GTM/crm.tool')!;
       expect(toolWrite.content).toContain('  - Go To Market');
       // The .tool body below the frontmatter is byte-for-byte intact.
@@ -213,7 +219,7 @@ describe('KbReferenceScanner — candidates are the resolver\'s walk, not the ex
       const scanner = new KbReferenceScanner(ws, new NodeFs(), KB);
 
       expect((await scanner.scan('ws-1')).get('admin')).toEqual([{ path: 'Archive/access.md', verb: 'write' }]);
-      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m));
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE);
       expect(writes.map((w) => w.repoRelativePath)).toEqual(['Archive/access.md']);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -270,10 +276,25 @@ describe('KbReferenceScanner — references are what the resolver parses', () =>
       await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
       const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
       await expect(
-        scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m)),
+        scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE),
       ).rejects.toThrow(/Team\/access\.md name the old principal in a form the rename cannot rewrite/);
       // Nothing was written: the file is byte-for-byte as before.
       expect(await fs.readFile(path.join(repo, 'Team/access.md'), 'utf-8')).toBe(FLOW_ACCESS_MD);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the refusal counts a file the renaming person cannot read, never names it', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-hidden-'));
+    try {
+      await write(path.join(root, KB), 'Team/access.md', FLOW_ACCESS_MD);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      const err = await scanner
+        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), NONE_VISIBLE)
+        .catch((e: Error) => e);
+      expect((err as Error).message).toMatch(/^1 location you cannot read name the old principal/);
+      expect((err as Error).message).not.toContain('Team');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -303,8 +324,24 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
       await expect(
-        scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m)),
+        scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE),
       ).rejects.toThrow(/Cannot list Locked .*rename aborted with no changes/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the refusal counts a folder the renaming person cannot read, never names it', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-hidden-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
+      const err = await scanner
+        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), NONE_VISIBLE)
+        .catch((e: Error) => e);
+      expect((err as Error).message).toBe(
+        'Cannot list 1 location you cannot read while rewriting references; rename aborted with no changes',
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -316,7 +353,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole('Lo\nFAKE: line'), KB);
       const err = await scanner
-        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m))
+        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE)
         .catch((e: Error) => e);
       expect((err as Error).message).not.toContain('\n');
       expect((err as Error).message).toContain('Lo\\nFAKE: line');

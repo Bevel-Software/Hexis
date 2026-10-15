@@ -146,7 +146,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
   const groupsYaml = () => fs.readFile(path.join(repo, 'groups.yaml'), 'utf-8');
 
   it('roster: capability metadata, legacy flag, and members/groups split', async () => {
-    const roster = await service.getRoster();
+    const roster = await service.getRoster(ADMIN.email);
     const admin = roster.find((r) => r.canonical === 'admin')!;
     expect(admin.capability).toMatchObject({ groupAssignable: true });
     expect(admin.capability?.description).toContain('configuration');
@@ -182,7 +182,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
   it('assigns a group to Admin (NEW) — the invariant lives in the direct-email rule, not a ban', async () => {
     await service.assignGroup(ADMIN, 'admin', 'GTM Team');
     expect(await rolesYaml()).toContain('- group:gtm team');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster(ADMIN.email);
     expect(roster.find((r) => r.canonical === 'admin')?.groups).toEqual(['gtm team']);
     // But Admin can never drop its LAST direct email — group refs don't count.
     await expect(

@@ -1266,7 +1266,7 @@ export function createAccessRoutes(
       // surface). The frontend hides the page, but the API must gate too — the
       // roster exposes every role + member email.
       await assertRolesAdmin(user.email);
-      res.json({ roles: await rolesAdmin.getRoster() });
+      res.json({ roles: await rolesAdmin.getRoster(user.email) });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

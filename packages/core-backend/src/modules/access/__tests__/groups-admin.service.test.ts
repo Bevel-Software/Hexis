@@ -463,8 +463,9 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
       expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'owner' }]);
       expect(reviewer.bareNameResolvesToRole).toEqual([{ path: 'team/access.md', verb: 'read' }]);
-      // A group no role shares a name with keeps its bare hits, and has nothing to report.
-      const ops = roster.groups.find((g) => g.canonical === 'ops')!;
+      // A group no role shares a name with keeps its bare hits, and has nothing
+      // to report. ops@x.io is in Ops, so it can read ops/access.md.
+      const ops = (await svc.getRoster('ops@x.io')).groups.find((g) => g.canonical === 'ops')!;
       expect(ops.referencedBy).toEqual(
         expect.arrayContaining([
           { path: 'ops/access.md', verb: 'read' },
@@ -505,6 +506,46 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       // role's, so the secret file is closed to pat, and so is its path.
       expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), 'pat@x.io', 'secret/Plan.md')).toBe(false);
       expect(await rowsFor('pat@x.io')).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('referencedBy names only the files the viewer can read and counts the rest', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-refs-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      await write(repo2, 'roles.yaml', ROLES); // Admin: admin@x.io, Reviewer: rev@x.io
+      await write(repo2, 'groups.yaml', 'groups:\n  Ops:\n    - ops@x.io\n');
+      await write(repo2, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+      // Two group/Ops rules: one in an open folder, one in a node only the
+      // Reviewer role may read.
+      await write(repo2, 'team/access.md', '---\nwrite:\n  - group/Ops\n---\n');
+      await write(
+        repo2,
+        'secret/Plan.md',
+        '---\nread:\n  - deny everyone\n  - Reviewer\nowner:\n  - deny group/Ops\n---\n# Plan\n',
+      );
+      const workspace = stubWorkspace(root2);
+      const svc = new GroupsAdminService(
+        workspace,
+        stubWorkflow().svc,
+        new AccessControlService(workspace as never, KB, new NodeFs()),
+        new NodeFs(),
+        KB,
+        () => DEFAULT_BRANCH,
+      );
+      const opsFor = async (email: string) =>
+        (await svc.getRoster(email)).groups.find((g) => g.canonical === 'ops')!;
+
+      const asReviewer = await opsFor('rev@x.io');
+      expect(asReviewer.referencedBy.map((r) => r.path).sort()).toEqual(['secret/Plan.md', 'team/access.md']);
+      expect(asReviewer.referencesHidden).toBe(0);
+      // The Admin cannot read secret/Plan.md: its rule still stops granting on
+      // delete, so it is counted, but its path is not shown.
+      const asAdmin = await opsFor('admin@x.io');
+      expect(asAdmin.referencedBy).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+      expect(asAdmin.referencesHidden).toBe(1);
     } finally {
       await fs.rm(root2, { recursive: true, force: true });
     }

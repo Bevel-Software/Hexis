@@ -21,6 +21,8 @@ const WS = workspaceIdForBranch(DEFAULT_BRANCH);
 
 const ADMIN: AuthUser = { id: 'u-admin', email: 'razvan@bevel.software', name: 'Razvan' } as AuthUser;
 const OTHER_ADMIN: AuthUser = { id: 'u-2', email: 'juan@bevel.software', name: 'Juan' } as AuthUser;
+/** A Sales member: reads the Sales-governed files the roster tests reference. */
+const SALES_VIEWER = 'felix@example.com';
 
 const ROLES = `roles:
   Admin:
@@ -179,7 +181,7 @@ describe('RolesAdminService', () => {
   });
 
   it('getRoster lists roles, marks Admin, dedupes members', async () => {
-    const roster = await svc.getRoster();
+    const roster = await svc.getRoster(ADMIN.email);
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
     expect(roster.find((r) => r.canonical === 'admin')!.isAdmin).toBe(true);
     expect(roster.find((r) => r.canonical === 'sales')!.members).toEqual(['felix@example.com']);
@@ -193,7 +195,7 @@ describe('RolesAdminService', () => {
     let branch = '';
     const late = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => branch, bus.bus);
     branch = DEFAULT_BRANCH;
-    const roster = await late.getRoster();
+    const roster = await late.getRoster(ADMIN.email);
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
   });
 
@@ -273,13 +275,25 @@ describe('RolesAdminService', () => {
     // ...AND a grant that lives ONLY in a node's own frontmatter (the gap).
     await write(repo, 'team/deal.md', '---\nowner: Sales\n---\n# Deal\n');
 
-    const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
+    const sales = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
     const paths = sales.referencedBy.map((r) => r.path).sort();
     expect(paths).toEqual(['team/access.md', 'team/deal.md']);
     // The frontmatter ref carries its verb, so the warning can name it.
     expect(sales.referencedBy).toContainEqual({ path: 'team/deal.md', verb: 'owner' });
     // An unreferenced role still shows nothing.
-    expect((await svc.getRoster()).find((r) => r.canonical === 'admin')!.referencedBy).toEqual([]);
+    expect((await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'admin')!.referencedBy).toEqual([]);
+  });
+
+  it("getRoster names only files the viewer can read and counts the rest — an Admin can't read Sales's files", async () => {
+    await write(repo, 'team/access.md', '---\nread:\n  - deny everyone\n  - Sales\n---\n');
+    await write(repo, 'team/deal.md', '---\nowner: Sales\n---\n# Deal\n');
+
+    const asAdmin = (await svc.getRoster(ADMIN.email)).find((r) => r.canonical === 'sales')!;
+    expect(asAdmin.referencedBy).toEqual([]);
+    expect(asAdmin.referencesHidden).toBe(2);
+    const asMember = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
+    expect(asMember.referencedBy).toHaveLength(2);
+    expect(asMember.referencesHidden).toBe(0);
   });
 
   it('addMember persists + is idempotent', async () => {
@@ -581,7 +595,7 @@ describe('roster referencedBy under group shadowing', () => {
       '---\nread:\n  - Sales\nwrite:\n  - role/Sales\nowner:\n  - group/Sales\n---\n',
     );
 
-    const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
+    const sales = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
     expect(sales.referencedBy).toEqual([
       { path: 'team/access.md', verb: 'read' },
       { path: 'team/access.md', verb: 'write' },
@@ -590,7 +604,7 @@ describe('roster referencedBy under group shadowing', () => {
 
   it('with no group of the name: bare hits count for the role (both spellings)', async () => {
     await write(repo, 'team/access.md', '---\nread:\n  - Sales\nwrite:\n  - role/Sales\n---\n');
-    const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
+    const sales = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
     expect(sales.referencedBy).toEqual([
       { path: 'team/access.md', verb: 'read' },
       { path: 'team/access.md', verb: 'write' },
@@ -640,7 +654,7 @@ describe('Admin fixed members — the deployment admin', () => {
   });
 
   it('lists the deployment admin as a fixed member of Admin, and of no other role', async () => {
-    const roster = await serviceWith([OWNER]).getRoster();
+    const roster = await serviceWith([OWNER]).getRoster(ADMIN.email);
     expect(roster.find((r) => r.canonical === 'admin')!.fixedMembers).toEqual([OWNER]);
     expect(roster.find((r) => r.canonical === 'sales')!.fixedMembers).toEqual([]);
   });
@@ -649,7 +663,7 @@ describe('Admin fixed members — the deployment admin', () => {
     // The page prints `fixedMembersNote` as sent, so this is the one copy of
     // the wording: the note and the API refusal cannot drift apart.
     const svc = serviceWith([OWNER]);
-    const roster = await svc.getRoster();
+    const roster = await svc.getRoster(ADMIN.email);
     const note = roster.find((r) => r.canonical === 'admin')!.fixedMembersNote;
     expect(note).toBe('Owner; cannot be removed here');
     expect(roster.find((r) => r.canonical === 'sales')!.fixedMembersNote).toBeNull();
@@ -660,10 +674,10 @@ describe('Admin fixed members — the deployment admin', () => {
   it('canonicalises the configured address and drops a blank one', async () => {
     // The composition root passes `[config.adminEmail]` unconditionally, so an
     // unset ADMIN_EMAIL arrives as [''] — that must not become a member "".
-    expect((await serviceWith(['']).getRoster()).find((r) => r.canonical === 'admin')!.fixedMembers)
+    expect((await serviceWith(['']).getRoster(ADMIN.email)).find((r) => r.canonical === 'admin')!.fixedMembers)
       .toEqual([]);
     expect(
-      (await serviceWith(['  Owner@Bevel.Software  ']).getRoster()).find((r) => r.canonical === 'admin')!
+      (await serviceWith(['  Owner@Bevel.Software  ']).getRoster(ADMIN.email)).find((r) => r.canonical === 'admin')!
         .fixedMembers,
     ).toEqual([OWNER]);
   });
@@ -672,7 +686,7 @@ describe('Admin fixed members — the deployment admin', () => {
     // The seeded roles.yaml names ADMIN_EMAIL, so overlap is the normal case.
     // `members` must keep it — the Admin >=1-direct-email invariant counts the
     // FILE — and the page is what renders the overlap once.
-    const admin = (await serviceWith(['razvan@bevel.software']).getRoster()).find(
+    const admin = (await serviceWith(['razvan@bevel.software']).getRoster(ADMIN.email)).find(
       (r) => r.canonical === 'admin',
     )!;
     expect(admin.members).toContain('razvan@bevel.software');
@@ -718,7 +732,7 @@ describe('Admin fixed members — the deployment admin', () => {
   });
 
   it('with no ADMIN_EMAIL configured, no role has a fixed member', async () => {
-    const roster = await serviceWith([]).getRoster();
+    const roster = await serviceWith([]).getRoster(ADMIN.email);
     expect(roster.every((r) => r.fixedMembers.length === 0)).toBe(true);
     expect(roster.every((r) => r.fixedMembersNote === null)).toBe(true);
     // ...and ordinary Admin membership stays editable.

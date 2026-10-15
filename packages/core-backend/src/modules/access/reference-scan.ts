@@ -348,6 +348,31 @@ export interface ReferenceRewrite {
   original: string;
 }
 
+/**
+ * Which of the given repo-relative paths the person a refusal is for may
+ * read — `canReadBatch` bound to that person. A path is itself a disclosure,
+ * so a refusal names only these and counts the rest.
+ */
+export type PathVisibility = (repoRelPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
+
+/** `paths` as a refusal may show them: the readable ones by name, the rest as a count. */
+async function disclosablePaths(paths: string[], visible: PathVisibility): Promise<string> {
+  const verdicts = await visible(paths);
+  const shown = paths.filter((p) => verdicts.get(p) === true).map((p) => sanitizedPath(p || '.'));
+  const hidden = paths.length - shown.length;
+  if (hidden > 0) shown.push(`${hidden} location${hidden === 1 ? '' : 's'} you cannot read`);
+  return shown.join(', ');
+}
+
+/** `refs` split into the rows whose file `readable` allows, and a count of the rest. */
+export function partitionReadable(
+  refs: readonly ReferenceHit[],
+  readable: ReadonlyMap<string, boolean>,
+): { shown: ReferenceHit[]; hidden: number } {
+  const shown = refs.filter((r) => readable.get(r.path) === true);
+  return { shown, hidden: refs.length - shown.length };
+}
+
 /** How long a cached reference scan may serve after its load. Backstop only —
  *  reference-changing writes invalidate explicitly (the admin services after
  *  their own rewrites, and the event-bus tap below for everyone else's). */
@@ -523,12 +548,15 @@ export class KbReferenceScanner {
    * half-renamed principal still pointed at by stragglers = silent access
    * drop) — so any read failure aborts via `makeError` with nothing written.
    * Returns the writes WITH each file's original text (rollback snapshots).
+   * A refusal names only the paths `visible` says the renaming person may
+   * read; the rest are counted, never named.
    */
   async rewriteReferences(
     workspaceId: string,
     oldToken: string | readonly string[],
     newDisplayName: string,
     makeError: (message: string, cause?: string) => Error,
+    visible: PathVisibility,
   ): Promise<ReferenceRewrite[]> {
     const oldTokens = typeof oldToken === 'string' ? [oldToken] : oldToken;
     const repoDir = await this.repoDir(workspaceId);
@@ -538,7 +566,7 @@ export class KbReferenceScanner {
     // fail-closed rule as an unreadable file below.
     if (holes.length > 0) {
       throw makeError(
-        `Cannot list ${holes.map((h) => sanitizedPath(h || '.')).join(', ')} while rewriting references; rename aborted with no changes`,
+        `Cannot list ${await disclosablePaths(holes, visible)} while rewriting references; rename aborted with no changes`,
       );
     }
     const texts = await Promise.all(
@@ -553,7 +581,7 @@ export class KbReferenceScanner {
     for (const t of texts) {
       if (!t.ok) {
         throw makeError(
-          `Cannot read ${t.repoRel} while rewriting references; rename aborted with no changes`,
+          `Cannot read ${await disclosablePaths([t.repoRel], visible)} while rewriting references; rename aborted with no changes`,
           t.cause,
         );
       }
@@ -583,7 +611,7 @@ export class KbReferenceScanner {
     });
     if (stranded.length > 0) {
       throw makeError(
-        `${stranded.map((p) => sanitizedPath(p)).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
+        `${await disclosablePaths(stranded, visible)} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
       );
     }
     return writes;

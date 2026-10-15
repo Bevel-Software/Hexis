@@ -61,6 +61,10 @@ export function DirectoryGroupsPage() {
   const [working, setWorking] = useState(false);
   // Group pending delete confirmation (manual mode).
   const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
+  // Rules in files the admin cannot read are counted, never named — they still
+  // stop granting on delete, so the warning's total includes them.
+  const deleteHiddenCount = deleteTarget?.referencesHidden ?? 0;
+  const deleteRuleCount = (deleteTarget?.referencedBy.length ?? 0) + deleteHiddenCount;
   // The overlay panel's "a directory connection exists" signal — true between
   // connecting and the first push, when the roster still reads 'manual' but
   // manual edits would go dormant. See GroupsDirectoryPanelProps.
@@ -289,12 +293,12 @@ export function DirectoryGroupsPage() {
       >
         {deleteTarget && (
           <div className="space-y-2">
-            {deleteTarget.referencedBy.length > 0 ? (
+            {deleteRuleCount > 0 ? (
               <>
                 <p className="text-xs text-ink leading-snug">
-                  {deleteTarget.referencedBy.length} access rule
-                  {deleteTarget.referencedBy.length === 1 ? '' : 's'} reference
-                  {deleteTarget.referencedBy.length === 1 ? 's' : ''} this group and will stop
+                  {deleteRuleCount} access rule
+                  {deleteRuleCount === 1 ? '' : 's'} reference
+                  {deleteRuleCount === 1 ? 's' : ''} this group and will stop
                   matching anyone after deletion:
                 </p>
                 <ul className="max-h-40 overflow-auto text-xs text-ink-muted space-y-0.5">
@@ -303,6 +307,11 @@ export function DirectoryGroupsPage() {
                       {ref.verb} · {ref.path}
                     </li>
                   ))}
+                  {deleteHiddenCount > 0 && (
+                    <li className="truncate">
+                      {deleteHiddenCount} in {deleteHiddenCount === 1 ? 'a file' : 'files'} you cannot read
+                    </li>
+                  )}
                 </ul>
               </>
             ) : (deleteTarget.assignedToRoles?.length ?? 0) === 0 ? (

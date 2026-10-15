@@ -71,7 +71,7 @@ import {
 import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
 import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from '../access-model/access-grammar.js';
 import { AdminLockedCommits } from './admin-locked-commit.js';
-import { KbReferenceScanner } from './reference-scan.js';
+import { KbReferenceScanner, partitionReadable } from './reference-scan.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
 export class RolesAdminError extends WorkflowDomainError {
@@ -125,9 +125,12 @@ export interface RoleRosterEntry {
    * frontmatter. `role/<name>` and BARE-token hits both count — a bare name
    * is always the role when the role exists, even when a group shares the
    * name (that group is `group/<name>`). Sound: this is the SAME scan the
-   * group rename/delete rewrites use.
+   * group rename/delete rewrites use. Only files the roster's viewer can read
+   * are listed (see `getRoster`).
    */
   referencedBy: { path: string; verb: string }[];
+  /** How many more rules reference this role in files the viewer cannot read. */
+  referencesHidden: number;
 }
 
 const ROLES_YAML = 'roles.yaml';
@@ -308,8 +311,13 @@ export class RolesAdminService {
 
   // ---- Read -------------------------------------------------------------
 
-  /** The roster: every role on the default branch with members + references. */
-  async getRoster(): Promise<RoleRosterEntry[]> {
+  /**
+   * The roster: every role on the default branch with members + references.
+   * `viewerEmail` is who the roster is for: `referencedBy` names only the
+   * files that viewer can read and counts the rest — being an Admin is not
+   * read access to every file, and a path is itself a disclosure.
+   */
+  async getRoster(viewerEmail: string): Promise<RoleRosterEntry[]> {
     const workspaceId = await this.ensureWorkspace();
     const text = await this.readRolesYaml(workspaceId);
     const model = parseRolesModel(text);
@@ -345,7 +353,17 @@ export class RolesAdminService {
           ...(referencesByToken.get(canonical) ?? []),
           ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${canonical}`) ?? []),
         ],
+        referencesHidden: 0,
       });
+    }
+    const paths = [...new Set(out.flatMap((r) => r.referencedBy.map((ref) => ref.path)))];
+    if (paths.length > 0) {
+      const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
+      for (const r of out) {
+        const refs = partitionReadable(r.referencedBy, readable);
+        r.referencedBy = refs.shown;
+        r.referencesHidden = refs.hidden;
+      }
     }
     return out;
   }
@@ -450,7 +468,7 @@ export class RolesAdminService {
     );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [OLD_ROLES_YAML, ROLES_YAML]);
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   // ---- Mutations --------------------------------------------------------
@@ -484,7 +502,7 @@ export class RolesAdminService {
   ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
     await this.runEdit(actor, (text) => editAddMember(text, canonical, email), opts?.aroundWrite);
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -542,7 +560,7 @@ export class RolesAdminService {
       }
       return editRemoveMember(text, canonical, email);
     });
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -572,12 +590,12 @@ export class RolesAdminService {
       }
       await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
     });
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   async unassignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
     await this.runEdit(actor, (text) => editRemoveGroupRef(text, canonical, groupName));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -689,7 +707,7 @@ export class RolesAdminService {
     );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   // ---- Internals --------------------------------------------------------

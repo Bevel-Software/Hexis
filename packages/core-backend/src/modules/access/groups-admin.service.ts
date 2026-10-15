@@ -54,7 +54,7 @@ import {
   type GroupsEditResult,
 } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
-import { KbReferenceScanner } from './reference-scan.js';
+import { KbReferenceScanner, partitionReadable } from './reference-scan.js';
 
 /** Where role→group assignments live (`group:<canonical>` member entries). */
 const ROLES_YAML = 'roles.yaml';
@@ -74,8 +74,13 @@ export interface GroupRosterEntry {
   canonical: string;
   displayName: string;
   members: string[];
-  /** Every access rule referencing this group — same scan the rename uses. */
+  /**
+   * Every access rule referencing this group — same scan the rename uses —
+   * in a file the roster's viewer can read (see `getRoster`).
+   */
   referencedBy: { path: string; verb: string }[];
+  /** How many more rules reference this group in files the viewer cannot read. */
+  referencesHidden: number;
   /**
    * The access rules that name this group's name BARE while a ROLE of the same
    * name exists. A bare name is the role, so these rules grant the role, not
@@ -183,9 +188,10 @@ export class GroupsAdminService {
    *   - Manual mode, broken groups.yaml: 422 with the parse message — the
    *     repair path must show the operator what to fix, never a dead page.
    *
-   * `viewerEmail` is who the roster is for: `bareNameResolvesToRole` names
-   * only the files that viewer can read. Being an Admin is not read access to
-   * every file, and a path is itself a disclosure.
+   * `viewerEmail` is who the roster is for: `referencedBy` and
+   * `bareNameResolvesToRole` name only the files that viewer can read. Being
+   * an Admin is not read access to every file, and a path is itself a
+   * disclosure.
    */
   async getRoster(viewerEmail: string): Promise<GroupsRoster> {
     const workspaceId = await this.ensureWorkspace();
@@ -219,25 +225,35 @@ export class GroupsAdminService {
           ...(referencesByToken.get(`${GROUP_TOKEN_PREFIX}${canonical}`) ?? []),
           ...(roles.has(canonical) ? [] : referencesByToken.get(canonical) ?? []),
         ],
+        referencesHidden: 0,
         bareNameResolvesToRole: roles.has(canonical) ? referencesByToken.get(canonical) ?? [] : [],
         assignedToRoles: assignedByGroup.get(canonical) ?? [],
       });
     }
-    await this.keepReadableCollisions(workspaceId, viewerEmail, groups);
+    await this.keepReadableReferences(workspaceId, viewerEmail, groups);
     return { mode, groups, groupsHealth: active.health };
   }
 
-  /** Drop every `bareNameResolvesToRole` row whose file the viewer cannot read. */
-  private async keepReadableCollisions(
+  /**
+   * Drop every `referencedBy` and `bareNameResolvesToRole` row whose file the
+   * viewer cannot read. The dropped `referencedBy` rows stay as a count, so the
+   * delete confirmation still says how many rules stop granting.
+   */
+  private async keepReadableReferences(
     workspaceId: string,
     viewerEmail: string,
     groups: GroupRosterEntry[],
   ): Promise<void> {
-    const paths = [...new Set(groups.flatMap((g) => g.bareNameResolvesToRole.map((r) => r.path)))];
+    const paths = [
+      ...new Set(groups.flatMap((g) => [...g.referencedBy, ...g.bareNameResolvesToRole].map((r) => r.path))),
+    ];
     if (paths.length === 0) return;
     const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
     for (const g of groups) {
-      g.bareNameResolvesToRole = g.bareNameResolvesToRole.filter((r) => readable.get(r.path) === true);
+      const refs = partitionReadable(g.referencedBy, readable);
+      g.referencedBy = refs.shown;
+      g.referencesHidden = refs.hidden;
+      g.bareNameResolvesToRole = partitionReadable(g.bareNameResolvesToRole, readable).shown;
     }
   }
 
@@ -379,6 +395,7 @@ export class GroupsAdminService {
         [`${GROUP_TOKEN_PREFIX}${canonical}`, ...(roles.has(canonical) ? [] : [canonical])],
         `${GROUP_TOKEN_PREFIX}${newDisplayName.trim()}`,
         (message, cause) => new GroupsAdminError(message, 422, { cause }),
+        (paths) => this.accessControl.canReadBatch(workspaceId, actor.email, paths),
       );
       for (const w of refWrites) {
         files.push({ repoRel: w.repoRelativePath, content: w.content, original: w.original });
