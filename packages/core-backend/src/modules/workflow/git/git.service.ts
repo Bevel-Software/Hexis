@@ -25,6 +25,7 @@ import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
+import { readRefSha } from '../../kb-fs/index.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,
@@ -293,6 +294,25 @@ export class GitService implements IGitService {
   // concurrent processes worst case — fast for typical (<8) feature-branch
   // counts, calm under large branch lists.
   private static readonly MAX_AHEAD_BEHIND_CONCURRENCY = 8;
+
+  /**
+   * A change request's changed entries, keyed by the two commits its diff
+   * was read between. Two commits never change, and neither does the
+   * merge-base between them, so the three-dot diff of a pair is a fact: a
+   * push moves a tip, the pair changes, the old entry is simply never asked
+   * for again. No TTL, no invalidation.
+   *
+   * This is what a change-request listing was paying git for on every read:
+   * one `diff` per open request, polled every minute and refetched on every
+   * event, where nothing had moved. Now git is asked once per pair, which is
+   * once per push. Keyed by commits alone, not by workspace: every clone of
+   * the knowledge base holds the same objects, so the answer is the same in
+   * all of them. Bounded FIFO; the bound only caps memory.
+   */
+  private readonly changedEntriesByCommits = new Map<string, NameStatusEntry[]>();
+  /** Diffs being read right now, so concurrent misses on one pair share one `git diff`. */
+  private readonly changedEntriesInFlight = new Map<string, Promise<NameStatusEntry[]>>();
+  private static readonly CHANGED_ENTRIES_MAX = 4096;
 
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -3213,9 +3233,8 @@ export class GitService implements IGitService {
       await this.fetchPrRefs(cwd, baseBranch, headBranch);
     }
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
-      const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
-      return this.prChangedPathsAt(cwd, baseRef, headRef, opts);
+      const at = pinned ?? (await this.publishedPrEnds(cwd, baseBranch, headBranch));
+      return flattenChangedPaths(await this.prChangedEntriesBetweenCommits(cwd, at.base, at.head), opts);
     });
   }
 
@@ -3290,11 +3309,49 @@ export class GitService implements IGitService {
       await this.fetchPrRefs(cwd, baseBranch, headBranch);
     }
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
-      const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
-      const entries = await this.prChangedEntriesAt(cwd, baseRef, headRef);
+      const at = pinned ?? (await this.publishedPrEnds(cwd, baseBranch, headBranch));
+      const entries = await this.prChangedEntriesBetweenCommits(cwd, at.base, at.head);
       return { paths: flattenChangedPaths(entries, {}), pairs: changedPathPairs(entries) };
     });
+  }
+
+  /**
+   * {@link prChangedEntriesAt} for a pair of COMMITS, read once per pair
+   * (see `changedEntriesByCommits`). The caller holds the reservation, as for
+   * `prChangedEntriesAt`; a memo hit holds it for nothing, which is cheaper
+   * than a second code path around the lock.
+   */
+  private async prChangedEntriesBetweenCommits(
+    cwd: string,
+    baseSha: string,
+    headSha: string,
+  ): Promise<NameStatusEntry[]> {
+    const key = `${baseSha}\0${headSha}`;
+    const known = this.changedEntriesByCommits.get(key);
+    if (known) return known;
+    let pending = this.changedEntriesInFlight.get(key);
+    if (!pending) {
+      pending = this.prChangedEntriesAt(cwd, baseSha, headSha)
+        .then((entries) => {
+          if (this.changedEntriesByCommits.size >= GitService.CHANGED_ENTRIES_MAX) {
+            const oldest = this.changedEntriesByCommits.keys().next().value;
+            if (oldest !== undefined) this.changedEntriesByCommits.delete(oldest);
+          }
+          this.changedEntriesByCommits.set(key, entries);
+          return entries;
+        })
+        .finally(() => {
+          if (this.changedEntriesInFlight.get(key) === pending) this.changedEntriesInFlight.delete(key);
+        });
+      // Same bound as the memo: evicting an in-flight entry costs at most one
+      // redundant diff for that pair, never a lost answer.
+      if (this.changedEntriesInFlight.size >= GitService.CHANGED_ENTRIES_MAX) {
+        const oldest = this.changedEntriesInFlight.keys().next().value;
+        if (oldest !== undefined) this.changedEntriesInFlight.delete(oldest);
+      }
+      this.changedEntriesInFlight.set(key, pending);
+    }
+    return pending;
   }
 
   /**
@@ -3637,16 +3694,23 @@ export class GitService implements IGitService {
     baseBranch: string,
     headBranch: string,
   ): Promise<{ base: string; head: string } | null> {
-    const shas: string[] = [];
-    for (const branch of [baseBranch, headBranch]) {
-      try {
-        shas.push((await this.resolvePublishedBranch(cwd, branch)).sha);
-      } catch (err) {
-        if (err instanceof WorkflowValidationError) return null;
-        throw err;
-      }
+    try {
+      return await this.publishedPrEnds(cwd, baseBranch, headBranch);
+    } catch (err) {
+      if (err instanceof WorkflowValidationError) return null;
+      throw err;
     }
-    return { base: shas[0], head: shas[1] };
+  }
+
+  /** The two commits a change request is read between, each resolved as {@link resolvePublishedBranch} does. */
+  private async publishedPrEnds(
+    cwd: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<{ base: string; head: string }> {
+    const base = (await this.resolvePublishedBranch(cwd, baseBranch)).sha;
+    const head = (await this.resolvePublishedBranch(cwd, headBranch)).sha;
+    return { base, head };
   }
 
   /**
@@ -3672,6 +3736,13 @@ export class GitService implements IGitService {
     branch: string,
   ): Promise<{ ref: string; sha: string }> {
     for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
+      // The ref file first (`readRefSha`): no process, same answer, same
+      // freshness. Git is asked only for what the files cannot decide — a
+      // missing ref is decided by the files and the loop moves on; an
+      // unreadable one is git's to answer, as the authority.
+      const fromFiles = await readRefSha(cwd, ref);
+      if (fromFiles === 'missing') continue;
+      if (fromFiles !== 'unreadable') return { ref, sha: fromFiles.sha };
       try {
         const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
         return { ref, sha: stdout.trim() };
