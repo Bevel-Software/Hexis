@@ -3438,23 +3438,27 @@ export class WorkflowService implements IWorkflowService {
     }
 
     // The body is rewritten from the row as stored, not from the summary read
-    // above, and the write is guarded on `open` AND on that very body: a merge
-    // or close that won the race refuses the edit instead of being written
-    // over, and a body another edit changed meanwhile is re-read and the edit
-    // re-applied to it — so two appends racing each other both land.
-    let updated = false;
-    for (let attempt = 0; attempt < 3 && !updated; attempt++) {
-      const [row] = await this.db
+    // above, inside one transaction holding the row's lock (`FOR UPDATE`) from
+    // the read to the write: a merge or close that won the race leaves no open
+    // row and refuses the edit instead of being written over, and an edit
+    // racing this one waits for it and then applies to the body it left — so
+    // two appends racing each other both land. The lock, never a comparison of
+    // the stored body, is what serialises them: `body` is encrypted with a
+    // fresh IV on every write, so its ciphertext never equals a re-encryption
+    // of the same text.
+    const updated = await this.db.transaction(async (tx) => {
+      const [row] = await tx
         .select({ body: changeRequests.body })
         .from(changeRequests)
         .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
-        .limit(1);
-      if (!row) break;
+        .limit(1)
+        .for('update');
+      if (!row) return false;
       const newDescription =
         appended === undefined
           ? description
           : [authorsDescription(row.body), appended].filter((s) => s.length > 0).join('\n\n');
-      const written = await this.db
+      const written = await tx
         .update(changeRequests)
         .set({
           ...(title !== undefined ? { title } : {}),
@@ -3463,20 +3467,15 @@ export class WorkflowService implements IWorkflowService {
             : {}),
           updatedAt: new Date(),
         })
-        .where(
-          and(
-            eq(changeRequests.number, number),
-            eq(changeRequests.state, 'open'),
-            eq(changeRequests.body, row.body),
-          ),
-        )
+        .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
         .returning({ id: changeRequests.id });
-      updated = written.length > 0;
-    }
+      return written.length > 0;
+    });
     this.prs.invalidateDetailCache(number);
     if (!updated) {
       const fresh = await this.prs.getPr(number);
-      assertEditable(fresh?.state ?? 'closed');
+      if (!fresh) throw new WorkflowDomainError('change request not found', 404);
+      assertEditable(fresh.state);
       throw new WorkflowDomainError('This change request changed while it was being edited. Retry in a moment.', 409);
     }
     crLog.info(`#${number} title/description edited`);

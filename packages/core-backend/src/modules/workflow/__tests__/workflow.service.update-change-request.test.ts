@@ -62,7 +62,9 @@ function harness(
     select: vi.fn(() => db),
     from: vi.fn(() => db),
     where: vi.fn(() => db),
-    limit: vi.fn(async () => (state === 'open' ? [{ body: opts.body ?? `Old reason.\n\n${GENERATED}` }] : [])),
+    limit: vi.fn(() => db),
+    for: vi.fn(async () => (state === 'open' ? [{ body: opts.body ?? `Old reason.\n\n${GENERATED}` }] : [])),
+    transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
     update: vi.fn(() => db),
     set: vi.fn((values: Record<string, unknown>) => {
       written.push(values);
@@ -269,15 +271,12 @@ describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
     expect(h.written[0].body).toBe(`Old reason.\n\nRound two.\n\n${GENERATED}`);
   });
 
-  it('re-applies an append to a body another edit changed meanwhile, so neither is lost', async () => {
+  it('reads the body under the row’s lock, in the transaction that writes it, so racing edits serialise', async () => {
     const h = harness({ authorEmail: AUTHOR });
-    (h.db.limit as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([{ body: `Old reason.\n\n${GENERATED}` }])
-      .mockResolvedValueOnce([{ body: `Old reason.\n\nRound one.\n\n${GENERATED}` }]);
-    (h.db.returning as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'row-9' }]);
     await h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: 'Round two.' });
-    expect(h.written).toHaveLength(2);
-    expect(h.written[1].body).toBe(`Old reason.\n\nRound one.\n\nRound two.\n\n${GENERATED}`);
+    expect(h.db.transaction).toHaveBeenCalledTimes(1);
+    expect(h.db.for).toHaveBeenCalledWith('update');
+    expect(h.written).toHaveLength(1);
     expect(h.emitted).toEqual([{ kind: 'change-request-edited', number: 9 }]);
   });
 
