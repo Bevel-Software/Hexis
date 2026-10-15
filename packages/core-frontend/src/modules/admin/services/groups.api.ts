@@ -27,6 +27,13 @@ export interface GroupRosterEntry {
    * defensively: a skewed server may omit it, and rendering must not throw.
    */
   assignedToRoles?: string[];
+  /**
+   * Access rules naming this group's name BARE while a role of the same name
+   * exists — a bare name means the role, so these grant the role, not this
+   * group. Rewritten as `group/<Name>` if the group was meant. Optional
+   * defensively, like `assignedToRoles`.
+   */
+  bareNameResolvesToRole?: { path: string; verb: string }[];
 }
 
 /**

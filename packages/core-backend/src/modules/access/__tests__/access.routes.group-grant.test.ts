@@ -121,7 +121,7 @@ describe('group principals on the share surface', () => {
       body: JSON.stringify(body),
     });
 
-  it('grants read to a known group — spliced as the bare-name token', async () => {
+  it('grants read to a known group — spliced as the explicit group/<Name> token', async () => {
     h = await makeHarness({ groups: ['GTM Team', 'Product'] });
     const res = await post('grant', {
       path: `${KB}/Sales`,
@@ -131,8 +131,8 @@ describe('group principals on the share surface', () => {
     });
     expect(res.status).toBe(200);
     const md = h.files.get(`${KB}/Sales/access.md`)!;
-    expect(md).toContain('- GTM Team');
-    expect(md).not.toContain('role/'); // a GROUP grant is the bare token
+    expect(md.split('\n')).toContain('  - group/GTM Team'); // never the bare name
+    expect(md).not.toContain('role/');
   });
 
   it('grants a ROLE as the explicit role/<Name> token', async () => {
@@ -185,7 +185,7 @@ describe('group principals on the share surface', () => {
     expect(await res.json()).toMatchObject({ kind: 'unknown-role', role: 'Ghost Role' });
   });
 
-  it('a group sharing a role name is grantable — precedence resolves it (no refusal)', async () => {
+  it('a group sharing a role name is grantable — each kind is written with its prefix (no refusal)', async () => {
     h = await makeHarness({ roles: ['Everyone', 'Product'], groups: ['Product'] });
     const asGroup = await post('grant', {
       path: `${KB}/Sales`,
@@ -194,7 +194,7 @@ describe('group principals on the share surface', () => {
       principal: { kind: 'group', group: 'Product' },
     });
     expect(asGroup.status).toBe(200);
-    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- Product');
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- group/Product');
     // The ROLE of the same name grants as the explicit token, side by side.
     const asRole = await post('grant', {
       path: `${KB}/Sales`,
@@ -244,7 +244,19 @@ describe('group principals on the share surface', () => {
       principal: { kind: 'group', group: 'Product' },
     });
     expect(res.status).toBe(200);
-    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- Product');
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- group/Product');
+  });
+
+  it('a group named with its group/ prefix is written once-prefixed', async () => {
+    h = await makeHarness({ groups: ['GTM Team'] });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'group/GTM Team' },
+    });
+    expect(res.status).toBe(200);
+    expect(h.files.get(`${KB}/Sales/access.md`)!.split('\n')).toContain('  - group/GTM Team');
   });
 
   it('a non-admin granting to a group they are not in is refused exactly like an unknown group', async () => {
@@ -276,9 +288,11 @@ describe('group principals on the share surface', () => {
 
   it('revokes with a group principal (name-based, no existence check)', async () => {
     h = await makeHarness({
+      roles: ['Everyone'],
       groups: ['GTM Team'],
       files: {
-        [`${KB}/Sales/access.md`]: '---\nread:\n  - Vanished Team\n---\n',
+        // Both spellings: the legacy bare one and the explicit one.
+        [`${KB}/Sales/access.md`]: '---\nread:\n  - Vanished Team\n  - group/Vanished Team\n---\n',
       },
     });
     const res = await post('revoke', {
@@ -364,11 +378,11 @@ describe('token-kind family at the route boundary', () => {
     expect(md).toContain('- Admin');
   });
 
-  it('granting a GROUP that shadows an already-granted role/<Name> is NOT swallowed as idempotent', async () => {
+  it('granting a GROUP that shares an already-granted role name is NOT swallowed as idempotent', async () => {
     h = await makeHarness({
       roles: ['Everyone', 'Product'],
       groups: ['Product'],
-      files: { [`${KB}/Sales/access.md`]: '---\nread:\n  - role/Product\n---\n' },
+      files: { [`${KB}/Sales/access.md`]: '---\nread:\n  - role/Product\n  - Product\n---\n' },
     });
     const res = await post('grant', {
       path: `${KB}/Sales`,
@@ -379,15 +393,15 @@ describe('token-kind family at the route boundary', () => {
     expect(res.status).toBe(200);
     const md = h.files.get(`${KB}/Sales/access.md`)!;
     expect(md).toContain('- role/Product');
-    expect(md.split('\n')).toContain('  - Product'); // the group's bare token landed
+    expect(md.split('\n')).toContain('  - group/Product'); // the group's token landed
   });
 
-  it('revoking the ROLE while a same-named GROUP is granted leaves the bare token (kbPrincipals-driven shadowing)', async () => {
+  it("revoking the ROLE while a same-named GROUP is granted leaves the group's token", async () => {
     h = await makeHarness({
       roles: ['Everyone', 'Product'],
       groups: ['Product'],
       files: {
-        [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+        [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n  - group/Product\n---\n',
       },
     });
     const res = await post('revoke', {
@@ -398,6 +412,27 @@ describe('token-kind family at the route boundary', () => {
     expect(res.status).toBe(200);
     const md = h.files.get(`${KB}/Sales/access.md`)!;
     expect(md).not.toContain('role/Product');
-    expect(md.split('\n')).toContain('  - Product'); // the GROUP's grant survives
+    expect(md.split('\n')).not.toContain('  - Product'); // the bare name was the role's
+    expect(md.split('\n')).toContain('  - group/Product'); // the GROUP's grant survives
+  });
+
+  it("revoking the GROUP while a same-named ROLE is granted leaves the role's spellings", async () => {
+    h = await makeHarness({
+      roles: ['Everyone', 'Product'],
+      groups: ['Product'],
+      files: {
+        [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n  - group/Product\n---\n',
+      },
+    });
+    const res = await post('revoke', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      principal: { kind: 'group', group: 'Product' },
+    });
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Sales/access.md`)!;
+    expect(md).not.toContain('group/Product');
+    expect(md.split('\n')).toContain('  - Product');
+    expect(md).toContain('- role/Product');
   });
 });

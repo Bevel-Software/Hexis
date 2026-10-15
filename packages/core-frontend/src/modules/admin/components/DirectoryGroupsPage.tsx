@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
+import { Banner } from '../../../shared/components/Banner';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAppRegistry } from '../../../core/registry';
@@ -150,6 +151,12 @@ export function DirectoryGroupsPage() {
   const health = roster?.groupsHealth;
   const broken =
     brokenGroups ?? (health && !health.ok ? { file: health.file, reason: health.reason } : null);
+  // Groups that share a role's name, with the rules that spell them bare —
+  // those rules grant the ROLE, so an Admin must rewrite them if the group
+  // was meant.
+  const bareCollisions = (roster?.groups ?? []).filter(
+    (g) => (g.bareNameResolvesToRole?.length ?? 0) > 0,
+  );
 
   return (
     <>
@@ -169,6 +176,29 @@ export function DirectoryGroupsPage() {
                 {broken.reason ? <> Reason: {broken.reason}</> : null}
               </div>
             </div>
+          )}
+
+          {bareCollisions.length > 0 && (
+            <Banner tone="wait" role="status" className="text-xs">
+              <div className="font-semibold">
+                Some access rules name a group the way a role is named.
+              </div>
+              <div>
+                A bare name in an access rule means the role when one of that name exists. These
+                rules grant the role, not the group — write the group as <code>group/&lt;Name&gt;</code>{' '}
+                if it was meant:
+              </div>
+              <ul className="mt-1 list-disc pl-4">
+                {bareCollisions.flatMap((g) =>
+                  g.bareNameResolvesToRole!.map((ref) => (
+                    <li key={`${g.canonical}:${ref.path}:${ref.verb}`}>
+                      <code>{ref.path}</code> — {ref.verb}: {g.displayName} (write{' '}
+                      <code>group/{g.displayName}</code>)
+                    </li>
+                  )),
+                )}
+              </ul>
+            </Banner>
           )}
 
           {error && (

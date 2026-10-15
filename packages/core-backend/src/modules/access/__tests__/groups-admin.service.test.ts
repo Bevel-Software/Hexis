@@ -241,13 +241,18 @@ describe('GroupsAdminService', () => {
   });
 
   it('canonical-changing rename rewrites grant references in ONE commit', async () => {
-    await write(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n---\n');
+    await write(
+      repo,
+      'Knowledge/Sales/access.md',
+      '---\nread:\n  - GTM Team\n  - group/GTM Team\nwrite:\n  - deny GTM Team\n---\n',
+    );
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
 
     expect(await groupsYaml()).toContain('Go To Market:');
     const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
-    expect(rewritten).toContain('- Go To Market');
-    expect(rewritten).toContain('- deny Go To Market');
+    // Rewritten as the explicit group token, whatever the old spelling.
+    expect(rewritten).toContain('- group/Go To Market');
+    expect(rewritten).toContain('- deny group/Go To Market');
     expect(rewritten).not.toContain('GTM Team');
     expect(commits).toHaveLength(1);
     expect(commits[0].summary).toContain('gtm team → Go To Market');
@@ -268,8 +273,9 @@ describe('GroupsAdminService', () => {
 
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
     const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
-    expect(rewritten).toContain('- Go To Market');
-    expect(rewritten).toContain('- deny Go To Market');
+    // Rewritten as the explicit group token, whatever the old spelling.
+    expect(rewritten).toContain('- group/Go To Market');
+    expect(rewritten).toContain('- deny group/Go To Market');
     expect(rewritten).not.toContain('GTM Team');
     // The frontmatter self-rule is a rule source too, and Admin is untouched.
     expect(rewritten).toContain('- Admin');
@@ -421,16 +427,23 @@ describe('groups-edit guardrails', () => {
 });
 
 describe('groups roster referencedBy — the mirror of the roles roster attribution', () => {
-  it('a group shadowed BY a role name still owns its bare-token hits; role/<name> hits are never the group’s', async () => {
+  it('a group sharing a role name owns only its group/ hits; bare and role/ hits are the role’s', async () => {
     const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-shadow-'));
     try {
       const repo2 = path.join(root2, KB);
-      // A group named Reviewer shares the Reviewer role's name. Group-first
-      // precedence gives the GROUP the bare key, so the bare hit is its
-      // reference; the explicit role/ hit belongs to the ROLE roster only.
+      // A group named Reviewer shares the Reviewer role's name. Role-first
+      // precedence gives the ROLE the bare key, so the bare and role/ hits
+      // belong to the ROLE roster; the group's reference is its group/ hit.
+      // The bare hit is reported so an Admin can rewrite it if the group
+      // was meant.
       await write(repo2, 'roles.yaml', ROLES); // declares role Reviewer
-      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
-      await write(repo2, 'team/access.md', '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\n---\n');
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n  Ops:\n    - ops@x.io\n');
+      await write(repo2, 'ops/access.md', '---\nread:\n  - Ops\nwrite:\n  - group/Ops\n---\n');
+      await write(
+        repo2,
+        'team/access.md',
+        '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\nowner:\n  - group/Reviewer\n---\n',
+      );
       const workspace = stubWorkspace(root2);
       const svc = new GroupsAdminService(
         workspace,
@@ -441,7 +454,18 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       );
       const roster = await svc.getRoster();
       const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
-      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'read' }]);
+      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'owner' }]);
+      expect(reviewer.bareNameResolvesToRole).toEqual([{ path: 'team/access.md', verb: 'read' }]);
+      // A group no role shares a name with keeps its bare hits, and has nothing to report.
+      const ops = roster.groups.find((g) => g.canonical === 'ops')!;
+      expect(ops.referencedBy).toEqual(
+        expect.arrayContaining([
+          { path: 'ops/access.md', verb: 'read' },
+          { path: 'ops/access.md', verb: 'write' },
+        ]),
+      );
+      expect(ops.referencedBy).toHaveLength(2);
+      expect(ops.bareNameResolvesToRole).toEqual([]);
     } finally {
       await fs.rm(root2, { recursive: true, force: true });
     }

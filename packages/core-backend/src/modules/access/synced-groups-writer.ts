@@ -72,7 +72,7 @@ export interface SyncedGroupsSource {
 
 // Name safety is the SHARED predicate in `group-files.ts` (`unsafeNameReason`)
 // — the same rules the manual group editor asserts, including the reserved
-// `role/` prefix. Here the name arrives from the IdP, so an unsafe group is
+// `role/` and `group/` prefixes. Here the name arrives from the IdP, so an unsafe group is
 // SKIPPED with a warning instead of erroring (fail-closed: an unrepresentable
 // group grants nothing).
 

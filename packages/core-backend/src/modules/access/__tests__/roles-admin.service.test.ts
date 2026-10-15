@@ -570,18 +570,24 @@ describe('roster referencedBy under group shadowing', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('a bare-token hit is the GROUP’s when a group shadows the role name; role/<name> hits stay the role’s', async () => {
-    // A group named Sales shadows the Sales role: bare tokens resolve to the
-    // GROUP, so the roles roster must not claim them as role references.
+  it('a bare-token hit stays the ROLE’s when a group shares the name; group/<name> hits never are', async () => {
+    // A group named Sales shares the Sales role's name: bare tokens still
+    // resolve to the ROLE, so the roles roster claims them; group/ is the group.
     await write(repo, 'groups.yaml', 'groups:\n  Sales:\n    - pat@x.io\n');
-    await write(repo, 'team/access.md', '---\nread:\n  - Sales\nwrite:\n  - role/Sales\n---\n');
+    await write(
+      repo,
+      'team/access.md',
+      '---\nread:\n  - Sales\nwrite:\n  - role/Sales\nowner:\n  - group/Sales\n---\n',
+    );
 
     const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
-    // Only the explicit spelling counts for the ROLE.
-    expect(sales.referencedBy).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+    expect(sales.referencedBy).toEqual([
+      { path: 'team/access.md', verb: 'read' },
+      { path: 'team/access.md', verb: 'write' },
+    ]);
   });
 
-  it('unshadowed: bare hits still count for the role (both spellings)', async () => {
+  it('with no group of the name: bare hits count for the role (both spellings)', async () => {
     await write(repo, 'team/access.md', '---\nread:\n  - Sales\nwrite:\n  - role/Sales\n---\n');
     const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
     expect(sales.referencedBy).toEqual([

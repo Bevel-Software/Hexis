@@ -346,6 +346,37 @@ describe('DirectoryGroupsPage', () => {
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
   });
 
+  it('names every rule whose bare group name resolves to a same-named role, with the group/ spelling', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      mode: 'idp',
+      groups: [
+        {
+          canonical: 'admin',
+          displayName: 'Admin',
+          members: ['mallory@example.com'],
+          referencedBy: [],
+          assignedToRoles: [],
+          bareNameResolvesToRole: [{ path: 'Knowledge/Board/access.md', verb: 'read' }],
+        },
+        ...IDP_ROSTER.groups,
+      ],
+      groupsHealth: { ok: true },
+    });
+    renderPage();
+    const report = await screen.findByRole('status');
+    expect(report).toHaveTextContent(/name a group the way a role is named/i);
+    expect(report).toHaveTextContent('Knowledge/Board/access.md');
+    expect(report).toHaveTextContent('read: Admin');
+    expect(report).toHaveTextContent('group/Admin');
+  });
+
+  it('shows no bare-name report when no group shares a role name', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue(MANUAL_ROSTER);
+    renderPage();
+    await screen.findByText('Product');
+    expect(screen.queryByText(/name a group the way a role is named/i)).not.toBeInTheDocument();
+  });
+
   it('a roster whose groupsHealth is broken banners loudly: file, reason, "not being applied"', async () => {
     // Broken IdP-synced file: the roster still answers 200 (mode stays idp,
     // groups empty) but carries the health marker — resolution is degraded

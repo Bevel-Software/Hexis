@@ -92,13 +92,44 @@ export const DENY_PREFIX = 'deny ';
 export const GROUP_REF_PREFIX = 'group:';
 /**
  * Explicit ROLE token prefix in access.md entries: `role/<Name>` resolves to
- * the roles.yaml role only, never a group. A BARE name resolves GROUP-FIRST
- * and falls back to the role — so `role/` is the escape hatch when a group
- * shares the role's name. The prefix is reserved in the group name-safety
- * rules (a group may never be named `role/...`), and every role is also
- * registered in the principal index under its `role/<canonical>` alias.
+ * the roles.yaml role only, never a group. A BARE name resolves ROLE-FIRST
+ * and falls back to the group, so a group that shares a role's name is
+ * reached only as `group/<Name>` (see `GROUP_TOKEN_PREFIX`) — a group named
+ * `Admin` never takes over the grants written for the Admin role. The prefix
+ * is reserved in the group name-safety rules (a group may never be named
+ * `role/...`), and every role is also registered in the principal index under
+ * its `role/<canonical>` alias.
  */
 export const ROLE_TOKEN_PREFIX = 'role/';
+
+/**
+ * Explicit GROUP token prefix in access.md entries: `group/<Name>` resolves
+ * to the active source's group only, never a role. Every group is registered
+ * in the principal index under its `group/<canonical>` alias; the bare name
+ * reaches the group only while no role of that name exists. The share dialog
+ * and the access API always write groups this way. Reserved in the group
+ * name-safety rules and in roles.yaml like `role/`.
+ */
+export const GROUP_TOKEN_PREFIX = 'group/';
+
+/**
+ * A canonical role-shaped token split into its explicit kind prefix and its
+ * bare name: `role/admin` → `{ prefix: 'role', name: 'admin' }`, `group/admin`
+ * → `{ prefix: 'group', name: 'admin' }`, anything else (a bare name, a
+ * plugin token, `everyone`) → `{ prefix: null, name: <token> }`.
+ */
+export function splitPrincipalToken(canonical: string): {
+  prefix: 'role' | 'group' | null;
+  name: string;
+} {
+  if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
+    return { prefix: 'role', name: canonical.slice(ROLE_TOKEN_PREFIX.length) };
+  }
+  if (canonical.startsWith(GROUP_TOKEN_PREFIX)) {
+    return { prefix: 'group', name: canonical.slice(GROUP_TOKEN_PREFIX.length) };
+  }
+  return { prefix: null, name: canonical };
+}
 
 /**
  * PLUGIN-principal token prefix in access.md entries: `plugin/<Name>/<verb>`
@@ -585,6 +616,11 @@ export function parseAccessEntry(
     const suffix = canonicalRoleName(role.slice(ROLE_TOKEN_PREFIX.length));
     if (!suffix) return { ok: false, error: `entry '${body}' names no role after '${ROLE_TOKEN_PREFIX}'` };
     role = `${ROLE_TOKEN_PREFIX}${suffix}`;
+  } else if (role.startsWith(GROUP_TOKEN_PREFIX)) {
+    // Explicit group token, normalised the same way to `group/<canonicalName>`.
+    const suffix = canonicalRoleName(role.slice(GROUP_TOKEN_PREFIX.length));
+    if (!suffix) return { ok: false, error: `entry '${body}' names no group after '${GROUP_TOKEN_PREFIX}'` };
+    role = `${GROUP_TOKEN_PREFIX}${suffix}`;
   } else if (role.startsWith(PLUGIN_TOKEN_PREFIX)) {
     // `plugin/<Name>/<verb>`: the name is canonicalised to the plugin's
     // manifest slug, the verb must be one of the three. Anything else is a
@@ -646,6 +682,12 @@ export function parseRolesYaml(
     if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
       errors.push(
         `roles.yaml: role '${displayName}' starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix — that spelling is the explicit role token in access entries`,
+      );
+      continue;
+    }
+    if (canonical.startsWith(GROUP_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${GROUP_TOKEN_PREFIX}' prefix — that spelling is the explicit group token in access entries`,
       );
       continue;
     }
@@ -730,15 +772,17 @@ export function parseRolesYaml(
  *
  * Rules (the grant-grammar precedence):
  *   - Every role is ALSO registered under its explicit `role/<canonical>`
- *     alias — the token that always resolves to the role.
- *   - A BARE name resolves GROUP-FIRST: when a group's canonical name
- *     collides with a role's, the bare key resolves to the GROUP (warned);
- *     the role stays reachable via `role/<canonical>`.
+ *     alias, and every group under its explicit `group/<canonical>` alias —
+ *     the tokens that always resolve to that kind.
+ *   - A BARE name resolves ROLE-FIRST: when a group's canonical name
+ *     collides with a role's, the bare key stays the ROLE's (warned); the
+ *     group is reachable only via `group/<canonical>`. So a group named
+ *     `Admin` — whoever proposed it — never gains what `Admin` is granted.
  *   - Role `group:<Name>` refs — Admin's included — expand against the
  *     merged groups; an unknown ref contributes nothing (warned).
  *   - `byEmail` is rebuilt so each member holds exactly the tokens that
  *     resolve to a principal they belong to (bare + `role/` alias for roles,
- *     bare for groups).
+ *     `group/` alias plus the bare name when the group owns it for groups).
  */
 export function mergeGroupsIntoRoles(
   index: RolesIndex,
@@ -765,19 +809,18 @@ export function mergeGroupsIntoRoles(
     }
   }
 
-  // 2. Bare-name precedence: groups win the bare token; the role keeps its
-  //    `role/<canonical>` alias registered below.
+  // 2. Bare-name precedence: roles keep the bare token; every group gets its
+  //    `group/<canonical>` alias, and the bare key only when no role owns it.
   for (const [canonical, def] of groups) {
+    const group = { displayName: def.displayName, emails: new Set(def.emails), kind: 'group' as const };
+    index.byCanonical.set(`${GROUP_TOKEN_PREFIX}${canonical}`, group);
     if (roleRecords.has(canonical)) {
       warnings.push(
-        `${sourceFile}: group '${def.displayName}' shares its name with a role — the bare name now resolves to the GROUP; use '${ROLE_TOKEN_PREFIX}${canonical}' to reference the role`,
+        `${sourceFile}: group '${def.displayName}' shares its name with a role — the bare name resolves to the ROLE; use '${GROUP_TOKEN_PREFIX}${canonical}' to reference the group`,
       );
+      continue;
     }
-    index.byCanonical.set(canonical, {
-      displayName: def.displayName,
-      emails: new Set(def.emails),
-      kind: 'group',
-    });
+    index.byCanonical.set(canonical, group);
   }
 
   // 3. Explicit `role/<canonical>` alias for every role (same record — the
@@ -788,8 +831,8 @@ export function mergeGroupsIntoRoles(
   }
 
   // 4. Rebuild the email → tokens map from the final index so membership
-  //    reflects the post-precedence keys (a collided role's members no longer
-  //    hold the bare token unless the group also contains them).
+  //    reflects the post-precedence keys (a collided group's members hold
+  //    only its `group/` alias, never the role's bare token).
   index.byEmail.clear();
   for (const [key, principal] of index.byCanonical) {
     for (const email of principal.emails) {

@@ -14,10 +14,11 @@
  *     file's ORIGINAL text too, so rollback snapshots reuse the read the
  *     rewrite already did instead of a second full-KB pass).
  *
- * Tokens here are the ENTRY-GRAMMAR canonical tokens: a bare name (group
- * first, then role) or an explicit `role/<name>`. Callers translate: a ROLE's
- * references are its bare token plus its `role/` token; a GROUP's are its
- * bare token only.
+ * Tokens here are the ENTRY-GRAMMAR canonical tokens: a bare name (the role
+ * when one exists, else the group) or an explicit `role/<name>` /
+ * `group/<name>`. Callers translate: a ROLE's references are its bare token
+ * plus its `role/` token; a GROUP's are its `group/` token, plus the bare
+ * token while no role shares the name.
  */
 
 import path from 'node:path';
@@ -237,8 +238,8 @@ function walkRoleRefs(
 
 /**
  * Every genuine role/group reference in `text`'s rule regions, as
- * {role, verb} where `role` is the canonical ENTRY TOKEN (bare name or
- * `role/<name>`). `isAccessMd` marks an `access.md` file, whose BODY is a
+ * {role, verb} where `role` is the canonical ENTRY TOKEN (bare name,
+ * `role/<name>` or `group/<name>`). `isAccessMd` marks an `access.md` file, whose BODY is a
  * rule source in the body-governed format — see {@link ruleLineRanges}.
  */
 export function findRoleRefsInText(
@@ -462,8 +463,8 @@ export class KbReferenceScanner {
   }
 
   /**
-   * Find every genuine reference to `oldToken` and rewrite it to
-   * `newDisplayName`. FAIL-CLOSED: a candidate we cannot read might reference
+   * Find every genuine reference to `oldToken` (or any of several spellings
+   * of one principal) and rewrite it to `newDisplayName`. FAIL-CLOSED: a candidate we cannot read might reference
    * the old token, and skipping it would commit a partial rewrite (a
    * half-renamed principal still pointed at by stragglers = silent access
    * drop) — so any read failure aborts via `makeError` with nothing written.
@@ -471,10 +472,11 @@ export class KbReferenceScanner {
    */
   async rewriteReferences(
     workspaceId: string,
-    oldToken: string,
+    oldToken: string | readonly string[],
     newDisplayName: string,
     makeError: (message: string, cause?: string) => Error,
   ): Promise<ReferenceRewrite[]> {
+    const oldTokens = typeof oldToken === 'string' ? [oldToken] : oldToken;
     const repoDir = await this.repoDir(workspaceId);
     const writes: ReferenceRewrite[] = [];
     const candidates = await this.collectCandidateFiles(workspaceId);
@@ -498,7 +500,10 @@ export class KbReferenceScanner {
     candidates.forEach((repoRel, i) => {
       const entry = texts[i];
       if (!entry.ok) return; // unreachable — the loop above threw
-      const rewritten = rewriteRoleTokensInText(entry.text, oldToken, newDisplayName, true, isAccessMdPath(repoRel));
+      let rewritten = entry.text;
+      for (const token of oldTokens) {
+        rewritten = rewriteRoleTokensInText(rewritten, token, newDisplayName, true, isAccessMdPath(repoRel));
+      }
       if (rewritten !== entry.text) {
         writes.push({ repoRelativePath: repoRel, content: rewritten, original: entry.text });
       }

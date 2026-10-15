@@ -285,16 +285,16 @@ describe('POST /access/revoke — route classification + modes', () => {
       expect(h.stubs.files.get(`${KB}/Sales/access.md`)).toContain('Admin'); // untouched
     });
 
-    it('a GROUP revoke matches its exact bare token only — a VANISHED group never strips role/<Name>', async () => {
-      // The file grants BOTH spellings of one name: the bare token (the
-      // group's grant) and role/Product (the role's). The group has since
-      // vanished from the active source (kbPrincipals reports no groups), so
-      // the mutation layer's shadow probe reads "unshadowed" — name-level
-      // matching would strip BOTH spellings, silently revoking the ROLE. The
-      // route pins exact-token matching for group principals instead.
+    it('a GROUP revoke strips group/<Name> — a VANISHED group never strips the role spellings', async () => {
+      // The file grants every spelling of one name: the bare token and
+      // role/Product (the role's) and group/Product (the group's). The group
+      // has since vanished from the active source and the principal index
+      // says nothing about roles either (kbPrincipals reports none), so
+      // nothing vouches that the bare name is the group's: only the explicit
+      // group token goes.
       h = await makeHarness({
         files: {
-          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n  - group/Product\n---\n',
         },
         grantSources: () => ({}),
       });
@@ -305,9 +305,10 @@ describe('POST /access/revoke — route classification + modes', () => {
       });
       expect(res.status).toBe(200);
       const text = h.stubs.files.get(`${KB}/Sales/access.md`)!;
-      // The group's bare grant is gone; the role's explicit grant survives.
+      // The group's grant is gone; the role's spellings survive.
+      expect(text).not.toContain('group/Product');
       expect(text).toContain('- role/Product');
-      expect(text.split('\n')).not.toContain('  - Product');
+      expect(text.split('\n')).toContain('  - Product');
     });
 
     it('a ROLE revoke still sweeps legacy bare spellings when nothing shadows the name', async () => {
