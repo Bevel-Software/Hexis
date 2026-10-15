@@ -40,6 +40,7 @@ export type RefFileAnswer = { sha: string } | 'missing' | 'unreadable';
 
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_SYMREF_DEPTH = 5;
+const PER_WORKTREE = /^refs\/(?:worktree|bisect|rewritten)\//;
 
 /** A ref name this reader is willing to turn into a path under `.git`. */
 function isSafeRefName(ref: string): boolean {
@@ -158,9 +159,13 @@ async function readLooseRef(dirs: GitDirs, dir: string, relative: string, depth:
 async function resolveIn(dirs: GitDirs, ref: string, depth: number): Promise<RefFileAnswer> {
   if (depth > MAX_SYMREF_DEPTH) return 'unreadable';
   if (!isSafeRefName(ref)) return 'unreadable';
-  const loose = await readLooseRef(dirs, ref === 'HEAD' ? dirs.gitDir : dirs.commonDir, ref, depth);
+  // `HEAD` and the per-worktree namespaces (`refs/worktree/`, `refs/bisect/`,
+  // `refs/rewritten/`) are a worktree's own, kept loose in its git directory
+  // and never packed; everything else is the repository's.
+  const own = ref === 'HEAD' || PER_WORKTREE.test(ref);
+  const loose = await readLooseRef(dirs, own ? dirs.gitDir : dirs.commonDir, ref, depth);
   if (loose !== 'missing') return decidedHere(ref, loose);
-  if (ref === 'HEAD') return 'missing';
+  if (own) return 'missing';
   const packed = await (dirs.packed ??= readPackedRefs(dirs.commonDir));
   if (!packed) return 'unreadable';
   const sha = packed.get(ref);

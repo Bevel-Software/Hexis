@@ -128,6 +128,16 @@ describe('readRefSha', () => {
     await expectSha(wt, 'refs/heads/main');
     await expectSha(wt, 'refs/remotes/origin/main');
     expect(await readRefSha(wt, 'HEAD')).not.toEqual(await readRefSha(clone, 'HEAD'));
+    // A per-worktree ref lives in the worktree's own git directory: git
+    // resolves it there and nowhere else. It is not a branch, so the reader
+    // leaves it to git — but as something that exists, never as missing.
+    const sha = await git(wt, 'rev-parse', 'HEAD');
+    await git(wt, 'update-ref', 'refs/worktree/probe', sha);
+    expect(await git(wt, 'rev-parse', '--verify', 'refs/worktree/probe^{commit}')).toBe(sha);
+    expect(await readRefSha(wt, 'refs/worktree/probe')).toBe('unreadable');
+    expect(await readRevSha(wt, 'worktree/probe')).toBe('unreadable');
+    await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'refs/worktree/probe^{commit}')).rejects.toThrow();
+    expect(await readRefSha(clone, 'refs/worktree/probe')).toBe('missing');
   });
 
   it('says missing for a ref no file holds, before and after packing', async () => {
