@@ -820,6 +820,13 @@ export class PullRequestService implements IPullRequestService {
      * commit — usually another request's merge.
      */
     let appliedSha: string | null = null;
+    /**
+     * The request recorded a merge commit this read could not get at — not in
+     * the clone yet, or a merge log too unreadable to verify it. Kept apart
+     * from "made no commit of its own" (a recorded sha that is verifiably
+     * another request's), which leaves `appliedSha` null just the same.
+     */
+    let appliedUnreadable = false;
     // The SAME routing the list takes, from the same function, so the two
     // surfaces cannot disagree about which files a request has — see
     // {@link changeSourceFor} for why each state reads from what it does.
@@ -953,6 +960,11 @@ export class PullRequestService implements IPullRequestService {
       forkPoint = { mergeBaseSha: null, behind: false };
       targetChangedShared = false;
       appliedSha = null;
+      // A mismatch is a verdict: the recorded commit is another request's, so
+      // this apply made none of its own. Anything else is history this read
+      // could not reach, and says nothing about whether a change was applied.
+      appliedUnreadable =
+        row.state === 'merged' && source.kind === 'commit' && !(err instanceof AppliedChangeMismatchError);
     }
 
     // An APPLIED request with no verified merge commit of its own — the
@@ -1122,7 +1134,12 @@ export class PullRequestService implements IPullRequestService {
     const finished =
       row.state === 'open'
         ? null
-        : await this.finishedFacts(row, appliedSha, row.state === 'merged' ? await mergeOrNobody() : null);
+        : await this.finishedFacts(
+            row,
+            appliedSha,
+            appliedUnreadable,
+            row.state === 'merged' ? await mergeOrNobody() : null,
+          );
 
     const detail: PullRequestDetail = {
       ...summary,
@@ -1200,6 +1217,7 @@ export class PullRequestService implements IPullRequestService {
   private async finishedFacts(
     row: ChangeRequestRow,
     appliedSha: string | null,
+    appliedUnreadable: boolean,
     merge: { name: string | null; headSha: string } | null,
   ): Promise<PullRequestFinished> {
     return {
@@ -1210,6 +1228,7 @@ export class PullRequestService implements IPullRequestService {
           ? 'repository-replaced'
           : null,
       appliedSha: row.state === 'merged' ? appliedSha : null,
+      appliedUnreadable: row.state === 'merged' && appliedUnreadable,
     };
   }
 

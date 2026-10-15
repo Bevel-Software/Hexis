@@ -69,6 +69,8 @@ export function FinishedChangeRequest({
   const statusLine = useMemo(() => (detail ? finishedStatusLine(detail) : null), [detail]);
   const files = useMemo(() => (detail && applied ? detail.files : []), [applied, detail]);
   const appliedSha = applied ? (detail?.finished?.appliedSha ?? null) : null;
+  /** A recorded merge commit this answer could not read: no diff, and no claim that nothing was applied. */
+  const appliedUnreadable = applied && detail?.finished?.appliedUnreadable === true;
   const showFiles = files.length > 0;
   const targetBranch = cr.base || DEFAULT_BRANCH;
 
@@ -146,7 +148,12 @@ export function FinishedChangeRequest({
     // is still pending too, so a probe in flight shows Loading… below, and a
     // retryable failure falls through to the sentence with Try again — never
     // either one reading as success.
-    pane = (
+    pane = appliedUnreadable ? (
+      <p className="py-6 text-center text-detail text-ink-faint">
+        The change as it was applied can't be read right now. Close and reopen this request later
+        to see it.
+      </p>
+    ) : (
       <p className="py-6 text-center text-detail text-ink-faint">
         Everything this request proposed was already there when it was applied, so it made no
         change of its own to show.

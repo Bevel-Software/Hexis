@@ -479,6 +479,17 @@ export interface PullRequestFinished {
    * and is never sent.
    */
   appliedSha: string | null;
+  /**
+   * `true` only for an applied request that RECORDED a merge commit which
+   * could not be read on this answer: the commit is not in this clone yet, or
+   * the merge log that verifies it could not be read. Its change exists but
+   * is unavailable here, so `appliedSha` is `null` WITHOUT meaning the apply
+   * made no commit, and the view must not say nothing was applied. `false`
+   * everywhere else — a closed request, an apply verified as its own, and one
+   * that made no commit of its own (none recorded, or the recorded one is
+   * verifiably another request's).
+   */
+  appliedUnreadable: boolean;
 }
 
 /**

@@ -169,6 +169,7 @@ function detailOf(
             appliedBy: state === 'merged' ? { name: 'Robin Lee' } : null,
             closedReason: null,
             appliedSha: state === 'merged' ? SHA : null,
+            appliedUnreadable: false,
             ...finished,
           },
     ...over,
@@ -535,6 +536,24 @@ describe('ChangeRequestDialog: an applied request', () => {
     );
     expect(screen.queryByText(/· as applied/)).not.toBeInTheDocument();
     // Never a diff, so never a read of any commit.
+    expect(crApi.readFileAtCommit).not.toHaveBeenCalled();
+    expectNoReviewControls();
+  });
+
+  it('a recorded merge commit that could not be read never claims nothing was applied', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [file('Docs/pricing.yaml', { additions: 2, deletions: 1 })], {
+        appliedSha: null,
+        appliedUnreadable: true,
+      }),
+    );
+    renderDialog();
+    expect(await screen.findByText(/change as it was applied can't be read right now/)).toBeInTheDocument();
+    expect(screen.queryByText(/already there when it was applied/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/made no change of its own/)).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Applied by Robin Lee');
+    expect(screen.getAllByRole('treeitem').map((r) => r.textContent)).toEqual(['pricing.yaml']);
+    expect(screen.queryByText(/· as applied/)).not.toBeInTheDocument();
     expect(crApi.readFileAtCommit).not.toHaveBeenCalled();
     expectNoReviewControls();
   });

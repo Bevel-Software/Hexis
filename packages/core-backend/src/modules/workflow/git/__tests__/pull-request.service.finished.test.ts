@@ -38,6 +38,7 @@ function harness(
   opts: {
     mergeLog?: MergeLogRow[];
     mismatch?: boolean;
+    mergeNotInClone?: boolean;
     mergeLogThrows?: boolean;
     headNotInClone?: boolean;
     targetUnreachable?: boolean;
@@ -100,6 +101,9 @@ function harness(
     if (opts.mismatch) {
       throw new AppliedChangeMismatchError(`commit ${MERGE_SHA} is not change request #4's merge`);
     }
+    if (opts.mergeNotInClone) {
+      throw new WorkflowValidationError(`commit ${MERGE_SHA} is not in this clone`);
+    }
     return { baseSha: BASE_SHA, headSha: HEAD_SHA };
   });
   const changedFilesOfProposalHead = vi.fn(async () => {
@@ -152,6 +156,7 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
       appliedBy: { name: 'Robin Lee' },
       closedReason: null,
       appliedSha: MERGE_SHA,
+      appliedUnreadable: false,
     });
     // The summary line counts the change as applied: the merge commit's files.
     expect(detail?.files.map((f) => [f.path, f.additions, f.deletions])).toEqual([
@@ -272,6 +277,7 @@ describe('PullRequestService.getPrDetail — how a finished request ended', () =
       appliedBy: null,
       closedReason: null,
       appliedSha: null,
+      appliedUnreadable: false,
     });
     expect(mergeLogWhere).not.toHaveBeenCalled();
   });
@@ -337,7 +343,39 @@ describe('PullRequestService.getPrDetail — an apply that made no commit of its
     expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, { sourceBranch: 'feature/x' });
     expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
     expect(detail?.finished?.appliedSha).toBeNull();
+    // Verifiably another request's commit: this apply made none of its own.
+    expect(detail?.finished?.appliedUnreadable).toBe(false);
     expect(JSON.stringify(detail)).not.toContain(MERGE_SHA);
+  });
+
+  it('a recorded merge commit that is not in the clone is unreadable history, never "made no commit"', async () => {
+    const { svc, changedFilesOfProposalHead } = harness(
+      {},
+      { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }], mergeNotInClone: true },
+    );
+    const detail = await svc.getPrDetail(4);
+    // The proposal head is still readable, so the list is its own files…
+    expect(changedFilesOfProposalHead).toHaveBeenCalledWith('ws', 'main', PROPOSAL_HEAD, { sourceBranch: 'feature/x' });
+    expect(detail?.files.map((f) => f.path)).toEqual(['Knowledge/Proposed.md']);
+    // …with no sha to diff, flagged as unavailable rather than as a no-op apply.
+    expect(detail?.finished).toMatchObject({ appliedSha: null, appliedUnreadable: true, appliedBy: { name: 'Robin Lee' } });
+    expect(JSON.stringify(detail)).not.toContain(MERGE_SHA);
+  });
+
+  it('a recorded merge commit whose merge log cannot be read is unreadable history too', async () => {
+    const { svc } = harness({}, { mergeLogThrows: true });
+    expect((await svc.getPrDetail(4))?.finished).toMatchObject({ appliedSha: null, appliedUnreadable: true });
+  });
+
+  it('a verified own merge commit and a row recording none are both readable', async () => {
+    expect((await harness({}, { mergeLog: [{ name: 'Robin Lee' }] }).svc.getPrDetail(4))?.finished).toMatchObject({
+      appliedSha: MERGE_SHA,
+      appliedUnreadable: false,
+    });
+    expect(
+      (await harness({ mergedSha: null }, { mergeLog: [{ name: 'Robin Lee', headSha: PROPOSAL_HEAD }] }).svc.getPrDetail(4))
+        ?.finished,
+    ).toMatchObject({ appliedSha: null, appliedUnreadable: false });
   });
 
   it('answers no files when that head is no longer in the clone', async () => {
