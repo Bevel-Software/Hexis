@@ -15,8 +15,6 @@ const log = logger('tool-read-only-hints');
 /** The deployment setting the overrides live in — see `CORE_SETTINGS`. */
 export const TOOL_READ_ONLY_SETTING = 'toolReadOnlyOverrides';
 
-export type { IToolReadOnlyHints, ToolReadOnlyEntry };
-
 type SettingsPort = Pick<DeploymentSettingsService, 'reload' | 'recordIfAbsent' | 'swapIfValue'>;
 
 /** A name that is neither a platform tool nor a meta-tool. */
