@@ -8,6 +8,7 @@ import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.
 import { assertOneSpecPerLine, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { readRevSha } from '../kb-fs/ref-files.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -65,6 +66,11 @@ import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
+
+/** A full object id, which is what every at-ref gate resolves its ref to before reading. */
+function isCommitSha(ref: string): boolean {
+  return /^[0-9a-f]{40,64}$/.test(ref);
+}
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -1441,6 +1447,18 @@ export class AccessControlService implements IAccessControl {
   private static readonly AT_REF_CACHE_MAX = 512;
 
   /**
+   * A path's own access entries AT A COMMIT, keyed by commit + path. A blob
+   * at a commit never changes, so neither does what it declares for itself:
+   * no TTL, no invalidation, and no workspace in the key (every clone holds
+   * the same objects). This is the read every at-ref gate makes after the
+   * model: one `cat-file --batch` per call for the paths asked, which a
+   * change-request listing made once per ref per listing for the same paths
+   * at the same commits. Bounded FIFO; the bound only caps memory.
+   */
+  private readonly ownEntriesAtCommit = new Map<string, OwnEntries | null>();
+  private static readonly OWN_ENTRIES_AT_COMMIT_MAX = 16_384;
+
+  /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
    * Held on the service rather than read per-model because it comes from the
    * environment, not from the knowledge base.
@@ -2553,6 +2571,11 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
+    // At a commit (what every gate passes: `resolvedRef`), the batched read
+    // and its memo answer; a single `git show` stays for a symbolic ref.
+    if (isCommitSha(ref)) {
+      return (await this.readOwnEntriesAtRefBatch(repoDir, ref, [relativePath])).get(relativePath) ?? null;
+    }
     const text = await this.showAtRef(repoDir, ref, relativePath);
     if (text === null) return null;
     if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
@@ -2574,18 +2597,37 @@ export class AccessControlService implements IAccessControl {
   ): Promise<Map<string, OwnEntries | null>> {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
+    const memo = isCommitSha(ref) ? this.ownEntriesAtCommit : null;
     for (const p of relativePaths) {
-      if (p === 'roles.yaml') result.set(p, null);
-      else if (!wanted.includes(p)) wanted.push(p);
+      if (p === 'roles.yaml') {
+        result.set(p, null);
+        continue;
+      }
+      const key = `${ref}\0${p}`;
+      if (memo?.has(key)) {
+        result.set(p, memo.get(key) ?? null);
+        continue;
+      }
+      if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
     const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
-      if (text === null) result.set(p, null);
-      else result.set(p, isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text));
+      const own =
+        text === null ? null : isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
+      result.set(p, own);
+      if (memo) this.rememberOwnEntriesAtCommit(`${ref}\0${p}`, own);
     });
     return result;
+  }
+
+  private rememberOwnEntriesAtCommit(key: string, value: OwnEntries | null): void {
+    this.ownEntriesAtCommit.set(key, value);
+    if (this.ownEntriesAtCommit.size > AccessControlService.OWN_ENTRIES_AT_COMMIT_MAX) {
+      const oldest = this.ownEntriesAtCommit.keys().next().value;
+      if (oldest !== undefined) this.ownEntriesAtCommit.delete(oldest);
+    }
   }
 
   /**
@@ -2742,6 +2784,14 @@ export class AccessControlService implements IAccessControl {
   /** The commit `ref` points at in this clone, or null when it doesn't resolve. */
   private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
     if (!ref || ref.startsWith('-')) return null;
+    // The ref files first (`readRevSha`): the names git would try, in git's
+    // order, read without a process. "Missing" from the files is what
+    // rev-parse answers nothing for; "unreadable" — a spelling the reader
+    // does not resolve, a tag it cannot peel, a file it could not read — is
+    // git's to decide, as the authority.
+    const fromFiles = await readRevSha(repoDir, ref);
+    if (fromFiles === 'missing') return null;
+    if (fromFiles !== 'unreadable') return fromFiles.sha;
     try {
       const { stdout } = await this.gitRunner.run(repoDir, [
         'rev-parse',

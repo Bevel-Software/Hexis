@@ -129,6 +129,11 @@ function lsTreeBuilds(): number {
   return spawnLog.filter((argv) => argv.includes('ls-tree')).length;
 }
 
+/** Ref resolutions through git: none, since the ref files answer. */
+function revParses(): number {
+  return spawnLog.filter((argv) => argv.includes('rev-parse')).length;
+}
+
 /** Batched reads of a commit's access tree: one per build. */
 function catFileBatches(): number {
   return spawnLog.filter((argv) => argv.includes('cat-file')).length;
@@ -386,9 +391,11 @@ describe('AccessControlService — at-ref model cache', () => {
     // The seed holds roles.yaml and two access.md files; a read per file was
     // what the build used to cost, and what a server forking a large heap
     // cannot afford.
+    // One listing and one batch build the model; a second batch reads the
+    // asked path's own entries, once per commit and path (see the memo test).
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
     expect(lsTreeBuilds()).toBe(1);
-    expect(catFileBatches()).toBe(1);
+    expect(catFileBatches()).toBe(2);
     expect(fileShows()).toBe(0);
     // Both access files were read through the batch: Team's denial is seen.
     await pushFromOther('deny Admin in Team', () =>
@@ -396,7 +403,7 @@ describe('AccessControlService — at-ref model cache', () => {
     );
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
     expect(lsTreeBuilds()).toBe(2);
-    expect(catFileBatches()).toBe(2);
+    expect(catFileBatches()).toBe(4);
     expect(fileShows()).toBe(0);
   });
 
@@ -534,7 +541,40 @@ describe('AccessControlService — at-ref model cache', () => {
     // ...and nothing was pinned: the next call, with git answering in full,
     // builds again and answers.
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
-    expect(catFileBatches()).toBe(batchesBefore + 2);
+    // Three batches: the refused build, then the build that answered and the
+    // asked path's own entries.
+    expect(catFileBatches()).toBe(batchesBefore + 3);
+  });
+
+  it('resolves refs from the ref files and remembers own entries at a commit: a repeated gate call starts no git', async () => {
+    // First call at this commit: the model is built (two git calls) and the
+    // asked path's own entries are read (one batch). The refs themselves —
+    // `origin/main`, and the candidates a short name tries — come from the
+    // ref files, so no `rev-parse` runs at all.
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(new Map([[DOC, true]]));
+    expect(revParses()).toBe(0);
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(2);
+
+    // The same gate again, and the single-path gate for the same path: the
+    // model and the own entries are both remembered, so apart from the
+    // fixture's own fetch nothing is started.
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(new Map([[DOC, true]]));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, 'main', admin, DOC)).toBe(true);
+    expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+
+    // A path not asked before at this commit is read, and only that path.
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC, QUOTED_DOC])).toEqual(
+      new Map([
+        [DOC, true],
+        [QUOTED_DOC, false],
+      ]),
+    );
+    expect(catFileBatches()).toBe(1);
+    expect(revParses()).toBe(0);
   });
 
   it('holds the models of far more commits than one listing resolves', async () => {
