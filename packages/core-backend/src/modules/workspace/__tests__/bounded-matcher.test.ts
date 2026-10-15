@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WorkerPatternMatcher, type WorkerPatternMatcherOptions } from '../bounded-matcher.js';
 import { PatternTooExpensiveError } from '../pattern-matcher.contract.js';
 
@@ -118,6 +119,28 @@ describe('WorkerPatternMatcher', () => {
     expect(expected.at(-1)! * filler.length).toBeGreaterThan(200);
     expect(await m.search('^hit', '').matchingLines(lines, 10_000)).toEqual(expected);
     expect(await m.search('^hit', '').matchingLines(lines, 3)).toEqual(expected.slice(0, 3));
+  });
+
+  it('hands a line longer than one batch over in shared memory, never in a message, and matches it exactly', async () => {
+    const m = matcher({ batchChars: 100 });
+    // A lone surrogate included: the line must reach the worker code unit for code unit.
+    const long = `${'x'.repeat(1_000)}\uD800 tail ${'y'.repeat(500)}`;
+    const lines = ['short', long, 'z'.repeat(400), 'end tail'];
+    const posted = vi.spyOn(Worker.prototype, 'postMessage');
+    try {
+      for (const pattern of ['tail', '\\uD800 tail', '^x+\\uD800', 'y{500}$', '^z+$', 'nowhere']) {
+        const re = new RegExp(pattern);
+        const expected = lines.flatMap((l, i) => (re.test(l) ? [i] : []));
+        expect(await m.search(pattern, '').matchingLines(lines, 10_000)).toEqual(expected);
+      }
+      const postedChars = posted.mock.calls.map(([msg]) =>
+        ((msg as { lines?: string[] }).lines ?? []).reduce((n, l) => n + l.length, 0),
+      );
+      expect(postedChars.length).toBeGreaterThan(0);
+      expect(Math.max(...postedChars)).toBeLessThanOrEqual(100);
+    } finally {
+      posted.mockRestore();
+    }
   });
 
   it('refuses a search with 503 once the queue for a worker is full, rather than holding its lines', async () => {

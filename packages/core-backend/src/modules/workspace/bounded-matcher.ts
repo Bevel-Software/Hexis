@@ -46,7 +46,9 @@ export interface WorkerPatternMatcherOptions {
    * Characters handed to the worker in one message. Posting a message copies
    * it on the request thread, so a large file goes over in pieces of about
    * this size rather than in one copy that would stall every other request.
-   * Default 1 MB.
+   * A single line longer than this is not posted at all: it is written into
+   * shared memory this many characters at a time, yielding between pieces,
+   * and the worker reads it from there. Default 1 MB.
    */
   batchChars?: number;
 }
@@ -63,8 +65,10 @@ const WORKER_SOURCE = `
 const { parentPort } = require('node:worker_threads');
 const { performance } = require('node:perf_hooks');
 let cached = { key: null, re: null };
-parentPort.on('message', ({ source, flags, lines, limit }) => {
+parentPort.on('message', ({ source, flags, lines, shared, limit }) => {
   try {
+    // One line too long to post, written into shared memory as raw UTF-16 code units.
+    if (shared) lines = [Buffer.from(shared).toString('utf16le')];
     const key = flags + '/' + source;
     if (cached.key !== key) cached = { key, re: new RegExp(source, flags) };
     const re = cached.re;
@@ -83,7 +87,12 @@ parentPort.on('message', ({ source, flags, lines, limit }) => {
 
 type Reply = { hits: number[]; elapsed: number } | { error: string };
 /** What a search borrows from its pool: a worker, its return, and where a batch ends. */
-type Lease = { acquire(): Promise<Worker>; release(w: Worker): void; batchEnd(lines: string[], from: number): number };
+type Lease = {
+  acquire(): Promise<Worker>;
+  release(w: Worker): void;
+  batchEnd(lines: string[], from: number): number;
+  readonly batchChars: number;
+};
 type Waiter = { resolve: (w: Worker) => void; reject: (err: Error) => void };
 
 export class WorkerPatternMatcher implements IPatternMatcher {
@@ -96,11 +105,7 @@ export class WorkerPatternMatcher implements IPatternMatcher {
   private readonly all = new Set<Worker>();
   private readonly waiting: Waiter[] = [];
   private closed = false;
-  private readonly lease: Lease = {
-    acquire: () => this.acquire(),
-    release: (w) => this.release(w),
-    batchEnd: (lines, from) => this.batchEnd(lines, from),
-  };
+  private readonly lease: Lease;
 
   constructor(opts: WorkerPatternMatcherOptions = {}) {
     this.budgetMs = option('budgetMs', opts.budgetMs ?? 5_000, 1, MAX_TIMER_MS - TRANSFER_GRACE_MS);
@@ -110,6 +115,12 @@ export class WorkerPatternMatcher implements IPatternMatcher {
     this.maxWaiting = option('maxWaiting', opts.maxWaiting ?? 16, 0);
     this.maxPatternLength = option('maxPatternLength', opts.maxPatternLength ?? 1_000, 1);
     this.batchChars = option('batchChars', opts.batchChars ?? 1_000_000, 1);
+    this.lease = {
+      acquire: () => this.acquire(),
+      release: (w) => this.release(w),
+      batchEnd: (lines, from) => this.batchEnd(lines, from),
+      batchChars: this.batchChars,
+    };
   }
 
   search(source: string, flags: string): IPatternSearch {
@@ -136,7 +147,11 @@ export class WorkerPatternMatcher implements IPatternMatcher {
     await Promise.all(workers.map((w) => w.terminate()));
   }
 
-  /** Where the batch starting at `from` ends: about `batchChars` characters on, and never empty. */
+  /**
+   * Where the batch starting at `from` ends: about `batchChars` characters on,
+   * and never empty. A batch of one line past `batchChars` is handed over
+   * through shared memory instead (see {@link BoundedSearch.matchBatch}).
+   */
   private batchEnd(lines: string[], from: number): number {
     let to = from;
     let chars = 0;
@@ -213,11 +228,17 @@ class BoundedSearch implements IPatternSearch {
     return hits;
   }
 
-  /** One handoff to the worker, charged to this search's budget. */
+  /**
+   * One handoff to the worker, charged to this search's budget. No handoff
+   * copies more than `batchChars` characters on the request thread at once: a
+   * line longer than that goes over in shared memory, not in the message.
+   */
   private async matchBatch(w: Worker, lines: string[], limit: number): Promise<number[]> {
+    if (this.spentMs >= this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
+    const oversized = lines.length === 1 && lines[0]!.length > this.pool.batchChars;
+    const payload = oversized ? { shared: await shareLine(lines[0]!, this.pool.batchChars) } : { lines };
     const remaining = this.budgetMs - this.spentMs;
-    if (remaining <= 0) throw new PatternTooExpensiveError(this.source, this.budgetMs);
-    const reply = await run(w, { source: this.source, flags: this.flags, lines, limit }, remaining + TRANSFER_GRACE_MS);
+    const reply = await run(w, { source: this.source, flags: this.flags, ...payload, limit }, remaining + TRANSFER_GRACE_MS);
     if (reply === 'timeout') {
       this.spentMs = this.budgetMs;
       throw new PatternTooExpensiveError(this.source, this.budgetMs);
@@ -227,6 +248,23 @@ class BoundedSearch implements IPatternSearch {
     if (this.spentMs > this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
     return reply.hits;
   }
+}
+
+/**
+ * A line as raw UTF-16 code units in shared memory, which a message hands the
+ * worker without copying. It is written `chunkChars` at a time with a turn of
+ * the event loop between, so a line of any length never holds the request
+ * thread for longer than one chunk. Raw code units keep the line exact, lone
+ * surrogates included.
+ */
+async function shareLine(line: string, chunkChars: number): Promise<SharedArrayBuffer> {
+  const shared = new SharedArrayBuffer(line.length * 2);
+  const bytes = Buffer.from(shared);
+  for (let at = 0; at < line.length; at += chunkChars) {
+    if (at > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    bytes.write(line.slice(at, at + chunkChars), at * 2, 'utf16le');
+  }
+  return shared;
 }
 
 function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'timeout'> {
