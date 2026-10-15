@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -362,8 +362,8 @@ describe('AccessMutationService', () => {
     });
 
     it('GROUP deny with a VANISHED group succeeds even when a same-named ROLE keeps a role/<Name> grant', async () => {
-      // The false-negative this pins: the route pins tokenMatch:'exact' for a
-      // GROUP principal, so the deny strips/denies ONLY the bare token. The
+      // The false-negative this pins: with tokenMatch pinned to 'exact' on the
+      // bare token, the deny strips/denies ONLY that token. The
       // post-write effectiveness assert must judge the SAME exact identity —
       // with the group vanished the name reads "unshadowed", and the
       // alias-tolerant default would read the surviving `role/Product Team`
@@ -601,6 +601,18 @@ describe('token-kind family — role-first revoke, exact-token grant (real resol
     await write(repo, 'Sales/access.md', '---\nwrite:\n  - role/Product Team\n---\n');
     const r = await mutation.grant(WS, 'folder', 'Sales', 'write', roleP);
     expect(r.changed).toBe(false);
+  });
+
+  it("REVOKE on a model-load failure: a ROLE revoke stays exact and keeps the bare token", async () => {
+    await collide(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    // A failed load answers empty principal lists: nothing says who owns the bare name.
+    vi.spyOn(access, 'kbPrincipals').mockResolvedValue({ roles: [], groups: [], plugins: [] } as never);
+    const r = await mutation.revoke(WS, 'folder', 'Sales', roleP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('role/Product Team');
+    expect(text.split('\n')).toContain('  - Product Team');
   });
 
   it("REVOKE collided: revoking the ROLE strips its bare and role/ spellings, never the group's", async () => {

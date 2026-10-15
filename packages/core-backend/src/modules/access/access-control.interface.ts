@@ -57,7 +57,9 @@ export type GrantPrincipal =
  * active group source). The resolver knows the kind from the merged principal
  * index — a `role/<canonical>` alias hit is always the role, a
  * `group/<canonical>` hit always the group, and a bare token is the role when
- * one of that name exists, else the group — and the share dialog needs
+ * one of that name exists, otherwise the group when one exists (a token that
+ * names neither keeps the legacy `role` kind, as `everyone` does) — and the
+ * share dialog needs
  * it to badge each grantee row honestly ("Role" vs "Group") and to round-trip
  * the row's principal with the right kind.
  *

@@ -282,7 +282,8 @@ export class AccessMutationService {
    *
    *   - A ROLE (`role/<name>`, or a bare name) owns the bare key unless no
    *     role of that name exists and a group does — then the bare token is
-   *     the group's, and matching is `'exact'`.
+   *     the group's, and matching is `'exact'`. A model that fails to load
+   *     keeps it `'exact'` too.
    *   - A GROUP (`group/<name>`) owns the bare key only while no role of
    *     that name exists — otherwise the bare token is the role's, and
    *     matching is `'exact'`. A group that has VANISHED from the active
@@ -304,7 +305,9 @@ export class AccessMutationService {
       return isRole || roles.length === 0 ? 'exact' : 'name';
     }
     const isGroup = groups.some((g) => canonicalRoleName(g) === name);
-    return !isRole && isGroup ? 'exact' : 'name';
+    // No roles at all means the model failed to load: stay exact, so a role
+    // revoke never strips a same-named group's bare grant.
+    return roles.length === 0 || (!isRole && isGroup) ? 'exact' : 'name';
   }
 
   /**
@@ -369,7 +372,10 @@ export class AccessMutationService {
     // When present, strip ONLY this verb (a per-checkbox toggle in the share UI);
     // absent strips the principal from every verb (the whole-principal Remove).
     verb?: Verb,
-    // `tokenMatch` overrides the derived matching (see revokeTokenMatch).
+    // `tokenMatch` overrides the derived matching (see revokeTokenMatch). A
+    // TEST seam only: no production caller passes it — the route leans on the
+    // derived matching, which never strips across kinds. Pinning `'name'` here
+    // would bypass that guard.
     opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     void _actingUserEmail; // referenced to satisfy no-unused-vars until something consumes it
@@ -450,7 +456,7 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
-    // Same override as `revoke`.
+    // Same override as `revoke` — a test seam, unused in production.
     opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal);

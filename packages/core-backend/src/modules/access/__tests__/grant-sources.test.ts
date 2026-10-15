@@ -251,7 +251,7 @@ describe('grantSources — principal kind when a group shares a role name', () =
 
   it('a BARE grant of a shared name is the ROLE\'s, never attributed to the GROUP principal', async () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
-    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n  - role/Engineer\n---\n');
+    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
     const groupSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
       kind: 'role',
       role: 'group/Engineer',

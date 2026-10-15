@@ -116,17 +116,19 @@ export const GROUP_TOKEN_PREFIX = 'group/';
  * A canonical role-shaped token split into its explicit kind prefix and its
  * bare name: `role/admin` → `{ prefix: 'role', name: 'admin' }`, `group/admin`
  * → `{ prefix: 'group', name: 'admin' }`, anything else (a bare name, a
- * plugin token, `everyone`) → `{ prefix: null, name: <token> }`.
+ * plugin token, `everyone`) → `{ prefix: null, name: <token> }`. A prefixed
+ * name is canonicalised again, so `group/ admin` splits like `group/admin`
+ * (as `parseAccessEntry` reads it).
  */
 export function splitPrincipalToken(canonical: string): {
   prefix: 'role' | 'group' | null;
   name: string;
 } {
   if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
-    return { prefix: 'role', name: canonical.slice(ROLE_TOKEN_PREFIX.length) };
+    return { prefix: 'role', name: canonicalRoleName(canonical.slice(ROLE_TOKEN_PREFIX.length)) };
   }
   if (canonical.startsWith(GROUP_TOKEN_PREFIX)) {
-    return { prefix: 'group', name: canonical.slice(GROUP_TOKEN_PREFIX.length) };
+    return { prefix: 'group', name: canonicalRoleName(canonical.slice(GROUP_TOKEN_PREFIX.length)) };
   }
   return { prefix: null, name: canonical };
 }

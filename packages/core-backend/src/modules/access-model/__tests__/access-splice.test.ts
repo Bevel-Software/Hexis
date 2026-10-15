@@ -388,8 +388,18 @@ write:
     const asRole = spliceRevoke(ALL, 'write', { kind: 'role', role: 'role/Sales' });
     expect(asRole.text.split('\n')).toEqual(['---', 'write:', '  - group/Sales', '  - Admin', '---', '']);
 
+    // The splice primitive alone: 'name' takes the bare token for whichever
+    // kind is asked. The service never asks it for a GROUP while a role of the
+    // name exists (ALL has one) — it pins 'exact', pinned in the next test.
     const asGroup = spliceRevoke(ALL, 'write', { kind: 'role', role: 'group/Sales' });
     expect(asGroup.text.split('\n')).toEqual(['---', 'write:', '  - role/Sales', '  - Admin', '---', '']);
+  });
+
+  it('REVOKE matches a spaced `group/ <Name>` request against the parsed `group/<name>` entry', () => {
+    const r = spliceRevoke(ALL, 'write', { kind: 'role', role: 'group/ Sales' }, { tokenMatch: 'exact' });
+    expect(r.text.split('\n')).toEqual(['---', 'write:', '  - role/Sales', '  - Sales', '  - Admin', '---', '']);
+    const md = '---\nwrite:\n  - group/ Sales\n---\n';
+    expect(spliceRevoke(md, 'write', { kind: 'role', role: 'group/Sales' }).changed).toBe(true);
   });
 
   it("REVOKE 'exact' of group/<Name> strips only that spelling", () => {

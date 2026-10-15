@@ -36,7 +36,9 @@ Access to any path — reading it as much as writing it — is governed by
   Capitalised forms like `Deny` are *not* triggers; they are treated as part
   of a name.
 - **Principals** are a role (`role/<Name>`, from `roles.yaml`), a group
-  (`group/<Name>`, from `groups.yaml`), a person as `Name <email>`, a plugin
+  (`group/<Name>`, from the active group source — `groups.yaml`, or
+  `synced-groups.yaml` when groups sync from an identity provider), a person
+  as `Name <email>`, a plugin
   token (above), or
   **`everyone`** — the built-in org-wide principal: every signed-in person and
   their agents. `read: everyone` in a folder's BODY opens that folder to the
@@ -52,9 +54,10 @@ Access to any path — reading it as much as writing it — is governed by
   access dialog writes them that way too. A bare name (`read: Reviewer`)
   still works and means the ROLE when a role of that name exists, and the
   group otherwise. So a group that shares a role's name is reached only as
-  `group/<Name>`: a group named `Admin` never receives what `Admin` is
-  granted. `role/<Name>` always means the role, `group/<Name>` always the
-  group.
+  `group/<Name>`: a bare `read: Admin` reaches the `Admin` role, never the
+  members of a group named `Admin` (unless `roles.yaml` itself lists that
+  group under the role). `role/<Name>` always means the role,
+  `group/<Name>` always the group.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a

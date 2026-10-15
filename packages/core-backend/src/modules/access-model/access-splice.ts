@@ -173,11 +173,12 @@ export type TokenMatch = 'exact' | 'name';
 function entryMatches(entry: ParsedEntry, p: Principal, tokenMatch: TokenMatch): boolean {
   if (p.kind === 'user') return entry.kind === 'user' && entry.email === canonicalEmail(p.email);
   if (entry.kind !== 'role') return false;
-  const canonicalPrincipal = canonicalRoleName(p.role);
-  if (tokenMatch === 'exact') return entry.role === canonicalPrincipal;
-  const own = splitPrincipalToken(canonicalPrincipal);
+  // Compare split, canonical halves: `group/ Product` in the request names the
+  // same principal as the `group/product` the parser reads from the file.
+  const own = splitPrincipalToken(canonicalRoleName(p.role));
   const theirs = splitPrincipalToken(entry.role);
   if (theirs.name !== own.name) return false;
+  if (tokenMatch === 'exact') return theirs.prefix === own.prefix;
   // Same family only: a bare principal stands for the role, as `role/` does.
   return theirs.prefix === null || theirs.prefix === (own.prefix ?? 'role');
 }

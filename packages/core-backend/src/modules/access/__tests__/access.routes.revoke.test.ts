@@ -56,6 +56,8 @@ async function makeHarness(opts: {
   effectiveEmails?: Record<string, boolean>;
   /** Override the (otherwise-empty) eligibleWriters list so a principal shows as a row in resolvedView. */
   eligibleWriters?: { roles: string[]; users: { name: string; email: string }[] };
+  /** kbPrincipals' roles — empty (the default) reads as a model that failed to load. */
+  roles?: string[];
 }): Promise<Harness> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -79,8 +81,8 @@ async function makeHarness(opts: {
     invalidate: vi.fn(),
     // The mutation service consults the merged principal index to decide
     // exact-vs-name token matching on revoke (group shadowing). No groups in
-    // these fixtures → unshadowed (name-level) matching, the legacy behavior.
-    kbPrincipals: vi.fn(async () => ({ roles: [], groups: [], people: [] })),
+    // these fixtures; no roles (the default) reads as a failed load → exact.
+    kbPrincipals: vi.fn(async () => ({ roles: opts.roles ?? [], groups: [], people: [] })),
     // resolvedView() fans out to these after a successful mutation; harmless stubs.
     // canRead/canDownload/canOwner are ALSO consumed by denyHere's assert.
     canRead: vi.fn(async (_w: string, email: string) => effEmail(email, true)),
@@ -319,6 +321,7 @@ describe('POST /access/revoke — route classification + modes', () => {
           [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
         },
         grantSources: () => ({}),
+        roles: ['Everyone', 'Product'],
       });
       const res = await revoke({
         path: `${KB}/Sales`,
