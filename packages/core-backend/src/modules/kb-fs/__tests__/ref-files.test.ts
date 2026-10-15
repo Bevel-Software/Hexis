@@ -244,7 +244,7 @@ describe('readRevSha', () => {
     await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'refs/heads/main^{commit}')).rejects.toThrow();
     expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
     expect(await readRevSha(clone, 'main')).toBe('unreadable');
-    expect(packed).toMatch(/^[0-9a-f]{40}$/);
+    expect(packed).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
   });
 
   it('hands git what it does not resolve itself', async () => {
