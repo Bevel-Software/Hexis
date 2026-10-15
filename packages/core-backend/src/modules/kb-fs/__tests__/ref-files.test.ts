@@ -154,6 +154,14 @@ describe('readRefSha', () => {
     expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
     expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
     await fs.rmdir(path.join(clone, '.git/packed-refs'));
+    // A packed-refs file with a record this reader does not understand is
+    // not read around: the skipped record could be the one asked for.
+    await fs.writeFile(path.join(clone, '.git/packed-refs'), `# pack-refs with: peeled fully-peeled sorted\nnot-a-sha refs/heads/main\n`);
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
+    await fs.writeFile(path.join(clone, '.git/packed-refs'), `${sha} refs/heads/main\n^garbage\n`);
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
+    await fs.rm(path.join(clone, '.git/packed-refs'));
     await fs.rm(path.join(clone, '.git/HEAD'));
     await fs.mkdir(path.join(clone, '.git/HEAD'));
     expect(await readRefSha(clone, 'HEAD')).toBe('unreadable');

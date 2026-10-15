@@ -96,7 +96,12 @@ async function gitDirsOf(repoDir: string): Promise<GitDirs | null> {
   return { gitDir, commonDir };
 }
 
-/** `packed-refs`: `<sha> <name>` lines (`^` peel lines and comments skipped). Absent file → an empty table. */
+/**
+ * `packed-refs`: `<sha> <name>` lines, `^<sha>` peel lines, `#` comments.
+ * Absent file → an empty table. A line that is none of those is a file this
+ * reader does not understand, and the whole table is null (unreadable): a
+ * record it skipped could be the one that was asked for.
+ */
 async function readPackedRefs(commonDir: string): Promise<Map<string, string> | null> {
   let text: string;
   try {
@@ -107,12 +112,16 @@ async function readPackedRefs(commonDir: string): Promise<Map<string, string> | 
   const table = new Map<string, string>();
   for (const raw of text.split('\n')) {
     const line = raw.trim();
-    if (!line || line.startsWith('#') || line.startsWith('^')) continue;
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('^')) {
+      if (!SHA.test(line.slice(1))) return null;
+      continue;
+    }
     const space = line.indexOf(' ');
-    if (space < 0) continue;
-    const sha = line.slice(0, space);
-    const name = line.slice(space + 1).trim();
-    if (SHA.test(sha) && name) table.set(name, sha);
+    const sha = space < 0 ? '' : line.slice(0, space);
+    const name = space < 0 ? '' : line.slice(space + 1).trim();
+    if (!SHA.test(sha) || !name) return null;
+    table.set(name, sha);
   }
   return table;
 }
