@@ -195,6 +195,7 @@ describe('AccessControlService — at-ref model cache', () => {
   let repo: string;
   let other: string;
   let svc: AccessControlService;
+  let stub: WorkspaceService;
   const workspaceId = 'ws-atref-cache';
   const admin = 'razvan@bevel.software';
   const DOC = 'Team/Doc.md';
@@ -247,7 +248,7 @@ describe('AccessControlService — at-ref model cache', () => {
     await git(other, 'config', 'user.email', 'other@example.com');
     await git(other, 'config', 'user.name', 'Other');
 
-    const stub = {
+    stub = {
       getWorkspacePath: async () => workspaceDir,
       // The real service TTLs this at 30s; the stub always fetches so a push
       // from `other` is visible on the next gate call.
@@ -605,6 +606,52 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
     expect(catFileBatches()).toBe(0);
     expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+  });
+
+  it("keeps a commit's tree up to the cap and not past it, as an absent path's cost shows", async () => {
+    // The seed carries seven paths. A service that may hold seven keeps the
+    // tree, so an absent path is answered without a read; one that may hold
+    // six does not keep it, so the same path is read on every call.
+    const NEW = 'Team/New.md';
+    const limited = (treeIndexMaxPaths: number) =>
+      new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, { treeIndexMaxPaths });
+    const keeps = limited(7);
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(0);
+    const drops = limited(6);
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(2);
+  });
+
+  it('lets the oldest models give their tree up past the budget, and they still answer', async () => {
+    // Seven paths at the first commit, eight at the second, a budget of ten:
+    // remembering the second puts the first past the budget. The first
+    // model keeps answering gates without a rebuild; only an absent path at
+    // it is read again, while at the second it costs nothing.
+    const NEW = 'Team/New.md';
+    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, {
+      treeIndexBudget: 10,
+    });
+    const first = await git(repo, 'rev-parse', 'origin/main');
+    expect(await budgeted.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    await pushFromOther('a later page', () => fs.writeFile(path.join(other, 'Team/Later.md'), '# later\n'));
+    expect(await budgeted.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    const second = await git(repo, 'rev-parse', 'origin/main');
+    expect(second).not.toBe(first);
+    spawnLog.length = 0;
+    expect(await budgeted.canWriteAtRef(workspaceId, second, admin, NEW)).toBe(true);
+    expect(lsTreeBuilds()).toBe(0);
+    expect(catFileBatches()).toBe(0);
+    spawnLog.length = 0;
+    expect(await budgeted.canWriteAtRef(workspaceId, first, admin, NEW)).toBe(true);
+    expect(lsTreeBuilds()).toBe(0);
+    expect(catFileBatches()).toBe(1);
   });
 
   it('remembers what a blob declares for itself, never a blob the batch could not read', async () => {
