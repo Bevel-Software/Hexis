@@ -88,7 +88,7 @@ function ReadOnlyControl({
         </label>
       ) : (
         <span
-          className={`text-[10px] px-1.5 py-0.5 rounded ${
+          className={`text-[10px] px-1.5 py-0.5 rounded-xs ${
             hint.readOnly ? 'bg-emerald-50 text-emerald-700' : 'bg-sunken text-ink-muted'
           }`}
         >
@@ -106,7 +106,7 @@ function ReadOnlyControl({
           disabled={busy}
           onClick={() => onSet(hint, null)}
           aria-label={`Reset ${hint.name} to its built-in value (${builtInLabel})`}
-          className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-line text-ink-muted hover:bg-hover disabled:opacity-50"
+          className="text-[10px] font-medium px-1.5 py-0.5 rounded-xs border border-line text-ink-muted hover:bg-hover disabled:opacity-50"
         >
           Reset
         </button>
