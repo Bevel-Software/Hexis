@@ -2,7 +2,7 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('auth');
-import type { AuthService } from './auth.service.js';
+import { PasswordChangedMeanwhileError, type AuthService } from './auth.service.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
 import { FixedWindowRateLimiter } from './rate-limit.js';
 import { AccountDeactivatedError } from './account-admission.js';
@@ -42,6 +42,22 @@ export interface AuthProviderPlugin {
   isEnabled?(): boolean;
   /** Mount the provider's routes (login redirect, callback) on the auth router. */
   mountRoutes(router: express.Router, authService: AuthService): void;
+}
+
+/**
+ * Set the JWT as the HttpOnly auth cookie so transports that can't carry
+ * headers (EventSource for SSE, image tags) authenticate automatically. JSON
+ * callers continue to use the Bearer header returned in the body. Secure in
+ * production; off in dev so the cookie survives `http://localhost` requests.
+ */
+function setAuthCookie(res: express.Response, token: string): void {
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: AUTH_COOKIE_MAX_AGE_S * 1000,
+    path: '/',
+  });
 }
 
 export function createAuthRoutes(
@@ -100,18 +116,7 @@ export function createAuthRoutes(
       // attempts isn't rate-limited on their next visit. (The wider per-ip
       // window intentionally keeps counting.)
       loginPairLimiter.reset(pairKey);
-      // Also set the JWT as an HttpOnly cookie so transports that can't
-      // carry headers (EventSource for SSE, image tags) authenticate
-      // automatically. JSON callers continue to use the Bearer header
-      // returned in the body. Secure in production; off in dev so the
-      // cookie survives `http://localhost` requests.
-      res.cookie(AUTH_COOKIE_NAME, result.token, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
-        maxAge: AUTH_COOKIE_MAX_AGE_S * 1000,
-        path: '/',
-      });
+      setAuthCookie(res, result.token);
       res.json(result);
     } catch (error) {
       // The password was right and an admin switched the account off: said
@@ -144,6 +149,9 @@ export function createAuthRoutes(
   // POST /api/auth/change-password — self-service (protected). Requires the
   // current password whenever one is set; an SSO-only account sets its first
   // password without one.
+  //
+  // A change ends every session opened before it, this one included, so the
+  // caller is handed a fresh token (body and cookie) to carry on with.
   router.post('/auth/change-password', authMiddleware, async (req, res) => {
     const { currentPassword, newPassword } = req.body as {
       currentPassword?: string;
@@ -158,9 +166,16 @@ export function createAuthRoutes(
       return;
     }
     try {
-      await authService.changePassword(req.userId!, currentPassword, newPassword);
-      res.json({ ok: true });
+      const { token } = await authService.changePassword(req.userId!, currentPassword, newPassword);
+      setAuthCookie(res, token);
+      res.json({ ok: true, token });
     } catch (error) {
+      // Another session changed the password first: what this one proved is
+      // no longer current, and nothing was written.
+      if (error instanceof PasswordChangedMeanwhileError) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
       const msg = error instanceof Error ? error.message : 'Unknown error';
       // Policy violations and a wrong current password are caller errors, not
       // server faults — and the message is safe to show verbatim.
