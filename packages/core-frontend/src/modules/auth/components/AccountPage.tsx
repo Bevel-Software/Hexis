@@ -119,7 +119,7 @@ export function AccountPage() {
             )}
             {saved && (
               <div className="text-sm text-emerald-700" role="status">
-                Password changed. Every other session using the old password has been signed out.
+                Password changed. Every other session has been signed out.
               </div>
             )}
 

@@ -64,7 +64,10 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
   }, PG_TEST_TIMEOUT);
 
   afterAll(async () => {
-    await new Promise((resolve) => server?.close(resolve));
+    await new Promise<void>((resolve) => {
+      if (server) server.close(() => resolve());
+      else resolve();
+    });
     if (db) await closeDb(db);
     await dropScratchDatabases();
   }, PG_TEST_TIMEOUT);
@@ -186,6 +189,35 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
       expect(afterStale.passwordHash).toBe(afterRace.passwordHash);
       expect(afterStale.sessionVersion).toBe(1);
       expect(await meWithBearer(third.token)).toBe(200);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'ends the sessions opened before an admin reset, and refuses a change that read the row before it',
+    async () => {
+      await auth.createAccount('noor@acme.test', 'Noor', 'old-password-1');
+      const laptop = await signIn('noor@acme.test', 'old-password-1');
+      const changer = await signIn('noor@acme.test', 'old-password-1');
+      expect(await meWithBearer(laptop.token)).toBe(200);
+      expect(await meWithCookie(laptop.cookie)).toBe(200);
+
+      // The reset lands after the self-service change has proven the old password.
+      beforeNextHash.run = async () => {
+        await auth.createAccount('noor@acme.test', undefined, 'reset-password-1');
+      };
+      const raced = await changePassword(changer.token, 'old-password-1', 'self-new-password');
+      expect(raced.status).toBe(409);
+
+      // The reset is the account's password, and the generation moved on once.
+      const row = await storedRow('noor@acme.test');
+      expect(await verifyPassword('reset-password-1', row.passwordHash!)).toBe(true);
+      expect(row.sessionVersion).toBe(1);
+      expect(await meWithBearer(laptop.token)).toBe(401);
+      expect(await meWithCookie(laptop.cookie)).toBe(401);
+      expect(await meWithBearer(changer.token)).toBe(401);
+      const fresh = await signIn('noor@acme.test', 'reset-password-1');
+      expect(await meWithBearer(fresh.token)).toBe(200);
     },
     PG_TEST_TIMEOUT,
   );

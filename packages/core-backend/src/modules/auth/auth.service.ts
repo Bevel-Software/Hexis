@@ -382,16 +382,22 @@ export class AuthService implements IAccountSwitchGuard {
     // EXPLICITLY supplied name is persisted too; a blank name keeps the
     // existing display name rather than clobbering it with the local-part
     // fallback. `returning()` yields the authoritative row either way.
+    // A reset is a password change like any other: the session generation
+    // moves on with it, so every session opened with the old password ends,
+    // and a self-service change that read the row before it is refused
+    // rather than overwriting the reset (see {@link changePassword}).
+    const sessionVersion = sql`${users.sessionVersion} + 1`;
     const [row] = await this.db
       .insert(users)
       .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
       .onConflictDoUpdate({
         target: users.emailBidx,
         set: suppliedName
-          ? { passwordHash, name: suppliedName, updatedAt: new Date() }
-          : { passwordHash, updatedAt: new Date() },
+          ? { passwordHash, sessionVersion, name: suppliedName, updatedAt: new Date() }
+          : { passwordHash, sessionVersion, updatedAt: new Date() },
       })
       .returning();
+    this.activeCache.delete(row.id);
     return this.toClientUser(row);
   }
 
