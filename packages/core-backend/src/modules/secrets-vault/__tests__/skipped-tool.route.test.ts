@@ -3,11 +3,9 @@ import express from 'express';
 import { randomBytes } from 'node:crypto';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import type { CallTemplate } from '@utcp/sdk';
-import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
+import { createSecretsVaultRoutes, DbSkippedToolsService, type ISkippedToolsService } from '../index.js';
 import { FakeSkippedToolsService } from './fake-skipped-tools.js';
-import type { ISkippedToolsService } from '../skipped-tools.service.js';
-import { createToolManualsAgentRoutes } from '../../tool-manuals/tool-manuals.routes.js';
-import type { IToolManualService } from '../../tool-manuals/tool-manuals.contract.js';
+import { createToolManualsAgentRoutes, type IToolManualService } from '../../tool-manuals/index.js';
 import { createCatalogRevisionRoutes } from '../../../core/catalog-revision.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
@@ -15,7 +13,6 @@ import { closeDb, createDb, type Database } from '../../database/connection.js';
 import { runCoreMigrations } from '../../database/migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { AuthService } from '../../auth/auth.service.js';
-import { DbSkippedToolsService } from '../skipped-tools.service.js';
 
 /**
  * A tool the person skips on the Connect page STAYS skipped.

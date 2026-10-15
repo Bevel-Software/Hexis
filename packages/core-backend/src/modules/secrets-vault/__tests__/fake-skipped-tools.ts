@@ -1,4 +1,4 @@
-import type { ISkippedToolsService } from '../skipped-tools.service.js';
+import type { ISkippedToolsService } from '../index.js';
 
 /**
  * An in-memory stand-in for the `skipped_tools` table, for route tests that
