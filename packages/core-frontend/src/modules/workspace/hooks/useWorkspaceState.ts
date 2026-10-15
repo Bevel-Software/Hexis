@@ -319,12 +319,23 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const existenceReadSeqRef = useRef(0);
   const goneAtSeqRef = useRef<Map<string, number>>(new Map());
   /**
-   * By workspace and path, the number of the latest-issued read that answered
-   * with the file. A refresh read issued before it answers late with older
-   * bytes, and must not replace what that newer read brought (see
-   * `applyReadBytes`).
+   * By workspace and path, the number of the latest-issued read whose bytes
+   * became the open tab's saved content (`applyReadBytes`, the
+   * `file-changed` handler). A read issued before it answers late with older
+   * bytes, and must not replace what that newer read brought. A read that
+   * left the tab alone (unsaved edits, a pending preview) does not count: the
+   * `file-changed` read after it still has to merge its bytes into the edits.
    */
-  const foundAtSeqRef = useRef<Map<string, number>>(new Map());
+  const landedAtSeqRef = useRef<Map<string, number>>(new Map());
+  const isStaleLanding = useCallback(
+    (readFrom: string, path: string, seq: number) =>
+      (landedAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
+    [],
+  );
+  const markLanded = useCallback((readFrom: string, path: string, seq: number) => {
+    const key = existenceKey(readFrom, path);
+    if ((landedAtSeqRef.current.get(key) ?? -1) < seq) landedAtSeqRef.current.set(key, seq);
+  }, []);
   const isStaleFind = useCallback(
     (readFrom: string, path: string, seq: number) =>
       (goneAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
@@ -334,10 +345,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const seq = ++existenceReadSeqRef.current;
     const key = existenceKey(readFrom, path);
     const thisGone = read.then(
-      () => {
-        if ((foundAtSeqRef.current.get(key) ?? -1) < seq) foundAtSeqRef.current.set(key, seq);
-        return false;
-      },
+      () => false,
       (err: unknown) => {
         const isGone = err instanceof WorkspaceApiError && err.status === 404;
         if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
@@ -372,8 +380,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * eager refetch, `lock-released`) into the open tab, under the one policy
    * they share. Nothing lands when the workspace moved on, when a read issued
    * after this one (`seq`, from `trackExistenceCheck`) found the file gone
-   * or already answered with it (its bytes are newer than these), or when the tab, as it is NOW, was marked deleted, holds unsaved edits or
-   * a pending agent preview: newer state always wins over a late answer.
+   * or already landed its bytes (they are newer than these), or when the tab,
+   * as it is NOW, was marked deleted, holds unsaved edits or a pending agent
+   * preview: newer state always wins over a late answer.
    * `stillApplies` adds a caller's own check on the tab as it is now.
    */
   const applyReadBytes = useCallback((
@@ -385,16 +394,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   ) => {
     if (workspaceIdRef.current !== readFrom) return;
     if (isStaleFind(readFrom, path, seq)) return;
-    if ((foundAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq) return;
     setOpenTabs((tabs) => tabs.map((t) => {
       if (t.path !== path) return t;
+      if (isStaleLanding(readFrom, path, seq)) return t;
       if (t.deletedBy || t.isDirty || t.pendingFileContent !== null) return t;
       if (stillApplies && !stillApplies(t)) return t;
+      markLanded(readFrom, path, seq);
       // Same bytes: skip a re-render that would briefly unmount the renderer.
       if (content === t.content && content === t.savedContent) return t;
       return { ...t, content, savedContent: content, isDirty: false, pendingFileContent: null };
     }));
-  }, [isStaleFind]);
+  }, [isStaleFind, isStaleLanding, markLanded]);
   // Unsaved-work questions are asked in the app's own dialog and awaited.
   const confirm = useConfirm();
   // Paths whose close is waiting on that question: a second close of the same
@@ -1941,6 +1951,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           // bytes predate the delete. Clearing the delete on them would let
           // the next save re-create the file; the notice and edits stay.
           if (isStaleFind(subscribedWorkspaceId, event.path, seq)) return;
+          // A read issued after this one already put its (newer) bytes in
+          // the tab, the same ordering `applyReadBytes` keeps: these would
+          // put older bytes back, or merge them in as a change on the branch.
+          if (isStaleLanding(subscribedWorkspaceId, event.path, seq)) return;
           if (workspaceIdRef.current === subscribedWorkspaceId) {
             // The file is there: writing it is no longer re-creating it.
             deletedPathsRef.current.delete(event.path);
@@ -1959,6 +1973,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               // Re-check pending status inside the updater — `setPendingContent`
               // may have landed during the readFile await.
               if (t.pendingFileContent !== null) return t;
+              if (isStaleLanding(subscribedWorkspaceId, event.path, seq)) return t;
+              markLanded(subscribedWorkspaceId, event.path, seq);
               // The file is there after all (re-created, or the delete was
               // undone): the tab is a file again.
               const base = t.deletedBy ? { ...t, deletedBy: null } : t;
@@ -2082,7 +2098,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       offFsTreeChanged();
       offLockReleased();
     };
-  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted, trackExistenceCheck, isStaleFind, forgetOwnDelete, applyReadBytes]);
+  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted, trackExistenceCheck, isStaleFind, isStaleLanding, markLanded, forgetOwnDelete, applyReadBytes]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 

@@ -1175,6 +1175,56 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(result.current.activeTab?.changedOnBranch ?? null).toBeNull();
   });
 
+  /** The next file-changed read is held until `answer` is called; later reads answer from `disk`. */
+  function holdFileChangedRead(bytes: string) {
+    const held: { answer: () => void } = { answer: () => { throw new Error('File-changed read was not started'); } };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      held.answer = () => resolve(bytes);
+    }));
+    act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Notes.md');
+    return held;
+  }
+
+  it("a change's late read does not replace the newer bytes a later change already brought to a clean tab", async () => {
+    const result = await editedTab();
+    const first = BASE.replace('First paragraph.', 'First paragraph, pulled first.');
+    const held = holdFileChangedRead(first);
+
+    const second = BASE.replace('First paragraph.', 'First paragraph, pulled second.');
+    disk.set('KB/Notes.md', second);
+    act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+    await waitFor(() => expect(result.current.activeTab?.content).toBe(second));
+
+    await act(async () => { held.answer(); });
+    await settle();
+
+    expect(result.current.activeTab?.content).toBe(second);
+    expect(result.current.activeTab?.savedContent).toBe(second);
+    expect(result.current.activeTab?.isDirty).toBe(false);
+  });
+
+  it("a change's late read still merges into unsaved edits that a newer read left alone", async () => {
+    const result = await editedTab();
+    await typeInto(result, `${BASE}\n\nMy new closing line.`);
+    const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+    disk.set('KB/Notes.md', pulled);
+    const held = holdFileChangedRead(pulled);
+
+    // A newer read finds the file but keeps off the edited tab.
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Notes.md' } as WorkflowEvent));
+    await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledTimes(2));
+    await settle();
+    expect(result.current.activeTab?.savedContent).toBe(BASE);
+
+    await act(async () => { held.answer(); });
+    await waitFor(() => expect(result.current.activeTab?.changedOnBranch).toBe('merged'));
+    expect(result.current.activeTab?.content).toBe(`${pulled}\n\nMy new closing line.`);
+    expect(result.current.activeTab?.savedContent).toBe(pulled);
+    expect(result.current.activeTab?.isDirty).toBe(true);
+  });
+
   it('the banner clears on the next save', async () => {
     const result = await editedTab();
     await typeInto(result, `${BASE}\n\nMine.`);
