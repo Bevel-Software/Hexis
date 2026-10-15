@@ -16,7 +16,6 @@ import { injectBridge, VIEW_META_KEY } from '../views/bridge.js';
 import {
   createViewCatalog,
   summarize,
-  titlesFromGrep,
   viewPathsFromGrep,
   viewToolName,
   VIEW_DATA_TOOL,
@@ -168,6 +167,16 @@ describe('the page and its bridge', () => {
     expect(isKnowledgeView('<html></html>')).toBe(false);
   });
 
+  it('reads back a snapshot whose data holds <!--, which the page carries escaped', () => {
+    const next = buildSnapshot(FILES, { type: ['Task'], fields: 'Name' }, 'main', '2026-10-07');
+    next.nodes[`${ONT}/Knowledge/Tasks/Bread.md`]!.fields.Name = { text: 'see <!-- the note -->' };
+    const html = replaceEmbeddedSnapshot(page({ format: 'hexis-kb-snapshot/1' }), next);
+    expect(html).toContain('<\\!--');
+    expect(readEmbeddedSnapshot(html)?.nodes?.[`${ONT}/Knowledge/Tasks/Bread.md`]?.fields.Name).toEqual({
+      text: 'see <!-- the note -->',
+    });
+  });
+
   it('swaps the snapshot a page carries, safely inside <script>', () => {
     const next = buildSnapshot(FILES, { type: ['Task'], fields: 'Name' }, 'main', '2026-10-07');
     next.nodes[`${ONT}/Knowledge/Tasks/Bread.md`]!.fields.Name = { text: '</script><b>x</b>' };
@@ -207,9 +216,6 @@ describe('the view catalog', () => {
         ],
       }),
     ).toEqual({ kbDir: 'knowledge-base', paths: [VIEW] });
-    expect(titlesFromGrep({ matches: [{ path: `knowledge-base/${VIEW}`, text: '<title>To-do list</title>' }] })).toEqual(
-      new Map([[VIEW, 'To-do list']]),
-    );
   });
 
   it('names a view after its file, uniquely', () => {
@@ -286,7 +292,6 @@ describe('the view catalog', () => {
     const { contents } = await views.readResource('ui://hexis/views/to_do_list.html');
     const served = readEmbeddedSnapshot((contents[0] as { text: string }).text);
     expect(Object.keys(served?.nodes ?? {})).toHaveLength(2);
-    expect(served?.takenAt).not.toBe('2026-10-01');
   });
 
   it('reads the view live: a summary for the model, the snapshot for the page', async () => {
@@ -315,10 +320,76 @@ describe('the view catalog', () => {
     expect(result._meta?.[VIEW_META_KEY]).toMatchObject({ liveError: expect.stringContaining('no mirror configuration') });
   });
 
-  it('finds the views and their titles in ONE search of the knowledge base', async () => {
-    const kb = fakeKb(page(snapshotOnPage));
-    await createViewCatalog(CONFIG, { callKb: kb, cacheDir: null }).listTools();
+  /**
+   * A knowledge base as the grep tool searches it: the pattern runs over every
+   * line of every file, case-sensitively unless `ignore_case` says otherwise,
+   * and stops at `max_results` with `truncated` set.
+   */
+  const searchableKb = (files: Record<string, string>) =>
+    vi.fn(async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+      const rel = String(args.path ?? '').replace(/^knowledge-base\//, '');
+      if (tool === 'start_session') return { sessionId: 's-1' };
+      if (tool === 'read_file') {
+        if (rel in files) return { path: rel, content: files[rel] };
+        throw new Error(`no ${rel}`);
+      }
+      if (tool !== 'grep') throw new Error(`unexpected ${tool}`);
+      const re = new RegExp(String(args.pattern), args.ignore_case ? 'i' : '');
+      const max = Number(args.max_results ?? 200);
+      const matches: { path: string; line: number; text: string }[] = [];
+      for (const [p, text] of Object.entries(files)) {
+        const lines = text.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (!re.test(lines[i]!)) continue;
+          if (matches.length === max) return { matches, truncated: true };
+          matches.push({ path: `knowledge-base/${p}`, line: i + 1, text: lines[i]! });
+        }
+      }
+      return { matches, truncated: false };
+    });
+
+  it('finds the views in ONE search, whatever case their markup is in, and titles them from their pages', async () => {
+    const files: Record<string, string> = {
+      [VIEW]: page(snapshotOnPage),
+      // Upper-case markup, with the snapshot block on a line of its own.
+      'KnowledgeBase/Ops/Board.html':
+        '<!DOCTYPE html>\n<HTML><HEAD><TITLE>Ops board</TITLE></HEAD>\n<BODY>\n' +
+        `<SCRIPT ID="kb-snapshot">\nwindow.KB_SNAPSHOT = ${JSON.stringify(snapshotOnPage)};\n</SCRIPT>\n</BODY></HTML>`,
+    };
+    const kb = searchableKb(files);
+    const tools = await createViewCatalog(CONFIG, { callKb: kb, cacheDir: null }).listTools();
     expect(kb.mock.calls.filter(([tool]) => tool === 'grep')).toHaveLength(1);
+    // In path order: KnowledgeBase/Juan/... before KnowledgeBase/Ops/...
+    expect(tools.map((t) => [t.name, t.title])).toEqual([
+      ['show_to_do_list', 'To-do list'],
+      ['show_board', 'Ops board'],
+      [VIEW_DATA_TOOL, 'Knowledge view data'],
+    ]);
+  });
+
+  it('finds a view in a knowledge base with more pages than the search returns', async () => {
+    const files: Record<string, string> = {};
+    // Ordinary pages first, as a walk may meet them: each has a title and no snapshot.
+    for (let i = 0; i < 1200; i++) files[`Data/PR-Overviews/PR-${i}.html`] = `<html><head><title>PR ${i}</title></head></html>`;
+    files[VIEW] = page(snapshotOnPage);
+    const tools = await createViewCatalog(CONFIG, { callKb: searchableKb(files), cacheDir: null }).listTools();
+    expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+  });
+
+  it('keeps the views a capped search did not reach', async () => {
+    const other = 'KnowledgeBase/Ops/Board.html';
+    const kb = searchableKb({ [VIEW]: page(snapshotOnPage), [other]: page(snapshotOnPage) });
+    const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null });
+    expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL]);
+    // The next search stops after one view.
+    const full = kb.getMockImplementation()!;
+    kb.mockImplementation(async (tool, args) =>
+      tool === 'grep' ? full(tool, { ...args, max_results: 1 }) : full(tool, args),
+    );
+    // An unknown view makes the catalog search again before it answers.
+    await expect(views.readResource('ui://hexis/views/nope.html')).rejects.toThrow(/Unknown resource/);
+    expect(kb.mock.calls.filter(([tool]) => tool === 'grep')).toHaveLength(2);
+    expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL]);
   });
 
   describe('kept between runs', () => {

@@ -639,7 +639,10 @@ export function readEmbeddedSnapshot(html: string): Partial<Snapshot> | null {
   const body = block[2]!.trim().match(/window\.KB_SNAPSHOT\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
   if (!body) return null;
   try {
-    return JSON.parse(body[1]!) as Partial<Snapshot>;
+    // `serialise` (like build_snapshot.py) writes `<!--` as `<\!--`, which
+    // JavaScript reads as `<!--` and JSON rejects. `<` occurs only inside JSON
+    // strings, so this undoes exactly that escape.
+    return JSON.parse(body[1]!.replace(/<\\!--/g, '<!--')) as Partial<Snapshot>;
   } catch {
     return null;
   }

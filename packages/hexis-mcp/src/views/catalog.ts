@@ -69,12 +69,15 @@ const KEPT_REFRESH_DELAY_MS = 20_000;
 const SUMMARY_NODES = 80;
 const CACHE_VERSION = 1;
 /**
- * One search finds both: the views (their snapshot block) and every page's
- * title. Two separate searches each scanned the whole knowledge base.
+ * The search matches the snapshot block alone, one line per view, so its
+ * result cap is spent on views. A title pattern beside it matched the title of
+ * every HTML page in the knowledge base and filled the cap with pages that are
+ * not views. Titles come from the pages, which are read anyway.
  */
 const SNAPSHOT_LINE = /<script\b[^>]*\bid=["']kb-snapshot["']/i;
 const TITLE_LINE = /<title>([^<]+)<\/title>/i;
-const DISCOVERY_PATTERN = `${SNAPSHOT_LINE.source}|${TITLE_LINE.source}`;
+/** The search's cap, the most the grep tool allows. */
+const SEARCH_CAP = 1000;
 
 export interface ViewEntry {
   tool: string;
@@ -142,18 +145,6 @@ export function viewPathsFromGrep(result: unknown): { kbDir: string | null; path
     paths.add(split.rel);
   }
   return { kbDir, paths: [...paths].sort() };
-}
-
-/** Repo path -> page title, from the `<title>` lines of a search result. */
-export function titlesFromGrep(result: unknown): Map<string, string> {
-  const titles = new Map<string, string>();
-  for (const m of (result as { matches?: { path?: unknown; text?: unknown }[] } | null)?.matches ?? []) {
-    if (typeof m.path !== 'string' || typeof m.text !== 'string') continue;
-    const title = m.text.match(TITLE_LINE)?.[1]?.trim();
-    const split = splitRepoPath(m.path);
-    if (title && split && !titles.has(split.rel)) titles.set(split.rel, title);
-  }
-  return titles;
 }
 
 /** The model's view of a snapshot: one line per node, the short fields only. */
@@ -286,26 +277,43 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   const refresh = (): Promise<ViewEntry[]> => {
     refreshing ??= (async () => {
       try {
-        const result = await kb('grep', { branch: DEFAULT_BRANCH, pattern: DISCOVERY_PATTERN, max_results: 1000 });
-        if ((result as { truncated?: unknown } | null)?.truncated) {
-          console.error('[hexis-mcp] the views search hit its result cap; some views may be missing.');
-        }
+        // Case-insensitive, as the pattern's own `i` is: `.source` drops the flag.
+        const result = await kb('grep', {
+          branch: DEFAULT_BRANCH,
+          pattern: SNAPSHOT_LINE.source,
+          ignore_case: true,
+          max_results: SEARCH_CAP,
+        });
         const found = viewPathsFromGrep(result);
         if (found.kbDir) kbDir = found.kbDir;
-        const titles = titlesFromGrep(result);
+        let paths = found.paths;
+        if ((result as { truncated?: unknown } | null)?.truncated) {
+          // A capped search says nothing about the views it did not reach, so
+          // those are kept rather than dropped. A view deleted meanwhile stays
+          // listed until a search completes.
+          console.error('[hexis-mcp] the views search hit its result cap; views it did not reach are kept from before.');
+          paths = [...new Set([...paths, ...(views ?? []).map((v) => v.path)])].sort();
+        }
         const taken = new Set<string>();
-        const next = found.paths.map((p) => {
+        const next: ViewEntry[] = paths.map((p) => {
           const tool = viewToolName(p, taken);
-          return { tool, uri: `${URI_PREFIX}${tool.slice(VIEW_TOOL_PREFIX.length)}.html`, path: p, title: titles.get(p) ?? titleFromPath(p) };
+          return { tool, uri: `${URI_PREFIX}${tool.slice(VIEW_TOOL_PREFIX.length)}.html`, path: p, title: titleFromPath(p) };
         });
+        // Each title from its page, which this also warms so the first view
+        // opened is served from memory. A page that cannot be read keeps the
+        // title its file name gives.
+        await Promise.all(
+          next.map(async (v) => {
+            const title = await page(v, DEFAULT_BRANCH).then((html) => html.match(TITLE_LINE)?.[1]?.trim(), () => undefined);
+            if (title) v.title = title;
+          }),
+        );
         const changed = views !== null && !sameViews(views, next);
         views = next;
         viewsAt = Date.now();
         save();
         console.error(`[hexis-mcp] ${next.length} knowledge view(s) served as MCP Apps.`);
         if (changed) options.onChange?.();
-        // Warm the pages too, so the first view opened is served from memory.
-        for (const v of next) if (!pages.has(v.path)) void page(v, DEFAULT_BRANCH).catch(() => {});
         return next;
       } catch (err) {
         console.error(`[hexis-mcp] knowledge views unavailable: ${err instanceof Error ? err.message : String(err)}`);
