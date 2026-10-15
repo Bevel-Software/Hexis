@@ -4,9 +4,8 @@ import { logger } from '../../shared/logging.js';
 import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import {
   cloneCredentialConfigArgs,
   cloneTrackingConfigArgs,
@@ -153,12 +152,14 @@ export interface KbRepositoryOptions {
   dir: string;
   /** The configured remote, read at every use (the setup screen can change it). */
   kbRepoUrl: () => string;
-  gitRunner?: IGitRunner;
+  /** Injected by the composition root, as every other git caller's is. */
+  gitRunner: IGitRunner;
   /**
    * The mutex the git layer serializes worktree operations under. The same
-   * instance, so that the repository-level reservation here waits for them.
+   * instance, injected by the composition root, so that the repository-level
+   * reservation here waits for them.
    */
-  mutex?: WorkspaceMutex;
+  mutex: WorkspaceMutex;
 }
 
 export type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
@@ -188,8 +189,8 @@ export class KbRepository implements IKbRepository {
   constructor(opts: KbRepositoryOptions) {
     this.dir = path.resolve(opts.dir);
     this.kbRepoUrl = opts.kbRepoUrl;
-    this.gitRunner = opts.gitRunner ?? new NodeGitRunner();
-    this.mutex = opts.mutex ?? new WorkspaceMutex();
+    this.gitRunner = opts.gitRunner;
+    this.mutex = opts.mutex;
   }
 
   private redact(text: string): string {

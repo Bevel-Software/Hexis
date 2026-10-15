@@ -159,10 +159,11 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
  * aside and made a fresh one of the configured address meanwhile. When the
  * answer is no, nothing moves and the call answers no ids.
  *
- * A workspaces root that cannot be read (a permission or I/O error, not an
- * absence) stops the call before anything moves, as an unreadable repository
- * does: moving the repository without worktrees it could not see would leave
- * every one of them pointing at nothing.
+ * A workspaces root, or a working copy's `.git`, that cannot be read (a
+ * permission or I/O error, not an absence) stops the call before anything
+ * moves, as an unreadable repository does: moving the repository without
+ * worktrees it could not see would leave every one of them pointing at
+ * nothing.
  */
 export async function setAsideRepository(
   repository: IKbRepository,
@@ -190,7 +191,9 @@ export async function setAsideRepository(
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const dir = path.join(workspacesRoot, entry.name, kbDirName);
-      const gitdir = await readGitfile(path.join(dir, '.git')).catch(() => null);
+      // Only absence shows a folder is no worktree: a `.git` that could not be
+      // read (EACCES, EIO) stops the call, as an unreadable root does.
+      const gitdir = await readGitfile(path.join(dir, '.git'));
       if (gitdir !== null && (await inside(gitdir))) worktrees.push({ id: entry.name, dir });
     }
     const repositoryThere = await fs.access(repository.dir).then(

@@ -461,6 +461,7 @@ describe('setting the repository aside', () => {
       const aliased = new KbRepository({
         dir: path.join(alias, path.relative(root, svc.repository.dir)),
         kbRepoUrl: () => upstream,
+        gitRunner: new NodeGitRunner(),
         mutex: svc.repository.mutex,
       });
       // The destination too is named through the alias.
@@ -514,6 +515,29 @@ describe('setting the repository aside', () => {
       expect(await svc.repository.exists()).toBe(true);
       expect(await fs.access(dest).then(() => true, () => false)).toBe(false);
       expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('worktree');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    "moves nothing when a working copy's .git cannot be read, rather than the repository without that worktree",
+    async () => {
+      const svc = service();
+      await svc.getOrCreateForBranch('alice/a');
+      await svc.getOrCreateForBranch('bob/b');
+      const link = path.join(checkoutOf('alice/a'), '.git');
+      const dest = path.join(root, 'set-aside', 'stamp');
+      await fs.chmod(link, 0o000);
+      try {
+        await expect(setAsideRepository(svc.repository, workspacesRoot, 'knowledge-base', dest)).rejects.toThrow(
+          /EACCES/,
+        );
+      } finally {
+        await fs.chmod(link, 0o644);
+      }
+      expect(await fs.access(dest).then(() => true, () => false)).toBe(false);
+      expect(await svc.repository.exists()).toBe(true);
+      expect(await workingCopyShape(checkoutOf('alice/a'))).toBe('worktree');
+      expect(await workingCopyShape(checkoutOf('bob/b'))).toBe('worktree');
     },
   );
 
