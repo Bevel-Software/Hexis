@@ -92,6 +92,12 @@ export function createCatalogRevisionRoutes(deps: {
   manualAuth: RequestHandler;
   /** Connection-key/internal-token user id → email, for the per-caller ACL. */
   resolveUserEmail: (userId: string) => Promise<string | undefined>;
+  /**
+   * The manuals the caller skipped on the Connect page. `all-tools` leaves
+   * those out, so skipping or including one changes the catalog a running
+   * server holds and has to move the revision. Absent, nothing is skipped.
+   */
+  skippedTools?: { skippedBy(userId: string): Promise<ReadonlySet<string>> };
   /** The MCP App views served; absent on a deployment that serves none. */
   mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
 }): express.Router {
@@ -110,8 +116,13 @@ export function createCatalogRevisionRoutes(deps: {
       // A manifest that cannot be read counts as no views, which is also what
       // the MCP endpoint serves in that state.
       const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
+      // Joined onto the manual half as lines no manual fingerprint can be (the
+      // \u0002 lead), rather than by filtering it: a fingerprint is opaque
+      // here and does not say which manual it is.
+      const skipped = userId && deps.skippedTools ? [...(await deps.skippedTools.skippedBy(userId))] : [];
+      const manualLines = [...manuals, ...skipped.map((name) => `\u0002skipped\u0000${name}`)];
       res.json({
-        revision: catalogRevision(manuals, skills, views),
+        revision: catalogRevision(manualLines, skills, views),
         tools: manuals.length,
         skills: skills.length,
       });

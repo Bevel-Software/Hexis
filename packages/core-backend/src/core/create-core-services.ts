@@ -106,6 +106,8 @@ import {
 } from '../modules/marketplace/github-facade/index.js';
 import {
   DbSecretsVaultService,
+  DbSkippedToolsService,
+  type ISkippedToolsService,
   McpOAuthDiscoveryService,
   registerBevelSecretsVariableLoader,
 } from '../modules/secrets-vault/index.js';
@@ -363,6 +365,8 @@ export interface CoreServices {
    */
   kbDirName: string;
   secretsVaultService: DbSecretsVaultService;
+  /** The tools each person took out of their agent on the Connect page. */
+  skippedToolsService: ISkippedToolsService;
   connectionProbeService: ConnectionProbeService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
@@ -1170,6 +1174,9 @@ export async function createCoreServices(
   // UTCP's and process-wide while the vault is this graph's.
   const secretsScope = tenantKey ? `${config.tenantId}/${config.dbSchema}` : DEFAULT_SECRETS_SCOPE;
   registerBevelSecretsVariableLoader(secretsVaultService, secretsScope);
+  // The Connect page's "Skipped by you": a standing per-person choice the
+  // listing reports and the agent catalog honours, not a page-local flag.
+  const skippedToolsService = new DbSkippedToolsService(db);
 
   // Deleting ONE tool from its page — the owner's verb, the other end of the
   // promise that made them the owner. Built here because it is the one service
@@ -1645,6 +1652,7 @@ export async function createCoreServices(
     createSyncedGroupsMaterializer,
     updateCheckService,
     secretsVaultService,
+    skippedToolsService,
     connectionProbeService,
     externalApiKeyService,
     internalTokenService,

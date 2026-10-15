@@ -28,6 +28,7 @@ const connectMock = vi.hoisted(() => ({
   startToolOAuth: vi.fn(),
   getMcpOAuthRequest: vi.fn(),
   completeMcpOAuth: vi.fn(),
+  setToolSkipped: vi.fn(),
 }));
 vi.mock('../../services/connect.api', () => connectMock);
 
@@ -142,6 +143,7 @@ function pendingFor(
       path: t.path,
       type: t.type,
       canWrite: t.canWrite,
+      skipped: false,
       variables: t.variables
         .filter((x) => !x.oauth)
         .map((x) => ({
@@ -168,9 +170,22 @@ function pendingFor(
         needsReauth: x.needsReauth ?? false,
         ownerConfigured: x.adminConfigured,
         ownerOnly: !x.adminConfigured && !t.canWrite,
+        skipped: false,
       })),
   );
   return { tools, oauth: [], toolOAuth };
+}
+
+/** The slugs the reader skipped, as `/connect/skipped/:slug` stores them. */
+const skippedOnServer = new Set<string>();
+
+/** A listing as the server sends it once it has the reader's skips. */
+function withSkips(p: ConnectPending): ConnectPending {
+  return {
+    ...p,
+    tools: p.tools.map((t) => ({ ...t, skipped: skippedOnServer.has(t.slug) })),
+    toolOAuth: p.toolOAuth.map((o) => ({ ...o, skipped: skippedOnServer.has(o.slug) })),
+  };
 }
 
 function renderPage() {
@@ -197,9 +212,18 @@ beforeEach(() => {
   // the full catalog, pruned by their read grant. It comes out equal to
   // `pendingFor(CATALOG)` — that is the point, and it is now a result rather
   // than a fixture.
+  //
+  // The server also KEEPS what the reader skipped, so a skip here is a write
+  // to that store and every later load reports it — which is what makes a
+  // reload in these tests a reload and not a reset.
+  skippedOnServer.clear();
   connectMock.getConnectPending
     .mockReset()
-    .mockResolvedValue(pendingFor(FULL_CATALOG, READABLE_BY('a@x.com')));
+    .mockImplementation(async () => withSkips(pendingFor(FULL_CATALOG, READABLE_BY('a@x.com'))));
+  connectMock.setToolSkipped.mockReset().mockImplementation(async (slug: string, skip: boolean) => {
+    if (skip) skippedOnServer.add(slug);
+    else skippedOnServer.delete(slug);
+  });
   connectMock.getMcpOAuthRequest.mockReset();
   varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
   varsMock.setAdminVar.mockReset().mockResolvedValue(undefined);
@@ -232,8 +256,8 @@ describe('the Connect page counts what the plugin banner counted', () => {
     );
 
     expect(await screen.findByText('Skipped by you')).toBeInTheDocument();
-    // Skipping is a client-side decision, so the assertion has to be about what
-    // the PAGE did with it: nothing left the list. `clay` is still one of the
+    // The assertion is about what the PAGE did with the skip: nothing left the
+    // list. `clay` is still one of the
     // four the banner counted — dropping a skipped row is exactly how a page
     // reached from "4 need setup" came to show two.
     expect(screen.getAllByRole('link', { name: /^Open / }).map((l) => l.textContent)).toEqual(
@@ -270,6 +294,75 @@ describe('the Connect page counts what the plugin banner counted', () => {
     expect(outstandingCount(withPersonal)).toBe(4);
     // Still work, still listed — just counted apart from the integrations.
     expect(standaloneOutstanding(withPersonal)).toBe(1);
+  });
+});
+
+/**
+ * A skip outlives the page that made it.
+ *
+ * QA unticked a sign-in and a key tool, reloaded, and both rows were back to
+ * "Needs your sign-in" / "Needs a key from you": the skip lived in component
+ * state. A reload here is an unmount and a fresh mount over the same server.
+ */
+describe('a tool the reader skipped stays skipped', () => {
+  const SKIP = 'Skip this tool (removes your saved keys and sign-ins for it)';
+
+  /** Close the page and open it again — all that survives is what the server holds. */
+  function reload(view: ReturnType<typeof renderPage>): ReturnType<typeof renderPage> {
+    view.unmount();
+    return renderPage();
+  }
+
+  it('skip, reload: the row is still skipped and still counted; include: actionable again', async () => {
+    const view = renderPage();
+    fireEvent.click(within(await rowFor('clay')).getByRole('checkbox', { name: SKIP }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('clay', true));
+    await within(await rowFor('clay')).findByText('Skipped by you');
+
+    const reloaded = reload(view);
+    const clay = await rowFor('clay');
+    expect(within(clay).getByText('Skipped by you')).toBeInTheDocument();
+    expect(clay.className).toContain('opacity-60');
+    expect(within(clay).queryByLabelText('API_KEY value')).not.toBeInTheDocument();
+    // Counted exactly as the banner counts it: the skip wiped nothing the
+    // Library reads as set, so the banner still says four — and so does what
+    // the page was handed after the reload.
+    const { total, brokenLinks, warnings } = attentionOf(libraryItems(CATALOG), 'GTM');
+    const served = (await connectMock.getConnectPending.mock.results.at(-1)!.value) as ConnectPending;
+    expect(served.tools.find((t) => t.slug === 'clay')!.skipped).toBe(true);
+    expect(outstandingCount(served)).toBe(total - brokenLinks - warnings);
+
+    fireEvent.click(within(clay).getByRole('button', { name: 'Include' }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('clay', false));
+    await within(await rowFor('clay')).findByText('Needs a key from you');
+
+    // …and that, too, is what the next load says.
+    reload(reloaded);
+    const back = await rowFor('clay');
+    expect(within(back).getByText('Needs a key from you')).toBeInTheDocument();
+    expect(within(back).getByLabelText('API_KEY value')).toBeInTheDocument();
+  });
+
+  it('keeps a skipped SIGN-IN skipped across a reload, with Include and no Authorize', async () => {
+    const catalog = [
+      tool({
+        slug: 'granola',
+        variables: [v({ name: 'TOKEN', key: 'granola_TOKEN', oauth: true, adminConfigured: true })],
+      }),
+    ];
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    const view = renderPage();
+    fireEvent.click(within(await rowFor('granola')).getByRole('checkbox', { name: SKIP }));
+    await within(await rowFor('granola')).findByText('Skipped by you');
+
+    reload(view);
+    const granola = await rowFor('granola');
+    expect(within(granola).getByText('Skipped by you')).toBeInTheDocument();
+    expect(within(granola).queryByRole('button', { name: 'Authorize' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(granola).getByRole('button', { name: 'Include' }));
+    expect(await within(await rowFor('granola')).findByText('Needs your sign-in')).toBeInTheDocument();
+    expect(within(await rowFor('granola')).getByRole('button', { name: 'Authorize' })).toBeInTheDocument();
   });
 });
 

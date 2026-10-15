@@ -13,6 +13,7 @@ import {
   startToolOAuth,
   getMcpOAuthRequest,
   completeMcpOAuth,
+  setToolSkipped,
   type ConnectTool,
   type ConnectOAuth,
   type ConnectToolOAuth,
@@ -47,7 +48,9 @@ const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
  *  - owner-only — a workspace value somebody else has to set, greyed, naming
  *    the variable so they know what to ask for;
  *  - skipped — a tool they took out themselves, greyed, with Include to put it
- *    back.
+ *    back. The SERVER keeps that choice (`ConnectTool.skipped`), so the row
+ *    reads the same after a reload and in another session, and the agent does
+ *    not get the tool back until it is included.
  *
  * All three are counted. A banner saying four and a page showing two was the
  * bug; a page that showed four and counted two would be the same bug with more
@@ -100,11 +103,10 @@ export function ConnectToolsPage() {
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
-  // Entries the user took OUT. Everything the server sent is in by default —
-  // it used to be the other way round, and an unconfigured tool the reader had
-  // never seen rendered grey and uncounted, which is exactly how a page reached
-  // from "4 integrations need setup" came to show two.
-  const [skipped, setSkipped] = useState<Set<string>>(new Set());
+  // Tools (by slug) whose skip or include is in flight. Which tools are
+  // skipped is NOT held here: it arrives with every load, because a choice
+  // kept only by this page was gone on the next reload — the tool back to
+  // "Needs your sign-in", and back on the agent's list once anyone signed in.
   const [wiping, setWiping] = useState<Set<string>>(new Set());
 
   /**
@@ -233,65 +235,61 @@ export function ConnectToolsPage() {
   };
 
   /**
-   * Include/skip toggle. `id` keys the local opt-out set; `configured` says
-   * whether any per-user value exists; `wipe` removes them all. Unticking a
-   * configured entry wipes it (that's what "skip" means — the tool must not
-   * register for the agent); unticking an unconfigured one just hides inputs.
-   * Either way the row STAYS, greyed and still counted: skipping is a decision
-   * about what the agent may use, not a claim the tool is set up.
+   * Include/skip toggle, for a whole TOOL: its sign-in row and its key card are
+   * one integration, skipped or included together, because that is the unit
+   * the server stores and the agent's catalog drops.
    *
-   * `wipe` calls the `removed` callback it is handed after each DELETE that
-   * lands. A tool with several saved keys is several round-trips, and the
-   * second one can fail after the first succeeded: that key is gone for real,
-   * so the Library's copy went stale at the FIRST success, not at the last.
-   * Announcing only on a clean wipe would leave the catalog showing a key
-   * nobody has any more.
+   * Skipping is stored first, then the caller's saved keys and sign-ins for the
+   * tool are wiped (that is what "skip" has always meant — nothing of theirs
+   * is left for the tool to use). The row STAYS, greyed and still counted:
+   * skipping is a decision about what the agent may use, not a claim the tool
+   * is set up. Including clears the stored choice and nothing else.
+   *
+   * The Library is told after each DELETE that lands. A tool with several saved
+   * keys is several round-trips, and the second one can fail after the first
+   * succeeded: that key is gone for real, so the Library's copy went stale at
+   * the FIRST success, not at the last. Announcing only on a clean wipe would
+   * leave the catalog showing a key nobody has any more.
    */
-  const onToggle = async (
-    id: string,
-    configured: boolean,
-    wipe: (removed: () => void) => Promise<void>,
-  ) => {
-    if (skipped.has(id)) {
-      setSkipped((s) => {
+  const onToggle = async (slug: string, skip: boolean) => {
+    setWiping((s) => new Set(s).add(slug));
+    let removedAny = false;
+    let failure: string | null = null;
+    try {
+      await setToolSkipped(slug, skip);
+      if (skip) {
+        for (const o of toolOAuth.filter((x) => x.slug === slug && x.authorized)) {
+          await deleteUserVar(o.slug, o.varName);
+          removedAny = true;
+        }
+        for (const t of tools.filter((x) => x.slug === slug)) {
+          for (const v of t.variables.filter((x) => x.scope === 'user' && x.configured)) {
+            await deleteUserVar(t.slug, v.name);
+            removedAny = true;
+          }
+        }
+      }
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    } finally {
+      // Before this page's own refetch, not after it: the Library is a
+      // different store with a different round-trip, and there is nothing
+      // for it to wait on.
+      if (removedAny) announceToolCredentialsChanged();
+      // Quiet: the rows stay mounted while the stored choice comes back.
+      await refresh(true);
+      // After it: a load that succeeds clears the alert, and this one is
+      // about the skip, not the load.
+      if (failure) setError(failure);
+      setWiping((s) => {
         const nextSet = new Set(s);
-        nextSet.delete(id);
+        nextSet.delete(slug);
         return nextSet;
       });
-      return;
-    }
-    setSkipped((s) => new Set(s).add(id));
-    if (configured) {
-      setWiping((s) => new Set(s).add(id));
-      let removedAny = false;
-      try {
-        await wipe(() => {
-          removedAny = true;
-        });
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (removedAny) {
-          // Before this page's own refetch, not after it: the Library is a
-          // different store with a different round-trip, and there is nothing
-          // for it to wait on.
-          announceToolCredentialsChanged();
-          await refresh();
-        }
-        setWiping((s) => {
-          const nextSet = new Set(s);
-          nextSet.delete(id);
-          return nextSet;
-        });
-      }
     }
   };
 
   const agentMode = agentState != null;
-  const toolId = (t: ConnectTool) => `tool:${t.slug}`;
-  const signInId = (o: ConnectToolOAuth) => `signin:${o.key}`;
-  const toolConfigured = (t: ConnectTool) => t.variables.some((v) => v.configured);
-  const isOn = (id: string) => !skipped.has(id);
 
   // One integration, one unit — and every state of it, including the two the
   // reader cannot act on. See `outstandingCount`: this number exists to equal
@@ -417,8 +415,7 @@ export function ConnectToolsPage() {
                 <Section title="Sign-ins">
                   {/* OAuth-backed tool variables — authorized via the tool-scoped flow. */}
                   {toolOAuth.map((o) => {
-                    const id = signInId(o);
-                    const on = isOn(id);
+                    const on = !o.skipped;
                     // The provider was never registered, so there is no consent
                     // screen for Authorize to open. Whose job that is decides
                     // whether this is a greyed reason or a field.
@@ -457,7 +454,7 @@ export function ConnectToolsPage() {
                         label={o.label || o.toolName}
                         on={on}
                         dim={!on}
-                        busy={wiping.has(id)}
+                        busy={wiping.has(o.slug)}
                         state={
                           !on
                             ? 'skipped'
@@ -467,12 +464,7 @@ export function ConnectToolsPage() {
                                 ? 'signed-in'
                                 : 'needs-signin'
                         }
-                        onToggle={() =>
-                          void onToggle(id, o.authorized, async (removed) => {
-                            await deleteUserVar(o.slug, o.varName);
-                            removed();
-                          })
-                        }
+                        onToggle={() => void onToggle(o.slug, on)}
                         action={
                           on ? (
                             <Button
@@ -483,7 +475,10 @@ export function ConnectToolsPage() {
                               {o.authorized ? 'Reconnect' : 'Authorize'}
                             </Button>
                           ) : (
-                            <IncludeButton onClick={() => void onToggle(id, false, async () => {})} />
+                            <IncludeButton
+                              disabled={wiping.has(o.slug)}
+                              onClick={() => void onToggle(o.slug, false)}
+                            />
                           )
                         }
                       />
@@ -517,13 +512,11 @@ export function ConnectToolsPage() {
               {tools.length > 0 && (
                 <Section title="Keys">
                   {tools.map((tool) => {
-                    const id = toolId(tool);
-                    const configured = toolConfigured(tool);
                     // A tool whose every remaining variable belongs to somebody
                     // else offers nothing to opt into, so it gets no toggle —
                     // and cannot be "skipped by you", because you never had it.
                     const actionable = tool.variables.filter(isActionable);
-                    const on = actionable.length === 0 || isOn(id);
+                    const on = actionable.length === 0 || !tool.skipped;
                     const unset = actionable.filter((v) => !v.configured).length;
                     const ownerVar = tool.variables.find((v) => v.ownerOnly);
                     // Grey the CARD only when nothing on it is the reader's to
@@ -556,23 +549,20 @@ export function ConnectToolsPage() {
                           label={tool.name}
                           on={on}
                           dim={dim}
-                          busy={wiping.has(id)}
+                          busy={wiping.has(tool.slug)}
                           state={state}
                           reason={state === 'owner-only' && ownerVar ? ownerReason(ownerVar.name) : undefined}
                           onToggle={
                             actionable.length === 0
                               ? undefined
-                              : () =>
-                                  void onToggle(id, configured, async (removed) => {
-                                    for (const v of actionable.filter((x) => x.configured)) {
-                                      await deleteUserVar(tool.slug, v.name);
-                                      removed();
-                                    }
-                                  })
+                              : () => void onToggle(tool.slug, on)
                           }
                           action={
                             on ? undefined : (
-                              <IncludeButton onClick={() => void onToggle(id, false, async () => {})} />
+                              <IncludeButton
+                                disabled={wiping.has(tool.slug)}
+                                onClick={() => void onToggle(tool.slug, false)}
+                              />
                             )
                           }
                         />
@@ -713,9 +703,9 @@ function ConnectRowHead({
  * and this is here anyway: an unticked box in a greyed row reads as a record of
  * what happened, not as the way to undo it.
  */
-function IncludeButton({ onClick }: { onClick: () => void }) {
+function IncludeButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
   return (
-    <Button variant="outline" size="tiny" onClick={onClick}>
+    <Button variant="outline" size="tiny" disabled={disabled} onClick={onClick}>
       Include
     </Button>
   );

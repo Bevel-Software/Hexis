@@ -415,6 +415,7 @@ export async function createCoreServer(
   // from the signed `state`. The authed CRUD/start routes mount later.
   const secretsVaultRoutesDeps = {
     secretsVault: core.secretsVaultService,
+    skippedTools: core.skippedToolsService,
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
     connectionProbe: core.connectionProbeService,
@@ -528,6 +529,8 @@ export async function createCoreServer(
     // What the proxy's schema check found when each server's tools were last
     // loaded — reported to a caller who may write the tool, nobody else.
     hiddenTools: core.mcpService.hiddenTools,
+    // A tool the caller skipped on /connect is reported as their choice.
+    skippedTools: core.skippedToolsService,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({
@@ -557,6 +560,8 @@ export async function createCoreServer(
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
+    // A tool the caller skipped on the Connect page is not in their catalog.
+    core.skippedToolsService,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -571,6 +576,8 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    // Skipping a tool takes it out of the catalog, so it moves the revision.
+    skippedTools: core.skippedToolsService,
     // The views move the revision too: a release that changes a view and no
     // manual would otherwise leave a running local server on the old one.
     mcpApps: core.mcpAppService,

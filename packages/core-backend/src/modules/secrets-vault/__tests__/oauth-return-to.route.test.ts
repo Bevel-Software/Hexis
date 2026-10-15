@@ -7,6 +7,7 @@ import {
   createSecretsVaultPublicRoutes,
   isSafeReturnPath,
 } from '../secrets-vault.routes.js';
+import { InMemorySkippedToolsService } from '../skipped-tools.service.js';
 
 /**
  * OAUTH `returnTo`: a sign-in started from a page other than /connect must land
@@ -73,6 +74,7 @@ const connectionProbe = {
 
 const deps = {
   secretsVault,
+  skippedTools: new InMemorySkippedToolsService(),
   toolManualService,
   accessControl,
   connectionProbe,

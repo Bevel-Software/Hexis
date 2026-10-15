@@ -25,6 +25,15 @@ export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
 
 const callTemplateSerializer = new CallTemplateSerializer();
 
+/**
+ * The manuals a person took out of their agent on the Connect page, by catalog
+ * name. A port rather than the secrets-vault service itself: this module has
+ * no business importing that one, and the catalog only ever asks this.
+ */
+export interface SkippedToolSource {
+  skippedBy(userId: string): Promise<ReadonlySet<string>>;
+}
+
 /** The external KB manual's discovery call-template — Bevel's own `/api/agent/utcp`. */
 function kbManualTemplate(): CallTemplate {
   return callTemplateSerializer.validateDict({
@@ -64,6 +73,12 @@ export function createToolManualsAgentRoutes(
      */
     pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
+  /**
+   * What the caller skipped. A skipped manual is left out of their catalog —
+   * and so out of every agent surface built from it — until they include it
+   * again. Absent, nothing is left out.
+   */
+  skippedTools?: SkippedToolSource,
 ): express.Router {
   const router = express.Router();
 
@@ -83,7 +98,12 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      const userManuals = email ? await toolManualService.toManualCallTemplates(email, { remoteOnly }) : [];
+      const accessible = email ? await toolManualService.toManualCallTemplates(email, { remoteOnly }) : [];
+      // The person said no to these on the Connect page; the agent does not
+      // get them back on the next request just because nothing remembered.
+      const userId = req.toolAuth?.userId;
+      const skipped = userId && skippedTools ? await skippedTools.skippedBy(userId) : new Set<string>();
+      const userManuals = accessible.filter((m) => !skipped.has(String(m.name)));
       const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
       res.json({ manuals });
     } catch (err) {
