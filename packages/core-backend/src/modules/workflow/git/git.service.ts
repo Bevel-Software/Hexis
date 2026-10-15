@@ -4364,10 +4364,11 @@ export function parseNumstatZ(out: string): NumstatEntry[] {
  * the knowledge base's repository shares, which git refuses a second writer
  * of rather than waiting — and so must run as the repository's administrator
  * (`IKbRepository.exclusive`): a `config` that sets or unsets, a `remote`
- * change, a branch rename or upstream change (its config section), a push
- * that sets the upstream. Reads of the config are not writes. Nothing else
- * is: the refs, `packed-refs`, the object store and the worktree list are
- * locked by git itself.
+ * change, a branch rename, delete or upstream change (its config section is
+ * written, or removed with the branch), a push that sets the upstream. Reads
+ * of the config are not writes. Nothing else is: the refs, `packed-refs` and
+ * the object store are locked by git itself, and the worktree list is the
+ * repository's own to serialize (`KbRepository`).
  *
  * Leading `-c key=value` / `-C dir` options are skipped to find the subcommand.
  */
@@ -4382,7 +4383,7 @@ function writesSharedConfig(args: readonly string[]): boolean {
     case 'config':
       return !rest.some((a) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin)$/.test(a));
     case 'branch':
-      return rest.some((a) => /^(-m|-M|--move|-u|--set-upstream-to=.*|--unset-upstream)$/.test(a));
+      return rest.some((a) => /^(-d|-D|--delete|-m|-M|--move|-u|--set-upstream-to=.*|--unset-upstream)$/.test(a));
     case 'push':
       return rest.some((a) => a === '-u' || a === '--set-upstream');
     default:

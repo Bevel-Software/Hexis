@@ -592,15 +592,18 @@ export class KbRepository implements IKbRepository {
       await fs.rm(checkoutDir, { recursive: true, force: true });
       return;
     }
-    // The worktree list: as the administrator (see `addWorktree`). The
-    // branch's ref is git's to lock.
+    // As the administrator, the branch delete included: the worktree list
+    // is the repository's to serialize (see `addWorktree`), the delete
+    // removes the branch's section from the shared config, and an
+    // `addWorktree` of the same branch must find the ref either there or
+    // gone, not read it and then lose it.
     await this.exclusive(async () => {
       await this.git(['worktree', 'remove', '--force', '--force', checkoutDir]).catch(async () => {
         await fs.rm(checkoutDir, { recursive: true, force: true });
       });
       await this.git(['worktree', 'prune']);
+      await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
     });
-    await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
   }
 
   /**

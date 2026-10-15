@@ -6,12 +6,14 @@
  * repository driven by the git CLI; the composition root makes ONE and
  * injects it everywhere, so that one fetch serves every workspace and the
  * repository's administration — its creation, the writes to its one config
- * file, a set-aside — is serialized in one place.
+ * file, its worktree list, a set-aside — is serialized in one place.
  *
  * Nothing else is serialized by the application: git was built for many
- * worktrees of one repository, and protects the refs, `packed-refs`, the
- * object store and the worktree list with its own locks. Two worktrees run
- * side by side, as two developers' worktrees of one repository do.
+ * worktrees of one repository, and protects the refs, `packed-refs` and the
+ * object store with its own locks. The worktree list (`worktrees/`) it does
+ * not lock, which is why adding, removing and pruning worktrees are
+ * administration here. Two worktrees run side by side, as two developers'
+ * worktrees of one repository do.
  */
 
 export interface FetchOptions {
