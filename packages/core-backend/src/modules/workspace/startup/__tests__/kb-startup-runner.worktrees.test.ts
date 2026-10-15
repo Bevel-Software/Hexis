@@ -357,6 +357,33 @@ describe('a deployment upgraded over full clones', () => {
     expect((await git(alice, ['rev-parse', 'HEAD'])).trim()).toBe(tip);
     await expect(fs.access(path.join(path.dirname(alice), '.knowledge-base.converting'))).rejects.toThrow();
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'leaves both folders of a cut-short conversion alone when the worktree\'s link cannot be read (EACCES is not absence)',
+    async () => {
+      await makeRunner([touchAll]).runAll();
+      const alice = checkoutOf('alice/a');
+      await fs.writeFile(path.join(alice, 'unsaved.md'), 'kept');
+      // A crash after the worktree came up, before the moved clone was removed.
+      const aside = path.join(path.dirname(alice), '.knowledge-base.converting');
+      await git(root, ['clone', '-q', '-b', 'alice/a', upstream, aside]);
+      const gitdir = (await fs.readFile(path.join(alice, '.git'), 'utf-8')).replace(/^gitdir:\s*/, '').trim();
+      const records = path.dirname(gitdir);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await fs.chmod(records, 0o000);
+      try {
+        // No step opens a branch: every worktree record is unreadable now.
+        await makeRunner([]).runAll();
+      } finally {
+        await fs.chmod(records, 0o755);
+      }
+
+      expect(await fs.readFile(path.join(alice, 'unsaved.md'), 'utf-8')).toBe('kept');
+      expect(await workingCopyShape(alice)).toBe('worktree');
+      expect(await workingCopyShape(aside)).toBe('clone');
+      expect(warn.mock.calls.flat().join('\n')).toMatch(/interrupted conversion of the "alice\/a" working copy/);
+    },
+  );
 });
 
 describe('the repository address changes', () => {

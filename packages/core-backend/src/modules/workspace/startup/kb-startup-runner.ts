@@ -865,7 +865,17 @@ export class KbStartupRunner {
       const workspaceDir = path.join(this.opts.workspacesRoot, entry.name);
       const repoDir = path.join(workspaceDir, this.opts.kbDirName);
       const aside = path.join(workspaceDir, `.${this.opts.kbDirName}.converting`);
-      await this.finishInterruptedConversion(repoDir, aside);
+      try {
+        await this.finishInterruptedConversion(repoDir, aside);
+      } catch (err) {
+        // Both folders stay as they are; the next start looks again.
+        kept.push(branchForWorkspaceId(entry.name));
+        startupLog.warn(
+          `an interrupted conversion of the "${branchForWorkspaceId(entry.name)}" working copy could not be finished (` +
+            `${this.redact(err instanceof Error ? err.message : String(err))}). The moved clone is kept as it is, and the next start tries again.`,
+        );
+        continue;
+      }
       if ((await workingCopyShape(repoDir).catch(() => 'none')) !== 'clone') continue;
       const branch = branchForWorkspaceId(entry.name);
       try {
@@ -927,7 +937,9 @@ export class KbStartupRunner {
   /** See {@link convertLegacyClones}: a conversion a crash cut short. */
   private async finishInterruptedConversion(repoDir: string, aside: string): Promise<void> {
     if (!(await fs.access(aside).then(() => true, () => false))) return;
-    if ((await workingCopyShape(repoDir).catch(() => 'none')) === 'worktree') {
+    // Only a checkout shown to be no worktree is removed: a link that could
+    // not be read has shown nothing, and the error leaves both folders alone.
+    if ((await workingCopyShape(repoDir)) === 'worktree') {
       await fs.rm(aside, { recursive: true, force: true });
       return;
     }

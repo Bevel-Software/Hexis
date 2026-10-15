@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import type { ITreeWalker } from '../shared/fs.contract.js';
@@ -6,11 +7,14 @@ import { KbRepository, repositoryDirFor } from '../modules/workspace/kb-reposito
 import type { IKbRepository } from '../modules/workspace/kb-repository.contract.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { KbStartupRunner, type KbStartupRunnerOptions } from '../modules/workspace/startup/kb-startup-runner.js';
+import { recordTestRepositoryRoot } from './test-repositories.js';
 
 /**
  * The repository a suite's services share when it builds them by hand: one
  * next to the workspaces root (see `repositoryDirFor`), as the composition
- * root would place it there for a deployment with no backups root.
+ * root would place it there for a deployment with no backups root. Removed
+ * once the file's suites are done (see `test-repositories.ts`): a suite's
+ * teardown removes its fixture root, not what sits beside it.
  */
 export function testKbRepository(
   workspacesRoot: string,
@@ -18,8 +22,10 @@ export function testKbRepository(
   kbRepoUrl: string | (() => string),
   gitRunner?: IGitRunner,
 ): IKbRepository {
+  const dir = repositoryDirFor(workspacesRoot, kbDirName);
+  recordTestRepositoryRoot(path.dirname(dir));
   return new KbRepository({
-    dir: repositoryDirFor(workspacesRoot, kbDirName),
+    dir,
     kbRepoUrl: typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl,
     gitRunner,
   });
