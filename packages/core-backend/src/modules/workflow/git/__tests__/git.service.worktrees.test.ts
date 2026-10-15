@@ -64,14 +64,12 @@ beforeEach(async () => {
   }
   await git(seed, ['push', '-q', upstream, TARGET, 'alice/a', 'bob/b']);
 
-  // One mutex for the git layer and the repository, as the composition root wires them.
   const mutex = new WorkspaceMutex();
   const runner = new NodeGitRunner();
   const repository = new KbRepository({
     dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
     kbRepoUrl: () => upstream,
     gitRunner: runner,
-    mutex,
   });
   workspaces = newWorkspaceService(
     workspacesRoot, upstream, testKbContext(), new NodeFs(), runner, undefined, undefined, repository,
@@ -197,26 +195,25 @@ describe('GitService over worktrees', () => {
   });
 });
 
-describe('GitService under the repository reservation', () => {
-  /** The shared mutex, noting whether the repository reservation is held while git runs. */
-  class RecordingMutex extends WorkspaceMutex {
+describe('GitService and the repository administrator', () => {
+  /** The repository, noting whether its administrator's section is held while git runs. */
+  class RecordingRepository extends KbRepository {
     depth = 0;
-    override runRepository<T>(fn: () => Promise<T>): Promise<T> {
-      return super.runRepository(async () => {
+    override exclusive<T>(fn: () => Promise<T>): Promise<T> {
+      return super.exclusive(async () => {
         this.depth += 1;
         try { return await fn(); } finally { this.depth -= 1; }
       });
     }
   }
 
-  it('runs what rewrites shared repository state under the reservation, and nothing else', async () => {
-    const mutex = new RecordingMutex();
+  it('writes the shared config as the administrator, and runs everything else as itself', async () => {
+    const mutex = new WorkspaceMutex();
     const runner = new NodeGitRunner();
-    const repository = new KbRepository({
+    const repository = new RecordingRepository({
       dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
       kbRepoUrl: () => upstream,
       gitRunner: runner,
-      mutex,
     });
     const recorded = newWorkspaceService(
       workspacesRoot, upstream, testKbContext(), new NodeFs(), runner, undefined, undefined, repository,
@@ -226,7 +223,7 @@ describe('GitService under the repository reservation', () => {
       defaultTimeoutMs: runner.defaultTimeoutMs,
       credentials: runner.credentials,
       run: ((cwd: string, args: string[], opts?: never) => {
-        calls.push({ args, held: mutex.depth > 0 });
+        calls.push({ args, held: repository.depth > 0 });
         return runner.run(cwd, args, opts);
       }) as NodeGitRunner['run'],
     };
@@ -250,15 +247,16 @@ describe('GitService under the repository reservation', () => {
     };
     const of = (pred: (s: { name: string; rest: string[] }) => boolean) => calls.filter((c) => pred(sub(c.args)));
 
-    const shared = [
-      ...of((s) => s.name === 'fetch'),
-      ...of((s) => s.name === 'config' && s.rest.includes('--replace-all')),
-      ...of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')),
-    ];
+    // The config is the one file git refuses a second writer of; the refs,
+    // packed-refs and the objects git locks itself, so a fetch, a commit, a
+    // push and a branch delete run as any worktree's git would.
+    const shared = [...of((s) => s.name === 'config' && s.rest.includes('--replace-all'))];
     const own = [
+      ...of((s) => s.name === 'fetch'),
       ...of((s) => s.name === 'commit'),
       ...of((s) => s.name === 'push' && !s.rest.includes('-u')),
       ...of((s) => s.name === 'status'),
+      ...of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')),
       ...of((s) => s.name === 'config' && s.rest.includes('--get')),
     ];
     for (const name of ['fetch', 'config', 'commit', 'push', 'status']) {

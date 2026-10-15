@@ -657,7 +657,7 @@ export class GitService implements IGitService {
       // result rather than firing a redundant network round-trip. Awaiting
       // the same promise also means subsequent listBranches calls see the
       // newly fetched refs.
-      await this.mutex.whileParked(inFlight);
+      await inFlight;
       return this.lastImplicitFetchOk.get(workspaceId) ?? false;
     }
 
@@ -1452,8 +1452,8 @@ export class GitService implements IGitService {
       // No `-u`: it writes the upstream into the config during the push, and
       // a worktree's config is the repository's, shared by every workspace —
       // git refuses a second writer of it rather than waiting. The upstream is
-      // stamped after the push instead, as one short write under the
-      // repository reservation (see `git`).
+      // stamped after the push instead, as one short write made as the
+      // repository's administrator (see `git`).
       await this.git(cwd, ['push', 'origin', branch]);
       await this.git(cwd, ['config', '--replace-all', `branch.${branch}.remote`, 'origin']);
       await this.git(cwd, ['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`]);
@@ -4159,12 +4159,18 @@ export class GitService implements IGitService {
       // a search for a file literally named that.
       env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
     });
-    // What rewrites state every worktree of the repository shares — the
-    // remote-tracking refs, `packed-refs`, the one config file — runs under
-    // the repository-level reservation. Inside a workspace operation (a pull's
-    // fetch, a merge's) that serializes it with the other repository
-    // operations; outside one (`fetchPrRefs`), with every worktree too.
-    return touchesSharedRepositoryState(args) ? this.mutex.runRepository(run) : run();
+    // A write to the git config is a write to the ONE file every worktree of
+    // the repository shares, which git refuses a second writer of rather than
+    // waiting: it runs as the repository's administrator. Everything else —
+    // a fetch, a commit, a branch delete — git serializes with its own locks,
+    // as it does for any two worktrees of one repository.
+    return writesSharedConfig(args) ? this.asRepositoryAdministrator(cwd, run) : run();
+  }
+
+  /** `run` as the repository's administrator when `cwd` is a worktree of it; as itself for a full clone. */
+  private async asRepositoryAdministrator<T>(cwd: string, run: () => Promise<T>): Promise<T> {
+    const repository = (await this.workspaceService.repositoryOfCheckout?.(cwd)) ?? null;
+    return repository ? repository.exclusive(run) : run();
   }
 
   /**
@@ -4354,33 +4360,29 @@ export function parseNumstatZ(out: string): NumstatEntry[] {
 }
 
 /**
- * Whether a git command rewrites state that every worktree of the knowledge
- * base's repository shares, and so must run under the repository-level
- * reservation (`WorkspaceMutex.runRepository`): a fetch (remote-tracking refs,
- * the object store, `packed-refs` when it prunes), a garbage collection, a
- * worktree add/remove/prune, a remote change, a branch delete or rename
- * (`packed-refs`, the branch's config section), and any WRITE to the config —
- * one file for every worktree, which git refuses a second writer of rather
- * than waiting. Reads of the config are not writes.
+ * Whether a git command WRITES the config — the one file every worktree of
+ * the knowledge base's repository shares, which git refuses a second writer
+ * of rather than waiting — and so must run as the repository's administrator
+ * (`IKbRepository.exclusive`): a `config` that sets or unsets, a `remote`
+ * change, a branch rename or upstream change (its config section), a push
+ * that sets the upstream. Reads of the config are not writes. Nothing else
+ * is: the refs, `packed-refs`, the object store and the worktree list are
+ * locked by git itself.
  *
  * Leading `-c key=value` / `-C dir` options are skipped to find the subcommand.
  */
-function touchesSharedRepositoryState(args: readonly string[]): boolean {
+function writesSharedConfig(args: readonly string[]): boolean {
   let i = 0;
   while (i < args.length && (args[i] === '-c' || args[i] === '-C')) i += 2;
   const sub = args[i];
   const rest = args.slice(i + 1);
   switch (sub) {
-    case 'fetch':
-    case 'gc':
-    case 'worktree':
     case 'remote':
-    case 'pack-refs':
       return true;
     case 'config':
       return !rest.some((a) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin)$/.test(a));
     case 'branch':
-      return rest.some((a) => /^(-d|-D|--delete|-m|-M|--move|-u|--set-upstream-to=.*|--unset-upstream)$/.test(a));
+      return rest.some((a) => /^(-m|-M|--move|-u|--set-upstream-to=.*|--unset-upstream)$/.test(a));
     case 'push':
       return rest.some((a) => a === '-u' || a === '--set-upstream');
     default:
