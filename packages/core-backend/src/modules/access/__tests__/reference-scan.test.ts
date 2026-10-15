@@ -221,6 +221,65 @@ describe('KbReferenceScanner — candidates are the resolver\'s walk, not the ex
   });
 });
 
+describe('KbReferenceScanner — references are what the resolver parses', () => {
+  // A body-governed access.md: the body is the folder's rules, the
+  // frontmatter the file's own — here a FLOW sequence, which only the
+  // resolver's full-YAML fallback reads. And a node whose owner is QUOTED.
+  const FLOW_ACCESS_MD = '---\nread: ["Admin"]\n---\nwrite:\n  - Admin\n';
+  const QUOTED_NODE = "---\nowner: 'Admin'\n---\n# Doc\n";
+
+  it('the scan reports quoted and flow-YAML rules the resolver enforces', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-yaml-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      await write(repo, 'Team/Doc.md', QUOTED_NODE);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+
+      const hits = (await scanner.scan('ws-1')).get('admin') ?? [];
+      expect(hits).toEqual(
+        expect.arrayContaining([
+          { path: 'Team/access.md', verb: 'write' },
+          { path: 'Team/access.md', verb: 'read' },
+          { path: 'Team/Doc.md', verb: 'owner' },
+        ]),
+      );
+      expect(hits).toHaveLength(3);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('an access.md the resolver drops as broken references nothing', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-broken-'));
+    try {
+      // A scalar where the verb needs a list: a hard parse error, so the
+      // resolver ignores the whole file.
+      await write(path.join(root, KB), 'Team/access.md', '---\nread: Admin\nwrite:\n  - Admin\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      expect((await scanner.scan('ws-1')).get('admin')).toBeUndefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a rename refuses with nothing written when a reference is in a form it cannot rewrite', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      await expect(
+        scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m)),
+      ).rejects.toThrow(/Team\/access\.md name the old principal in a form the rename cannot rewrite/);
+      // Nothing was written: the file is byte-for-byte as before.
+      expect(await fs.readFile(path.join(repo, 'Team/access.md'), 'utf-8')).toBe(FLOW_ACCESS_MD);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('KbReferenceScanner — a folder the walk cannot list', () => {
   /** The real walk, reporting `Locked` as a folder it could not list. */
   function walkerWithHole(hole = 'Locked'): ITreeWalker & { walks: number } {

@@ -3,9 +3,13 @@
  * services (roles + groups) drive for "which access rules name this
  * principal" and "rewrite every reference atomically":
  *
- *   - `findRoleRefsInText` / `rewriteRoleTokensInText`: the config-region
- *     parse that decides what IS a principal reference. One source of truth,
- *     so the delete/rename warning and the rename rewrite can never disagree.
+ *   - `resolverRoleRefs`: what IS a principal reference — the resolver's own
+ *     parse of each file, so the reports name every enforced rule.
+ *   - `findRoleRefsInText` / `rewriteRoleTokensInText`: the line-level walk
+ *     the rename edits text with. It handles block lists and `key: value`
+ *     entries; the rewrite re-checks its result with `resolverRoleRefs` and
+ *     refuses when a reference survives (a quoted or flow-YAML entry), so
+ *     the warning and the rename can never disagree.
  *   - `KbReferenceScanner`: candidate collection (every KB file with an
  *     access-frontmatter extension — `.md` and `.tool`, the resolver's own
  *     set), the advisory reference scan (cached — roster mutations must not
@@ -31,10 +35,16 @@ import { printable, sanitizedPath } from '../../shared/printable.js';
 import {
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
+  accessMdSelfEntries,
+  canonicalRoleName,
   hasAccessFrontmatterExtension,
   isAccessMdPath,
   parseAccessEntry,
+  parseAccessFile,
+  parseOwnAccessEntries,
   stripComment,
+  type ParsedEntry,
+  type Verb,
 } from '../access-model/access-grammar.js';
 
 const log = logger('access');
@@ -297,6 +307,34 @@ export function rewriteRoleTokensInText(
   return changed ? lines.join('\n') : text;
 }
 
+/**
+ * The principal references the RESOLVER reads from one candidate file, by
+ * the resolver's own parsers: an `access.md`'s folder rules
+ * (`parseAccessFile`) and its self-rules (`accessMdSelfEntries`), any other
+ * file's own frontmatter (`parseOwnAccessEntries`). Those parsers read
+ * quoted scalars and flow sequences (`read: ["Admin"]`) the line walker
+ * above does not, so the reports built on this name every rule that is
+ * actually enforced — and nothing the resolver ignores (a broken
+ * `access.md` is dropped from the model, so it references nothing).
+ */
+export function resolverRoleRefs(text: string, repoRel: string): { role: string; verb: string }[] {
+  const out: { role: string; verb: string }[] = [];
+  const add = (entries: Record<Verb, ParsedEntry[]> | null): void => {
+    if (!entries) return;
+    for (const verb of KNOWN_VERBS) {
+      for (const e of entries[verb]) if (e.kind === 'role') out.push({ role: e.role, verb });
+    }
+  };
+  if (isAccessMdPath(repoRel)) {
+    const folder = parseAccessFile(text, repoRel);
+    if (folder.ok) add(folder.file.entries);
+    add(accessMdSelfEntries(text));
+  } else {
+    add(parseOwnAccessEntries(text));
+  }
+  return out;
+}
+
 export interface ReferenceHit {
   path: string;
   verb: string;
@@ -417,9 +455,10 @@ export class KbReferenceScanner {
   /**
    * Sound scan of EVERY candidate file (folder `access.md` + `.md`/`.tool`
    * node frontmatter) for genuine principal references, indexed by canonical
-   * entry TOKEN. Shares the
-   * candidate set and the config-region parse with the rename rewrite, so the
-   * delete warning and the rewrite see the SAME references. A file we cannot
+   * entry TOKEN, read by the resolver's own parse ({@link resolverRoleRefs}).
+   * Shares the candidate set with the rename rewrite, and the rewrite checks
+   * its result against the same parse, so the delete warning and the rewrite
+   * cannot disagree on what references a principal. A file we cannot
    * read is skipped (this is an advisory read, not the atomic write path).
    * Cached per workspace (see class doc); reads are batched with Promise.all
    * rather than serial per-file awaits.
@@ -456,7 +495,7 @@ export class KbReferenceScanner {
       candidates.forEach((repoRel, i) => {
         const text = texts[i];
         if (text === null) return;
-        for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
+        for (const ref of resolverRoleRefs(text, repoRel)) {
           const list = byToken.get(ref.role);
           if (list) list.push({ path: repoRel, verb: ref.verb });
           else byToken.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
@@ -519,6 +558,11 @@ export class KbReferenceScanner {
         );
       }
     }
+    // Old tokens the rename must leave no reference to (the new name's own
+    // token is exempt: it IS the rewrite's result).
+    const newToken = canonicalRoleName(newDisplayName);
+    const gone = new Set(oldTokens.filter((t) => t !== newToken));
+    const stranded: string[] = [];
     candidates.forEach((repoRel, i) => {
       const entry = texts[i];
       if (!entry.ok) return; // unreachable — the loop above threw
@@ -526,10 +570,22 @@ export class KbReferenceScanner {
       for (const token of oldTokens) {
         rewritten = rewriteRoleTokensInText(rewritten, token, newDisplayName, true, isAccessMdPath(repoRel));
       }
+      // The line rewrite edits block-list and `key: value` entries; the
+      // resolver also reads quoted and flow-YAML ones. A reference it still
+      // sees after the rewrite would be stranded by the rename — refuse.
+      if (resolverRoleRefs(rewritten, repoRel).some((r) => gone.has(r.role))) {
+        stranded.push(repoRel);
+        return;
+      }
       if (rewritten !== entry.text) {
         writes.push({ repoRelativePath: repoRel, content: rewritten, original: entry.text });
       }
     });
+    if (stranded.length > 0) {
+      throw makeError(
+        `${stranded.map((p) => sanitizedPath(p)).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
+      );
+    }
     return writes;
   }
 
