@@ -509,3 +509,67 @@ describe('"copy changes" in the page', () => {
     expect(copied).toHaveBeenCalledWith('Set Bread to done');
   });
 });
+
+/** A date `offset` days from today, as a task's Due is written. */
+const day = (offset: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const todo = (name: string, due: string, extra: Record<string, { text: string }> = {}) => ({
+  node_type: 'Task',
+  file_path: `KnowledgeBase/Ops/Knowledge/Tasks/${name}.md`,
+  fields: { Name: { text: name }, Status: { text: 'open' }, ...(due ? { Due: { text: due } } : {}), ...extra },
+});
+const AGENDA_SNAPSHOT = {
+  format: 'hexis-kb-snapshot/1',
+  takenAt: day(0),
+  nodes: Object.fromEntries(
+    [
+      todo('Late', day(-2)),
+      todo('Now', day(0)),
+      todo('Soon', day(1)),
+      todo('Later', day(5)),
+      todo('Someday', ''),
+      todo('Filed', day(-1), { Status: { text: 'done' }, Completed: { text: day(-1) } }),
+    ].map((n) => [n.file_path, n]),
+  ),
+  edges: [],
+};
+
+describe('the agenda', () => {
+  const phone = { platform: 'mobile', displayMode: 'inline' };
+  const rows = (): string[] =>
+    [...document.querySelectorAll<HTMLElement>('#hx-native [data-act="toggle-done"]')].map((b) =>
+      (b.dataset.path ?? '').replace(/^.*\//, '').replace(/\.md$/, ''),
+    );
+
+  it('groups open tasks as overdue, today, tomorrow, each later day and no date, and folds the completed ones', async () => {
+    const h = fakeHost({ 'ui/initialize': initialize({}, phone) });
+    mount(h.host, '', AGENDA_SNAPSHOT);
+    await h.initialized();
+    expect(texts('#hx-native .hx-sub')).toEqual(['5 tasks open · 1 overdue']);
+    const headings = texts('#hx-native h2.hx-section');
+    expect(headings.slice(0, 3)).toEqual(['Overdue1', 'Today1', 'Tomorrow1']);
+    expect(headings[3]).toMatch(/1$/); // the later day, named by the reader's locale
+    expect(headings[4]).toBe('No date1');
+    expect(rows()).toEqual(['Late', 'Now', 'Soon', 'Later', 'Someday']);
+    expect(texts('#hx-native [data-act="toggle-completed"]')).toEqual(['Completed1']);
+    click('[data-act="toggle-completed"]');
+    expect(rows()).toEqual(['Late', 'Now', 'Soon', 'Later', 'Someday', 'Filed']);
+  });
+
+  it('reopens a completed task, and sends that to the chat', async () => {
+    const h = fakeHost({ 'ui/initialize': initialize({}, phone), 'ui/message': () => ({}) });
+    mount(h.host, '', AGENDA_SNAPSHOT);
+    await h.initialized();
+    click('[data-act="toggle-completed"]');
+    click('[data-act="toggle-done"][data-path$="Filed.md"]');
+    expect(document.querySelector('.hx-pending-n')?.textContent).toBe('1 change');
+    click('[data-act="send"]');
+    await vi.waitFor(() => expect(h.requests('ui/message')).toHaveLength(1));
+    expect(JSON.stringify(h.requests('ui/message')[0]?.params)).toContain(
+      'In KnowledgeBase/Ops/Knowledge/Tasks/Filed.md (\\"Filed\\"), set Status to open, remove Completed.',
+    );
+  });
+});
