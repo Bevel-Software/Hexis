@@ -4,3 +4,4 @@
  * workspace needs only the shape of the gate every write passes first.
  */
 export type { WriteValidator } from './locking-filesystem.js';
+export { readRefSha, readRevSha, type RefFileAnswer } from './ref-files.js';
