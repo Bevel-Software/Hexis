@@ -219,6 +219,29 @@ describe('links in a view', () => {
     expect(linkCalls(h)).toEqual(['/knowledge-base/KnowledgeBase/Ops/Q%231%20100%25.md']);
   });
 
+  it('follows the branch the host says the view was shown from, for links and its own live read', async () => {
+    const h = linkHost();
+    mount(h.host, '<a id="rel" href="../Tasks/Milk.md">Milk</a>');
+    await h.initialized();
+    h.notify('ui/notifications/tool-input', { arguments: { branch: 'dev' } });
+    h.notify('ui/notifications/tool-cancelled'); // no result: the view reads for itself
+    await vi.waitFor(() => expect(h.requests('tools/call').some((m) => m.params?.name === 'hexis_view_data')).toBe(true));
+    click('#rel');
+    await vi.waitFor(() => expect(linkCalls(h)).toHaveLength(1));
+    const branches = h.requests('tools/call').map((m) => (m.params?.arguments as { branch: string }).branch);
+    expect(branches).toEqual(['dev', 'dev']);
+  });
+
+  it('takes the branch a tool result was read from', async () => {
+    const h = linkHost();
+    mount(h.host, '<a id="rel" href="../Tasks/Milk.md">Milk</a>');
+    await h.initialized();
+    h.notify('ui/notifications/tool-result', { content: [], _meta: { 'hexis/view': { branch: 'dev', snapshot: SNAPSHOT } } });
+    click('#rel');
+    await vi.waitFor(() => expect(linkCalls(h)).toHaveLength(1));
+    expect((h.requests('tools/call')[0]?.params?.arguments as { branch: string }).branch).toBe('dev');
+  });
+
   it('scrolls a fragment inside the frame and asks the server nothing', async () => {
     const h = linkHost();
     mount(h.host, '<a id="jump" href="#due">Due</a><h2 id="due">Due</h2>');

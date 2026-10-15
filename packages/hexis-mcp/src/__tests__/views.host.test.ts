@@ -248,6 +248,22 @@ describe('a knowledge view in a real MCP Apps host', () => {
     expect(h.said[0]).toContain('In KnowledgeBase/Ops/Knowledge/Tasks/Bread.md ("Bread"), set Status to done');
   });
 
+  it('opens the links of a view shown from a branch on that branch', { timeout: 60_000 }, async () => {
+    const client = await connectServer();
+    const result = (await client.callTool({ name: 'show_to_do_list', arguments: { branch: 'dev' } })) as CallToolResult;
+    const html = ((await client.readResource({ uri: 'ui://hexis/views/to_do_list.html' })).contents[0] as { text: string }).text;
+    const h = await host(client);
+    const win = openFrame(html, h.transport);
+    await h.initialized;
+    await h.bridge.sendToolInput({ arguments: { branch: 'dev' } });
+    await h.bridge.sendToolResult(result);
+    await bevelOf(win).buildGraph();
+    click(win, '#bread');
+    await vi.waitFor(() =>
+      expect(h.opened).toEqual([`${base}/workspace/dev/knowledge-base/KnowledgeBase/Ops/Knowledge/Tasks/Bread.md`]),
+    );
+  });
+
   it('reads live data through the host when no tool result reaches the view', { timeout: 60_000 }, async () => {
     const client = await connectServer();
     const html = ((await client.readResource({ uri: 'ui://hexis/views/to_do_list.html' })).contents[0] as { text: string }).text;

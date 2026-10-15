@@ -52,6 +52,11 @@ const BRIDGE_SOURCE = String.raw`
   let hostCaps = {};
   let hostContext = {};
   let initialized = false;
+  // The branch this view shows: the one the host says its tool was called on
+  // (show_*({ branch }), or the branch its result was read from), else the
+  // page's own. Links and the fallback live read follow it.
+  let branch = CFG.branch;
+  const adoptBranch = (value) => { if (typeof value === 'string' && value.trim()) branch = value.trim(); };
 
   const send = (msg) => host.postMessage(msg, '*');
   const request = (method, params) => new Promise((resolve, reject) => {
@@ -113,7 +118,7 @@ const BRIDGE_SOURCE = String.raw`
   };
   async function fetchLive() {
     try {
-      const result = await callServer(CFG.dataTool, { view: CFG.view, branch: CFG.branch }, 'live data');
+      const result = await callServer(CFG.dataTool, { view: CFG.view, branch }, 'live data');
       const snap = snapshotOf(result);
       deliver(snap, snap ? null : errorOf(result));
     } catch (e) {
@@ -238,7 +243,7 @@ const BRIDGE_SOURCE = String.raw`
   // tool), and the host opens the address. A link it refuses opens nothing.
   async function openHref(href) {
     try {
-      const result = await callServer(CFG.linkTool, { view: CFG.view, href, branch: CFG.branch }, 'a link');
+      const result = await callServer(CFG.linkTool, { view: CFG.view, href, branch }, 'a link');
       const url = result && result.structuredContent && result.structuredContent.url;
       if (typeof url !== 'string' || !url) {
         const text = result && Array.isArray(result.content) ? result.content.filter((c) => c && c.type === 'text').map((c) => c.text).join(' ') : '';
@@ -310,7 +315,12 @@ const BRIDGE_SOURCE = String.raw`
       return;
     }
     switch (msg.method) {
+      case 'ui/notifications/tool-input':
+        adoptBranch(msg.params && msg.params.arguments && msg.params.arguments.branch);
+        break;
       case 'ui/notifications/tool-result': {
+        const meta = msg.params && msg.params._meta && msg.params._meta[META];
+        adoptBranch(meta && meta.branch);
         const snap = snapshotOf(msg.params);
         if (snap) deliver(snap);
         else fetchLive();
