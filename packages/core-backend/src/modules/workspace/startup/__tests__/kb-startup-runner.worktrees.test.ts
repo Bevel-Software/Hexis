@@ -168,6 +168,27 @@ describe('a boot that opens every remote branch', () => {
     expect(await sizeOf(workspacesRoot)).toBeLessThan(await sizeOf(path.join(repositoryDir(), 'objects')));
   });
 
+  it('does not fetch a branch again when the wait for the reservation outlasts the gap between the listing and the fetch', async () => {
+    const inner = new NodeGitRunner(undefined, credentials);
+    const calls: string[][] = [];
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        calls.push(args);
+        // Each add's prune runs before it reads the repository's fetch: a
+        // slow one stands for a long wait under a loaded machine.
+        if (args[0] === 'worktree' && args[1] === 'prune') await new Promise((r) => setTimeout(r, 50));
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+
+    await makeRunner([touchAll], { gitRunner }).runAll();
+
+    expect(calls.filter((args) => args.includes('fetch') && args.at(-1) === 'origin')).toHaveLength(1);
+    expect(calls.filter((args) => args.includes('fetch') && args.some((a) => a.startsWith('+refs/heads/')))).toEqual([]);
+  });
+
   it('starts again over its own worktrees without converting or re-adding anything', async () => {
     await makeRunner([touchAll]).runAll();
     const log = vi.spyOn(console, 'log');

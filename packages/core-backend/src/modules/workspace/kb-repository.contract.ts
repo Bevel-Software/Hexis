@@ -13,6 +13,12 @@ import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 export interface FetchOptions {
   /** A fetch that SUCCEEDED this recently is fresh enough; nothing runs. */
   maxAgeMs: number;
+  /**
+   * An instant: a success counts as fresh only when its fetch started at or
+   * after it, however young it is (a fetch from before a listing may lack
+   * what the listing saw).
+   */
+  fetchedSince?: number;
   /** Skip the freshness window (the in-flight join still applies). */
   force?: boolean;
   /**
@@ -28,8 +34,12 @@ export interface AddWorktreeOptions {
   allowLocalOnly?: boolean;
   /** A conversion: a local ref behind the remote stays where it is. */
   keepLocalTip?: boolean;
-  /** Reuse the repository's own fetch when it succeeded this recently and knows the branch. */
-  withinFetchWindowMs?: number;
+  /**
+   * Reuse the repository's own fetch when it started at or after this instant
+   * and knows the branch. An instant, not an age: it is compared inside the
+   * reservation, so time spent waiting for it cannot age a fetch out.
+   */
+  fetchedSince?: number;
 }
 
 export interface IKbRepository {

@@ -22,7 +22,7 @@ import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js'
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
 import { KbRepository, repositoryDirFor, workingCopyShape } from '../kb-repository.js';
-import type { IKbRepository } from '../kb-repository.contract.js';
+import type { FetchOptions, IKbRepository } from '../kb-repository.contract.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
 /**
@@ -265,7 +265,7 @@ export class KbStartupRunner {
   /**
    * When this run listed the remote's branches. A fetch that started before
    * it may lack a deletion the listing already saw, so only a fetch since
-   * counts as current for the branches the run opens (`fetchWindowMs`).
+   * counts as current for the branches the run opens (`fetchedSince`).
    */
   private listedAt = 0;
 
@@ -1158,8 +1158,8 @@ export class KbStartupRunner {
     // The phase opens every branch: the repository's one fetch in the window
     // brought them all, so each add reads it instead of asking the remote
     // for its branch again. A fetch that failed leaves the add to ask.
-    await this.repository.fetch({ maxAgeMs: this.fetchWindowMs() });
-    await this.repository.addWorktree(branch, repoDir, { withinFetchWindowMs: this.fetchWindowMs() });
+    await this.repository.fetch(this.fetchWindow());
+    await this.repository.addWorktree(branch, repoDir, { fetchedSince: this.fetchedSince() });
     try {
       this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
     } catch (err) {
@@ -1170,9 +1170,18 @@ export class KbStartupRunner {
     return repoDir;
   }
 
-  /** How old a fetch of the repository may be and still count for this run: never older than its listing. */
-  private fetchWindowMs(): number {
-    return Math.max(0, Math.min(STARTUP_FETCH_WINDOW_MS, Date.now() - this.listedAt));
+  /**
+   * The earliest a fetch of the repository may have started and still count
+   * for this run: never before its listing, never older than the window. An
+   * instant, so the repository compares it when it gets the reservation and
+   * time spent waiting for it does not age the fetch out.
+   */
+  private fetchedSince(): number {
+    return Math.max(this.listedAt, Date.now() - STARTUP_FETCH_WINDOW_MS);
+  }
+
+  private fetchWindow(): FetchOptions {
+    return { maxAgeMs: STARTUP_FETCH_WINDOW_MS, fetchedSince: this.fetchedSince() };
   }
 
   private async updateClone(branch: string, repoDir: string, worktree = false): Promise<string> {
@@ -1180,7 +1189,7 @@ export class KbStartupRunner {
       // ONE fetch for every worktree the phase visits, within the window: the
       // repository's. The phase is fail-closed, so a failed fetch stops it
       // with git's words, as the clone's own fetch did.
-      if (!(await this.repository.fetch({ maxAgeMs: this.fetchWindowMs() }))) {
+      if (!(await this.repository.fetch(this.fetchWindow()))) {
         const raw = `git fetch origin failed: ${String(this.repository.lastFetchFailure() ?? 'unknown failure')}`;
         throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
       }

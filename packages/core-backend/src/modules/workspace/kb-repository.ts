@@ -371,7 +371,13 @@ export class KbRepository implements IKbRepository {
    */
   async fetch(opts: FetchOptions): Promise<boolean> {
     const now = Date.now();
-    if (!opts.force && now - this.lastSuccessAt < opts.maxAgeMs) return true;
+    if (
+      !opts.force &&
+      now - this.lastSuccessAt < opts.maxAgeMs &&
+      (opts.fetchedSince === undefined || this.lastSuccessAt >= opts.fetchedSince)
+    ) {
+      return true;
+    }
     // Joined PARKED: the fetch in flight may be waiting for every running
     // worktree operation, and the caller may be one.
     if (this.inFlightFetch) return this.mutex.whileParked(this.inFlightFetch);
@@ -470,8 +476,8 @@ export class KbRepository implements IKbRepository {
    * remote where it is: the worktree comes up at the clone's own tip, and the
    * phase's own update moves it on, as it moved the clone.
    *
-   * `withinFetchWindowMs` (the startup phase, opening every branch) skips
-   * asking the remote when the repository's own fetch succeeded that recently
+   * `fetchedSince` (the startup phase, opening every branch) skips asking
+   * the remote when the repository's own fetch succeeded, starting no earlier
    * and already has `origin/<branch>`: that fetch brought every branch, so
    * opening a hundred branches costs one fetch, not a hundred. A branch it
    * does not know yet is asked for as usual.
@@ -491,8 +497,9 @@ export class KbRepository implements IKbRepository {
       // deleted, on the host. One branch, not the whole remote.
       let missing = false;
       const fresh =
-        opts.withinFetchWindowMs !== undefined &&
-        Date.now() - this.lastSuccessAt < opts.withinFetchWindowMs &&
+        opts.fetchedSince !== undefined &&
+        this.lastSuccessAt > 0 &&
+        this.lastSuccessAt >= opts.fetchedSince &&
         (await this.revParse(`refs/remotes/origin/${branch}`)) !== null;
       if (!fresh) {
         try {

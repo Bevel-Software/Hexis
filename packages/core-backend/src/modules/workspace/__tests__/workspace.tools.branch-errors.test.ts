@@ -435,9 +435,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
     const base = await start({ source: 'internal', scope: 'write' });
     const takesBranch = internalTools
       .map((t) => ({ name: t.name, body: (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body }))
-      .filter(({ body }) => (body?.required ?? []).includes('branch'))
-      // Resolves its own branch, and validates it itself first.
-      .filter(({ name }) => name !== 'execute_command');
+      .filter(({ body }) => (body?.required ?? []).includes('branch'));
 
     for (const { name: tool, body } of takesBranch) {
       // Every other argument the tool requires, so the call matches the tool

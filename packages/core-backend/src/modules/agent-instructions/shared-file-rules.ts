@@ -3,7 +3,7 @@
  *
  * They used to be appended, in full, to every tool description that they
  * covered: the content rule rode on all twelve file tools, the agent-guide
- * reminder on all of them plus the shell, the write-mode and escape-sequence
+ * reminder on all of them, the write-mode and escape-sequence
  * paragraphs on two or three apiece. A description then ran to two or three
  * thousand characters, most of it text the agent had already read on the tool
  * above — and clients cut long descriptions from the END, which is where the

@@ -12,4 +12,6 @@ When the knowledge base's repository address changes to another repository, the 
 
 Git operations on two different worktrees run side by side. A fetch, a worktree add, remove or prune, and every write to the shared git config take one repository-level reservation, which waits for the worktree operations in flight. A push now stamps its upstream after the push instead of with `-u`, so it does not hold that reservation over the network.
 
+The in-app agent's internal shell tool, `execute_command`, is removed. A command line an agent composes could reach what every worktree shares (other branches' refs, the object store, the worktree list), and no reading of a command line can promise what the shell will run; so there is no tool that runs one, and no guard in its place. Every git operation an agent needs is a platform tool with fixed arguments (branches, change requests, merge, files, grep), run by the application. A call to `execute_command` by name now answers as an unknown tool.
+
 Rolling back to an earlier release needs the workspaces volume cleared first: that release does not recognise a worktree and would treat each as a clone. Unpushed commits stay in the repository folder under the backups root, which a rollback leaves in place.

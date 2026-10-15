@@ -41,8 +41,8 @@ export interface ToolContext {
   sessionId?: string;
   /**
    * The branch the in-process agent's workspace is focused on, from its internal
-   * token. An internal-only workspace tool (e.g. `execute_command`) falls back to
-   * it when the model omits `branch`, so the in-app chat agent acts on its own
+   * token. A tool may fall back to it when the model omits `branch` (`list_tool_setup`
+   * reads the focused branch's setup), so the in-app chat agent acts on its own
    * workspace even on a branch-less call. Only set for `source: 'internal'`;
    * external callers must name the branch explicitly (a present-but-invalid value
    * still fails closed regardless of this).
