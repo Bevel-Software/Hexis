@@ -59,14 +59,13 @@ const READERS = [
   'get_agent_guide',
 ];
 
-/**
- * `ask`, the one reader the ticket names that core does not register: it comes
- * from a deployment's agent overlay (`ext.tools`), which is not in this
- * repository. What is pinned here is the RULE it rides on — an overlay tool
- * that declares no write lists as a reader — through a stand-in; the real
- * overlay's declaration is checked on a deployment that has it.
+/*
+ * `ask` is the one reader the ticket names that core does not register: it
+ * comes from a deployment's agent overlay (`ext.tools`), which is not in this
+ * repository, so NOTHING here covers it — its hint is checked on a deployment
+ * that has the overlay. What is pinned here is only the rule an overlay tool
+ * rides on, through tools that are plainly not `ask`.
  */
-const OVERLAY_READERS = ['ask'];
 
 /** The tools the ticket names as writers, every one of which must list `readOnlyHint: false`. */
 const WRITERS = [
@@ -137,11 +136,6 @@ function platformRegistry(): ToolRegistry {
     kb,
   });
   registerAgentGuideTool(registry, express.Router(), pass, handler, async () => []);
-  // A stand-in for `ask` (see OVERLAY_READERS): declared as an overlay
-  // declares a tool, through `toolDef` with no write.
-  registry.registerExternalTool(
-    toolDef({ name: 'ask', description: 'Ask the agent.', path: '/api/agent/tools/ask', inputs: { type: 'object', properties: {} } }),
-  );
   return registry;
 }
 
@@ -208,15 +202,22 @@ describe('the built-in hint of every platform tool', () => {
     }
   });
 
-  it('lists an overlay tool that declares no write, like `ask`, as a reader — and one declaring `write: true` as a writer', async () => {
+  it('core registers no `ask`: its hint is the overlay\'s, and is not covered by this file', async () => {
+    expect((await platformRegistry().listExternal()).some((t) => t.name === 'ask')).toBe(false);
+  });
+
+  it('lists an overlay tool that declares no write as a reader, and one declaring `write: true` as a writer', async () => {
     const registry = platformRegistry();
+    registry.registerExternalTool(
+      toolDef({ name: 'overlay_read', description: 'Reads.', path: '/api/agent/tools/overlay_read', inputs: { type: 'object', properties: {} } }),
+    );
     // Declared with `write: true` and no `write` tag: the boolean alone must
     // keep it off the readers.
     registry.registerExternalTool(
       toolDef({ name: 'overlay_write', description: 'Writes.', path: '/api/agent/tools/overlay_write', inputs: { type: 'object', properties: {} }, write: true }),
     );
     const listing = await hostedListing(registry, new ToolReadOnlyHints(registry, memorySettings().port));
-    for (const name of OVERLAY_READERS) expect(listing.get(name)?.annotations, name).toEqual({ readOnlyHint: true });
+    expect(listing.get('overlay_read')?.annotations).toEqual({ readOnlyHint: true });
     expect(listing.get('overlay_write')?.annotations).toEqual({ readOnlyHint: false });
   });
 
