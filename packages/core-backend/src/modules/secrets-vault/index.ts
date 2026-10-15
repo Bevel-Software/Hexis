@@ -28,6 +28,5 @@ export {
 } from './secrets-variable-loader.js';
 export {
   DbSkippedToolsService,
-  InMemorySkippedToolsService,
   type ISkippedToolsService,
 } from './skipped-tools.service.js';

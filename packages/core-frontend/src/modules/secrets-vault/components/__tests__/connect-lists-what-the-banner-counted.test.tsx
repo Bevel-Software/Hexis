@@ -408,6 +408,49 @@ describe('a tool the reader skipped stays skipped', () => {
     // Included, it is the owner's again — nothing for the reader to opt out of.
     expect(within(back).queryByRole('checkbox')).not.toBeInTheDocument();
   });
+
+  it('skips a tool with a key AND a sign-in whole: skipped from one row, both rows say so', async () => {
+    // One integration, one entry in the agent's catalog: there is no half of
+    // it to leave on. Skipped from its sign-in, its key card is skipped too —
+    // after a reload as well — and an Include from the key card restores both.
+    const catalog = [
+      tool({
+        slug: 'linear',
+        variables: [
+          v({ name: 'API_KEY', key: 'linear_API_KEY', userConfigured: true }),
+          v({ name: 'TOKEN', key: 'linear_TOKEN', oauth: true, adminConfigured: true, authorized: true }),
+        ],
+      }),
+    ];
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    /** The sign-in row and the key card, in page order. */
+    const rows = async () =>
+      (await screen.findAllByRole('link', { name: 'Open linear' })).map(
+        (link) => link.closest('div')!.parentElement as HTMLElement,
+      );
+
+    const view = renderPage();
+    const [signIn] = await rows();
+    fireEvent.click(within(signIn).getByRole('checkbox', { name: SKIP }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('linear', true));
+    // The skip wipes what the reader had saved for the tool — both halves.
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('linear', 'TOKEN'));
+    expect(varsMock.deleteUserVar).toHaveBeenCalledWith('linear', 'API_KEY');
+
+    reload(view);
+    const skipped = await rows();
+    expect(skipped).toHaveLength(2);
+    for (const row of skipped) expect(within(row).getByText('Skipped by you')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Authorize' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('API_KEY value')).not.toBeInTheDocument();
+
+    fireEvent.click(within(skipped[1]).getByRole('button', { name: 'Include' }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('linear', false));
+    await waitFor(() => expect(screen.queryByText('Skipped by you')).not.toBeInTheDocument());
+    // Both halves are the reader's again: ticked, and the key field open.
+    for (const row of await rows()) expect(within(row).getByRole('checkbox', { name: SKIP })).toBeChecked();
+    expect(screen.getByLabelText('API_KEY value')).toBeInTheDocument();
+  });
 });
 
 describe('the Connect page says why, when the reader cannot act', () => {

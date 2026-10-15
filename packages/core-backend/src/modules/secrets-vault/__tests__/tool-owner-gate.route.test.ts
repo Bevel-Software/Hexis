@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
-import { InMemorySkippedToolsService } from '../skipped-tools.service.js';
+import { FakeSkippedToolsService } from './fake-skipped-tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -94,7 +94,7 @@ async function baseUrlAs(email: string): Promise<string> {
     '/api',
     createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
       secretsVault,
       toolManualService,
       accessControl,

@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
-import { InMemorySkippedToolsService } from '../skipped-tools.service.js';
+import { FakeSkippedToolsService } from './fake-skipped-tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -88,7 +88,7 @@ async function baseUrlWith(auth: { userId?: string; email?: string }): Promise<s
     '/api',
     createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
       secretsVault,
       toolManualService,
       accessControl,
@@ -175,7 +175,7 @@ describe('GET /api/connect/pending — the workspace tier', () => {
       '/api',
       createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) =>
             keys.map((key) => ({
@@ -265,7 +265,7 @@ describe('GET /api/connect/pending — readability', () => {
       '/api',
       createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) =>
             keys.map((key) => ({
@@ -393,7 +393,7 @@ describe('GET /api/connect/pending — OAuth scope coverage', () => {
       '/api',
       createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
         secretsVault: vaultWithGranted(grantedScopes),
         toolManualService: oauthTool,
         accessControl,
@@ -489,7 +489,7 @@ describe('GET /api/connect/pending — tool sign-ins are not double-listed as st
       '/api',
       createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
         secretsVault: vault,
         toolManualService: oauthTool,
         accessControl,
@@ -551,7 +551,7 @@ describe('GET /api/connect/pending — a row of the wrong KIND is not "set up"',
       '/api',
       createSecretsVaultRoutes({
       kb: testKbContext(),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) => keys.map(opts.status),
           list: async () => [],

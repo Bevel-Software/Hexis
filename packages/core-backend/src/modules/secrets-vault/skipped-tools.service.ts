@@ -45,22 +45,3 @@ export class DbSkippedToolsService implements ISkippedToolsService {
       .where(and(eq(skippedTools.userId, userId), eq(skippedTools.manual, manual)));
   }
 }
-
-/** The same contract held in memory — for tests, and for wiring that has no database. */
-export class InMemorySkippedToolsService implements ISkippedToolsService {
-  private readonly byUser = new Map<string, Set<string>>();
-
-  async skippedBy(userId: string): Promise<ReadonlySet<string>> {
-    return new Set(this.byUser.get(userId) ?? []);
-  }
-
-  async skip(userId: string, manual: string): Promise<void> {
-    const set = this.byUser.get(userId) ?? new Set<string>();
-    set.add(manual);
-    this.byUser.set(userId, set);
-  }
-
-  async include(userId: string, manual: string): Promise<void> {
-    this.byUser.get(userId)?.delete(manual);
-  }
-}

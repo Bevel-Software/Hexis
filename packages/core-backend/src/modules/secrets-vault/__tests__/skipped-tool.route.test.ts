@@ -1,13 +1,21 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { randomBytes } from 'node:crypto';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import type { CallTemplate } from '@utcp/sdk';
 import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
-import { InMemorySkippedToolsService } from '../skipped-tools.service.js';
+import { FakeSkippedToolsService } from './fake-skipped-tools.js';
+import type { ISkippedToolsService } from '../skipped-tools.service.js';
 import { createToolManualsAgentRoutes } from '../../tool-manuals/tool-manuals.routes.js';
 import type { IToolManualService } from '../../tool-manuals/tool-manuals.contract.js';
 import { createCatalogRevisionRoutes } from '../../../core/catalog-revision.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
+import { closeDb, createDb, type Database } from '../../database/connection.js';
+import { runCoreMigrations } from '../../database/migrate.js';
+import { coreMigrationsDir } from '../../../assets.js';
+import { AuthService } from '../../auth/auth.service.js';
+import { DbSkippedToolsService } from '../skipped-tools.service.js';
 
 /**
  * A tool the person skips on the Connect page STAYS skipped.
@@ -72,7 +80,7 @@ const servers: HttpServer[] = [];
  * store. The user is whoever the `x-user` header names.
  */
 async function session(
-  skippedTools: InMemorySkippedToolsService,
+  skippedTools: ISkippedToolsService,
   resolveUserEmail: (id: string) => Promise<string | undefined> = async (id) => `${id}@x.com`,
 ): Promise<string> {
   const app = express();
@@ -155,7 +163,7 @@ function setSkipped(base: string, slug: string, skip: boolean, user = 'u-1'): Pr
 
 describe('a skipped tool stays skipped', () => {
   it('is reported skipped after a reload and in a second session, until it is included', async () => {
-    const store = new InMemorySkippedToolsService();
+    const store = new FakeSkippedToolsService();
     const first = await session(store);
 
     expect((await pending(first)).toolOAuth).toEqual([expect.objectContaining({ slug: 'granola', skipped: false })]);
@@ -180,7 +188,7 @@ describe('a skipped tool stays skipped', () => {
   });
 
   it('is one person’s choice — nobody else’s listing or catalog changes', async () => {
-    const base = await session(new InMemorySkippedToolsService());
+    const base = await session(new FakeSkippedToolsService());
     await setSkipped(base, 'granola', true, 'u-1');
 
     expect((await pending(base, 'u-2')).toolOAuth).toEqual([expect.objectContaining({ skipped: false })]);
@@ -188,7 +196,7 @@ describe('a skipped tool stays skipped', () => {
   });
 
   it('keeps the tool out of the agent’s catalog until it is included again', async () => {
-    const base = await session(new InMemorySkippedToolsService());
+    const base = await session(new FakeSkippedToolsService());
     expect(await catalog(base)).toEqual(expect.arrayContaining(['granola', 'qa_userkey']));
     const before = await revision(base);
 
@@ -205,7 +213,7 @@ describe('a skipped tool stays skipped', () => {
   });
 
   it('still offers Include once the tool has no key of the reader’s left to show', async () => {
-    const store = new InMemorySkippedToolsService();
+    const store = new FakeSkippedToolsService();
     const base = await session(store);
     await setSkipped(base, 'qa-userkey', true);
 
@@ -226,7 +234,7 @@ describe('a skipped tool stays skipped', () => {
   });
 
   it('a skipped sign-in tool is carried by its sign-in row, not by an empty key card too', async () => {
-    const base = await session(new InMemorySkippedToolsService());
+    const base = await session(new FakeSkippedToolsService());
     await setSkipped(base, 'granola', true);
 
     const view = await pending(base);
@@ -235,18 +243,119 @@ describe('a skipped tool stays skipped', () => {
   });
 
   it('does not move the revision for a caller with no catalog for a skip to change', async () => {
-    const base = await session(new InMemorySkippedToolsService(), async () => undefined);
+    const base = await session(new FakeSkippedToolsService(), async () => undefined);
     const before = await revision(base);
 
     await setSkipped(base, 'qa-userkey', true);
     expect(await revision(base)).toBe(before);
   });
 
+  it('skips a tool with both a key and a sign-in whole — both rows say so, and both come back', async () => {
+    // One manual is one entry in the agent's catalog, so there is no half of
+    // it to leave on: a skip made from either row is the tool's, the other
+    // row reports it too, and an Include from either undoes both.
+    manuals = [
+      {
+        slug: 'linear',
+        name: 'linear',
+        path: 'Plugins/GTM/linear.tool',
+        type: 'http',
+        variables: [
+          { name: 'API_KEY', scope: 'user', label: null },
+          { name: 'TOKEN', scope: 'user', label: 'Linear sign-in', oauth: { scopes: [] } },
+        ],
+      },
+    ];
+    const store = new FakeSkippedToolsService();
+    const base = await session(store);
+
+    await setSkipped(base, 'linear', true);
+    const second = await pending(await session(store));
+    expect(second.tools).toEqual([expect.objectContaining({ slug: 'linear', skipped: true })]);
+    expect(second.toolOAuth).toEqual([expect.objectContaining({ slug: 'linear', skipped: true })]);
+    expect(await catalog(base)).not.toContain('linear');
+
+    await setSkipped(base, 'linear', false);
+    const back = await pending(base);
+    expect(back.tools).toEqual([expect.objectContaining({ slug: 'linear', skipped: false })]);
+    expect(back.toolOAuth).toEqual([expect.objectContaining({ slug: 'linear', skipped: false })]);
+    expect(await catalog(base)).toContain('linear');
+  });
+
   it('answers 404 for a tool the caller cannot read, and records nothing', async () => {
-    const store = new InMemorySkippedToolsService();
+    const store = new FakeSkippedToolsService();
     const base = await session(store);
 
     expect((await setSkipped(base, 'blackbox', true)).status).toBe(404);
     expect([...(await store.skippedBy('u-1'))]).toEqual([]);
   });
+});
+
+/**
+ * The same choice over the REAL table, through `DbSkippedToolsService`: the
+ * fake above stands in for it everywhere else, so what it promises — one row
+ * per person and tool however often it is skipped, a no-op include, a choice
+ * nobody else sees — is pinned here where Postgres decides it (the primary
+ * key and the `onConflictDoNothing` the fake can only imitate). Each "session"
+ * is its own pool, so nothing carries between them but the rows.
+ */
+describe.skipIf(!PG_ADMIN_URL)('a skipped tool stays skipped, on a real Postgres', () => {
+  const KEY = randomBytes(32).toString('base64');
+  const open: Database[] = [];
+
+  async function pool(url: string): Promise<Database> {
+    const db = createDb(url, { piiKey: KEY });
+    open.push(db);
+    return db;
+  }
+
+  afterAll(async () => {
+    for (const db of open) await closeDb(db);
+    await dropScratchDatabases();
+  }, PG_TEST_TIMEOUT);
+
+  it(
+    'skip, reload, second session: still skipped and off the agent; include: back',
+    async () => {
+      const url = await scratchDatabaseUrl('hexis_skipped');
+      const db = await pool(url);
+      await runCoreMigrations(db, coreMigrationsDir());
+      // `skipped_tools.user_id` references a real account.
+      const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+      const lena = (await auth.createAccountWithoutPassword('lena@acme.test', 'Lena')).user.id;
+      const tom = (await auth.createAccountWithoutPassword('tom@acme.test', 'Tom')).user.id;
+
+      const first = await session(new DbSkippedToolsService(db));
+      expect((await setSkipped(first, 'granola', true, lena)).status).toBe(204);
+      // Skipping twice is one skip, not a primary-key violation.
+      expect((await setSkipped(first, 'granola', true, lena)).status).toBe(204);
+      expect((await setSkipped(first, 'qa-userkey', true, lena)).status).toBe(204);
+
+      // A second session: another server, over another pool.
+      const second = await session(new DbSkippedToolsService(await pool(url)));
+      for (const base of [first, second]) {
+        const view = await pending(base, lena);
+        expect(view.toolOAuth).toEqual([expect.objectContaining({ slug: 'granola', skipped: true })]);
+        expect(view.tools).toEqual([expect.objectContaining({ slug: 'qa-userkey', skipped: true })]);
+        expect(await catalog(base, lena)).not.toContain('granola');
+        expect(await catalog(base, lena)).not.toContain('qa_userkey');
+      }
+      // Lena's choice, not Tom's.
+      expect((await pending(second, tom)).toolOAuth).toEqual([expect.objectContaining({ skipped: false })]);
+      expect(await catalog(second, tom)).toEqual(expect.arrayContaining(['granola', 'qa_userkey']));
+
+      // Included in the second session, it is back in the first.
+      expect((await setSkipped(second, 'granola', false, lena)).status).toBe(204);
+      // Including a tool that is not skipped is a no-op, not an error.
+      expect((await setSkipped(second, 'granola', false, lena)).status).toBe(204);
+      expect((await pending(first, lena)).toolOAuth).toEqual([expect.objectContaining({ slug: 'granola', skipped: false })]);
+      expect(await catalog(first, lena)).toContain('granola');
+      expect(await catalog(first, lena)).not.toContain('qa_userkey');
+
+      // What the table holds agrees: one row, Lena's, for the tool still skipped.
+      const rows = await db.$client.query('select user_id, manual from skipped_tools');
+      expect(rows.rows).toEqual([{ user_id: lena, manual: 'qa_userkey' }]);
+    },
+    PG_TEST_TIMEOUT,
+  );
 });

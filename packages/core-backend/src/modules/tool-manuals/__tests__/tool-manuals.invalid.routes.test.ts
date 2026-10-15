@@ -13,7 +13,7 @@ import { ToolManualService } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { InMemorySkippedToolsService } from '../../secrets-vault/skipped-tools.service.js';
+import { FakeSkippedToolsService } from '../../secrets-vault/__tests__/fake-skipped-tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -101,7 +101,7 @@ async function baseUrlAs(email: string | undefined): Promise<{ base: string; ser
     '/api',
     createSecretsVaultRoutes({
       kb: testKbContext({ kbDirName: KB_DIR }),
-      skippedTools: new InMemorySkippedToolsService(),
+      skippedTools: new FakeSkippedToolsService(),
       secretsVault: { statusFor: async () => [] } as unknown as Parameters<
         typeof createSecretsVaultRoutes
       >[0]['secretsVault'],
