@@ -429,6 +429,44 @@ describe('the view catalog', () => {
       expect(kb.mock.calls.filter(([tool]) => tool === 'start_session')).toHaveLength(2);
     });
 
+    /** A KB whose `tool` calls wait until released: a read caught in flight. */
+    const held = (tool: string) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const base = fakeKb(page(snapshotOnPage));
+      const kb = vi.fn(async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        if (name === tool) await gate;
+        return base(name, args);
+      });
+      return { kb, release };
+    };
+
+    it('does not answer a view call with what it read for a reader who changed meanwhile', async () => {
+      const config = { ...CONFIG, connectionKey: 'key-a' };
+      const { kb, release } = held('list_files'); // the live read's walk
+      const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
+      await views.listTools();
+      const answer = views.callTool('show_to_do_list', {});
+      await vi.waitFor(() => expect(kb.mock.calls.some(([tool]) => tool === 'list_files')).toBe(true));
+      config.connectionKey = 'key-b';
+      release();
+      const result = await answer;
+      expect(result.isError).toBe(true);
+      expect(result._meta).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain('Bread');
+    });
+
+    it('does not serve a page it read for a reader who changed meanwhile', async () => {
+      const config = { ...CONFIG, connectionKey: 'key-a' };
+      const { kb, release } = held('read_file'); // the page itself
+      const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
+      await views.listTools();
+      const answer = views.readResource('ui://hexis/views/to_do_list.html');
+      config.connectionKey = 'key-b';
+      release();
+      await expect(answer).rejects.toThrow(/sign-in changed/);
+    });
+
     it('announces a change the background refresh found', async () => {
       dir = mkdtempSync(path.join(tmpdir(), 'hexis-views-'));
       const kb = fakeKb(page(snapshotOnPage));

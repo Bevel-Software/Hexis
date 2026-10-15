@@ -82,6 +82,8 @@ const KEPT_REFRESH_DELAY_MS = 20_000;
 const SUMMARY_NODES = 80;
 /** 2: the copy names the reader it belongs to. */
 const CACHE_VERSION = 2;
+/** The answer to a request whose reader changed while it was being read. */
+const READER_CHANGED = 'The sign-in changed while this was being read, so it is not answered. Ask again.';
 /**
  * The search matches the snapshot block alone, one line per view, so its
  * result cap is spent on views. A title pattern beside it matched the title of
@@ -523,6 +525,114 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
 
   const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+  /** A view tool's answer, for the reader of the moment (see `callTool`). */
+  async function answerTool(tool: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    if (tool === VIEW_LINK_TOOL) {
+      const view = await byTool(String(args.view ?? ''));
+      if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
+      const href = String(args.href ?? '');
+      // Where the same link goes in the app: its grammar, against the page
+      // the link sits in (an app path starts with the repository's folder),
+      // and its scheme allowlist, since the host opens what this answers.
+      const url = kbHrefToAppUrl(href, {
+        basePath: `${kbDir}/${view.path}`,
+        kbDirName: kbDir,
+        branch: branchOf(args),
+        base: webBase,
+      });
+      if (url === null) return { isError: true, content: [{ type: 'text', text: `This link cannot be opened: ${href}` }] };
+      return { content: [{ type: 'text', text: url }], structuredContent: { url } };
+    }
+    if (tool === VIEW_DATA_TOOL) {
+      const view = await byTool(String(args.view ?? ''));
+      if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
+      try {
+        const { snapshot } = await liveSnapshot(view, branchOf(args));
+        return {
+          content: [{ type: 'text', text: `${Object.keys(snapshot.nodes).length} node(s), live.` }],
+          structuredContent: { snapshot },
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: errorText(err) }] };
+      }
+    }
+    const view = await byTool(tool);
+    if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${tool}".` }] };
+    const branch = branchOf(args);
+    try {
+      const { snapshot, errors } = await liveSnapshot(view, branch);
+      const count = Object.keys(snapshot.nodes).length;
+      const lines = [
+        `Showing "${view.title}" (${view.path}), live from branch ${branch}: ${count} item(s). ` +
+          'The user sees the page rendered in the chat; changes they make there arrive as a message.',
+      ];
+      if (errors.length) lines.push(`Some files could not be read (${errors.length}): ${errors.slice(0, 3).join('; ')}`);
+      lines.push('', summarize(snapshot));
+      return {
+        content: [{ type: 'text', text: lines.join('\n') }],
+        _meta: { [VIEW_META_KEY]: { path: view.path, branch, snapshot } },
+      };
+    } catch (err) {
+      // The page still renders, from the snapshot it carries.
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Showing "${view.title}" (${view.path}) from its embedded snapshot; live data did not load: ${errorText(err)}`,
+          },
+        ],
+        _meta: { [VIEW_META_KEY]: { path: view.path, branch, liveError: errorText(err) } },
+      };
+    }
+  }
+
+  /** A view's page, for the reader of the moment (see `readResource`). */
+  async function readPage(uri: string): Promise<ReadResourceResult> {
+    const view = (await current()).find((v) => v.uri === uri) ?? (await refresh()).find((v) => v.uri === uri);
+    if (!view) throw new Error(`Unknown resource ${uri}`);
+    let html = await page(view, DEFAULT_BRANCH);
+    if (!isKnowledgeView(html)) throw new Error(`${view.path} is no longer a knowledge view`);
+    // The last live read, when there is one, is fresher than what the page
+    // was committed with: the first paint uses it, live data follows.
+    const last = snapshots.get(view.path);
+    if (last) html = replaceEmbeddedSnapshot(html, last);
+    const bridge: BridgeConfig = {
+      view: view.tool,
+      dataTool: VIEW_DATA_TOOL,
+      linkTool: VIEW_LINK_TOOL,
+      pagePath: view.path,
+      branch: DEFAULT_BRANCH,
+      kbDir,
+    };
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: VIEW_MIME_TYPE,
+          text: injectBridge(html, bridge),
+          // Self-contained pages: no network origins to declare.
+          _meta: { ui: { prefersBorder: true, csp: {} } },
+        },
+      ],
+    };
+  }
+
+  /**
+   * The views for the reader of the moment. A list read for a reader who
+   * changed while it was read is not answered; the new reader's is read
+   * instead (once: a credential that keeps changing gets an empty list).
+   */
+  async function currentForReader(): Promise<ViewEntry[]> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      forgetAnotherReader();
+      const gen = generation;
+      const list = await current();
+      forgetAnotherReader();
+      if (gen === generation) return list;
+    }
+    return [];
+  }
+
   return {
     prefetch() {
       forgetAnotherReader();
@@ -542,78 +652,24 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     },
 
     async listTools() {
-      forgetAnotherReader();
-      const list = await current();
+      const list = await currentForReader();
       return list.length ? [...list.map(viewTool), dataTool, linkTool] : [];
     },
 
     async callTool(tool, args) {
       forgetAnotherReader();
-      if (tool === VIEW_LINK_TOOL) {
-        const view = await byTool(String(args.view ?? ''));
-        if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
-        const href = String(args.href ?? '');
-        // Where the same link goes in the app: its grammar, against the page
-        // the link sits in (an app path starts with the repository's folder),
-        // and its scheme allowlist, since the host opens what this answers.
-        const url = kbHrefToAppUrl(href, {
-          basePath: `${kbDir}/${view.path}`,
-          kbDirName: kbDir,
-          branch: branchOf(args),
-          base: webBase,
-        });
-        if (url === null) return { isError: true, content: [{ type: 'text', text: `This link cannot be opened: ${href}` }] };
-        return { content: [{ type: 'text', text: url }], structuredContent: { url } };
-      }
-      if (tool === VIEW_DATA_TOOL) {
-        const view = await byTool(String(args.view ?? ''));
-        if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
-        try {
-          const { snapshot } = await liveSnapshot(view, branchOf(args));
-          return {
-            content: [{ type: 'text', text: `${Object.keys(snapshot.nodes).length} node(s), live.` }],
-            structuredContent: { snapshot },
-          };
-        } catch (err) {
-          return { isError: true, content: [{ type: 'text', text: errorText(err) }] };
-        }
-      }
-      const view = await byTool(tool);
-      if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${tool}".` }] };
-      const branch = branchOf(args);
-      try {
-        const { snapshot, errors } = await liveSnapshot(view, branch);
-        const count = Object.keys(snapshot.nodes).length;
-        const lines = [
-          `Showing "${view.title}" (${view.path}), live from branch ${branch}: ${count} item(s). ` +
-            'The user sees the page rendered in the chat; changes they make there arrive as a message.',
-        ];
-        if (errors.length) lines.push(`Some files could not be read (${errors.length}): ${errors.slice(0, 3).join('; ')}`);
-        lines.push('', summarize(snapshot));
-        return {
-          content: [{ type: 'text', text: lines.join('\n') }],
-          _meta: { [VIEW_META_KEY]: { path: view.path, branch, snapshot } },
-        };
-      } catch (err) {
-        // The page still renders, from the snapshot it carries.
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Showing "${view.title}" (${view.path}) from its embedded snapshot; live data did not load: ${errorText(err)}`,
-            },
-          ],
-          _meta: { [VIEW_META_KEY]: { path: view.path, branch, liveError: errorText(err) } },
-        };
-      }
+      const gen = generation;
+      const result = await answerTool(tool, args);
+      // Read for a reader who is no longer the one asking: say so instead of answering with it.
+      forgetAnotherReader();
+      return gen === generation ? result : { isError: true, content: [{ type: 'text', text: READER_CHANGED }] };
     },
 
     handlesResource: (uri) => uri.startsWith(URI_PREFIX),
 
     async listResources() {
-      forgetAnotherReader();
       return {
-        resources: (await current()).map((v) => ({
+        resources: (await currentForReader()).map((v) => ({
           uri: v.uri,
           name: v.tool,
           title: v.title,
@@ -625,33 +681,11 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
 
     async readResource(uri) {
       forgetAnotherReader();
-      const view = (await current()).find((v) => v.uri === uri) ?? (await refresh()).find((v) => v.uri === uri);
-      if (!view) throw new Error(`Unknown resource ${uri}`);
-      let html = await page(view, DEFAULT_BRANCH);
-      if (!isKnowledgeView(html)) throw new Error(`${view.path} is no longer a knowledge view`);
-      // The last live read, when there is one, is fresher than what the page
-      // was committed with: the first paint uses it, live data follows.
-      const last = snapshots.get(view.path);
-      if (last) html = replaceEmbeddedSnapshot(html, last);
-      const bridge: BridgeConfig = {
-        view: view.tool,
-        dataTool: VIEW_DATA_TOOL,
-        linkTool: VIEW_LINK_TOOL,
-        pagePath: view.path,
-        branch: DEFAULT_BRANCH,
-        kbDir,
-      };
-      return {
-        contents: [
-          {
-            uri,
-            mimeType: VIEW_MIME_TYPE,
-            text: injectBridge(html, bridge),
-            // Self-contained pages: no network origins to declare.
-            _meta: { ui: { prefersBorder: true, csp: {} } },
-          },
-        ],
-      };
+      const gen = generation;
+      const result = await readPage(uri);
+      forgetAnotherReader();
+      if (gen !== generation) throw new Error(READER_CHANGED);
+      return result;
     },
   };
 }
