@@ -1,6 +1,5 @@
 import path from 'node:path';
 import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
-import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import type { ITreeWalker } from '../shared/fs.contract.js';
 import type { KbContext } from '../shared/kb-context.js';
@@ -29,7 +28,6 @@ export function testKbRepository(
     dir,
     kbRepoUrl: typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl,
     gitRunner: gitRunner ?? new NodeGitRunner(),
-    mutex: new WorkspaceMutex(),
   });
 }
 

@@ -462,7 +462,6 @@ describe('setting the repository aside', () => {
         dir: path.join(alias, path.relative(root, svc.repository.dir)),
         kbRepoUrl: () => upstream,
         gitRunner: new NodeGitRunner(),
-        mutex: svc.repository.mutex,
       });
       // The destination too is named through the alias.
       const dest = path.join(alias, 'set-aside', 'stamp');
@@ -487,7 +486,7 @@ describe('setting the repository aside', () => {
     }
   });
 
-  it('moves nothing when the reason for it no longer holds once the reservation is held', async () => {
+  it('moves nothing when the reason for it no longer holds once it is the administrator', async () => {
     const svc = service();
     await svc.getOrCreateForBranch('alice/a');
     const dest = path.join(root, 'set-aside', 'stamp');

@@ -1,5 +1,3 @@
-import type { WorkspaceMutex } from '../kb-fs/mutex.js';
-
 /**
  * The knowledge base's one repository, every branch workspace a worktree of
  * it — the contract its consumers (the workspace service, the KB startup
@@ -7,7 +5,13 @@ import type { WorkspaceMutex } from '../kb-fs/mutex.js';
  * `KbRepository` (`kb-repository.ts`) is the implementation, a bare
  * repository driven by the git CLI; the composition root makes ONE and
  * injects it everywhere, so that one fetch serves every workspace and the
- * repository-level reservation is one.
+ * repository's administration — its creation, the writes to its one config
+ * file, a set-aside — is serialized in one place.
+ *
+ * Nothing else is serialized by the application: git was built for many
+ * worktrees of one repository, and protects the refs, `packed-refs`, the
+ * object store and the worktree list with its own locks. Two worktrees run
+ * side by side, as two developers' worktrees of one repository do.
  */
 
 export interface FetchOptions {
@@ -46,14 +50,19 @@ export interface IKbRepository {
   /** The bare repository's folder. */
   readonly dir: string;
   /**
-   * The mutex the git layer serializes worktree operations under. Every
-   * operation that writes what the worktrees share — the fetch, a worktree
-   * add, remove or prune, a config write, the set-aside — runs under its
-   * repository-level reservation; the reads (`exists`, `listWorktrees`,
-   * `originUrl`) take none, and a caller that must act on what they answer
-   * reads them again under the reservation.
+   * Run `fn` as the repository's one administrator for its duration: no
+   * creation of the repository, no write to its one config file (git refuses
+   * a second writer of it rather than waiting), no change to its worktree
+   * list (which git does not lock: a prune beside a `worktree add` can take
+   * the entry being made), and no set-aside runs beside it. Git operations
+   * in the worktrees are not held back — git's own locks cover them — so a
+   * caller that moves the repository's folders holds those off itself (the
+   * startup phase runs before anything is served; the workspace service
+   * wraps a set-aside in what surrounds one). Never nested: `fn` must not
+   * call `exclusive` again, nor a method that does (`ensure`, `addWorktree`,
+   * `removeWorktree`, `prune`, the config writes).
    */
-  readonly mutex: WorkspaceMutex;
+  exclusive<T>(fn: () => Promise<T>): Promise<T>;
 
   /** Whether the repository is on disk and finished (its first fetch landed). */
   exists(): Promise<boolean>;
@@ -63,14 +72,22 @@ export interface IKbRepository {
   refreshCredentials(): Promise<void>;
   /** Run `git config` writes against the shared configuration, one writer at a time. */
   writeConfig(cwd: string, argLists: readonly string[][]): Promise<void>;
+  /**
+   * Garbage-collect the repository when git finds it worth it (`gc --auto`
+   * with git's default thresholds). Automatic collection is off on the
+   * repository — a commit in one worktree would otherwise collect beside
+   * every other worktree's work — so the startup phase runs this once, when
+   * nothing else does. Never throws.
+   */
+  maintain(): Promise<void>;
   /** The last time the repository reached the remote and whether it worked; null before any attempt. */
   lastContact(): { at: number; ok: boolean } | null;
   /** Why the last fetch failed, redacted; null when it did not. */
   lastFetchFailure(): string | null;
   /**
-   * `git fetch --prune origin`, once for every workspace: throttled, joined
-   * while in flight, under the repository reservation. Answers whether the
-   * remote-tracking refs are provably fresh. Never throws.
+   * `git fetch --prune origin`, once for every workspace: throttled, and
+   * joined while in flight. Answers whether the remote-tracking refs are
+   * provably fresh. Never throws.
    */
   fetch(opts: FetchOptions): Promise<boolean>;
   /** Forget what this process knows of the repository (it was set aside). */

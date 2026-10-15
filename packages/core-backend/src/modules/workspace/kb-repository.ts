@@ -4,7 +4,6 @@ import { logger } from '../../shared/logging.js';
 import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
@@ -37,11 +36,24 @@ const log = logger('kb-repository');
  * It lives OUTSIDE the workspaces root, so the orphan sweep (which removes
  * every folder there that is not a known branch's) never sees it.
  *
- * What changes what every worktree shares — a fetch, a worktree add, remove
- * or prune, the repository's configuration — runs under the repository-level
- * reservation of the {@link WorkspaceMutex} (`runRepository`). Git operations
- * inside one worktree keep their canonical workspace key, and two worktrees
- * run side by side.
+ * Git was built for many worktrees of one repository and protects what they
+ * share with its own locks: one per ref while it is written, one for
+ * `packed-refs` (which git waits for, `core.packedRefsTimeout`), one per
+ * worktree's index, objects written to a temp file and renamed into place,
+ * and a worktree being added marked locked until it is. So git operations
+ * in two worktrees run side by side here, as two developers' worktrees do,
+ * under nothing but the per-workspace mutex the git layer always held.
+ *
+ * What git does NOT wait for is its one config file — a second writer is
+ * refused, not queued — and what nothing in git serializes is the making of
+ * the repository and the moving of its folders. Those three run as the
+ * repository's one administrator, {@link exclusive}: the only lock this
+ * class adds.
+ *
+ * Automatic garbage collection is off (`gc.auto 0`): a commit in one
+ * worktree would otherwise collect beside every other worktree's work. The
+ * startup phase runs {@link maintain} once per boot instead, when nothing
+ * is served.
  */
 
 /** A first fetch of a large knowledge base takes minutes; the floor under its deadline. */
@@ -154,12 +166,6 @@ export interface KbRepositoryOptions {
   kbRepoUrl: () => string;
   /** Injected by the composition root, as every other git caller's is. */
   gitRunner: IGitRunner;
-  /**
-   * The mutex the git layer serializes worktree operations under. The same
-   * instance, injected by the composition root, so that the repository-level
-   * reservation here waits for them.
-   */
-  mutex: WorkspaceMutex;
 }
 
 export type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
@@ -168,7 +174,16 @@ export class KbRepository implements IKbRepository {
   readonly dir: string;
   private readonly kbRepoUrl: () => string;
   private readonly gitRunner: IGitRunner;
-  readonly mutex: WorkspaceMutex;
+
+  /** The administrator's queue: `exclusive` sections run one after another, in call order. */
+  private admin: Promise<unknown> = Promise.resolve();
+
+  /** See the contract: the repository's one administrator for `fn`'s duration. Never nested. */
+  async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.admin.catch(() => undefined).then(fn);
+    this.admin = next;
+    return next;
+  }
 
   /** When the last fetch succeeded, and when the last attempt failed. */
   private lastSuccessAt = 0;
@@ -190,7 +205,6 @@ export class KbRepository implements IKbRepository {
     this.dir = path.resolve(opts.dir);
     this.kbRepoUrl = opts.kbRepoUrl;
     this.gitRunner = opts.gitRunner;
-    this.mutex = opts.mutex;
   }
 
   private redact(text: string): string {
@@ -213,11 +227,11 @@ export class KbRepository implements IKbRepository {
 
   /**
    * Make sure the repository exists and has been fetched at least once; create
-   * it when it does not. Under the repository reservation. Throws when it
-   * cannot be created or its first fetch fails — with git's words, redacted.
+   * it when it does not. As the administrator. Throws when it cannot be
+   * created or its first fetch fails — with git's words, redacted.
    */
   async ensure(): Promise<void> {
-    await this.mutex.runRepository(() => this.ensureHeld());
+    await this.exclusive(() => this.ensureHeld());
   }
 
   private async ensureHeld(): Promise<void> {
@@ -266,6 +280,10 @@ export class KbRepository implements IKbRepository {
       // A KB has paths over 260 characters; without this a Windows checkout drops them.
       ['config', 'core.longpaths', 'true'],
       ['config', 'core.packedRefsTimeout', PACKED_REFS_TIMEOUT_MS],
+      // No automatic collection: it would run inside whichever worktree's
+      // commit tripped it, beside every other worktree's work. The startup
+      // phase collects once per boot instead (`maintain`).
+      ['config', 'gc.auto', '0'],
       // See `cloneTrackingConfigArgs`: an automatic gc forked into the
       // background becomes a zombie under a node server.
       ['config', 'gc.autoDetach', 'false'],
@@ -323,12 +341,12 @@ export class KbRepository implements IKbRepository {
 
   /**
    * Bring the credential helper into line with the deployment's credential when
-   * it changed since it was last stamped. Under the repository reservation, as
-   * every write to the shared config is. A no-op for a repository not yet made.
+   * it changed since it was last stamped. As the administrator, as every write
+   * to the shared config is. A no-op for a repository not yet made.
    */
   async refreshCredentials(): Promise<void> {
     if (this.stampedCredentials === this.credentialFingerprint() && this.configStamped) return;
-    await this.mutex.runRepository(async () => {
+    await this.exclusive(async () => {
       if (await this.exists()) await this.stampConfigIfNeeded();
     });
   }
@@ -340,9 +358,21 @@ export class KbRepository implements IKbRepository {
    * waiting for it.
    */
   async writeConfig(cwd: string, argLists: readonly string[][]): Promise<void> {
-    await this.mutex.runRepository(async () => {
+    await this.exclusive(async () => {
       for (const args of argLists) await this.gitRunner.run(cwd, args);
     });
+  }
+
+  /** See the contract. `gc --auto` decides for itself whether there is enough loose to pack. */
+  async maintain(): Promise<void> {
+    if (!(await this.exists())) return;
+    try {
+      await this.git(['-c', 'gc.auto=6700', 'gc', '--auto', '--quiet'], Math.max(this.gitRunner.defaultTimeoutMs, FIRST_FETCH_TIMEOUT_MS));
+    } catch (err) {
+      log.warn('garbage collection of the knowledge-base repository failed; it is tried again at the next start:', {
+        detail: this.redact(err instanceof Error ? err.message : String(err)),
+      });
+    }
   }
 
   /**
@@ -371,13 +401,13 @@ export class KbRepository implements IKbRepository {
 
   /**
    * `git fetch --prune origin` in the repository — ONCE for every workspace.
-   * Throttled by `maxAgeMs`, joined while in flight (ten callers in one tick
-   * share one fetch), and run under the repository reservation, so it waits
-   * for the worktree operations in flight and holds back the ones that are
-   * not. Answers whether the remote-tracking refs are provably fresh: this
-   * call's fetch (or the one it joined) succeeded, or one succeeded within
-   * the window. Never throws; a caller that must not act on stale refs reads
-   * the answer.
+   * Throttled by `maxAgeMs` and joined while in flight (ten callers in one
+   * tick share one fetch). Not serialized against the worktrees' own git:
+   * a fetch writes remote-tracking refs and packs, which git locks itself.
+   * Answers whether the remote-tracking refs are provably fresh: this call's
+   * fetch (or the one it joined) succeeded, or one succeeded within the
+   * window. Never throws; a caller that must not act on stale refs reads the
+   * answer.
    */
   async fetch(opts: FetchOptions): Promise<boolean> {
     const now = Date.now();
@@ -388,30 +418,27 @@ export class KbRepository implements IKbRepository {
     ) {
       return true;
     }
-    // Joined PARKED: the fetch in flight may be waiting for every running
-    // worktree operation, and the caller may be one.
-    if (this.inFlightFetch) return this.mutex.whileParked(this.inFlightFetch);
+    if (this.inFlightFetch) return this.inFlightFetch;
     if (!opts.force && opts.failureBackoffMs && now - this.lastFailureAt < opts.failureBackoffMs) {
       return false;
     }
     const generation = this.generation;
     let startedAt = Date.now();
-    const promise = this.mutex
-      .runRepository(async () => {
-        startedAt = Date.now();
-        if (!(await this.exists())) {
-          await this.ensureHeld();
-          return;
-        }
-        await this.stampConfigIfNeeded();
-        await this.git([
-          // A transfer that stalls below 1 KB/s for ten seconds is abandoned,
-          // so a hung host cannot park every workspace behind it.
-          '-c', 'http.lowSpeedLimit=1000',
-          '-c', 'http.lowSpeedTime=10',
-          ...SAFE_IMPLICIT_FETCH_ARGS,
-        ]);
-      })
+    const promise = (async () => {
+      startedAt = Date.now();
+      // A repository not made yet is made here, which fetches it once: that
+      // first fetch is this one.
+      const existed = await this.exists();
+      await this.ensure();
+      if (!existed) return;
+      await this.git([
+        // A transfer that stalls below 1 KB/s for ten seconds is abandoned,
+        // so a hung host cannot park every workspace behind it.
+        '-c', 'http.lowSpeedLimit=1000',
+        '-c', 'http.lowSpeedTime=10',
+        ...SAFE_IMPLICIT_FETCH_ARGS,
+      ]);
+    })()
       .then(
         () => {
           // When this fetch made the repository, ensureHeld() already stamped its
@@ -499,14 +526,12 @@ export class KbRepository implements IKbRepository {
     checkoutDir: string,
     opts: AddWorktreeOptions = {},
   ): Promise<void> {
-    await this.mutex.runRepository(async () => {
-      await this.ensureHeld();
-      // A registration left behind by a folder deleted without git (a crash,
-      // an operator) would make git refuse the path, or the branch, as taken.
-      await this.git(['worktree', 'prune']);
+    await this.ensure();
+    {
       // The remote is ASKED for the branch, as a clone of it asked: the
       // repository's tracking ref may be from before the branch moved, or was
-      // deleted, on the host. One branch, not the whole remote.
+      // deleted, on the host. One branch, not the whole remote. Not as the
+      // administrator: a fetch may take a while, and git locks what it writes.
       let missing = false;
       const fresh =
         opts.fetchedSince !== undefined &&
@@ -530,19 +555,29 @@ export class KbRepository implements IKbRepository {
         throw new Error(`Remote branch ${branch} not found in upstream origin`);
       }
       await fs.mkdir(path.dirname(checkoutDir), { recursive: true });
-      if (local === null) {
-        await this.git(['worktree', 'add', '--quiet', '--track', '-b', branch, checkoutDir, `refs/remotes/origin/${branch}`]);
-      } else {
-        const remote = missing ? null : await this.revParse(`refs/remotes/origin/${branch}`);
-        if (!opts.keepLocalTip && remote !== null && local !== remote && (await this.isAncestor(local, remote))) {
-          await this.git(['update-ref', `refs/heads/${branch}`, remote, local]);
+      // As the administrator, from the prune to the config writes: the
+      // worktree list is the one thing git does not lock (a prune beside
+      // another branch's `worktree add` can take the entry being made), and
+      // `worktree add --track` writes the shared config, which git refuses a
+      // second writer of.
+      await this.exclusive(async () => {
+        // A registration left behind by a folder deleted without git (a crash,
+        // an operator) would make git refuse the path, or the branch, as taken.
+        await this.git(['worktree', 'prune']);
+        if (local === null) {
+          await this.git(['worktree', 'add', '--quiet', '--track', '-b', branch, checkoutDir, `refs/remotes/origin/${branch}`]);
+        } else {
+          const remote = missing ? null : await this.revParse(`refs/remotes/origin/${branch}`);
+          if (!opts.keepLocalTip && remote !== null && local !== remote && (await this.isAncestor(local, remote))) {
+            await this.git(['update-ref', `refs/heads/${branch}`, remote, local]);
+          }
+          await this.git(['worktree', 'add', '--quiet', checkoutDir, branch]);
         }
-        await this.git(['worktree', 'add', '--quiet', checkoutDir, branch]);
-      }
-      // The branch tracks `origin/<branch>`, exactly one fetch refspec and
-      // one upstream ref, as a fresh clone of it would.
-      for (const args of cloneTrackingConfigArgs(branch)) await this.git(args);
-    });
+        // The branch tracks `origin/<branch>`, exactly one fetch refspec and
+        // one upstream ref, as a fresh clone of it would.
+        for (const args of cloneTrackingConfigArgs(branch)) await this.git(args);
+      });
+    }
   }
 
   /**
@@ -553,17 +588,19 @@ export class KbRepository implements IKbRepository {
    * any more, or is locked) is deleted by hand, then pruned.
    */
   async removeWorktree(checkoutDir: string, branch: string): Promise<void> {
-    await this.mutex.runRepository(async () => {
-      if (!(await this.exists())) {
-        await fs.rm(checkoutDir, { recursive: true, force: true });
-        return;
-      }
+    if (!(await this.exists())) {
+      await fs.rm(checkoutDir, { recursive: true, force: true });
+      return;
+    }
+    // The worktree list: as the administrator (see `addWorktree`). The
+    // branch's ref is git's to lock.
+    await this.exclusive(async () => {
       await this.git(['worktree', 'remove', '--force', '--force', checkoutDir]).catch(async () => {
         await fs.rm(checkoutDir, { recursive: true, force: true });
       });
       await this.git(['worktree', 'prune']);
-      await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
     });
+    await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
   }
 
   /**
@@ -572,21 +609,22 @@ export class KbRepository implements IKbRepository {
    * checked out in a worktree that exists is refused by git and kept.
    */
   async forgetWorktrees(branches: readonly string[]): Promise<void> {
-    await this.mutex.runRepository(async () => {
-      if (!(await this.exists())) return;
-      await this.git(['worktree', 'prune']);
-      for (const branch of branches) {
-        if ((await this.revParse(`refs/heads/${branch}`)) === null) continue;
-        await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
-      }
-    });
+    if (!(await this.exists())) return;
+    await this.prune();
+    for (const branch of branches) {
+      if ((await this.revParse(`refs/heads/${branch}`)) === null) continue;
+      await this.git(['branch', '-D', '--', branch]).catch(() => undefined);
+    }
   }
 
-  /** `git worktree prune`: forget worktrees whose folders are gone. */
+  /**
+   * `git worktree prune`: forget worktrees whose folders are gone. As the
+   * administrator: a prune beside a `worktree add` can take the entry being
+   * made, before git has marked it as in the making.
+   */
   async prune(): Promise<void> {
-    await this.mutex.runRepository(async () => {
-      if (await this.exists()) await this.git(['worktree', 'prune']);
-    });
+    if (!(await this.exists())) return;
+    await this.exclusive(() => this.git(['worktree', 'prune']));
   }
 
   /** The folders of the repository's worktrees, as git lists them. */
@@ -609,19 +647,17 @@ export class KbRepository implements IKbRepository {
    * the repository now has it.
    */
   async importBranch(cloneDir: string, branch: string): Promise<string> {
-    return this.mutex.runRepository(async () => {
-      await this.ensureHeld();
-      const tip = (
-        await this.gitRunner.run(cloneDir, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
-      ).stdout.trim();
-      await this.git(['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', cloneDir,
-        `+refs/heads/${branch}:refs/heads/${branch}`]);
-      const imported = await this.revParse(`refs/heads/${branch}`);
-      if (imported !== tip) {
-        throw new Error(`the repository holds ${imported ?? 'nothing'} for "${branch}" after the import, not ${tip}`);
-      }
-      return tip;
-    });
+    await this.ensure();
+    const tip = (
+      await this.gitRunner.run(cloneDir, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
+    ).stdout.trim();
+    await this.git(['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', cloneDir,
+      `+refs/heads/${branch}:refs/heads/${branch}`]);
+    const imported = await this.revParse(`refs/heads/${branch}`);
+    if (imported !== tip) {
+      throw new Error(`the repository holds ${imported ?? 'nothing'} for "${branch}" after the import, not ${tip}`);
+    }
+    return tip;
   }
 
   /**
@@ -700,7 +736,7 @@ export class KbRepository implements IKbRepository {
    * the old one as fresh.
    */
   async setOriginUrl(url: string): Promise<void> {
-    await this.mutex.runRepository(async () => {
+    await this.exclusive(async () => {
       await this.git(['remote', 'set-url', 'origin', url]);
       this.generation++;
       this.lastSuccessAt = 0;

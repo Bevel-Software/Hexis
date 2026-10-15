@@ -572,19 +572,17 @@ export async function createCoreServices(
    * Under the backups root: a persistent volume of its own, and one nothing
    * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
    */
-  /**
-   * Shared mutex so git and diff operations on the same workspace serialize
-   * against each other — a backup-reseed races a concurrent commit otherwise.
-   * Made here, ahead of the services, because the knowledge base's repository
-   * below reserves through it too: a fetch or a worktree add waits for the
-   * worktree operations the git layer runs under it.
-   */
+  // Shared mutex so git and diff operations on the same workspace serialize
+  // against each other — a backup-reseed races a concurrent commit otherwise.
   const workspaceMutex = new WorkspaceMutex();
   /**
    * The knowledge base's ONE repository: every branch workspace is a worktree
    * of it (see `kb-repository.ts`). One instance, handed to the workspace
    * service, the startup phase and (through the workspace service) the git
-   * layer, so one fetch serves every workspace and its reservation is one.
+   * layer, so one fetch serves every workspace and the writes to its one
+   * config file are serialized in one place. Git operations in the worktrees
+   * are not serialized against each other beyond the workspace mutex: git's
+   * own locks cover a repository shared by worktrees.
    *
    * Under the backups root, like the set-aside copies: a persistent volume in
    * every shipped compose file, so no new mount is needed, and outside the
@@ -597,7 +595,6 @@ export async function createCoreServices(
     dir: repositoryDirFor(config.workspacesRoot, kbDirName, path.join(config.backupsRoot, '.kb-repository')),
     kbRepoUrl: () => repositorySource.url(),
     gitRunner,
-    mutex: workspaceMutex,
   });
   const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
   /**

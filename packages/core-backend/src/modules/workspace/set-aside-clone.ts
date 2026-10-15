@@ -149,11 +149,14 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
  *
  * A worktree is found by its `.git` FILE naming a folder inside the
  * repository — whether or not that folder is still there — so a worktree
- * git had already lost track of goes with the rest. Under the repository
- * reservation: no fetch or worktree add runs while the folders move.
- * Answers the workspace ids moved.
+ * git had already lost track of goes with the rest. As the repository's one
+ * administrator (`exclusive`): no creation of a fresh repository and no
+ * config write runs while the folders move. Git operations in the worktrees
+ * are the caller's to hold off: the startup phase runs before anything is
+ * served, and the workspace service wraps the move in what surrounds a
+ * set-aside. Answers the workspace ids moved.
  *
- * `stillApplies`, when given, is asked again UNDER the reservation, before
+ * `stillApplies`, when given, is asked again as the administrator, before
  * anything moves: a caller decided to set the repository aside on what it
  * read before taking the reservation, and another caller may have set it
  * aside and made a fresh one of the configured address meanwhile. When the
@@ -172,7 +175,7 @@ export async function setAsideRepository(
   dest: string,
   stillApplies?: () => Promise<boolean>,
 ): Promise<string[]> {
-  return repository.mutex.runRepository(async () => {
+  return repository.exclusive(async () => {
     if (stillApplies && !(await stillApplies())) return [];
     const repositoryPath = await comparablePath(repository.dir);
     const inside = async (p: string): Promise<boolean> => {
