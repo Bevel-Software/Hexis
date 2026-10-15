@@ -27,7 +27,7 @@ import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { PATTERN_BUDGET_MS } from '../bounded-matcher.js';
+import { WorkerPatternMatcher } from '../bounded-matcher.js';
 import { WorkspaceService } from '../workspace.service.js';
 
 const execFileAsync = promisify(execFile);
@@ -70,6 +70,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let workspaces: WorkspaceService | null = null;
   let spillRoot = '';
   let docCacheDir = '';
+  let patternMatcher: WorkerPatternMatcher | undefined;
 
   afterEach(async () => {
     if (httpServer) {
@@ -79,6 +80,8 @@ describe('workspace tools — a branch that cannot be opened', () => {
       await new Promise<void>((r) => httpServer!.close(() => r()));
     }
     httpServer = undefined;
+    await patternMatcher?.close();
+    patternMatcher = undefined;
     workspaces = null;
     for (const dir of [root, spillRoot, docCacheDir]) {
       if (dir) await rm(dir, { recursive: true, force: true });
@@ -195,6 +198,15 @@ describe('workspace tools — a branch that cannot be opened', () => {
       },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this file's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (patternMatcher = new WorkerPatternMatcher()),
     );
     app.use('/api', router);
     internalTools = (await registry.listInternal()) as unknown as { name: string; inputs: unknown }[];
@@ -492,29 +504,34 @@ describe('workspace tools — a branch that cannot be opened', () => {
     const client = await CodeModeUtcpClient.create(process.cwd(), {
       variables: { bevel_API_URL: base, bevel_CONNECTION_KEY: 'internal-token' },
     } as never);
-    await client.registerManual(
-      new HttpCallTemplateSerializer().validateDict({
-        name: 'bevel',
-        call_template_type: 'http',
-        http_method: 'GET',
-        url: '${API_URL}/api/agent/internal/utcp',
-        content_type: 'application/json',
-        headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
-      }),
-    );
-    const started = Date.now();
-    const { result } = await client.callToolChain(
-      `const grep = (pattern) => bevel.grep({ body: { branch: 'alice/draft', pattern, path: 'knowledge-base/redos.md' } });
-       let expensive;
-       try { expensive = { ok: grep('^(a+)+$') }; } catch (err) { expensive = { failed: err.message }; }
-       return { expensive, control: grep('^a+!$') };`,
-      30_000,
-    );
-    expect(Date.now() - started).toBeLessThan(PATTERN_BUDGET_MS + 3_000);
-    expect(result.expensive.ok).toBeUndefined();
-    expect(result.expensive.failed).toContain('HTTP 400');
-    expect(result.expensive.failed).toContain('Pattern too expensive');
-    expect(result.control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
+    try {
+      await client.registerManual(
+        new HttpCallTemplateSerializer().validateDict({
+          name: 'bevel',
+          call_template_type: 'http',
+          http_method: 'GET',
+          url: '${API_URL}/api/agent/internal/utcp',
+          content_type: 'application/json',
+          headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
+        }),
+      );
+      const started = Date.now();
+      const { result } = await client.callToolChain(
+        `const grep = (pattern) => bevel.grep({ body: { branch: 'alice/draft', pattern, path: 'knowledge-base/redos.md' } });
+         let expensive;
+         try { expensive = { ok: grep('^(a+)+$') }; } catch (err) { expensive = { failed: err.message }; }
+         return { expensive, control: grep('^a+!$') };`,
+        30_000,
+      );
+      // The ticket's 5 s budget, plus the chain's own overhead.
+      expect(Date.now() - started).toBeLessThan(5_000 + 3_000);
+      expect(result.expensive.ok).toBeUndefined();
+      expect(result.expensive.failed).toContain('HTTP 400');
+      expect(result.expensive.failed).toContain('Pattern too expensive');
+      expect(result.control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
+    } finally {
+      await client.close();
+    }
   });
 
   it('500s an unreachable remote rather than blaming the branch', async () => {

@@ -62,6 +62,8 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
+import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
+import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
@@ -243,6 +245,8 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
+  /** Runs a caller's `grep` pattern off the request thread under a budget; its workers end when the graph stops. */
+  patternMatcher: IPatternMatcher;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
    * session cookie — none when it carries none that verifies — so the
@@ -741,6 +745,7 @@ export async function createCoreServices(
       'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
       'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
   });
+  const patternMatcher = new WorkerPatternMatcher();
   const agentDownloadStore = new AgentDownloadStore({
     root: agentDownloadsRoot,
     publicBaseUrl: config.publicBackendUrl,
@@ -1598,6 +1603,7 @@ export async function createCoreServices(
     spillStore,
     agentUploadStore,
     agentDownloadStore,
+    patternMatcher,
     agentDownloadFetcher,
     docExtractService,
     accessControl,

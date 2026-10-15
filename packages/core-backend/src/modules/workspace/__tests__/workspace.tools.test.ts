@@ -14,7 +14,7 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { BoundedMatcher, MAX_WAITING, PATTERN_BUDGET_MS } from '../bounded-matcher.js';
+import { WorkerPatternMatcher, type WorkerPatternMatcherOptions } from '../bounded-matcher.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
 import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
@@ -143,6 +143,12 @@ let callerSource: 'internal' | 'external' | 'session' = 'internal';
  * ONCE (it clears itself), so a test's later writes are ordinary ones.
  */
 let raceHook: (() => Promise<void>) | null = null;
+/**
+ * The grep matcher `start()` wires, built from `matcherOptions` (the
+ * defaults, unless a test narrows the pool) and closed after each test.
+ */
+let patternMatcher: WorkerPatternMatcher | undefined;
+let matcherOptions: WorkerPatternMatcherOptions = {};
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -151,6 +157,8 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  await patternMatcher?.close();
+  patternMatcher = new WorkerPatternMatcher(matcherOptions);
   hooks = new WorkflowHooks();
   notes = new ToolDescriptionNotes();
   callerSource = 'internal';
@@ -312,7 +320,7 @@ async function start(
     recoveryBotEmail: RECOVERY_BOT,
     hooks,
     notes,
-  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText);
+  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText, undefined, undefined, undefined, patternMatcher);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
@@ -343,10 +351,13 @@ const post = (url: string, body: unknown = {}) =>
 beforeEach(() => {
   /* fresh per test via start() */
   guideText = 'THE PLATFORM GUIDE\n';
+  matcherOptions = {};
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
   httpServer = undefined;
+  await patternMatcher?.close();
+  patternMatcher = undefined;
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = '';
@@ -1512,7 +1523,7 @@ describe('grep with a path that names a file', () => {
 });
 
 /**
- * A caller's pattern runs off the event loop under a budget (BoundedMatcher):
+ * A caller's pattern runs off the event loop under a budget (WorkerPatternMatcher):
  * one that backtracks for ever is stopped with a worded 400, and every other
  * request keeps being served meanwhile — here, a `read_file` on the same
  * server, which shares the one loop the pattern used to hold.
@@ -1542,7 +1553,8 @@ describe('a pattern too expensive to match', () => {
     expect(status).toBe(400);
     expect(body.error).toMatch(/^Pattern too expensive: /);
     expect(body.code).toBe('pattern_too_expensive');
-    expect(took).toBeLessThan(PATTERN_BUDGET_MS + 2_000);
+    expect(body.error).toContain("this search's 5 s budget");
+    expect(took).toBeLessThan(5_000 + 2_000);
     expect(probes.length).toBeGreaterThan(0);
     expect(Math.max(...probes)).toBeLessThan(1_000);
   });
@@ -1556,20 +1568,24 @@ describe('a pattern too expensive to match', () => {
   });
 
   it('answers a directory walk 503 when no worker is free, rather than skipping every file as unreadable', async () => {
+    // One worker and room for one search to wait: two expensive greps fill both.
+    matcherOptions = { budgetMs: 1_000, poolMax: 1, maxWaiting: 1 };
     const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `${LONG_LINE}\n`);
     await fs.writeFile(`${KB_DIR}/hit.md`, 'needle\n');
-    // Every worker held by a pattern that runs out its budget, the queue filled behind them.
-    const holding = Promise.allSettled(
-      Array.from({ length: 4 }, () => new BoundedMatcher('^(a+)+$', '').matchingLines([LONG_LINE], 1)),
-    );
+    const expensive = () =>
+      post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$', path: `${KB_DIR}/redos.md` }).then((r) => r.status);
+    const holding = expensive();
     await new Promise((r) => setTimeout(r, 200));
-    const queued = Promise.allSettled(
-      Array.from({ length: MAX_WAITING }, () => new BoundedMatcher('b', '').matchingLines(['b'], 1)),
-    );
+    const queued = expensive();
+    await new Promise((r) => setTimeout(r, 100));
     const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' });
     expect(res.status).toBe(503);
     expect(((await res.json()) as { code?: string }).code).toBe('search_busy');
-    await Promise.all([holding, queued]);
+    // The two that held the pool answered as they always would, and it serves again after.
+    expect(await Promise.all([holding, queued])).toEqual([400, 400]);
+    const after = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' });
+    expect(after.status).toBe(200);
   });
 
   it('a control pattern over the same line still matches', async () => {
@@ -2704,6 +2720,16 @@ describe('branch is a required parameter in the tool contract', () => {
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      // So `grep` is mounted; it spawns no worker, as nothing here searches.
+      new WorkerPatternMatcher(),
     );
     return registry;
   }

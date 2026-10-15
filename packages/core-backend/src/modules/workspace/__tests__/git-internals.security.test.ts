@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../../../shared/domain-errors.js';
@@ -35,6 +35,11 @@ import { createDiffRoutes } from '../../diff/diff.routes.js';
 import { DiffService } from '../../diff/diff.service.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { WorkspaceService } from '../workspace.service.js';
+import { WorkerPatternMatcher } from '../bounded-matcher.js';
+
+/** The grep matcher this file's harness wires, closed once the file is done. */
+const patternMatcher = new WorkerPatternMatcher();
+afterAll(() => patternMatcher.close());
 
 /**
  * Security regression: the repository's internal git folder is unreachable
@@ -282,6 +287,15 @@ describe('workspace tools refuse the git folder', () => {
       { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      patternMatcher,
     );
     app.use('/api', router);
     ({ server, baseUrl } = await listen(app));

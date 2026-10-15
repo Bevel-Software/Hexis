@@ -15,6 +15,7 @@ import type { UtcpTool } from '../tool.contract.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
+import { WorkerPatternMatcher } from '../../workspace/bounded-matcher.js';
 import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
@@ -110,6 +111,11 @@ async function hexisTools(skills: Parameters<typeof registerSkillsTools>[4] = em
     // mounted on the same terms as the upload one.
     undefined,
     unused(),
+    // Starter packs and the tree walk, not needed; then the grep matcher,
+    // mounted on the same terms (it spawns no worker until a search runs).
+    undefined,
+    undefined,
+    new WorkerPatternMatcher(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true);
   registerPluginsTools(registry, kb);

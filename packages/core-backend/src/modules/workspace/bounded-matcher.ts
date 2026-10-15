@@ -1,83 +1,62 @@
 import { Worker } from 'node:worker_threads';
 import { ToolError } from '../tool-helpers/tool.contract.js';
+import {
+  type IPatternMatcher,
+  type IPatternSearch,
+  PatternTooExpensiveError,
+  SearchBusyError,
+} from './pattern-matcher.contract.js';
 
 /**
- * The one place a CALLER'S regular expression is run.
+ * The one place a CALLER'S regular expression is run (see
+ * {@link IPatternMatcher}).
  *
- * JavaScript's engine backtracks, so a pattern like `^(a+)+$` over a line of
- * forty `a`s and a `!` takes longer than the universe has left — and run on the
- * request thread it holds the event loop for every user while it does. So the
- * pattern never runs on that thread: the lines go to a worker, the worker
- * answers which of them match, and a search whose matching outlives
- * {@link PATTERN_BUDGET_MS} has its worker terminated (which interrupts even a
- * regex mid-backtrack) and is answered with {@link PatternTooExpensiveError}.
+ * The pattern never runs on the request thread: the lines go to a worker, the
+ * worker answers which of them match, and a search whose matching outlives its
+ * budget has its worker terminated (which interrupts even a regex
+ * mid-backtrack) and is answered with {@link PatternTooExpensiveError}.
  * Nothing partial is returned: a search that blew its budget answers the 400
  * alone.
  *
  * The semantics are the engine's own — the worker compiles the same source with
  * the same flags and calls `test` on each line — so a pattern within budget
  * matches exactly the lines it always did.
+ *
+ * The pool is this instance's own: the composition root builds one per graph
+ * and closes it when the graph stops, so no worker outlives what it served.
  */
+export interface WorkerPatternMatcherOptions {
+  /** Matching time one search may spend, summed over every file it searches. Default 5 s. */
+  budgetMs?: number;
+  /** Workers kept for searches at once; a search past this waits for one to free up. Default 4. */
+  poolMax?: number;
+  /**
+   * Searches that may wait for a worker at once. A waiting search holds the
+   * lines it was handed, so the queue is capped: past it a search is refused
+   * with a 503 rather than piling file contents up in memory. Default 16.
+   */
+  maxWaiting?: number;
+  /**
+   * Longest pattern accepted. The pattern is compiled on the request thread
+   * (that is how a syntax error earns its 400 there), so its length is what
+   * bounds that. Default 1000.
+   */
+  maxPatternLength?: number;
+  /**
+   * Characters handed to the worker in one message. Posting a message copies
+   * it on the request thread, so a large file goes over in pieces of about
+   * this size rather than in one copy that would stall every other request.
+   * Default 1 MB.
+   */
+  batchChars?: number;
+}
 
-/** Matching time one search may spend, summed over every file it searches. */
-export const PATTERN_BUDGET_MS = 5_000;
 /**
  * Slack on top of the remaining budget before a batch is given up on: the
  * budget counts only the worker's own matching time, so handing the lines over
  * and the answer back must not be what trips it.
  */
 const TRANSFER_GRACE_MS = 250;
-/** Workers kept for searches at once; a search past this waits for one to free up. */
-const POOL_MAX = 4;
-/**
- * Searches that may wait for a worker at once. A waiting search holds the lines
- * it was handed, so the queue is capped: past it a search is refused with a 503
- * rather than piling file contents up in memory.
- */
-export const MAX_WAITING = 16;
-/**
- * Longest pattern accepted. The pattern is compiled on the request thread (that
- * is how a syntax error earns its 400 there), so its length is what bounds that.
- */
-export const MAX_PATTERN_LENGTH = 1_000;
-/**
- * Characters handed to the worker in one message. Posting a message copies it
- * on the request thread, so a large file goes over in pieces of about this size
- * rather than in one copy that would stall every other request.
- */
-export const BATCH_CHARS = 1_000_000;
-
-/** A pattern stopped for taking too long — a 400, worded for the caller. */
-export class PatternTooExpensiveError extends ToolError {
-  constructor(pattern: string, budgetMs: number) {
-    super(
-      `Pattern too expensive: /${pattern.length > 80 ? `${pattern.slice(0, 80)}…` : pattern}/ did not finish matching within this search's ${budgetMs / 1000} s budget, ` +
-        'so it was stopped and nothing was returned. Patterns with nested or overlapping repetition such as ' +
-        '`(a+)+` or `(a|aa)*` can take exponential time on some lines. Use a simpler pattern — a literal, ' +
-        'an anchor, a character class, a single repetition — or narrow `path`.',
-      400,
-      { code: 'pattern_too_expensive' },
-    );
-    this.name = 'PatternTooExpensiveError';
-  }
-}
-
-/** Every worker busy and the queue for one full — a 503, so the caller retries rather than reads a partial answer. */
-export class SearchBusyError extends ToolError {
-  constructor() {
-    super('Too many searches are running at once; try again in a few seconds.', 503, { code: 'search_busy' });
-    this.name = 'SearchBusyError';
-  }
-}
-
-/**
- * Whether `err` ends a whole search rather than one file's part of it: a
- * directory walk that skipped a file for either would answer an incomplete
- * result as if it were the whole one.
- */
-export function endsTheSearch(err: unknown): boolean {
-  return err instanceof PatternTooExpensiveError || err instanceof SearchBusyError;
-}
 
 /** The worker: compiles the pattern it is handed and answers the indices of the lines it matches. */
 const WORKER_SOURCE = `
@@ -103,77 +82,38 @@ parentPort.on('message', ({ source, flags, lines, limit }) => {
 `;
 
 type Reply = { hits: number[]; elapsed: number } | { error: string };
+/** What a search borrows from its pool: a worker, its return, and where a batch ends. */
+type Lease = { acquire(): Promise<Worker>; release(w: Worker): void; batchEnd(lines: string[], from: number): number };
+type Waiter = { resolve: (w: Worker) => void; reject: (err: Error) => void };
 
-const idle: Worker[] = [];
-let live = 0;
-const waiting: ((w: Worker) => void)[] = [];
+export class WorkerPatternMatcher implements IPatternMatcher {
+  private readonly budgetMs: number;
+  private readonly poolMax: number;
+  private readonly maxWaiting: number;
+  private readonly maxPatternLength: number;
+  private readonly batchChars: number;
+  private readonly idle: Worker[] = [];
+  private readonly all = new Set<Worker>();
+  private readonly waiting: Waiter[] = [];
+  private closed = false;
+  private readonly lease: Lease = {
+    acquire: () => this.acquire(),
+    release: (w) => this.release(w),
+    batchEnd: (lines, from) => this.batchEnd(lines, from),
+  };
 
-function spawn(): Worker {
-  live++;
-  const w = new Worker(WORKER_SOURCE, { eval: true });
-  // A worker that dies on its own (out of memory) leaves the pool.
-  w.once('exit', () => {
-    live--;
-    const at = idle.indexOf(w);
-    if (at >= 0) idle.splice(at, 1);
-    const next = waiting.shift();
-    if (next) next(spawn());
-  });
-  return w;
-}
+  constructor(opts: WorkerPatternMatcherOptions = {}) {
+    this.budgetMs = opts.budgetMs ?? 5_000;
+    this.poolMax = opts.poolMax ?? 4;
+    this.maxWaiting = opts.maxWaiting ?? 16;
+    this.maxPatternLength = opts.maxPatternLength ?? 1_000;
+    this.batchChars = opts.batchChars ?? 1_000_000;
+  }
 
-async function acquire(): Promise<Worker> {
-  if (idle.length === 0 && live >= POOL_MAX && waiting.length >= MAX_WAITING) throw new SearchBusyError();
-  const w = idle.pop() ?? (live < POOL_MAX ? spawn() : await new Promise<Worker>((resolve) => waiting.push(resolve)));
-  w.ref();
-  return w;
-}
-
-function release(w: Worker): void {
-  const next = waiting.shift();
-  if (next) return next(w);
-  // An idle worker must not hold a process's exit open.
-  w.unref();
-  idle.push(w);
-}
-
-function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'timeout'> {
-  return new Promise((resolve, reject) => {
-    const settle = (fn: () => void) => {
-      clearTimeout(timer);
-      w.off('message', onMessage);
-      w.off('error', onError);
-      fn();
-    };
-    const onMessage = (reply: Reply) => settle(() => resolve(reply));
-    const onError = (err: Error) => settle(() => reject(err));
-    const timer = setTimeout(() => settle(() => resolve('timeout')), timeoutMs);
-    w.on('message', onMessage);
-    w.on('error', onError);
-    w.postMessage(message);
-  });
-}
-
-/**
- * A caller's pattern, matched off the event loop under one search's budget.
- * One instance per search: the budget is spent across every call to
- * {@link matchingLines} it makes.
- */
-export class BoundedMatcher {
-  private spentMs = 0;
-
-  /**
-   * Throws the 400 `Invalid regex` the caller's syntax earns, or the 400 an
-   * over-long pattern earns, before any worker is involved.
-   */
-  constructor(
-    private readonly source: string,
-    private readonly flags: string,
-    private readonly budgetMs: number = PATTERN_BUDGET_MS,
-  ) {
-    if (source.length > MAX_PATTERN_LENGTH) {
+  search(source: string, flags: string): IPatternSearch {
+    if (source.length > this.maxPatternLength) {
       throw new ToolError(
-        `Pattern too long: ${source.length} characters, and a search pattern may have at most ${MAX_PATTERN_LENGTH}.`,
+        `Pattern too long: ${source.length} characters, and a search pattern may have at most ${this.maxPatternLength}.`,
         400,
         { code: 'pattern_too_long' },
       );
@@ -183,21 +123,82 @@ export class BoundedMatcher {
     } catch (err) {
       throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
     }
+    return new BoundedSearch(this.lease, source, flags, this.budgetMs);
   }
 
-  /**
-   * The indices of the lines the pattern matches, in order, at most `limit` of
-   * them (the first `limit`, exactly as a loop that stops at the cap finds).
-   * Throws {@link PatternTooExpensiveError} once this search's budget is spent.
-   */
+  async close(): Promise<void> {
+    this.closed = true;
+    for (const waiter of this.waiting.splice(0)) waiter.reject(new SearchBusyError());
+    const workers = [...this.all];
+    this.idle.length = 0;
+    await Promise.all(workers.map((w) => w.terminate()));
+  }
+
+  /** Where the batch starting at `from` ends: about `batchChars` characters on, and never empty. */
+  private batchEnd(lines: string[], from: number): number {
+    let to = from;
+    let chars = 0;
+    while (to < lines.length && (to === from || chars + lines[to]!.length <= this.batchChars)) chars += lines[to++]!.length;
+    return to;
+  }
+
+  private async acquire(): Promise<Worker> {
+    if (this.closed) throw new SearchBusyError();
+    if (this.idle.length === 0 && this.all.size >= this.poolMax && this.waiting.length >= this.maxWaiting) {
+      throw new SearchBusyError();
+    }
+    const w =
+      this.idle.pop() ??
+      (this.all.size < this.poolMax
+        ? this.spawn()
+        : await new Promise<Worker>((resolve, reject) => this.waiting.push({ resolve, reject })));
+    w.ref();
+    return w;
+  }
+
+  private release(w: Worker): void {
+    const next = this.waiting.shift();
+    if (next) return next.resolve(w);
+    // An idle worker must not hold a process's exit open.
+    w.unref();
+    this.idle.push(w);
+  }
+
+  private spawn(): Worker {
+    const w = new Worker(WORKER_SOURCE, { eval: true });
+    this.all.add(w);
+    // A worker that dies — terminated over budget, or out of memory — leaves the pool.
+    w.once('exit', () => {
+      this.all.delete(w);
+      const at = this.idle.indexOf(w);
+      if (at >= 0) this.idle.splice(at, 1);
+      if (this.closed) return;
+      const next = this.waiting.shift();
+      if (next) next.resolve(this.spawn());
+    });
+    return w;
+  }
+}
+
+/** One search: a caller's pattern, matched off the event loop under one budget. */
+class BoundedSearch implements IPatternSearch {
+  private spentMs = 0;
+
+  constructor(
+    private readonly pool: Lease,
+    private readonly source: string,
+    private readonly flags: string,
+    private readonly budgetMs: number,
+  ) {}
+
   async matchingLines(lines: string[], limit: number): Promise<number[]> {
     if (limit <= 0 || lines.length === 0) return [];
     if (this.spentMs >= this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
-    const w = await acquire();
+    const w = await this.pool.acquire();
     const hits: number[] = [];
     try {
       for (let from = 0; from < lines.length && hits.length < limit; ) {
-        const to = batchEnd(lines, from);
+        const to = this.pool.batchEnd(lines, from);
         for (const i of await this.matchBatch(w, lines.slice(from, to), limit - hits.length)) hits.push(from + i);
         from = to;
       }
@@ -206,7 +207,7 @@ export class BoundedMatcher {
       void w.terminate();
       throw err;
     }
-    release(w);
+    this.pool.release(w);
     return hits;
   }
 
@@ -226,10 +227,23 @@ export class BoundedMatcher {
   }
 }
 
-/** Where the batch starting at `from` ends: about {@link BATCH_CHARS} characters on, and never empty. */
-function batchEnd(lines: string[], from: number): number {
-  let to = from;
-  let chars = 0;
-  while (to < lines.length && (to === from || chars + lines[to]!.length <= BATCH_CHARS)) chars += lines[to++]!.length;
-  return to;
+function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'timeout'> {
+  return new Promise((resolve, reject) => {
+    const settle = (fn: () => void) => {
+      clearTimeout(timer);
+      w.off('message', onMessage);
+      w.off('error', onError);
+      w.off('exit', onExit);
+      fn();
+    };
+    const onMessage = (reply: Reply) => settle(() => resolve(reply));
+    const onError = (err: Error) => settle(() => reject(err));
+    // Terminated under the search by `close()`: answered as busy, not left hanging until the timer.
+    const onExit = () => settle(() => reject(new SearchBusyError()));
+    const timer = setTimeout(() => settle(() => resolve('timeout')), timeoutMs);
+    w.on('message', onMessage);
+    w.on('error', onError);
+    w.on('exit', onExit);
+    w.postMessage(message);
+  });
 }
