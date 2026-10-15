@@ -28,6 +28,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { WorkspaceService } from '../workspace.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 const KB_DIR = 'knowledge-base';
@@ -118,7 +119,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
     await runGit(seed, ['commit', '--allow-empty', '-m', 'draft']);
     await runGit(seed, ['push', 'origin', 'target-company-state', 'alice/draft']);
 
-    workspaces = new WorkspaceService(
+    workspaces = newWorkspaceService(
       workspacesRoot,
       opts.repoUrl === 'unreachable' ? join(root, 'no-such-repo.git') : upstream,
       testKbContext({ kbDirName: KB_DIR }),

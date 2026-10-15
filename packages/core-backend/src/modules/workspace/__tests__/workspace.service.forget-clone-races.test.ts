@@ -4,8 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../workspace.service.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * What happens to work ALREADY IN FLIGHT when the knowledge-base repository is
@@ -56,7 +56,7 @@ function heldRunner() {
 }
 
 function service(runner: IGitRunner) {
-  return new WorkspaceService(
+  return newWorkspaceService(
     workspacesRoot,
     () => `${root}/configured.git`,
     testKbContext({ branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),

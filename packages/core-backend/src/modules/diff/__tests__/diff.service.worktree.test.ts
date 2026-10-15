@@ -6,10 +6,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
-import { WorkspaceService } from '../../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { DiffService } from '../diff.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * The review session names the branch the workspace is on, read from HEAD
@@ -52,7 +52,7 @@ describe('DiffService on a worktree', () => {
     await git(seed, ['push', '-q', upstream, 'alice/draft']);
 
     const workspacesRoot = path.join(root, 'workspaces');
-    const workspaces = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
+    const workspaces = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
     const diff = new DiffService(
       workspaces,
       new WorkspaceMutex(),

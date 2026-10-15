@@ -5,7 +5,6 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { KbStartupRunner } from '../../kb-startup-runner.js';
 import { NodeGitRunner } from '../../../../workflow/git/node-git-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
@@ -21,6 +20,7 @@ import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { renderTemplateText } from '../template-source.js';
 import { TOOL_PREFIX_LINE, composeAgentInstructions, platformInstructions } from '../../../../agent-instructions/index.js';
 import { testKbContext } from '../../../../../__tests__/kb-context.js';
+import { newKbStartupRunner } from '../../../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -102,7 +102,7 @@ async function seedUpstream(
 }
 
 function makeRunner(steps: OnServerStart[], templateDir: string = TEMPLATE_DIR) {
-  return new KbStartupRunner({
+  return newKbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
     workspacesRoot,

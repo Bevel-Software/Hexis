@@ -103,7 +103,16 @@ export async function workingCopyShape(checkoutDir: string): Promise<WorkingCopy
   if (stat.isDirectory()) return 'clone';
   const gitdir = await readGitfile(dotGit);
   if (gitdir === null) return 'broken';
-  return (await fs.stat(gitdir).then((s) => s.isDirectory(), () => false)) ? 'worktree' : 'broken';
+  let held;
+  try {
+    held = await fs.stat(gitdir);
+  } catch (err) {
+    // Only absence shows the worktree gone; EACCES or EIO shows nothing, and a
+    // `broken` answer would have the checkout recreated over it.
+    if (isAbsence(err)) return 'broken';
+    throw err;
+  }
+  return held.isDirectory() ? 'worktree' : 'broken';
 }
 
 /**
@@ -404,7 +413,9 @@ export class KbRepository implements IKbRepository {
       })
       .then(
         () => {
-          if (generation === this.generation) this.noteFetched(true, startedAt);
+          // When this fetch made the repository, ensureHeld() already stamped its
+          // own (later) first-fetch start: keep that one.
+          if (generation === this.generation) this.noteFetched(true, Math.max(startedAt, this.lastSuccessAt));
           return true;
         },
         (err: unknown) => {

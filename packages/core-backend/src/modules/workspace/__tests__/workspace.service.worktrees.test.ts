@@ -6,12 +6,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../workspace.service.js';
 import { KbRepository, workingCopyShape } from '../kb-repository.js';
 import { setAsideRepository } from '../set-aside-clone.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * Branch workspaces are WORKTREES of one repository per knowledge base, at the
@@ -107,7 +107,7 @@ afterEach(async () => {
 });
 
 const service = (runner: IGitRunner = new NodeGitRunner(), url = upstream, setAsideRoot?: string) =>
-  new WorkspaceService(workspacesRoot, url, testKbContext(), new NodeFs(), runner, setAsideRoot);
+  newWorkspaceService(workspacesRoot, url, testKbContext(), new NodeFs(), runner, setAsideRoot);
 
 const checkoutOf = (branch: string) => path.join(workspacesRoot, workspaceIdForBranch(branch), 'knowledge-base');
 
@@ -200,6 +200,27 @@ describe('opening a branch', () => {
       (await git(upstream, ['rev-parse', 'alice/a'])).trim(),
     );
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'is not recreated when its link to the repository cannot be read (EACCES is not absence)',
+    async () => {
+      const svc = service();
+      await svc.getOrCreateForBranch('alice/a');
+      const checkout = checkoutOf('alice/a');
+      await fs.writeFile(path.join(checkout, 'unsaved.md'), 'kept');
+      const gitdir = (await fs.readFile(path.join(checkout, '.git'), 'utf-8')).replace(/^gitdir:\s*/, '').trim();
+      const records = path.dirname(gitdir);
+      await fs.chmod(records, 0o000);
+      try {
+        await expect(workingCopyShape(checkout)).rejects.toMatchObject({ code: 'EACCES' });
+        await expect(service().getOrCreateForBranch('alice/a')).rejects.toBeDefined();
+      } finally {
+        await fs.chmod(records, 0o755);
+      }
+      expect(await fs.readFile(path.join(checkout, 'unsaved.md'), 'utf-8')).toBe('kept');
+      expect(await workingCopyShape(checkout)).toBe('worktree');
+    },
+  );
 });
 
 describe('fetching', () => {

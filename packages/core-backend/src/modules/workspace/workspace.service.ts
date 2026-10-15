@@ -46,7 +46,7 @@ import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { normalizeRepositoryAddress, sameRepository } from '../kb-fs/remote-url.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
-import { KbRepository, repositoryDirFor, workingCopyShape } from './kb-repository.js';
+import { workingCopyShape } from './kb-repository.js';
 import type { IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
@@ -324,7 +324,7 @@ export class WorkspaceService implements IWorkspaceService {
      *
      * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
      */
-    private readonly setAsideRoot?: string,
+    private readonly setAsideRoot: string | undefined,
     /**
      * What surrounds the setting aside of ONE working copy when a branch is
      * opened and its clone turns out to be of another repository: given the
@@ -342,23 +342,13 @@ export class WorkspaceService implements IWorkspaceService {
     /**
      * The one repository every branch workspace is a worktree of — THE SAME
      * INSTANCE THE KB STARTUP PHASE AND THE GIT LAYER USE, so that one fetch
-     * serves them all and its reservation is one. Absent, a repository next to
-     * the workspaces root (see `repositoryDirFor`).
+     * serves them all and its reservation is one. Built by the composition
+     * root, never here.
      */
-    repository?: IKbRepository,
+    readonly repository: IKbRepository,
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
-    this.repository =
-      repository ??
-      new KbRepository({
-        dir: repositoryDirFor(workspacesRoot, kb.kbDirName),
-        kbRepoUrl: this.kbRepoUrl,
-        gitRunner,
-      });
   }
-
-  /** The knowledge base's one repository — see `kb-repository.ts`. */
-  readonly repository: IKbRepository;
 
   /**
    * Whether the checkout folder `repoDir` is a worktree (its `.git` a file)

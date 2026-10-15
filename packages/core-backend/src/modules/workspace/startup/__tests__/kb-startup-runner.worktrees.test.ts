@@ -4,11 +4,11 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { KbStartupRunner } from '../kb-startup-runner.js';
 import { workingCopyShape } from '../../kb-repository.js';
 import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
 import { gitCredentials, type IGitRunner } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { newKbStartupRunner } from '../../../../__tests__/workspace-service.js';
 
 /**
  * The startup phase on a knowledge base of WORKTREES: it opens every branch as
@@ -86,7 +86,7 @@ const touchDefault = step('touch', async (ctx) => {
 });
 
 function makeRunner(steps: OnServerStart[], overrides: Record<string, unknown> = {}) {
-  return new KbStartupRunner({
+  return newKbStartupRunner({
     gitRunner: new NodeGitRunner(undefined, credentials),
     kbRepoUrl: () => upstream,
     workspacesRoot,

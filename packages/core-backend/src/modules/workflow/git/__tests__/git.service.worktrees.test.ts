@@ -14,6 +14,7 @@ import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService, touchesSharedRepositoryState } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
 import { workspaceIdForBranch } from '../../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../../__tests__/workspace-service.js';
 
 /**
  * The git layer over a knowledge base of WORKTREES of one repository: the
@@ -72,7 +73,7 @@ beforeEach(async () => {
     gitRunner: runner,
     mutex,
   });
-  workspaces = new WorkspaceService(
+  workspaces = newWorkspaceService(
     workspacesRoot, upstream, testKbContext(), new NodeFs(), runner, undefined, undefined, repository,
   );
   gitService = new GitService(workspaces, new WorkflowHooks(), testKbContext(), mutex, null, runner);
@@ -117,7 +118,7 @@ describe('GitService over worktrees', () => {
     const clone = path.join(cloneRoot, id(TARGET), 'knowledge-base');
     await fs.mkdir(path.dirname(clone), { recursive: true });
     await git(root, ['clone', '-q', '-b', TARGET, upstream, clone]);
-    const clones = new WorkspaceService(cloneRoot, upstream, testKbContext(), new NodeFs());
+    const clones = newWorkspaceService(cloneRoot, upstream, testKbContext(), new NodeFs());
     const onClones = await new GitService(clones, new WorkflowHooks(), testKbContext()).changedFilesForPr(
       id(TARGET), TARGET, 'alice/a',
     );

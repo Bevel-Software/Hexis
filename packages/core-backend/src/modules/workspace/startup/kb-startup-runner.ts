@@ -21,7 +21,7 @@ import {
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
-import { KbRepository, repositoryDirFor, workingCopyShape } from '../kb-repository.js';
+import { workingCopyShape } from '../kb-repository.js';
 import type { FetchOptions, IKbRepository } from '../kb-repository.contract.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
@@ -135,9 +135,9 @@ export interface KbStartupRunnerOptions {
   /**
    * The knowledge base's one repository, every branch workspace a worktree of
    * it — THE SAME INSTANCE THE WORKSPACE SERVICE IS GIVEN (see
-   * `kb-repository.ts`). Absent, one next to the workspaces root.
+   * `kb-repository.ts`). Built by the composition root, never here.
    */
-  repository?: IKbRepository;
+  repository: IKbRepository;
 }
 
 const UNFINISHED_CLONE_QUIET_MS = 60_000;
@@ -270,13 +270,7 @@ export class KbStartupRunner {
   private listedAt = 0;
 
   constructor(private readonly opts: KbStartupRunnerOptions) {
-    this.repository =
-      opts.repository ??
-      new KbRepository({
-        dir: repositoryDirFor(opts.workspacesRoot, opts.kbDirName),
-        kbRepoUrl: opts.kbRepoUrl,
-        gitRunner: opts.gitRunner,
-      });
+    this.repository = opts.repository;
   }
 
   /** The run in progress, so two invokers share one rather than racing clones. */

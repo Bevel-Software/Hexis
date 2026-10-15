@@ -35,6 +35,7 @@ import { createDiffRoutes } from '../../diff/diff.routes.js';
 import { DiffService } from '../../diff/diff.service.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { WorkspaceService } from '../workspace.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * Security regression: the repository's internal git folder is unreachable
@@ -244,7 +245,7 @@ describe('workspace tools refuse the git folder', () => {
 
   beforeEach(async () => {
     workflow = makeWorkflow();
-    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     unzipSpy = vi.spyOn(service, 'unzipFile');
     bootstrappedSpy = vi.spyOn(service, 'hasBootstrappedWorkspace');
     const lockingFs = new LockingFilesystem(
@@ -419,7 +420,7 @@ describe('workspace routes refuse the git folder', () => {
 
   beforeEach(async () => {
     workflow = makeWorkflow();
-    service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     const app = express();
     app.use(express.json());
     app.use('/api', (req, _res, next) => {
@@ -566,7 +567,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
   let service: WorkspaceService;
 
   beforeEach(() => {
-    service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   });
 
   afterEach(async () => {
@@ -623,7 +624,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
         return { stdout: '.git\n', stderr: '', code: 0 };
       }),
     };
-    const refService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs(), gitRunner as never);
+    const refService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs(), gitRunner as never);
 
     for (const [form, raw] of Object.entries(fileForms('config'))) {
       if (!form.startsWith('symlinked')) continue;
@@ -679,7 +680,7 @@ describe('the route guard on its own', () => {
   beforeEach(async () => {
     reached = 0;
     userId = USER.id;
-    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     const app = express();
     // The server's own order: the guard ahead of the body parser, then again
     // on the parsed body, then again once the caller is known.
@@ -779,7 +780,7 @@ describe('DiffService refuses the git folder on its own', () => {
   let diffService: DiffService;
 
   beforeEach(() => {
-    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, new NodeFs());
   });
 
