@@ -992,11 +992,14 @@ describe('a file deleted by someone else', () => {
   describe('a lock released while the tab is clean, whose read answers late', () => {
     /** The lock-released read is held until `answer` is called; later reads answer from `disk`. */
     function holdLockReleasedRead() {
-      const held: { answer: () => void } = { answer: () => {} };
+      // Answering a read that was never issued would exercise nothing.
+      const held: { answer: () => void } = { answer: () => { throw new Error('Lock-released read was not started'); } };
+      apiMocks.readFile.mockClear();
       apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
         held.answer = () => resolve('# Draft\n\nA page to delete, changed.');
       }));
       act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+      expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
       return held;
     }
 
