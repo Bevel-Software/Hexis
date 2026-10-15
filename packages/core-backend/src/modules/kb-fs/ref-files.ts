@@ -182,29 +182,47 @@ function commitGuaranteed(ref: string): boolean {
  * The commit a full ref name (`refs/...`) or `HEAD` points at in the
  * repository behind `repoDir` (a clone, or a worktree of one). See the module
  * doc for the three answers and what each means to the caller.
+ *
+ * "Missing" is what `rev-parse` answers nothing for, and `rev-parse` tries
+ * the same prefixes for a full name as for a short one (`refs/heads/x` is
+ * also looked for as `refs/heads/refs/heads/x`), so a name that is missing
+ * as itself but present under a prefix is git's to resolve.
  */
 export async function readRefSha(repoDir: string, ref: string): Promise<RefFileAnswer> {
   const dirs = await gitDirsOf(repoDir);
   if (!dirs) return 'unreadable';
-  return resolveIn(dirs, ref, 0);
+  const exact = await resolveIn(dirs, ref, 0);
+  if (exact !== 'missing') return exact;
+  for (const name of prefixedCandidates(ref)) {
+    if ((await resolveIn(dirs, name, 0)) !== 'missing') return 'unreadable';
+  }
+  return 'missing';
 }
 
 /**
- * The full ref names `git rev-parse` tries for a name, in git's order
- * (gitrevisions(7)) after `$GIT_DIR/<name>` itself: `refs/<name>`,
+ * The names `git rev-parse` tries for `<name>` after `$GIT_DIR/<name>`
+ * itself, in git's order (gitrevisions(7)): `refs/<name>`,
  * `refs/tags/<name>`, `refs/heads/<name>`, `refs/remotes/<name>`,
- * `refs/remotes/<name>/HEAD`. `HEAD` and a full `refs/...` name are
- * themselves. Null for a spelling this reader does not resolve — an object
- * id or its abbreviation, a `<rev>^{...}` or `@{...}` form, an empty or
- * option-looking name — which the caller sends to git.
+ * `refs/remotes/<name>/HEAD`. The same for every spelling, a full `refs/...`
+ * name included.
+ */
+function prefixedCandidates(name: string): string[] {
+  return [`refs/${name}`, `refs/tags/${name}`, `refs/heads/${name}`, `refs/remotes/${name}`, `refs/remotes/${name}/HEAD`];
+}
+
+/**
+ * Every name `git rev-parse` tries for a spelling, in git's order: the
+ * spelling itself at `$GIT_DIR/<name>` (which for `HEAD` and a full
+ * `refs/...` name is the ref file), then the prefixed forms. Null for a
+ * spelling this reader does not resolve — an object id or its abbreviation,
+ * a `<rev>^{...}` or `@{...}` form, an empty or option-looking name — which
+ * the caller sends to git.
  */
 function refNameCandidates(ref: string): string[] | null {
   if (!ref || ref.startsWith('-')) return null;
-  if (ref === 'HEAD') return ['HEAD'];
-  if (ref.startsWith('refs/')) return [ref];
   if (/[\^~:@{}\\\s]/.test(ref)) return null;
   if (/^[0-9a-f]{4,64}$/i.test(ref)) return null;
-  return [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`, `refs/remotes/${ref}`, `refs/remotes/${ref}/HEAD`];
+  return [ref, ...prefixedCandidates(ref)];
 }
 
 /**
@@ -222,18 +240,26 @@ export async function readRevSha(repoDir: string, rev: string): Promise<RefFileA
   if (!candidates) return 'unreadable';
   const dirs = await gitDirsOf(repoDir);
   if (!dirs) return 'unreadable';
-  if (rev !== 'HEAD' && !rev.startsWith('refs/')) {
-    if (!isSafeRefName(`refs/${rev}`)) return 'unreadable';
-    try {
-      await fs.stat(path.join(dirs.gitDir, ...rev.split('/')));
-      return 'unreadable';
-    } catch (err) {
-      if (!isAbsence(err)) return 'unreadable';
-    }
-  }
   for (const name of candidates) {
-    const answer = await resolveIn(dirs, name, 0);
+    const answer = name === rev ? await resolveAsItself(dirs, rev) : await resolveIn(dirs, name, 0);
     if (answer !== 'missing') return answer;
   }
   return 'missing';
+}
+
+/**
+ * Git's first step for any spelling: `$GIT_DIR/<name>`. For `HEAD` and a
+ * full `refs/...` name that is the ref itself, read as such. For anything
+ * else it is a pseudoref (`MERGE_HEAD`, `AUTO_MERGE`, which may name a
+ * tree), and whatever exists there is git's to resolve.
+ */
+async function resolveAsItself(dirs: GitDirs, rev: string): Promise<RefFileAnswer> {
+  if (rev === 'HEAD' || rev.startsWith('refs/')) return resolveIn(dirs, rev, 0);
+  if (!isSafeRefName(`refs/${rev}`)) return 'unreadable';
+  try {
+    await fs.stat(path.join(dirs.gitDir, ...rev.split('/')));
+    return 'unreadable';
+  } catch (err) {
+    return isAbsence(err) ? 'missing' : 'unreadable';
+  }
 }

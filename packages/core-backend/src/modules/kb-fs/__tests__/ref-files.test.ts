@@ -137,6 +137,17 @@ describe('readRefSha', () => {
     expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
   });
 
+  it('tries the prefixes git tries for a full name too, before calling it missing', async () => {
+    // `rev-parse refs/heads/alias` finds a branch literally named
+    // `refs/heads/alias`, at refs/heads/refs/heads/alias; so does the reader.
+    const sha = await git(clone, 'rev-parse', 'origin/feature');
+    await git(clone, 'branch', 'refs/heads/alias', sha);
+    expect(await git(clone, 'rev-parse', '--verify', 'refs/heads/alias^{commit}')).toBe(sha);
+    expect(await readRefSha(clone, 'refs/heads/alias')).toBe('unreadable');
+    expect(await readRevSha(clone, 'refs/heads/alias')).toEqual({ sha });
+    expect(await readRevSha(clone, 'refs/heads/nope')).toBe('missing');
+  });
+
   it('says unreadable, never missing, on a read error that is not absence', async () => {
     // A directory where the ref file should be fails the read with EISDIR —
     // an error, not an absence — and so does one where packed-refs or HEAD
