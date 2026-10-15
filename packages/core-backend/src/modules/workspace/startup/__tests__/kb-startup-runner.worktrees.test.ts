@@ -392,6 +392,38 @@ describe('a deployment upgraded over full clones', () => {
     await expect(fs.access(aside)).rejects.toThrow();
   });
 
+  it('never copies from a converted clone it could not remove, so edits made since to ignored files stay', async () => {
+    const alice = await legacyClone('alice/a');
+    await commitIn(alice, '.gitignore', '*.local\n');
+    await fs.writeFile(path.join(alice, 'notes.local'), 'from the clone', 'utf8');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // The moved clone cannot be removed, whatever it is called by then.
+    const rm = fs.rm.bind(fs);
+    const refuse = vi.spyOn(fs, 'rm').mockImplementation(async (target, opts) => {
+      if (/\.knowledge-base\.convert(ing|ed)$/.test(String(target))) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+      return rm(target, opts);
+    });
+    try {
+      await makeRunner([touchDefault]).runAll();
+      expect(await workingCopyShape(alice)).toBe('worktree');
+      expect(await fs.readFile(path.join(alice, 'notes.local'), 'utf8')).toBe('from the clone');
+      expect(warn.mock.calls.flat().join('\n')).toMatch(/converted clone of "alice\/a" could not be removed/);
+
+      // Used since: an ignored file is edited in the worktree.
+      await fs.writeFile(path.join(alice, 'notes.local'), 'edited since', 'utf8');
+      await makeRunner([touchDefault]).runAll();
+
+      expect(await workingCopyShape(alice)).toBe('worktree');
+      expect(await fs.readFile(path.join(alice, 'notes.local'), 'utf8')).toBe('edited since');
+    } finally {
+      refuse.mockRestore();
+    }
+    // Once it can be removed, the next start removes it.
+    await makeRunner([touchDefault]).runAll();
+    await expect(fs.access(path.join(path.dirname(alice), '.knowledge-base.converted'))).rejects.toThrow();
+    expect(await fs.readFile(path.join(alice, 'notes.local'), 'utf8')).toBe('edited since');
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'leaves both folders of a cut-short conversion alone when the worktree\'s link cannot be read (EACCES is not absence)',
     async () => {

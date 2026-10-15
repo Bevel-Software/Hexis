@@ -848,7 +848,12 @@ export class KbStartupRunner {
    *  2. the clone is moved aside, beside where it was (one rename);
    *  3. the worktree is added at the imported tip, and checked to be there;
    *  4. the files git ignores in the clone, in no commit, are copied into it;
-   *  5. only then is the clone removed.
+   *  5. the clone is renamed `.<kb>.converted`: the one step that says the
+   *     copy is complete, taken before the worktree is used, so a clone left
+   *     behind after it is never copied from again (it would overwrite edits
+   *     made since); a rename that fails undoes the conversion;
+   *  6. only then is the clone removed. A removal that fails leaves the
+   *     `.converted` folder, which the next boot removes and nothing reads.
    *
    * A clone that cannot be converted — unreadable objects, uncommitted changes
    * that are not anybody's to discard, a branch it is not on — is put back
@@ -856,8 +861,9 @@ export class KbStartupRunner {
    * next boot tries again. One clone never stops the phase.
    *
    * A conversion a crash cut short is finished or undone first: the moved
-   * clone is removed when its worktree is in place (its tip was imported
-   * before it moved), and put back when it is not.
+   * clone's ignored files are copied and it is removed when its worktree is
+   * in place (its tip was imported before it moved, and the worktree was not
+   * used yet: the rename of step 5 comes first), and put back when it is not.
    */
   private async convertLegacyClones(): Promise<void> {
     let entries: import('node:fs').Dirent[];
@@ -873,8 +879,10 @@ export class KbStartupRunner {
       const workspaceDir = path.join(this.opts.workspacesRoot, entry.name);
       const repoDir = path.join(workspaceDir, this.opts.kbDirName);
       const aside = path.join(workspaceDir, `.${this.opts.kbDirName}.converting`);
+      const convertedClone = path.join(workspaceDir, `.${this.opts.kbDirName}.converted`);
+      await this.removeConvertedClone(branchForWorkspaceId(entry.name), convertedClone);
       try {
-        await this.finishInterruptedConversion(repoDir, aside);
+        await this.finishInterruptedConversion(repoDir, aside, convertedClone);
       } catch (err) {
         // Both folders stay as they are; the next start looks again.
         kept.push(branchForWorkspaceId(entry.name));
@@ -912,7 +920,7 @@ export class KbStartupRunner {
       ]).catch(() => 'unreadable');
       if (tip.trim() === '') continue;
       try {
-        await this.convertOneClone(branch, repoDir, aside);
+        await this.convertOneClone(branch, repoDir, aside, convertedClone);
         converted++;
       } catch (err) {
         kept.push(branch);
@@ -932,7 +940,7 @@ export class KbStartupRunner {
     }
   }
 
-  private async convertOneClone(branch: string, repoDir: string, aside: string): Promise<void> {
+  private async convertOneClone(branch: string, repoDir: string, aside: string, converted: string): Promise<void> {
     const onBranch = (await git(this.opts.gitRunner, repoDir, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim();
     if (onBranch !== branch) throw new Error(`it is on "${onBranch}", not on its own branch`);
     // Uncommitted work is in the working tree, not in a commit the import can
@@ -946,14 +954,33 @@ export class KbStartupRunner {
       const head = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
       if (head !== tip) throw new Error(`the worktree came up at ${head}, not at the clone's tip ${tip}`);
       await this.copyIgnoredFiles(aside, repoDir);
+      await fs.rename(aside, converted);
     } catch (err) {
-      // Undone: the worktree goes, the clone comes back exactly as it was.
-      await fs.rm(repoDir, { recursive: true, force: true }).catch(() => undefined);
-      await this.repository.prune().catch(() => undefined);
-      await fs.rename(aside, repoDir);
+      await this.undoConversion(repoDir, aside);
       throw err;
     }
-    await fs.rm(aside, { recursive: true, force: true });
+    await this.removeConvertedClone(branch, converted);
+  }
+
+  /** Undone: the worktree goes, the clone comes back exactly as it was. */
+  private async undoConversion(repoDir: string, aside: string): Promise<void> {
+    await fs.rm(repoDir, { recursive: true, force: true }).catch(() => undefined);
+    await this.repository.prune().catch(() => undefined);
+    await fs.rename(aside, repoDir);
+  }
+
+  /**
+   * Remove a converted clone: its commits and ignored files are in the
+   * worktree already. One that cannot be removed is said and left; the next
+   * boot tries again, and nothing ever copies from it.
+   */
+  private async removeConvertedClone(branch: string, converted: string): Promise<void> {
+    await fs.rm(converted, { recursive: true, force: true }).catch((err: unknown) => {
+      startupLog.warn(
+        `the converted clone of "${branch}" could not be removed (` +
+          `${this.redact(err instanceof Error ? err.message : String(err))}). Nothing reads it; the next start tries again.`,
+      );
+    });
   }
 
   /**
@@ -977,13 +1004,22 @@ export class KbStartupRunner {
   }
 
   /** See {@link convertLegacyClones}: a conversion a crash cut short. */
-  private async finishInterruptedConversion(repoDir: string, aside: string): Promise<void> {
+  private async finishInterruptedConversion(repoDir: string, aside: string, converted: string): Promise<void> {
     if (!(await fs.access(aside).then(() => true, () => false))) return;
     // Only a checkout shown to be no worktree is removed: a link that could
     // not be read has shown nothing, and the error leaves both folders alone.
     if ((await workingCopyShape(repoDir)) === 'worktree') {
-      await this.copyIgnoredFiles(aside, repoDir);
-      await fs.rm(aside, { recursive: true, force: true });
+      // Not used since it was added: the clone is still `.converting`, so
+      // the copy is finished (over a partial one) as the conversion would
+      // have, and undone when it cannot be.
+      try {
+        await this.copyIgnoredFiles(aside, repoDir);
+        await fs.rename(aside, converted);
+      } catch (err) {
+        await this.undoConversion(repoDir, aside);
+        throw err;
+      }
+      await this.removeConvertedClone(branchForWorkspaceId(path.basename(path.dirname(repoDir))), converted);
       return;
     }
     await fs.rm(repoDir, { recursive: true, force: true });
