@@ -137,6 +137,28 @@ describe('readRefSha', () => {
     expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
   });
 
+  it('says unreadable, never missing, on a read error that is not absence', async () => {
+    // A directory where the ref file should be fails the read with EISDIR —
+    // an error, not an absence — and so does one where packed-refs or HEAD
+    // should be. None of them may read as "no such ref": git decides.
+    const sha = await git(clone, 'rev-parse', 'refs/heads/main');
+    await fs.rm(path.join(clone, '.git/refs/heads/main'));
+    await fs.mkdir(path.join(clone, '.git/refs/heads/main'));
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    await fs.rmdir(path.join(clone, '.git/refs/heads/main'));
+    await fs.writeFile(path.join(clone, '.git/refs/heads/main'), `${sha}\n`);
+    await git(clone, 'pack-refs', '--all');
+    await fs.rm(path.join(clone, '.git/packed-refs'));
+    await fs.mkdir(path.join(clone, '.git/packed-refs'));
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
+    await fs.rmdir(path.join(clone, '.git/packed-refs'));
+    await fs.rm(path.join(clone, '.git/HEAD'));
+    await fs.mkdir(path.join(clone, '.git/HEAD'));
+    expect(await readRefSha(clone, 'HEAD')).toBe('unreadable');
+  });
+
   it('says unreadable where it cannot decide: not a repository, a corrupt file, a name it will not turn into a path', async () => {
     expect(await readRefSha(path.join(root, 'nowhere'), 'refs/heads/main')).toBe('unreadable');
     await fs.writeFile(path.join(clone, '.git/refs/heads/main'), 'not a sha\n');

@@ -577,6 +577,22 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(revParses()).toBe(0);
   });
 
+  it('asks git for a ref the files cannot decide, instead of reading it as missing', async () => {
+    // An annotated tag names a tag object, not a commit; the reader steps
+    // aside and the gate resolves it through `rev-parse <tag>^{commit}` —
+    // one process, the answer git gives, never "no such ref".
+    await git(repo, 'tag', '-a', 'v1', '-m', 'v1', 'origin/main');
+    expect(await svc.canWriteAtRef(workspaceId, 'v1', admin, DOC)).toBe(true);
+    expect(revParses()).toBe(1);
+    expect(lsTreeBuilds()).toBe(1);
+    // The same commit under its branch name: resolved from the files, the
+    // model already held.
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(revParses()).toBe(0);
+    expect(lsTreeBuilds()).toBe(0);
+  });
+
   it('remembers what a blob declares for itself, never a blob the batch could not read', async () => {
     const SECRET = 'Team/Secret.md';
     await pushFromOther('a page that denies the admin for itself', () =>
