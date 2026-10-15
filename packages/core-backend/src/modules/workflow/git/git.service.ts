@@ -4365,7 +4365,7 @@ export function parseNumstatZ(out: string): NumstatEntry[] {
  *
  * Leading `-c key=value` / `-C dir` options are skipped to find the subcommand.
  */
-export function touchesSharedRepositoryState(args: readonly string[]): boolean {
+function touchesSharedRepositoryState(args: readonly string[]): boolean {
   let i = 0;
   while (i < args.length && (args[i] === '-c' || args[i] === '-C')) i += 2;
   const sub = args[i];

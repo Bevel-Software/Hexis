@@ -11,7 +11,7 @@ import { WorkspaceMutex } from '../../../kb-fs/mutex.js';
 import { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { KbRepository, repositoryDirFor } from '../../../workspace/kb-repository.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
-import { GitService, touchesSharedRepositoryState } from '../git.service.js';
+import { GitService } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
 import { workspaceIdForBranch } from '../../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../../__tests__/workspace-service.js';
@@ -197,29 +197,76 @@ describe('GitService over worktrees', () => {
   });
 });
 
-describe('touchesSharedRepositoryState', () => {
-  it('names what rewrites the state every worktree shares', () => {
-    for (const args of [
-      ['fetch', '--no-write-fetch-head', 'origin'],
-      ['-c', 'http.lowSpeedLimit=1000', 'fetch', 'origin'],
-      ['gc', '--auto'],
-      ['worktree', 'prune'],
-      ['config', '--replace-all', 'branch.x.merge', 'refs/heads/x'],
-      ['branch', '-D', 'x'],
-      ['push', '-u', 'origin', 'x'],
-      ['remote', 'set-url', 'origin', 'u'],
-    ]) {
-      expect(touchesSharedRepositoryState(args), args.join(' ')).toBe(true);
+describe('GitService under the repository reservation', () => {
+  /** The shared mutex, noting whether the repository reservation is held while git runs. */
+  class RecordingMutex extends WorkspaceMutex {
+    depth = 0;
+    override runRepository<T>(fn: () => Promise<T>): Promise<T> {
+      return super.runRepository(async () => {
+        this.depth += 1;
+        try { return await fn(); } finally { this.depth -= 1; }
+      });
     }
-    for (const args of [
-      ['config', '--get', 'remote.origin.url'],
-      ['commit', '-m', 'x'],
-      ['push', 'origin', 'x'],
-      ['branch', 'x', 'y'],
-      ['status', '--porcelain'],
-      ['rev-parse', 'HEAD'],
-    ]) {
-      expect(touchesSharedRepositoryState(args), args.join(' ')).toBe(false);
+  }
+
+  it('runs what rewrites shared repository state under the reservation, and nothing else', async () => {
+    const mutex = new RecordingMutex();
+    const runner = new NodeGitRunner();
+    const repository = new KbRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner: runner,
+      mutex,
+    });
+    const recorded = newWorkspaceService(
+      workspacesRoot, upstream, testKbContext(), new NodeFs(), runner, undefined, undefined, repository,
+    );
+    const calls: { args: string[]; held: boolean }[] = [];
+    const recordingRunner = {
+      defaultTimeoutMs: runner.defaultTimeoutMs,
+      credentials: runner.credentials,
+      run: ((cwd: string, args: string[], opts?: never) => {
+        calls.push({ args, held: mutex.depth > 0 });
+        return runner.run(cwd, args, opts);
+      }) as NodeGitRunner['run'],
+    };
+    const service = new GitService(recorded, new WorkflowHooks(), testKbContext(), mutex, null, recordingRunner);
+    await recorded.getOrCreateForBranch(TARGET);
+    await recorded.getOrCreateForBranch('alice/a');
+
+    await service.fetch(id(TARGET));
+    await service.changedFilesForPr(id(TARGET), TARGET, 'alice/a');
+    await fs.writeFile(path.join(checkoutOf('alice/a'), 'alice.md'), 'alice edits\n');
+    await service.commitFile(id('alice/a'), ALICE, 'knowledge-base/alice.md', 'alice edits');
+    await service.push(id('alice/a'), ALICE);
+    await service.status(id('alice/a'));
+    await service.deleteBranch(id(TARGET), 'alice/a', ALICE, { systemCleanup: true });
+
+    // The subcommand, past leading `-c key=value` / `-C dir` options.
+    const sub = (args: string[]) => {
+      let i = 0;
+      while (args[i] === '-c' || args[i] === '-C') i += 2;
+      return { name: args[i], rest: args.slice(i + 1) };
+    };
+    const of = (pred: (s: { name: string; rest: string[] }) => boolean) => calls.filter((c) => pred(sub(c.args)));
+
+    const shared = [
+      ...of((s) => s.name === 'fetch'),
+      ...of((s) => s.name === 'config' && s.rest.includes('--replace-all')),
+      ...of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')),
+    ];
+    const own = [
+      ...of((s) => s.name === 'commit'),
+      ...of((s) => s.name === 'push' && !s.rest.includes('-u')),
+      ...of((s) => s.name === 'status'),
+      ...of((s) => s.name === 'config' && s.rest.includes('--get')),
+    ];
+    for (const name of ['fetch', 'config', 'commit', 'push', 'status']) {
+      expect(calls.some((c) => sub(c.args).name === name), name).toBe(true);
     }
+    expect(of((s) => s.name === 'config' && s.rest.includes('--replace-all')).length).toBeGreaterThan(0);
+    expect(of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')).length).toBeGreaterThan(0);
+    for (const c of shared) expect(c.held, c.args.join(' ')).toBe(true);
+    for (const c of own) expect(c.held, c.args.join(' ')).toBe(false);
   });
 });
