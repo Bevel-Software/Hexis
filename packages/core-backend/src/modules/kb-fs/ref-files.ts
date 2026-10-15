@@ -16,27 +16,29 @@ import { isAbsence } from '../../shared/fs.contract.js';
  *
  * What is read, in git's own order: a loose file under the common directory
  * (a worktree shares `refs/` with the repository it belongs to; only `HEAD`
- * is its own), then `packed-refs`, with a `^` peel line honoured for an
- * annotated tag. A symbolic ref (`ref: refs/heads/main`) is followed.
+ * is its own), then `packed-refs`. A symbolic ref (`ref: refs/heads/main`)
+ * is followed. A tag is never decided here: its file may hold a tag object,
+ * and what that peels to is git's to say.
  *
  * The answer is one of three things, and the caller treats them differently:
  * `{ sha }` is what git would answer too; `'missing'` means every file git
  * would consult says there is no such ref, which is as authoritative as
  * `rev-parse` answering nothing; `'unreadable'` means this reader could not
- * decide — a repository it does not understand, a tag it cannot peel, a
- * corrupt file, a name it refuses — and the caller asks git, which is
- * authoritative. Never a guess: a read error is `'unreadable'`, not
- * `'missing'`, so a flaky disk sends the caller to git rather than making a
- * branch disappear.
+ * decide — a repository it does not understand (one whose refs live in a
+ * reftable, say), a tag, a corrupt file, a name it refuses — and the caller
+ * asks git, which is authoritative. Never a guess: a read error is
+ * `'unreadable'`, not `'missing'`, so a flaky disk sends the caller to git
+ * rather than making a branch disappear.
  *
- * Only full ref names (`refs/...`) and `HEAD` are read here. A short name,
- * an abbreviated object id or a `<rev>^{...}` form has resolution rules of
- * its own; callers that hold one spell out the full names git would try, in
- * git's order, or ask git.
+ * What the files guarantee about the object: git itself refuses to write a
+ * non-commit under `refs/heads/`, and `refs/remotes/origin/` mirrors the
+ * remote's `refs/heads/`, so a branch tip read here is a commit as surely
+ * as `rev-parse <branch>^{commit}` would make it one. A caller that holds
+ * an object id rather than a name, or a `<rev>^{...}` form, asks git.
  */
 export type RefFileAnswer = { sha: string } | 'missing' | 'unreadable';
 
-const SHA = /^[0-9a-f]{40,64}$/;
+const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_SYMREF_DEPTH = 5;
 
 /** A ref name this reader is willing to turn into a path under `.git`. */
@@ -75,63 +77,80 @@ async function gitDirsOf(repoDir: string): Promise<GitDirs | null> {
   } catch (err) {
     if (!isAbsence(err)) return null;
   }
+  // A repository whose refs live in a reftable (`extensions.refStorage`)
+  // keeps nothing this reader understands under `refs/` or in `packed-refs`:
+  // every name would read as missing. Not a repository for this reader.
+  try {
+    await fs.stat(path.join(commonDir, 'reftable'));
+    return null;
+  } catch (err) {
+    if (!isAbsence(err)) return null;
+  }
+  try {
+    if (/^\s*refstorage\s*=\s*reftable\s*$/im.test(await fs.readFile(path.join(commonDir, 'config'), 'utf-8'))) {
+      return null;
+    }
+  } catch (err) {
+    if (!isAbsence(err)) return null;
+  }
   return { gitDir, commonDir };
 }
 
-/**
- * `packed-refs`: `<sha> <name>` lines, each optionally followed by `^<sha>`,
- * the peeled commit of an annotated tag. Absent file → an empty table.
- */
-async function readPackedRefs(commonDir: string): Promise<Map<string, { sha: string; peeled?: string }> | null> {
+/** `packed-refs`: `<sha> <name>` lines (`^` peel lines and comments skipped). Absent file → an empty table. */
+async function readPackedRefs(commonDir: string): Promise<Map<string, string> | null> {
   let text: string;
   try {
     text = await fs.readFile(path.join(commonDir, 'packed-refs'), 'utf-8');
   } catch (err) {
     return isAbsence(err) ? new Map() : null;
   }
-  const table = new Map<string, { sha: string; peeled?: string }>();
-  let last: { sha: string; peeled?: string } | null = null;
+  const table = new Map<string, string>();
   for (const raw of text.split('\n')) {
     const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    if (line.startsWith('^')) {
-      const peeled = line.slice(1);
-      if (last && SHA.test(peeled)) last.peeled = peeled;
-      continue;
-    }
+    if (!line || line.startsWith('#') || line.startsWith('^')) continue;
     const space = line.indexOf(' ');
     if (space < 0) continue;
     const sha = line.slice(0, space);
     const name = line.slice(space + 1).trim();
-    if (!SHA.test(sha) || !name) continue;
-    last = { sha };
-    table.set(name, last);
+    if (SHA.test(sha) && name) table.set(name, sha);
   }
   return table;
+}
+
+/**
+ * The file at `<dir>/<relative>`, read as git reads a loose ref: a symbolic
+ * ref is followed, an object id is the answer, anything else is not decided.
+ */
+async function readLooseRef(dirs: GitDirs, dir: string, relative: string, depth: number): Promise<RefFileAnswer> {
+  let text: string;
+  try {
+    text = (await fs.readFile(path.join(dir, ...relative.split('/')), 'utf-8')).trim();
+  } catch (err) {
+    return isAbsence(err) ? 'missing' : 'unreadable';
+  }
+  if (text.startsWith('ref:')) return resolveIn(dirs, text.slice('ref:'.length).trim(), depth + 1);
+  return SHA.test(text) ? { sha: text } : 'unreadable';
 }
 
 async function resolveIn(dirs: GitDirs, ref: string, depth: number): Promise<RefFileAnswer> {
   if (depth > MAX_SYMREF_DEPTH) return 'unreadable';
   if (!isSafeRefName(ref)) return 'unreadable';
-  const looseDir = ref === 'HEAD' ? dirs.gitDir : dirs.commonDir;
-  let loose: string | null = null;
-  try {
-    loose = (await fs.readFile(path.join(looseDir, ...ref.split('/')), 'utf-8')).trim();
-  } catch (err) {
-    if (!isAbsence(err)) return 'unreadable';
-  }
-  if (loose !== null) {
-    if (loose.startsWith('ref:')) return resolveIn(dirs, loose.slice('ref:'.length).trim(), depth + 1);
-    if (SHA.test(loose)) return ref.startsWith('refs/tags/') ? 'unreadable' : { sha: loose };
-    return 'unreadable';
-  }
+  const loose = await readLooseRef(dirs, ref === 'HEAD' ? dirs.gitDir : dirs.commonDir, ref, depth);
+  if (loose !== 'missing') return tagOrAnswer(ref, loose);
   if (ref === 'HEAD') return 'missing';
   const packed = await readPackedRefs(dirs.commonDir);
   if (!packed) return 'unreadable';
-  const entry = packed.get(ref);
-  if (!entry) return 'missing';
-  if (ref.startsWith('refs/tags/')) return entry.peeled ? { sha: entry.peeled } : 'unreadable';
-  return { sha: entry.sha };
+  const sha = packed.get(ref);
+  return sha ? tagOrAnswer(ref, { sha }) : 'missing';
+}
+
+/**
+ * A tag that exists is never decided here — what it peels to is git's to
+ * say — while a tag that does not exist is as missing as any other ref, so
+ * a short name can move on to the branch git would find next.
+ */
+function tagOrAnswer(ref: string, answer: RefFileAnswer): RefFileAnswer {
+  return ref.startsWith('refs/tags/') ? 'unreadable' : answer;
 }
 
 /**
@@ -147,11 +166,12 @@ export async function readRefSha(repoDir: string, ref: string): Promise<RefFileA
 
 /**
  * The full ref names `git rev-parse` tries for a name, in git's order
- * (gitrevisions(7)): `refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`,
- * `refs/remotes/<name>`, `refs/remotes/<name>/HEAD`. `HEAD` and a full
- * `refs/...` name are themselves. Null for a spelling this reader does not
- * resolve — an object id or its abbreviation, a `<rev>^{...}` or `@{...}`
- * form, an empty or option-looking name — which the caller sends to git.
+ * (gitrevisions(7)) after `$GIT_DIR/<name>` itself: `refs/<name>`,
+ * `refs/tags/<name>`, `refs/heads/<name>`, `refs/remotes/<name>`,
+ * `refs/remotes/<name>/HEAD`. `HEAD` and a full `refs/...` name are
+ * themselves. Null for a spelling this reader does not resolve — an object
+ * id or its abbreviation, a `<rev>^{...}` or `@{...}` form, an empty or
+ * option-looking name — which the caller sends to git.
  */
 export function refNameCandidates(ref: string): string[] | null {
   if (!ref || ref.startsWith('-')) return null;
@@ -164,16 +184,22 @@ export function refNameCandidates(ref: string): string[] | null {
 
 /**
  * {@link readRefSha} for a name as a caller holds it (`main`, `origin/main`,
- * `HEAD`, `refs/heads/main`): the first of git's candidates that resolves.
- * `'missing'` only when every candidate is missing; `'unreadable'` as soon as
- * one cannot be decided, because the undecided one might be the one git
- * would pick.
+ * `HEAD`, `refs/heads/main`): the first of git's candidates that resolves,
+ * starting where git starts, at `$GIT_DIR/<name>` itself (`MERGE_HEAD`,
+ * `FETCH_HEAD`, `ORIG_HEAD` live there). `'missing'` only when every
+ * candidate is missing; `'unreadable'` as soon as one cannot be decided,
+ * because the undecided one might be the one git would pick.
  */
 export async function readRevSha(repoDir: string, rev: string): Promise<RefFileAnswer> {
   const candidates = refNameCandidates(rev);
   if (!candidates) return 'unreadable';
   const dirs = await gitDirsOf(repoDir);
   if (!dirs) return 'unreadable';
+  if (rev !== 'HEAD' && !rev.startsWith('refs/')) {
+    if (!isSafeRefName(`refs/${rev}`)) return 'unreadable';
+    const own = await readLooseRef(dirs, dirs.gitDir, rev, 0);
+    if (own !== 'missing') return own;
+  }
   for (const name of candidates) {
     const answer = await resolveIn(dirs, name, 0);
     if (answer !== 'missing') return answer;

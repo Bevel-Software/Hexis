@@ -89,17 +89,33 @@ describe('readRefSha', () => {
     await expectSha(clone, 'refs/heads/main');
   });
 
-  it('peels an annotated tag from packed-refs, and refuses to guess at a loose one', async () => {
-    // A clone packs the refs it fetched, with a peel line for the annotated
-    // tag: that one is decided. A tag made here is loose, and its file holds
-    // the tag object's id, which is not the commit: not decided.
-    await expectSha(clone, 'refs/tags/v1');
+  it("never decides a tag, loose or packed: what it peels to is git's to say", async () => {
+    // A clone packs the refs it fetched (with a peel line for the annotated
+    // tag); a tag made here is loose and its file holds the tag object's id.
+    // Neither is read: a tag may peel to a tree or a blob, which `^{commit}`
+    // refuses, and only git applies that rule.
+    expect(await readRefSha(clone, 'refs/tags/v1')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/tags/light')).toBe('unreadable');
     await git(clone, 'tag', '-a', 'v2', '-m', 'v2');
-    await git(clone, 'tag', 'light2');
     expect(await readRefSha(clone, 'refs/tags/v2')).toBe('unreadable');
-    expect(await readRefSha(clone, 'refs/tags/light2')).toBe('unreadable');
     await git(clone, 'pack-refs', '--all');
-    await expectSha(clone, 'refs/tags/v2');
+    expect(await readRefSha(clone, 'refs/tags/v2')).toBe('unreadable');
+    expect(await readRevSha(clone, 'v1')).toBe('unreadable');
+  });
+
+  it('declines a repository whose refs live in a reftable', async () => {
+    // Git 2.45+ with `extensions.refStorage = reftable` keeps refs under
+    // `.git/reftable/`, not in files this reader understands: every name
+    // would read as missing. Both marks of that layout decline, so the
+    // caller asks git. Laid out by hand, so the check does not depend on
+    // the git on this machine knowing the format.
+    await fs.mkdir(path.join(clone, '.git/reftable'));
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    await fs.rm(path.join(clone, '.git/reftable'), { recursive: true });
+    await expectSha(clone, 'refs/heads/main');
+    await fs.appendFile(path.join(clone, '.git/config'), '[extensions]\n\trefStorage = reftable\n');
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
   });
 
   it('answers for a worktree: its own HEAD, and the refs it shares with the repository', async () => {
@@ -197,6 +213,19 @@ describe('readRevSha', () => {
     await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'feature^{commit}')).rejects.toThrow();
     expect(await readRevSha(clone, 'feature')).toBe('missing');
     expect(await readRevSha(clone, 'nope')).toBe('missing');
+  });
+
+  it('starts where git starts, at $GIT_DIR/<name>', async () => {
+    const sha = await git(clone, 'rev-parse', 'origin/feature');
+    await fs.writeFile(path.join(clone, '.git/MERGE_HEAD'), `${sha}\n`);
+    expect(await readRevSha(clone, 'MERGE_HEAD')).toEqual({
+      sha: await git(clone, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}'),
+    });
+    // FETCH_HEAD's lines carry more than an id: not decided here, git's call.
+    await fs.writeFile(path.join(clone, '.git/FETCH_HEAD'), `${sha}\t\tbranch 'feature' of origin\n`);
+    expect(await readRevSha(clone, 'FETCH_HEAD')).toBe('unreadable');
+    // A name with no such file goes on to the refs/ candidates as before.
+    expect(await readRevSha(clone, 'ORIG_HEAD')).toBe('missing');
   });
 
   it('hands git what it does not resolve itself', async () => {
