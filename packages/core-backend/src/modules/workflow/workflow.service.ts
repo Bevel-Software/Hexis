@@ -59,7 +59,7 @@ import type {
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   RemoteSyncPullResult,
-  UpdateChangeRequestInput,
+  UpdateChangeRequestFields,
 } from '@bevel-software/platform-shared';
 import {
   isFolderPlaceholder,
@@ -3343,7 +3343,7 @@ export class WorkflowService implements IWorkflowService {
   async updateChangeRequest(
     number: number,
     user: AuthUser,
-    input: UpdateChangeRequestInput,
+    input: UpdateChangeRequestFields,
   ): Promise<ChangeRequest> {
     const title = input.title === undefined ? undefined : input.title.trim();
     const description = input.description === undefined ? undefined : input.description.trim();

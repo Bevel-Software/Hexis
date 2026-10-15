@@ -416,10 +416,23 @@ export interface PullRequestDetail extends PullRequestSummary {
  * line reading exactly `## Affected owners` — that heading marks the
  * generated block.
  *
- * A plain interface, not a union of the allowed shapes: the body arrives as
- * untrusted JSON, so the server's worded 400 is the contract either way.
+ * A union of the allowed shapes, so a client cannot build `{}` or a
+ * `description` together with `appendDescription`. The server reads the
+ * body as untrusted JSON all the same — as {@link UpdateChangeRequestFields}
+ * — and answers any other shape with a worded 400.
  */
-export interface UpdateChangeRequestInput {
+export type UpdateChangeRequestInput =
+  | { title: string; description?: string; appendDescription?: never }
+  | { title?: string; description: string; appendDescription?: never }
+  | { title?: string; description?: never; appendDescription: string };
+
+/**
+ * The fields of a `PATCH /api/workflow/change-requests/:number` body as the
+ * server receives them — any combination, since the body is untrusted JSON.
+ * `WorkflowService.updateChangeRequest` checks the shape and refuses what
+ * {@link UpdateChangeRequestInput} rules out with a worded 400.
+ */
+export interface UpdateChangeRequestFields {
   title?: string;
   description?: string;
   appendDescription?: string;

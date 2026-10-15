@@ -4,6 +4,7 @@ import {
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
+  type UpdateChangeRequestInput,
 } from '@bevel-software/platform-shared';
 import '../change-requests.css';
 import { Banner, Button, Surface, TextAreaField, TextField } from '../../../shared/components';
@@ -906,11 +907,12 @@ export function ChangeRequestDialog({
     if (saving || !detail) return;
     const title = draftTitle.trim();
     const description = draftDescription.trim();
-    const changes = {
-      ...(title !== editBaseline.current.title ? { title } : {}),
-      ...(description !== editBaseline.current.description ? { description } : {}),
-    };
-    if (Object.keys(changes).length === 0) {
+    const titleChanged = title !== editBaseline.current.title;
+    const descriptionChanged = description !== editBaseline.current.description;
+    let changes: UpdateChangeRequestInput;
+    if (titleChanged) changes = descriptionChanged ? { title, description } : { title };
+    else if (descriptionChanged) changes = { description };
+    else {
       setEditing(false);
       return;
     }

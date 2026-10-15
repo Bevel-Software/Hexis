@@ -58,19 +58,32 @@ function harness(
   } as unknown as PullRequestService;
 
   const written: Record<string, unknown>[] = [];
-  const db = {
-    select: vi.fn(() => db),
-    from: vi.fn(() => db),
-    where: vi.fn(() => db),
-    limit: vi.fn(() => db),
+  // The transaction hands its callback a client of its OWN: every read and
+  // write of the row must go through it, so a read that slipped outside the
+  // transaction (and so outside the row lock) lands on `db` instead.
+  const tx = {
+    select: vi.fn(() => tx),
+    from: vi.fn(() => tx),
+    where: vi.fn(() => tx),
+    limit: vi.fn(() => tx),
     for: vi.fn(async () => (state === 'open' ? [{ body: opts.body ?? `Old reason.\n\n${GENERATED}` }] : [])),
-    transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
-    update: vi.fn(() => db),
+    update: vi.fn(() => tx),
     set: vi.fn((values: Record<string, unknown>) => {
       written.push(values);
-      return db;
+      return tx;
     }),
     returning: vi.fn(async () => [{ id: 'row-9' }]),
+  };
+  // The outer client answers every query with no rows: only background
+  // housekeeping (the deleted-branch sweep) may read through it.
+  const outer: Record<string, unknown> = {
+    then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
+  };
+  for (const step of ['from', 'where', 'limit', 'orderBy', 'innerJoin', 'set']) outer[step] = () => outer;
+  const db = {
+    select: vi.fn(() => outer),
+    update: vi.fn(() => outer),
+    transaction: vi.fn(async (fn: (client: unknown) => Promise<unknown>) => fn(tx)),
   };
 
   const writes = opts.writes === undefined ? {} : opts.writes;
@@ -100,7 +113,7 @@ function harness(
     openChangeGate(),
     events,
   );
-  return { svc, db, written, prs, access, workspaces, emitted };
+  return { svc, db, tx, written, prs, access, workspaces, emitted };
 }
 
 describe('WorkflowService.updateChangeRequest — who may edit', () => {
@@ -143,7 +156,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
       message:
         "Only the request's author, an admin, or someone who may approve every file it changes can edit its title and description.",
     });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
     expect(h.emitted).toEqual([]);
   });
 
@@ -152,7 +165,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     await expect(h.svc.updateChangeRequest(9, user('stranger@example.com'), { description: 'x' })).rejects.toMatchObject({
       status: 403,
     });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
   });
 
   it('an empty file list grants nobody but the author and admins', async () => {
@@ -168,7 +181,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
       status: 409,
       message: expect.stringContaining('could not be resolved'),
     });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
   });
 
   it('refuses a MERGED request with a worded 409, even to its author', async () => {
@@ -177,7 +190,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
       status: 409,
       message: 'This change request has already been applied; its title and description can no longer be changed.',
     });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
   });
 
   it('refuses a CLOSED request with a worded 409, even to an admin', async () => {
@@ -186,7 +199,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
       status: 409,
       message: 'This change request is closed; its title and description can no longer be changed.',
     });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
   });
 
   it('refuses a request that does not exist with 404', async () => {
@@ -199,7 +212,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     const h = harness({ authorEmail: AUTHOR });
     await expect(h.svc.updateChangeRequest(9, user(AUTHOR), {})).rejects.toMatchObject({ status: 400 });
     await expect(h.svc.updateChangeRequest(9, user(AUTHOR), { title: '   ' })).rejects.toMatchObject({ status: 400 });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
   });
 
   it('refuses a title past 256 characters with 400 — the agent tool’s limit, for the route too', async () => {
@@ -233,7 +246,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     await expect(
       h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'a', appendDescription: 'b' }),
     ).rejects.toMatchObject({ status: 400 });
-    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.update).not.toHaveBeenCalled();
   });
 });
 
@@ -275,7 +288,11 @@ describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
     const h = harness({ authorEmail: AUTHOR });
     await h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: 'Round two.' });
     expect(h.db.transaction).toHaveBeenCalledTimes(1);
-    expect(h.db.for).toHaveBeenCalledWith('update');
+    expect(h.db.select).not.toHaveBeenCalled();
+    expect(h.db.update).not.toHaveBeenCalled();
+    expect(h.tx.select).toHaveBeenCalledTimes(1);
+    expect(h.tx.for).toHaveBeenCalledWith('update');
+    expect(h.tx.update).toHaveBeenCalledTimes(1);
     expect(h.written).toHaveLength(1);
     expect(h.emitted).toEqual([{ kind: 'change-request-edited', number: 9 }]);
   });
@@ -289,7 +306,7 @@ describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
 
   it('a merge that won the race refuses the edit with the merged 409', async () => {
     const h = harness({ authorEmail: AUTHOR });
-    (h.db.returning as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (h.tx.returning as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (h.prs.getPr as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ state: 'open', authorId: hashEmail(AUTHOR), base: 'main' })
       .mockResolvedValueOnce({ state: 'merged' });

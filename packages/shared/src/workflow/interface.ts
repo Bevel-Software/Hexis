@@ -18,7 +18,7 @@
  */
 
 import type { AuthUser } from '../auth/types.js';
-import type { ChangeRequestApplyFailureKind, UpdateChangeRequestInput } from '../git/pr.types.js';
+import type { ChangeRequestApplyFailureKind, UpdateChangeRequestFields } from '../git/pr.types.js';
 import type {
   AcquireLockResult,
   Branch,
@@ -631,7 +631,7 @@ export interface IWorkflowService {
   updateChangeRequest(
     number: number,
     user: AuthUser,
-    input: UpdateChangeRequestInput,
+    input: UpdateChangeRequestFields,
   ): Promise<ChangeRequest>;
 
   /**
