@@ -623,6 +623,27 @@ describe('AuthService.changePassword — the sessions opened before it', () => {
     await expect(svc.resolveSession(token)).resolves.toEqual({ userId: ROW.id, email: ROW.email });
   });
 
+  it('reads the account row for every session it resolves, whatever the cache holds', async () => {
+    // Another replica's password change is only visible in the row, so a
+    // session answered from the cache would outlive it by up to 30 seconds.
+    const live = [{ ...ON, ...ROW }];
+    const { db } = makeFakeDb([live, live, live]);
+    const svc = new AuthService(db, makeConfig());
+    const token = jwt.sign({ userId: ROW.id, email: ROW.email, sv: 0 }, 'test-jwt-secret', { expiresIn: '7d' });
+    const select = vi.mocked(db.select);
+
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(1);
+    // The cache now holds the account; isActive may use it...
+    await expect(svc.isActive(ROW.id)).resolves.toBe(true);
+    expect(select).toHaveBeenCalledTimes(1);
+    // ...but a session never does.
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(2);
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(3);
+  });
+
   it('keeps a token issued before sessions had generations while the password never changed', async () => {
     const { db } = makeFakeDb([[{ ...ON, ...ROW }]]);
     const legacy = jwt.sign({ userId: ROW.id, email: ROW.email }, 'test-jwt-secret', { expiresIn: '7d' });
