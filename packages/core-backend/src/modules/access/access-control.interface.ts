@@ -235,6 +235,15 @@ export interface IAccessControl {
   canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>>;
 
   /**
+   * The display names of the groups `userEmail` is a member of, in the
+   * active group source (`groups.yaml`, or the IdP-synced file), spelled as
+   * `kbPrincipals` spells them. Direct membership only: a role that lists a
+   * group does not make its holders members of it. Empty when the person is
+   * in no group.
+   */
+  groupsOfUser(workspaceId: string, userEmail: string): Promise<string[]>;
+
+  /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
    * by the input paths, with `true` / `false` for each. Reuses one config
    * load per call.
