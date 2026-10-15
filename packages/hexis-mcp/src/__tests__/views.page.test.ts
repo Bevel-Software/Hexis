@@ -97,6 +97,11 @@ interface Msg {
 }
 type Answer = (params: Record<string, unknown> | undefined) => unknown;
 
+/** An answer that refuses the request, as a host's JSON-RPC error does. */
+class Refusal {
+  constructor(readonly message: string) {}
+}
+
 /** A host that answers the view's requests by method; a method with no answer is never answered. */
 function fakeHost(answers: Record<string, Answer>) {
   const sent: Msg[] = [];
@@ -111,7 +116,13 @@ function fakeHost(answers: Record<string, Answer>) {
       sent.push(msg);
       const answer = msg.id !== undefined && msg.method ? answers[msg.method] : undefined;
       if (!answer) return;
-      void Promise.resolve(answer(msg.params)).then((result) => deliver({ jsonrpc: '2.0', id: msg.id, result }));
+      void Promise.resolve(answer(msg.params)).then((result) =>
+        deliver(
+          result instanceof Refusal
+            ? { jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: result.message } }
+            : { jsonrpc: '2.0', id: msg.id, result },
+        ),
+      );
     },
   };
   return {
@@ -127,11 +138,11 @@ function fakeHost(answers: Record<string, Answer>) {
 const scriptOf = (markup: string): string => markup.match(/<script[^>]*>([\s\S]*)<\/script>/)![1]!;
 
 /** Open the view with `host` as its parent: the bridge first, then the compact presentation. */
-function mount(host: object, body = ''): void {
+function mount(host: object, body = '', snapshot: object = SNAPSHOT): void {
   Object.defineProperty(window, 'parent', { value: host, configurable: true });
   document.documentElement.className = '';
   document.body.innerHTML = body;
-  (window as unknown as { KB_SNAPSHOT: unknown }).KB_SNAPSHOT = SNAPSHOT;
+  (window as unknown as { KB_SNAPSHOT: unknown }).KB_SNAPSHOT = snapshot;
   new Function(scriptOf(bridgeScript(CONFIG)))();
   new Function(scriptOf(nativeMarkup()))();
 }
@@ -315,5 +326,154 @@ describe('the compact presentation', () => {
     const second = JSON.stringify(h.requests('ui/message')[1]?.params);
     expect(second).toContain('Milk.md');
     expect(second).not.toContain('Bread.md');
+  });
+});
+
+const lead = (name: string, stage: string, company: string) => ({
+  node_type: 'Lead',
+  file_path: `KnowledgeBase/Sales/Leads/${name}.md`,
+  fields: { Name: { text: name }, Stage: { text: stage }, Company: { text: company } },
+});
+/** One board: leads by Stage, Won counts as done, cards show their Company. */
+const BOARD_SNAPSHOT = {
+  format: 'hexis-kb-snapshot/1',
+  takenAt: '2026-10-15',
+  nodes: {
+    'KnowledgeBase/Sales/Boards/Leads.md': {
+      node_type: 'Board',
+      file_path: 'KnowledgeBase/Sales/Boards/Leads.md',
+      fields: {
+        Name: { text: 'Leads' },
+        'Card Type': { text: 'Lead' },
+        Folder: { text: 'KnowledgeBase/Sales/Leads' },
+        'Column Field': { text: 'Stage' },
+        Columns: { text: '- New\n- Contacted\n- Won' },
+        'Done Columns': { text: '- Won' },
+        'Card Fields': { text: '- Company' },
+      },
+    },
+    'KnowledgeBase/Sales/Leads/Acme.md': lead('Acme', 'New', 'Acme Corp'),
+    'KnowledgeBase/Sales/Leads/Globex.md': lead('Globex', 'Contacted', 'Globex Inc'),
+    'KnowledgeBase/Sales/Leads/Initech.md': lead('Initech', 'Won', 'Initech LLC'),
+  },
+  edges: [],
+};
+const texts = (selector: string): string[] =>
+  [...document.querySelectorAll(selector)].map((el) => (el.textContent ?? '').trim());
+
+describe('the compact board', () => {
+  const phone = { platform: 'mobile', displayMode: 'inline' };
+
+  it('shows a board as its columns, each with its count, opening on the first open column', async () => {
+    const h = fakeHost({ 'ui/initialize': initialize({}, phone) });
+    mount(h.host, '', BOARD_SNAPSHOT);
+    await h.initialized();
+    expect(texts('#hx-native .hx-title')).toEqual(['Leads']);
+    expect(texts('#hx-native .hx-sub')).toEqual(['2 open · 1 done']);
+    const tabs = [...document.querySelectorAll<HTMLElement>('[data-act="tab"]')].map((t) => [
+      t.dataset.col,
+      t.querySelector('.hx-tab-n')?.textContent,
+      t.getAttribute('aria-selected'),
+    ]);
+    expect(tabs).toEqual([
+      ['New', '1', 'true'],
+      ['Contacted', '1', 'false'],
+      ['Won', '1', 'false'],
+    ]);
+    expect(texts('.hx-card .hx-row-title')).toEqual(['Acme']);
+    expect(texts('.hx-card .hx-row-sub')).toEqual(['Acme Corp']);
+    click('[data-act="tab"][data-col="Contacted"]');
+    expect(texts('.hx-card .hx-row-title')).toEqual(['Globex']);
+  });
+
+  it('moves a card to another column, and sends the move to the chat', async () => {
+    const h = fakeHost({ 'ui/initialize': initialize({}, phone), 'ui/message': () => ({}) });
+    mount(h.host, '', BOARD_SNAPSHOT);
+    await h.initialized();
+    click('[data-act="open-item"][data-path$="Acme.md"]');
+    click('[data-act="set-col"][data-col="Contacted"]');
+    expect(document.querySelector('.hx-pending-n')?.textContent).toBe('1 change');
+    click('[data-act="send"]');
+    await vi.waitFor(() => expect(h.requests('ui/message')).toHaveLength(1));
+    expect(JSON.stringify(h.requests('ui/message')[0]?.params)).toContain(
+      'In KnowledgeBase/Sales/Leads/Acme.md (\\"Acme\\"), set Stage to Contacted.',
+    );
+  });
+});
+
+describe('compact or the full page', () => {
+  /** The frame's width, as the host sized it. */
+  const sized = (width: number): void => {
+    teardown.push(restoring(window, 'innerWidth'));
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+  };
+
+  it.each([
+    ['a phone', { platform: 'mobile', displayMode: 'fullscreen' }, 1024, true],
+    ['a narrow frame', { platform: 'desktop', displayMode: 'fullscreen' }, 600, true],
+    ['an inline frame', { platform: 'desktop', displayMode: 'inline' }, 1024, true],
+    ['a wide fullscreen frame on a desktop', { platform: 'desktop', displayMode: 'fullscreen' }, 1024, false],
+  ] as const)('on %s, compact: %s', async (_where, context, width, expected) => {
+    sized(width);
+    const h = fakeHost({ 'ui/initialize': initialize({}, { ...context, availableDisplayModes: ['inline', 'fullscreen'] }) });
+    mount(h.host);
+    await h.initialized();
+    expect(compact()).toBe(expected);
+  });
+
+  it('switches the full page to the compact presentation when asked', async () => {
+    sized(1024);
+    const h = fakeHost({
+      'ui/initialize': initialize({}, { platform: 'desktop', displayMode: 'fullscreen', availableDisplayModes: ['inline', 'fullscreen'] }),
+      'ui/request-display-mode': (params) => ({ mode: params?.mode }),
+    });
+    mount(h.host);
+    await h.initialized();
+    expect(compact()).toBe(false);
+    click('#hx-page-controls [data-act="compact"]');
+    await vi.waitFor(() => expect(h.requests('ui/request-display-mode')).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(compact()).toBe(true);
+  });
+});
+
+describe('"copy changes" in the page', () => {
+  /** The browser's clipboard, as the page found it: what it copied. */
+  const clipboard = () => {
+    const copied = vi.fn<(text: string) => Promise<void>>(async () => {});
+    teardown.push(restoring(navigator, 'clipboard'));
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: copied } });
+    return copied;
+  };
+  const write = (text: string): Promise<void> =>
+    (navigator as unknown as { clipboard: { writeText(text: string): Promise<void> } }).clipboard.writeText(text);
+
+  it('sends what the page copies to the chat, and still copies it', async () => {
+    const copied = clipboard();
+    const h = fakeHost({ 'ui/initialize': initialize({}), 'ui/message': () => ({}) });
+    mount(h.host);
+    await h.initialized();
+    await write('Set Bread to done');
+    expect(h.requests('ui/message')[0]?.params).toEqual({ role: 'user', content: [{ type: 'text', text: 'Set Bread to done' }] });
+    expect(copied).toHaveBeenCalledWith('Set Bread to done');
+  });
+
+  it('only copies when the host refuses the message', async () => {
+    const copied = clipboard();
+    const h = fakeHost({ 'ui/initialize': initialize({}), 'ui/message': () => new Refusal('not here') });
+    mount(h.host);
+    await h.initialized();
+    await write('Set Bread to done');
+    expect(h.requests('ui/message')).toHaveLength(1);
+    expect(copied).toHaveBeenCalledWith('Set Bread to done');
+  });
+
+  it('only copies before the view has spoken to its host', async () => {
+    const copied = clipboard();
+    const h = fakeHost({});
+    mount(h.host);
+    await write('Set Bread to done');
+    expect(h.requests('ui/message')).toHaveLength(0);
+    expect(copied).toHaveBeenCalledWith('Set Bread to done');
   });
 });
