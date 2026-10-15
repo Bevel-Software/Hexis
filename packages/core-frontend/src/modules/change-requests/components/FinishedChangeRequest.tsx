@@ -221,6 +221,15 @@ export function FinishedChangeRequest({
 
         <AuthorsReason body={detail?.body} />
 
+        {/* With no file list there is no pane to say it in, and the status
+            line alone would read as an apply with nothing to show. */}
+        {!showFiles && appliedUnreadable && (
+          <p className="mt-5 px-8 text-detail text-ink-faint">
+            The change as it was applied can't be read right now. Close and reopen this request
+            later to see it.
+          </p>
+        )}
+
         {showFiles && (
           <>
             <p className="mt-5 px-8 text-detail tabular-nums text-ink-faint">

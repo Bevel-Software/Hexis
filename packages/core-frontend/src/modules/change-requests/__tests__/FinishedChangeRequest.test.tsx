@@ -610,6 +610,19 @@ describe('ChangeRequestDialog: an applied request', () => {
     expect(screen.queryByText(/files? ·/)).not.toBeInTheDocument();
     expect(screen.queryByText(/doesn't change anything anymore/)).not.toBeInTheDocument();
     expect(screen.queryByRole('tree')).not.toBeInTheDocument();
+    expect(screen.queryByText(/can't be read right now/)).not.toBeInTheDocument();
+    expectNoReviewControls();
+  });
+
+  it('with no files and a recorded merge that could not be read, still says the change is unreadable', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailOf('merged', [], { appliedSha: null, appliedUnreadable: true }),
+    );
+    renderDialog();
+    expect(await screen.findByRole('status')).toHaveTextContent('Applied by Robin Lee');
+    expect(screen.getByText(/change as it was applied can't be read right now/)).toBeInTheDocument();
+    expect(screen.queryByText(/already there when it was applied/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('tree')).not.toBeInTheDocument();
     expectNoReviewControls();
   });
 });
