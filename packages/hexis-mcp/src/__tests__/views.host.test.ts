@@ -91,7 +91,7 @@ async function connectServer(): Promise<Client> {
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_e2e' };
   const handle = await createHexisMcpServer(config, '0.0.0', {
     catalogCheck: false,
-    views: { callKb: fakeKb(VIEW_PAGE), cacheDir: null },
+    views: { callKb: fakeKb(VIEW_PAGE) },
   });
   const client = new Client({ name: 'host', version: '0.0.0' }, { capabilities: {} });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

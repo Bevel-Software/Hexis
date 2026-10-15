@@ -1,8 +1,7 @@
-import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildSnapshot,
   isKnowledgeView,
@@ -24,7 +23,6 @@ import {
 } from '../views/catalog.js';
 import { FILES, ONT, VIEW, fakeKb, page, snapshotOnPage } from './fixtures/views-kb.js';
 
-const hashOf = (url: string): string => createHash('sha256').update(url).digest('hex').slice(0, 8);
 
 describe('buildSnapshot (port of build_snapshot.py)', () => {
   const selection: Selection = { type: ['Task'], fields: 'Name,Status,Project,Blocked By', keep_soi: true };
@@ -169,7 +167,7 @@ describe('the view catalog', () => {
   });
 
   it('lists a tool per view that points at its ui:// page, plus the app-only data tool', async () => {
-    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)) });
     const tools = await views.listTools();
     expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
     expect(tools[0]).toMatchObject({ _meta: { ui: { resourceUri: 'ui://hexis/views/to_do_list.html' } } });
@@ -182,7 +180,7 @@ describe('the view catalog', () => {
   });
 
   it('serves the page with the bridge, as an MCP App', async () => {
-    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)) });
     await views.listTools();
     const { contents } = await views.readResource('ui://hexis/views/to_do_list.html');
     expect(contents[0]).toMatchObject({ mimeType: VIEW_MIME_TYPE, _meta: { ui: { prefersBorder: true } } });
@@ -190,13 +188,13 @@ describe('the view catalog', () => {
     expect((contents[0] as { text: string }).text).toContain('data-hexis-native');
   });
 
-  it('paints first with the last live read, not the snapshot the page was committed with', async () => {
-    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+  it('serves the page with the data it was saved with: live data comes only with a tool result', async () => {
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)) });
     await views.listTools();
-    await views.callTool('show_to_do_list', {});
+    await views.callTool('show_to_do_list', {}); // a live read, which is not kept
     const { contents } = await views.readResource('ui://hexis/views/to_do_list.html');
     const served = readEmbeddedSnapshot((contents[0] as { text: string }).text);
-    expect(Object.keys(served?.nodes ?? {})).toHaveLength(2);
+    expect(served?.nodes).toEqual({});
   });
 
   /**
@@ -215,7 +213,7 @@ describe('the view catalog', () => {
     // A file name with a `#` and a `%` in it, as the bridge sends one (each segment encoded).
     ['/knowledge-base/KnowledgeBase/Ops/Q%231%20100%25.md', {}, 'https://kb.example/workspace/main/knowledge-base/KnowledgeBase/Ops/Q%231%20100%25.md'],
   ])('opens %s where the app does', async (href, extra, url) => {
-    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)) });
     await views.listTools();
     const result = await views.callTool(VIEW_LINK_TOOL, { view: 'show_to_do_list', href, ...extra });
     expect(result.isError).toBeFalsy();
@@ -223,7 +221,7 @@ describe('the view catalog', () => {
   });
 
   it.each(['javascript:alert(1)', 'data:text/html,hi', ''])('refuses to open %j', async (href) => {
-    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
+    const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)) });
     await views.listTools();
     const result = await views.callTool(VIEW_LINK_TOOL, { view: 'show_to_do_list', href });
     expect(result.isError).toBe(true);
@@ -233,7 +231,7 @@ describe('the view catalog', () => {
 
   it('reads the view live: a summary for the model, the snapshot for the page', async () => {
     const kb = fakeKb(page(snapshotOnPage));
-    const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null });
+    const views = createViewCatalog(CONFIG, { callKb: kb });
     await views.listTools();
     const result = await views.callTool('show_to_do_list', {});
     const text = (result.content[0] as { text: string }).text;
@@ -249,7 +247,6 @@ describe('the view catalog', () => {
   it('falls back to the embedded snapshot when the page records no mirror', async () => {
     const views = createViewCatalog(CONFIG, {
       callKb: fakeKb(page({ ...snapshotOnPage, selection: { type: ['Task'] } })),
-      cacheDir: null,
     });
     await views.listTools();
     const result = await views.callTool('show_to_do_list', {});
@@ -295,7 +292,7 @@ describe('the view catalog', () => {
     };
     const kb = searchableKb(files);
     const onChange = vi.fn();
-    const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null, onChange });
+    const views = createViewCatalog(CONFIG, { callKb: kb, onChange });
     // Listed at once under their file names, then titled from their pages, which is announced.
     expect((await views.listTools()).map((t) => [t.name, t.title])).toEqual([
       ['show_to_do_list', 'To Do List'],
@@ -319,7 +316,7 @@ describe('the view catalog', () => {
     // Ordinary pages first, as a walk may meet them: each has a title and no snapshot.
     for (let i = 0; i < 1200; i++) files[`Data/PR-Overviews/PR-${i}.html`] = `<html><head><title>PR ${i}</title></head></html>`;
     files[VIEW] = page(snapshotOnPage);
-    const tools = await createViewCatalog(CONFIG, { callKb: searchableKb(files), cacheDir: null }).listTools();
+    const tools = await createViewCatalog(CONFIG, { callKb: searchableKb(files) }).listTools();
     expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
   });
 
@@ -328,7 +325,7 @@ describe('the view catalog', () => {
     const search = kb.getMockImplementation()!;
     // A page read that never answers, as a slow deployment's would not within a listing.
     kb.mockImplementation(async (tool, args) => (tool === 'read_file' ? new Promise(() => {}) : search(tool, args)));
-    const tools = await createViewCatalog(CONFIG, { callKb: kb, cacheDir: null }).listTools();
+    const tools = await createViewCatalog(CONFIG, { callKb: kb }).listTools();
     expect(tools.map((t) => [t.name, t.title])).toEqual([
       ['show_to_do_list', 'To Do List'],
       [VIEW_DATA_TOOL, 'Knowledge view data'],
@@ -339,7 +336,7 @@ describe('the view catalog', () => {
   it('keeps the views a capped search did not reach', async () => {
     const other = 'KnowledgeBase/Ops/Board.html';
     const kb = searchableKb({ [VIEW]: page(snapshotOnPage), [other]: page(snapshotOnPage) });
-    const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null });
+    const views = createViewCatalog(CONFIG, { callKb: kb });
     expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
     // The next search stops after one view.
     const full = kb.getMockImplementation()!;
@@ -352,40 +349,37 @@ describe('the view catalog', () => {
     expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', 'show_board', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
   });
 
-  describe('kept between runs', () => {
-    let dir = '';
-    afterEach(() => rmSync(dir, { recursive: true, force: true }));
-
-    it('answers a restart from disk without searching, and refreshes behind it', async () => {
-      dir = mkdtempSync(path.join(tmpdir(), 'hexis-views-'));
-      vi.useFakeTimers({ toFake: ['setTimeout'] });
+  describe('what it keeps, and for whom', () => {
+    it('keeps nothing on disk', async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'hexis-home-'));
+      const previous = process.env.HEXIS_HOME;
+      process.env.HEXIS_HOME = home;
       try {
-        const first = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: dir });
-        await first.listTools();
-        await first.callTool('show_to_do_list', {});
-        await vi.runAllTimersAsync(); // the coalesced save
+        const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)) });
+        await views.listTools();
+        await views.callTool('show_to_do_list', {});
+        await views.readResource('ui://hexis/views/to_do_list.html');
+        await new Promise((resolve) => setTimeout(resolve, 400)); // past any write that would follow
+        expect(readdirSync(home)).toEqual([]);
       } finally {
-        vi.useRealTimers();
+        if (previous === undefined) delete process.env.HEXIS_HOME;
+        else process.env.HEXIS_HOME = previous;
+        rmSync(home, { recursive: true, force: true });
       }
-      await vi.waitFor(() => expect(readFileSync(path.join(dir, `${'kb.example'}-${hashOf(CONFIG.baseUrl)}.json`), 'utf8')).toContain('show_to_do_list'));
-      const file = path.join(dir, `kb.example-${hashOf(CONFIG.baseUrl)}.json`);
-      expect(statSync(file).mode & 0o777).toBe(0o600);
+    });
 
-      const never = vi.fn(async () => new Promise<unknown>(() => {}));
-      const second = createViewCatalog(CONFIG, { callKb: never, cacheDir: dir });
-      const tools = await second.listTools(); // the search below never answers
-      expect(tools.map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
-      const { contents } = await second.readResource('ui://hexis/views/to_do_list.html');
-      expect(Object.keys(readEmbeddedSnapshot((contents[0] as { text: string }).text)?.nodes ?? {})).toHaveLength(2);
-      vi.useFakeTimers({ toFake: ['setTimeout'] });
-      try {
-        second.prefetch();
-        expect(never).not.toHaveBeenCalled(); // a kept list's refresh steps aside at start
-        await vi.advanceTimersByTimeAsync(20_000);
-      } finally {
-        vi.useRealTimers();
-      }
-      await vi.waitFor(() => expect(never.mock.calls.length).toBeGreaterThan(0));
+    it('shows nothing a reader can no longer read, though it showed it a moment ago', async () => {
+      const kb = fakeKb(page(snapshotOnPage));
+      const views = createViewCatalog(CONFIG, { callKb: kb });
+      await views.listTools();
+      await views.readResource('ui://hexis/views/to_do_list.html');
+      // The reader loses access to the page.
+      const allowed = kb.getMockImplementation()!;
+      kb.mockImplementation(async (tool, args) => {
+        if (tool === 'read_file' && String(args.path).endsWith(VIEW)) throw new Error('not readable for this reader');
+        return allowed(tool, args);
+      });
+      await expect(views.readResource('ui://hexis/views/to_do_list.html')).rejects.toThrow(/not readable/);
     });
 
     /** A knowledge base that shows this reader nothing, as one with no access to the view would. */
@@ -396,30 +390,10 @@ describe('the view catalog', () => {
         throw new Error('not readable for this reader');
       });
 
-    it('never shows one reader what was kept for another', async () => {
-      dir = mkdtempSync(path.join(tmpdir(), 'hexis-views-'));
-      vi.useFakeTimers({ toFake: ['setTimeout'] });
-      try {
-        const first = createViewCatalog({ ...CONFIG, connectionKey: 'key-a' }, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: dir });
-        await first.listTools();
-        await first.callTool('show_to_do_list', {});
-        await vi.runAllTimersAsync(); // the coalesced save
-      } finally {
-        vi.useRealTimers();
-      }
-      const file = path.join(dir, `kb.example-${hashOf(CONFIG.baseUrl)}.json`);
-      await vi.waitFor(() => expect(readFileSync(file, 'utf8')).toContain('show_to_do_list'));
-      expect(readFileSync(file, 'utf8')).not.toContain('key-a');
-
-      const other = createViewCatalog({ ...CONFIG, connectionKey: 'key-b' }, { callKb: refusing(), cacheDir: dir });
-      expect(await other.listTools()).toEqual([]);
-      await expect(other.readResource('ui://hexis/views/to_do_list.html')).rejects.toThrow(/Unknown resource/);
-    });
-
     it('lets go of what it kept when the credential changes mid-run', async () => {
       const config = { ...CONFIG, connectionKey: 'key-a' };
       const kb = fakeKb(page(snapshotOnPage));
-      const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
+      const views = createViewCatalog(config, { callKb: kb });
       expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL, VIEW_LINK_TOOL]);
       await views.callTool('show_to_do_list', {});
       config.connectionKey = 'key-b';
@@ -446,7 +420,7 @@ describe('the view catalog', () => {
     it('does not answer a view call with what it read for a reader who changed meanwhile', async () => {
       const config = { ...CONFIG, connectionKey: 'key-a' };
       const { kb, release } = held('list_files'); // the live read's walk
-      const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
+      const views = createViewCatalog(config, { callKb: kb });
       await views.listTools();
       const answer = views.callTool('show_to_do_list', {});
       await vi.waitFor(() => expect(kb.mock.calls.some(([tool]) => tool === 'list_files')).toBe(true));
@@ -461,7 +435,7 @@ describe('the view catalog', () => {
     it('does not serve a page it read for a reader who changed meanwhile', async () => {
       const config = { ...CONFIG, connectionKey: 'key-a' };
       const { kb, release } = held('read_file'); // the page itself
-      const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
+      const views = createViewCatalog(config, { callKb: kb });
       await views.listTools();
       const answer = views.readResource('ui://hexis/views/to_do_list.html');
       config.connectionKey = 'key-b';
@@ -470,10 +444,9 @@ describe('the view catalog', () => {
     });
 
     it('announces a change the background refresh found', async () => {
-      dir = mkdtempSync(path.join(tmpdir(), 'hexis-views-'));
       const kb = fakeKb(page(snapshotOnPage));
       const onChange = vi.fn();
-      const views = createViewCatalog(CONFIG, { callKb: kb, cacheDir: null, onChange });
+      const views = createViewCatalog(CONFIG, { callKb: kb, onChange });
       await views.listTools();
       // The first list is not a change; its page then naming the view is.
       await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
@@ -481,10 +454,11 @@ describe('the view catalog', () => {
       kb.mockImplementation(async (tool: string) =>
         tool === 'start_session' ? { sessionId: 's-1' } : { matches: [] },
       );
-      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      // Six minutes on, the list is old: a listing answers with it and refreshes behind it.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 6 * 60_000);
       try {
-        views.prefetch();
-        await vi.advanceTimersByTimeAsync(20_000);
+        expect((await views.listTools()).map((t) => t.name)).toContain('show_to_do_list');
       } finally {
         vi.useRealTimers();
       }

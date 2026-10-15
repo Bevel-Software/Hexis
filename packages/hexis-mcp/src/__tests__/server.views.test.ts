@@ -119,7 +119,7 @@ async function connect(): Promise<{ client: Client; discovered: () => boolean; s
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_e2e' };
   const handle = await createHexisMcpServer(config, '0.0.0', {
     catalogCheck: false,
-    views: { callKb: fakeKb, cacheDir: null },
+    views: { callKb: fakeKb },
   });
   let settled = false;
   void handle.ready.then(

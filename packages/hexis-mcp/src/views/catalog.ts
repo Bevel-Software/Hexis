@@ -23,37 +23,33 @@
  * Reads go through the caller's own KB tools (`/api/agent/tools/*`), so the
  * caller's read access decides what a view can show, exactly as in the app.
  *
- * SPEED. Finding the views is one search over the whole knowledge base (about
- * five seconds on a large one), so it never sits in front of a listing twice:
- * it starts the moment the catalog exists, and what it found is kept on disk
- * (`~/.hexis/views/<deployment>.json`, readable only by the owner, like the
- * sign-in beside it) together with each page and each view's last live data.
- * A restart answers from that copy at once and refreshes behind it; a change
- * found by the refresh is announced with `list_changed` notifications.
+ * NOTHING SHOWN FROM A COPY. A page and a view's data are read from the
+ * knowledge base for the request that shows them, so what a reader sees is
+ * what the knowledge base lets them read at that moment, never what it let
+ * them (or someone else) read before. Nothing is kept on disk.
  *
- * WHOSE COPY. Everything kept, on disk and in memory, belongs to the reader
- * whose credential read it, and is shown to no one else: the knowledge base
- * decided what that reader may see, not what the next one may. The copy is
- * tagged with a fingerprint of the credential (never the credential), a copy
- * tagged for another is not loaded, and a credential that changes mid-run
- * drops everything kept before it. A renewed credential cannot be told apart
- * from another person's, so it starts afresh too.
+ * What is kept is the LIST of views, in memory, the way the server keeps the
+ * tools discovery found: finding the views is one search over the whole
+ * knowledge base (about five seconds on a large one), so it starts the moment
+ * the catalog exists, beside discovery, and is refreshed behind a listing
+ * when it is older than five minutes (or right away, for a view not in it). A
+ * change the refresh finds is announced with `list_changed` notifications.
+ * The list belongs to the reader whose credential found it: a credential
+ * that changes drops it, the session and any search in flight, and an answer
+ * read for one reader is never given to the next. A renewed credential cannot
+ * be told apart from another person's, so it starts afresh too.
  */
 import { createHash } from 'node:crypto';
-import { promises as fs, readFileSync } from 'node:fs';
-import path from 'node:path';
 import type { Resource, Tool as McpTool, CallToolResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { kbHrefToAppUrl } from '@bevel-software/platform-shared';
 import type { HexisMcpConfig } from '../config.js';
 import { callKbTool } from '../deployment.js';
-import { hexisHome, hostKey } from '../materialize.js';
 import { injectBridge, VIEW_META_KEY, type BridgeConfig } from './bridge.js';
 import {
   buildSnapshot,
   isKnowledgeView,
   mirrorFiles,
   readEmbeddedSnapshot,
-  replaceEmbeddedSnapshot,
   type KbReader,
   type Selection,
   type Snapshot,
@@ -70,18 +66,8 @@ const DEFAULT_KB_DIR = 'knowledge-base';
 const DEFAULT_BRANCH = 'main';
 /** How long a catalog is trusted before the next use refreshes it (in the background). */
 const CATALOG_TTL_MS = 5 * 60_000;
-/** How long a page is served without asking the knowledge base whether it changed. */
-const PAGE_TTL_MS = 30_000;
-/**
- * With a list kept from the last run, the refresh waits this long: the search
- * is heavy on the knowledge base, and right after a start is exactly when the
- * first view's live read wants it.
- */
-const KEPT_REFRESH_DELAY_MS = 20_000;
 /** Nodes the model's summary lists before it says how many more there are. */
 const SUMMARY_NODES = 80;
-/** 2: the copy names the reader it belongs to. */
-const CACHE_VERSION = 2;
 /** The answer to a request whose reader changed while it was being read. */
 const READER_CHANGED = 'The sign-in changed while this was being read, so it is not answered. Ask again.';
 /**
@@ -108,8 +94,6 @@ type CallKb = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
 export interface ViewCatalogOptions {
   /** How the KB tools are called; the deployment's `/api/agent/tools/*` by default. */
   callKb?: CallKb;
-  /** Where the catalog is kept between runs; `null` keeps it in memory only. Default `~/.hexis/views`. */
-  cacheDir?: string | null;
   /** Called when a background refresh changed the list of views. */
   onChange?: () => void;
 }
@@ -189,29 +173,14 @@ export interface ViewCatalog {
   readResource(uri: string): Promise<ReadResourceResult>;
 }
 
-/** What is kept between runs, per deployment, for one reader. */
-interface CacheFile {
-  version: number;
-  baseUrl: string;
-  /** The fingerprint of the credential that read all of this (`readerOf`). */
-  reader: string;
-  kbDir: string;
-  at: number;
-  views: ViewEntry[];
-  pages: Record<string, { at: number; html: string }>;
-  snapshots: Record<string, Snapshot>;
-}
-
 const sameViews = (a: ViewEntry[], b: ViewEntry[]): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOptions = {}): ViewCatalog {
   const call: CallKb = options.callKb ?? ((tool, args) => callKbTool(config, tool, args));
   const webBase = config.baseUrl.replace(/\/+$/, '');
-  const cacheFile =
-    options.cacheDir === null ? null : path.join(options.cacheDir ?? path.join(hexisHome(), 'views'), `${hostKey(config.baseUrl)}.json`);
 
-  // -- state, seeded from the last run --------------------------------------------------
-  /** The reader everything below was read for: a fingerprint of the credential. */
+  // -- state: the list of views, for one reader ---------------------------------------------
+  /** The reader the list below was found for: a fingerprint of the credential. */
   const readerOf = (): string => createHash('sha256').update(config.connectionKey ?? '').digest('hex').slice(0, 32);
   let keptFor = readerOf();
   /** Bumped when the reader changes, so a read begun for the last one keeps nothing it finds. */
@@ -219,56 +188,6 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   let kbDir = DEFAULT_KB_DIR;
   let views: ViewEntry[] | null = null;
   let viewsAt = 0;
-  const pages = new Map<string, { at: number; html: string }>();
-  const snapshots = new Map<string, Snapshot>();
-  if (cacheFile) {
-    try {
-      const saved = JSON.parse(readFileSync(cacheFile, 'utf8')) as CacheFile;
-      if (
-        saved.version === CACHE_VERSION &&
-        saved.baseUrl === config.baseUrl &&
-        saved.reader === keptFor &&
-        Array.isArray(saved.views)
-      ) {
-        kbDir = saved.kbDir || DEFAULT_KB_DIR;
-        views = saved.views;
-        viewsAt = saved.at;
-        for (const [p, page] of Object.entries(saved.pages ?? {})) pages.set(p, page);
-        for (const [p, snap] of Object.entries(saved.snapshots ?? {})) snapshots.set(p, snap);
-      }
-    } catch {
-      // No copy yet, or an unreadable one: the first search builds it.
-    }
-  }
-
-  let saveTimer: NodeJS.Timeout | null = null;
-  const save = (): void => {
-    if (!cacheFile || saveTimer) return;
-    // Coalesced: a burst of page and snapshot reads costs one write.
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      const known = new Set((views ?? []).map((v) => v.path));
-      const body: CacheFile = {
-        version: CACHE_VERSION,
-        baseUrl: config.baseUrl,
-        reader: keptFor,
-        kbDir,
-        at: viewsAt,
-        views: views ?? [],
-        pages: Object.fromEntries([...pages].filter(([p]) => known.has(p))),
-        snapshots: Object.fromEntries([...snapshots].filter(([p]) => known.has(p))),
-      };
-      const tmp = `${cacheFile}.${process.pid}.tmp`;
-      void fs
-        .mkdir(path.dirname(cacheFile), { recursive: true, mode: 0o700 })
-        .then(() => fs.writeFile(tmp, JSON.stringify(body), { mode: 0o600 }))
-        .then(() => fs.rename(tmp, cacheFile))
-        .catch((err: unknown) =>
-          console.error(`[hexis-mcp] could not keep the views catalog: ${err instanceof Error ? err.message : String(err)}`),
-        );
-    }, 250);
-    saveTimer.unref?.();
-  };
 
   // One KB session for every view read: views only read, so the
   // one-ontology-per-session write boundary never comes into play.
@@ -342,7 +261,6 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
         const changed = views !== null && !sameViews(views, next);
         views = next;
         viewsAt = Date.now();
-        save();
         console.error(`[hexis-mcp] ${next.length} knowledge view(s) served as MCP Apps.`);
         if (changed) options.onChange?.();
         void titlePages(next);
@@ -378,10 +296,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
       }),
     );
     // Only for the list still served: a newer search has titled its own.
-    if (renamed && gen === generation && views === list) {
-      save();
-      options.onChange?.();
-    }
+    if (renamed && gen === generation && views === list) options.onChange?.();
   }
   /** The views now: the known list at once (refreshed behind it when old), or the first search. */
   const current = async (): Promise<ViewEntry[]> => {
@@ -393,41 +308,13 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     (await current()).find((v) => v.tool === tool) ?? (await refresh()).find((v) => v.tool === tool);
 
   // -- a view's page and its live data ---------------------------------------------------------
-  const pageReads = new Map<string, Promise<string>>();
-  /** The page, from memory when fresh; read again (once at a time) when not. */
-  const fetchPage = (view: ViewEntry, branch: string): Promise<string> => {
-    const key = `${branch}\n${view.path}`;
-    let read = pageReads.get(key);
-    if (!read) {
-      const gen = generation;
-      const started: Promise<string> = reader(branch)
-        .read(view.path)
-        .then((html) => {
-          if (branch === DEFAULT_BRANCH && gen === generation) {
-            pages.set(view.path, { at: Date.now(), html });
-            save();
-          }
-          return html;
-        })
-        .finally(() => {
-          if (pageReads.get(key) === started) pageReads.delete(key);
-        });
-      read = started;
-      pageReads.set(key, read);
-    }
-    return read;
-  };
-  async function page(view: ViewEntry, branch: string): Promise<string> {
-    if (branch !== DEFAULT_BRANCH) return fetchPage(view, branch);
-    const kept = pages.get(view.path);
-    if (!kept) return fetchPage(view, branch);
-    // Stale while revalidating: the page is a shell, its data comes live anyway.
-    if (Date.now() - kept.at > PAGE_TTL_MS) void fetchPage(view, branch).catch(() => {});
-    return kept.html;
-  }
+  /**
+   * The page as the knowledge base answers it now, for this reader: read for
+   * each request that shows it, never served from a copy.
+   */
+  const page = (view: ViewEntry, branch: string): Promise<string> => reader(branch).read(view.path);
 
   async function liveSnapshot(view: ViewEntry, branch: string): Promise<{ snapshot: Snapshot; errors: string[] }> {
-    const gen = generation;
     const embedded = readEmbeddedSnapshot(await page(view, branch));
     const selection = embedded?.selection as Selection | undefined;
     const mirror = selection?.mirror;
@@ -438,10 +325,6 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     }
     const { files, errors } = await mirrorFiles(reader(branch), mirror);
     const snapshot = buildSnapshot(files, selection, branch);
-    if (branch === DEFAULT_BRANCH && gen === generation) {
-      snapshots.set(view.path, snapshot);
-      save();
-    }
     return { snapshot, errors };
   }
 
@@ -458,9 +341,6 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     kbDir = DEFAULT_KB_DIR;
     views = null;
     viewsAt = 0;
-    pages.clear();
-    snapshots.clear();
-    pageReads.clear();
     session = null;
     refreshing = null;
   }
@@ -590,12 +470,8 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   async function readPage(uri: string): Promise<ReadResourceResult> {
     const view = (await current()).find((v) => v.uri === uri) ?? (await refresh()).find((v) => v.uri === uri);
     if (!view) throw new Error(`Unknown resource ${uri}`);
-    let html = await page(view, DEFAULT_BRANCH);
+    const html = await page(view, DEFAULT_BRANCH);
     if (!isKnowledgeView(html)) throw new Error(`${view.path} is no longer a knowledge view`);
-    // The last live read, when there is one, is fresher than what the page
-    // was committed with: the first paint uses it, live data follows.
-    const last = snapshots.get(view.path);
-    if (last) html = replaceEmbeddedSnapshot(html, last);
     const bridge: BridgeConfig = {
       view: view.tool,
       dataTool: VIEW_DATA_TOOL,
@@ -636,14 +512,8 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   return {
     prefetch() {
       forgetAnotherReader();
-      // Nothing known: search now, alongside discovery. A list kept from the
-      // last run already answers, so its refresh steps aside for a while.
-      if (views === null) {
-        void refresh();
-        return;
-      }
-      const later = setTimeout(() => void refresh(), KEPT_REFRESH_DELAY_MS);
-      later.unref?.();
+      // Search now, alongside discovery, so the first listing finds the views ready.
+      if (views === null) void refresh();
     },
 
     handles: (tool) => {

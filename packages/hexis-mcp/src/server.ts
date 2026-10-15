@@ -450,10 +450,9 @@ export async function createHexisMcpServer(
      */
     catalogCheck?: false | { minIntervalMs?: number };
     /**
-     * How the knowledge views read the knowledge base and where they keep
-     * their list between runs (see views/catalog.ts). Here for tests, which
-     * fake the reads and keep nothing on disk; the default reads the
-     * deployment's KB tools and keeps the list under `~/.hexis/views`.
+     * How the knowledge views read the knowledge base (see views/catalog.ts).
+     * Here for tests, which fake the reads; the default reads the
+     * deployment's KB tools.
      */
     views?: Omit<ViewCatalogOptions, 'onChange'>;
   } = {},
@@ -549,8 +548,8 @@ export async function createHexisMcpServer(
    * deployment's KB tools directly, not through the UTCP client, so they are
    * independent of discovery and of credential swaps (each read takes the
    * current `config.connectionKey`). Their search starts NOW, alongside
-   * discovery, and a list kept from the last run answers before it ends; a
-   * change it finds reaches a connected client as `list_changed`.
+   * discovery, so the first listing finds them ready; a change a later search
+   * finds reaches a connected client as `list_changed`.
    */
   const views = createViewCatalog(config, {
     ...options.views,
