@@ -1038,6 +1038,44 @@ describe('a file deleted by someone else', () => {
     });
   });
 
+  it("a switched-to tab's late read does not replace edits typed after a newer read loaded it and a later one found it gone", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    // A write elsewhere invalidates the background tab's bytes.
+    await act(async () => { result.current.bumpFsRevision(); });
+    await settle();
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBeNull();
+
+    // The switch's read is held; the ones after it answer from `disk`.
+    const held: { answer: () => void } = { answer: () => { throw new Error('Activation read was not started'); } };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      held.answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    act(() => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    // A newer read loads the tab, and the person types into it.
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    await waitFor(() => expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.'));
+    await typeInto(result, 'my unsaved edits');
+    // A newer read still finds the file gone.
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+
+    await act(async () => { held.answer(); });
+    await settle();
+
+    // The notice stays, and Copy edits still holds what was typed.
+    expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
+    expect(result.current.activeTab?.isDirty).toBe(true);
+    expect(result.current.activeTab?.content).toBe('my unsaved edits');
+    await expect(result.current.saveFile('KB/Draft.md', 'my unsaved edits')).rejects.toThrow('Draft.md was deleted from this branch');
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
