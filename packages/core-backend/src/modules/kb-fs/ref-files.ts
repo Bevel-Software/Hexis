@@ -128,7 +128,13 @@ async function readLooseRef(dirs: GitDirs, dir: string, relative: string, depth:
   } catch (err) {
     return isAbsence(err) ? 'missing' : 'unreadable';
   }
-  if (text.startsWith('ref:')) return resolveIn(dirs, text.slice('ref:'.length).trim(), depth + 1);
+  if (text.startsWith('ref:')) {
+    const answer = await resolveIn(dirs, text.slice('ref:'.length).trim(), depth + 1);
+    // A symbolic ref whose target is gone is dangling, and git reports it
+    // as such; a packed entry under the symbolic ref's own name does not
+    // stand in for it. Git's to report, then.
+    return answer === 'missing' ? 'unreadable' : answer;
+  }
   return SHA.test(text) ? { sha: text } : 'unreadable';
 }
 
@@ -136,21 +142,31 @@ async function resolveIn(dirs: GitDirs, ref: string, depth: number): Promise<Ref
   if (depth > MAX_SYMREF_DEPTH) return 'unreadable';
   if (!isSafeRefName(ref)) return 'unreadable';
   const loose = await readLooseRef(dirs, ref === 'HEAD' ? dirs.gitDir : dirs.commonDir, ref, depth);
-  if (loose !== 'missing') return tagOrAnswer(ref, loose);
+  if (loose !== 'missing') return decidedHere(ref, loose);
   if (ref === 'HEAD') return 'missing';
   const packed = await readPackedRefs(dirs.commonDir);
   if (!packed) return 'unreadable';
   const sha = packed.get(ref);
-  return sha ? tagOrAnswer(ref, { sha }) : 'missing';
+  return sha ? decidedHere(ref, { sha }) : 'missing';
 }
 
 /**
- * A tag that exists is never decided here — what it peels to is git's to
- * say — while a tag that does not exist is as missing as any other ref, so
- * a short name can move on to the branch git would find next.
+ * The files decide only where git itself guarantees the object is a commit:
+ * `HEAD` and `refs/heads/*`, which git refuses to point at anything else,
+ * and `refs/remotes/*`, fetched from a remote's `refs/heads/*` under the
+ * same refusal. Anything else that exists — a tag, a ref directly under
+ * `refs/` — may name a tree or a blob, which only git's `^{commit}` refuses,
+ * so it is git's to resolve. Anything that does not exist is as missing as
+ * any other ref, so a short name can move on to the branch git would find
+ * next.
  */
-function tagOrAnswer(ref: string, answer: RefFileAnswer): RefFileAnswer {
-  return ref.startsWith('refs/tags/') ? 'unreadable' : answer;
+function decidedHere(ref: string, answer: RefFileAnswer): RefFileAnswer {
+  if (answer !== 'missing' && answer !== 'unreadable' && !commitGuaranteed(ref)) return 'unreadable';
+  return answer;
+}
+
+function commitGuaranteed(ref: string): boolean {
+  return ref === 'HEAD' || ref.startsWith('refs/heads/') || ref.startsWith('refs/remotes/');
 }
 
 /**
@@ -185,10 +201,12 @@ function refNameCandidates(ref: string): string[] | null {
 /**
  * {@link readRefSha} for a name as a caller holds it (`main`, `origin/main`,
  * `HEAD`, `refs/heads/main`): the first of git's candidates that resolves,
- * starting where git starts, at `$GIT_DIR/<name>` itself (`MERGE_HEAD`,
- * `FETCH_HEAD`, `ORIG_HEAD` live there). `'missing'` only when every
- * candidate is missing; `'unreadable'` as soon as one cannot be decided,
- * because the undecided one might be the one git would pick.
+ * starting where git starts, at `$GIT_DIR/<name>` itself. Whatever is found
+ * there (`MERGE_HEAD`, `FETCH_HEAD`, `AUTO_MERGE`, which may name a tree) is
+ * git's to resolve; only its absence lets the `refs/` candidates be read.
+ * `'missing'` only when every candidate is missing; `'unreadable'` as soon
+ * as one cannot be decided, because the undecided one might be the one git
+ * would pick.
  */
 export async function readRevSha(repoDir: string, rev: string): Promise<RefFileAnswer> {
   const candidates = refNameCandidates(rev);
@@ -197,8 +215,12 @@ export async function readRevSha(repoDir: string, rev: string): Promise<RefFileA
   if (!dirs) return 'unreadable';
   if (rev !== 'HEAD' && !rev.startsWith('refs/')) {
     if (!isSafeRefName(`refs/${rev}`)) return 'unreadable';
-    const own = await readLooseRef(dirs, dirs.gitDir, rev, 0);
-    if (own !== 'missing') return own;
+    try {
+      await fs.stat(path.join(dirs.gitDir, ...rev.split('/')));
+      return 'unreadable';
+    } catch (err) {
+      if (!isAbsence(err)) return 'unreadable';
+    }
   }
   for (const name of candidates) {
     const answer = await resolveIn(dirs, name, 0);

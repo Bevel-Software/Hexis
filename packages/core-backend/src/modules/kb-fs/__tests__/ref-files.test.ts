@@ -185,10 +185,13 @@ describe('readRevSha', () => {
     await git(clone, 'branch', 'origin/main', second);
     expect(await readRevSha(clone, 'origin/main')).toEqual(await want('origin/main'));
     expect(await readRevSha(clone, 'origin/main')).toEqual({ sha: second });
-    // A ref directly under refs/ comes before every namespace.
+    // A ref directly under refs/ comes before every namespace — and git does
+    // not guarantee what it names, so the reader steps aside for it.
     await git(clone, 'update-ref', 'refs/main', second);
+    expect(await git(clone, 'rev-parse', 'main')).toBe(second);
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    await git(clone, 'update-ref', '-d', 'refs/main');
     expect(await readRevSha(clone, 'main')).toEqual(await want('main'));
-    expect(await readRevSha(clone, 'main')).toEqual({ sha: second });
     expect(first).not.toBe(second);
     // A tag named like a branch comes before the branch — and a tag is git's
     // to peel, so the reader steps aside rather than answer the branch.
@@ -214,17 +217,34 @@ describe('readRevSha', () => {
     expect(await readRevSha(clone, 'nope')).toBe('missing');
   });
 
-  it('starts where git starts, at $GIT_DIR/<name>', async () => {
+  it('starts where git starts, at $GIT_DIR/<name>, and leaves whatever is there to git', async () => {
     const sha = await git(clone, 'rev-parse', 'origin/feature');
+    // A pseudoref may name a commit (MERGE_HEAD) or a tree (AUTO_MERGE), and
+    // only git's ^{commit} tells them apart: anything found there is git's.
     await fs.writeFile(path.join(clone, '.git/MERGE_HEAD'), `${sha}\n`);
-    expect(await readRevSha(clone, 'MERGE_HEAD')).toEqual({
-      sha: await git(clone, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}'),
-    });
-    // FETCH_HEAD's lines carry more than an id: not decided here, git's call.
-    await fs.writeFile(path.join(clone, '.git/FETCH_HEAD'), `${sha}\t\tbranch 'feature' of origin\n`);
-    expect(await readRevSha(clone, 'FETCH_HEAD')).toBe('unreadable');
-    // A name with no such file goes on to the refs/ candidates as before.
-    expect(await readRevSha(clone, 'ORIG_HEAD')).toBe('missing');
+    expect(await readRevSha(clone, 'MERGE_HEAD')).toBe('unreadable');
+    await fs.writeFile(path.join(clone, '.git/AUTO_MERGE'), `${await git(clone, 'rev-parse', 'HEAD^{tree}')}\n`);
+    expect(await readRevSha(clone, 'AUTO_MERGE')).toBe('unreadable');
+    // A branch named like a pseudoref file that exists is git's too...
+    await git(clone, 'branch', 'ORIG_HEAD', sha);
+    await fs.writeFile(path.join(clone, '.git/ORIG_HEAD'), `${sha}\n`);
+    expect(await readRevSha(clone, 'ORIG_HEAD')).toBe('unreadable');
+    // ...and a name with no such file goes on to the refs/ candidates.
+    await fs.rm(path.join(clone, '.git/ORIG_HEAD'));
+    expect(await readRevSha(clone, 'ORIG_HEAD')).toEqual({ sha });
+    expect(await readRevSha(clone, 'CHERRY_PICK_HEAD')).toBe('missing');
+  });
+
+  it('leaves a dangling symbolic ref to git rather than read a packed entry it shadows', async () => {
+    await git(clone, 'pack-refs', '--all');
+    const packed = await git(clone, 'rev-parse', 'refs/heads/main');
+    // The loose file comes back as a symbolic ref to a branch that is gone:
+    // git reports the ref as dangling, not as the packed tip underneath.
+    await fs.writeFile(path.join(clone, '.git/refs/heads/main'), 'ref: refs/heads/gone\n');
+    await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'refs/heads/main^{commit}')).rejects.toThrow();
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    expect(packed).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it('hands git what it does not resolve itself', async () => {
