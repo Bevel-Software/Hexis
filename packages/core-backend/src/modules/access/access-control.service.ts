@@ -1465,6 +1465,9 @@ export class AccessControlService implements IAccessControl {
   private static readonly OWN_ENTRIES_AT_COMMIT_MAX = 16_384;
   /** Paths a cached model keeps of its commit's tree, at most; a larger tree is not kept. */
   private static readonly TREE_INDEX_MAX_PATHS = 20_000;
+  /** Paths held across every cached model's tree, at most; past it the oldest models let their tree go. */
+  private static readonly TREE_INDEX_BUDGET = 500_000;
+  private treePathsHeld = 0;
 
   /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
@@ -2731,7 +2734,8 @@ export class AccessControlService implements IAccessControl {
       const { pluginsDir } = this.kb.layout;
       for (const p of stdout.split('\0')) {
         if (!p) continue;
-        all.push(p);
+        // One past the cap is enough to know the tree is not kept.
+        if (all.length <= AccessControlService.TREE_INDEX_MAX_PATHS) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
         else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
@@ -2841,9 +2845,22 @@ export class AccessControlService implements IAccessControl {
 
   private rememberAtRef(key: string, value: AtRefModel): void {
     this.atRefCache.set(key, value);
+    this.treePathsHeld += value.tree?.size ?? 0;
     if (this.atRefCache.size > AccessControlService.AT_REF_CACHE_MAX) {
       const oldest = this.atRefCache.keys().next().value;
-      if (oldest !== undefined) this.atRefCache.delete(oldest);
+      if (oldest !== undefined) {
+        this.treePathsHeld -= this.atRefCache.get(oldest)?.tree?.size ?? 0;
+        this.atRefCache.delete(oldest);
+      }
+    }
+    // The trees are a budget of their own, across every held model: past
+    // it, the oldest models keep their model and let their tree go — the
+    // gate still answers, absence is just no longer remembered for them.
+    for (const held of this.atRefCache.values()) {
+      if (this.treePathsHeld <= AccessControlService.TREE_INDEX_BUDGET) break;
+      if (!held.tree) continue;
+      this.treePathsHeld -= held.tree.size;
+      held.tree = null;
     }
   }
 
