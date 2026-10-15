@@ -237,6 +237,11 @@ describe('GitService and the repository administrator', () => {
     await service.commitFile(id('alice/a'), ALICE, 'knowledge-base/alice.md', 'alice edits');
     await service.push(id('alice/a'), ALICE);
     await service.status(id('alice/a'));
+    // A merge stamps the committer's name and email into the config.
+    const merged = await service.mergeChangeRequest(
+      id(TARGET), 'alice/a', TARGET, { subject: 'alice edits (#1)', body: '' }, ALICE,
+    );
+    expect(merged.kind).toBe('merged');
     await service.deleteBranch(id(TARGET), 'alice/a', ALICE, { systemCleanup: true });
 
     // The subcommand, past leading `-c key=value` / `-C dir` options.
@@ -247,23 +252,32 @@ describe('GitService and the repository administrator', () => {
     };
     const of = (pred: (s: { name: string; rest: string[] }) => boolean) => calls.filter((c) => pred(sub(c.args)));
 
-    // The config is the one file git refuses a second writer of; the refs,
-    // packed-refs and the objects git locks itself, so a fetch, a commit, a
-    // push and a branch delete run as any worktree's git would.
-    const shared = [...of((s) => s.name === 'config' && s.rest.includes('--replace-all'))];
+    // The config is the one file git refuses a second writer of: every write
+    // to it (the upstream stamp, the committer's name and email, a branch
+    // delete that drops the branch's section) is the administrator's. The
+    // refs, packed-refs and the objects git locks itself, so a fetch, a
+    // commit, a push, a merge and a read run as any worktree's git would.
+    const configRead = (rest: string[]) => rest.some((a) => /^(--get|--get-all|--get-regexp|--list|-l)$/.test(a));
+    const shared = [
+      ...of((s) => s.name === 'config' && !configRead(s.rest)),
+      ...of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')),
+    ];
     const own = [
       ...of((s) => s.name === 'fetch'),
       ...of((s) => s.name === 'commit'),
+      ...of((s) => s.name === 'merge'),
       ...of((s) => s.name === 'push' && !s.rest.includes('-u')),
       ...of((s) => s.name === 'status'),
-      ...of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')),
-      ...of((s) => s.name === 'config' && s.rest.includes('--get')),
+      ...of((s) => s.name === 'config' && configRead(s.rest)),
     ];
-    for (const name of ['fetch', 'config', 'commit', 'push', 'status']) {
+    for (const name of ['fetch', 'config', 'commit', 'merge', 'push', 'status']) {
       expect(calls.some((c) => sub(c.args).name === name), name).toBe(true);
     }
     expect(of((s) => s.name === 'config' && s.rest.includes('--replace-all')).length).toBeGreaterThan(0);
+    expect(of((s) => s.name === 'config' && s.rest[0] === 'user.name').length).toBeGreaterThan(0);
+    expect(of((s) => s.name === 'config' && s.rest[0] === 'user.email').length).toBeGreaterThan(0);
     expect(of((s) => s.name === 'branch' && s.rest.some((a) => a === '-D' || a === '-d')).length).toBeGreaterThan(0);
+    expect(shared.length).toBeGreaterThan(3);
     for (const c of shared) expect(c.held, c.args.join(' ')).toBe(true);
     for (const c of own) expect(c.held, c.args.join(' ')).toBe(false);
   });
