@@ -14,6 +14,7 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
+import { PATTERN_BUDGET_MS } from '../bounded-matcher.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
 import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
@@ -1541,7 +1542,7 @@ describe('a pattern too expensive to match', () => {
     expect(status).toBe(400);
     expect(body.error).toMatch(/^Pattern too expensive: /);
     expect(body.code).toBe('pattern_too_expensive');
-    expect(took).toBeLessThan(3_000);
+    expect(took).toBeLessThan(PATTERN_BUDGET_MS + 2_000);
     expect(probes.length).toBeGreaterThan(0);
     expect(Math.max(...probes)).toBeLessThan(1_000);
   });

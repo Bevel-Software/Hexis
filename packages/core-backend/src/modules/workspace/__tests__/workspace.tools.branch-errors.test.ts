@@ -27,6 +27,7 @@ import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
+import { PATTERN_BUDGET_MS } from '../bounded-matcher.js';
 import { WorkspaceService } from '../workspace.service.js';
 
 const execFileAsync = promisify(execFile);
@@ -509,7 +510,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
        return { expensive, control: grep('^a+!$') };`,
       30_000,
     );
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(PATTERN_BUDGET_MS + 3_000);
     expect(result.expensive.ok).toBeUndefined();
     expect(result.expensive.failed).toContain('HTTP 400');
     expect(result.expensive.failed).toContain('Pattern too expensive');

@@ -20,7 +20,7 @@ import { ToolError } from '../tool-helpers/tool.contract.js';
  */
 
 /** Matching time one search may spend, summed over every file it searches. */
-export const PATTERN_BUDGET_MS = 1_000;
+export const PATTERN_BUDGET_MS = 5_000;
 /**
  * Slack on top of the remaining budget before a batch is given up on: the
  * budget counts only the worker's own matching time, so handing the lines over
@@ -29,12 +29,29 @@ export const PATTERN_BUDGET_MS = 1_000;
 const TRANSFER_GRACE_MS = 250;
 /** Workers kept for searches at once; a search past this waits for one to free up. */
 const POOL_MAX = 4;
+/**
+ * Searches that may wait for a worker at once. A waiting search holds the lines
+ * it was handed, so the queue is capped: past it a search is refused with a 503
+ * rather than piling file contents up in memory.
+ */
+export const MAX_WAITING = 16;
+/**
+ * Longest pattern accepted. The pattern is compiled on the request thread (that
+ * is how a syntax error earns its 400 there), so its length is what bounds that.
+ */
+export const MAX_PATTERN_LENGTH = 1_000;
+/**
+ * Characters handed to the worker in one message. Posting a message copies it
+ * on the request thread, so a large file goes over in pieces of about this size
+ * rather than in one copy that would stall every other request.
+ */
+export const BATCH_CHARS = 1_000_000;
 
 /** A pattern stopped for taking too long — a 400, worded for the caller. */
 export class PatternTooExpensiveError extends ToolError {
   constructor(pattern: string, budgetMs: number) {
     super(
-      `Pattern too expensive: /${pattern.length > 80 ? `${pattern.slice(0, 80)}…` : pattern}/ did not finish matching within this search's ${budgetMs} ms budget, ` +
+      `Pattern too expensive: /${pattern.length > 80 ? `${pattern.slice(0, 80)}…` : pattern}/ did not finish matching within this search's ${budgetMs / 1000} s budget, ` +
         'so it was stopped and nothing was returned. Patterns with nested or overlapping repetition such as ' +
         '`(a+)+` or `(a|aa)*` can take exponential time on some lines. Use a simpler pattern — a literal, ' +
         'an anchor, a character class, a single repetition — or narrow `path`.',
@@ -89,6 +106,11 @@ function spawn(): Worker {
 }
 
 async function acquire(): Promise<Worker> {
+  if (idle.length === 0 && live >= POOL_MAX && waiting.length >= MAX_WAITING) {
+    throw new ToolError('Too many searches are running at once; try again in a few seconds.', 503, {
+      code: 'search_busy',
+    });
+  }
   const w = idle.pop() ?? (live < POOL_MAX ? spawn() : await new Promise<Worker>((resolve) => waiting.push(resolve)));
   w.ref();
   return w;
@@ -127,12 +149,22 @@ function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'ti
 export class BoundedMatcher {
   private spentMs = 0;
 
-  /** Throws the 400 `Invalid regex` the caller's syntax earns, before any worker is involved. */
+  /**
+   * Throws the 400 `Invalid regex` the caller's syntax earns, or the 400 an
+   * over-long pattern earns, before any worker is involved.
+   */
   constructor(
     private readonly source: string,
     private readonly flags: string,
     private readonly budgetMs: number = PATTERN_BUDGET_MS,
   ) {
+    if (source.length > MAX_PATTERN_LENGTH) {
+      throw new ToolError(
+        `Pattern too long: ${source.length} characters, and a search pattern may have at most ${MAX_PATTERN_LENGTH}.`,
+        400,
+        { code: 'pattern_too_long' },
+      );
+    }
     try {
       new RegExp(source, flags);
     } catch (err) {
@@ -147,26 +179,44 @@ export class BoundedMatcher {
    */
   async matchingLines(lines: string[], limit: number): Promise<number[]> {
     if (limit <= 0 || lines.length === 0) return [];
-    const remaining = this.budgetMs - this.spentMs;
-    if (remaining <= 0) throw new PatternTooExpensiveError(this.source, this.budgetMs);
+    if (this.spentMs >= this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
     const w = await acquire();
-    let reply: Reply | 'timeout';
+    const hits: number[] = [];
     try {
-      reply = await run(w, { source: this.source, flags: this.flags, lines, limit }, remaining + TRANSFER_GRACE_MS);
+      for (let from = 0; from < lines.length && hits.length < limit; ) {
+        const to = batchEnd(lines, from);
+        for (const i of await this.matchBatch(w, lines.slice(from, to), limit - hits.length)) hits.push(from + i);
+        from = to;
+      }
     } catch (err) {
+      // Terminating is what stops a regex mid-backtrack; the pool replaces it.
       void w.terminate();
       throw err;
     }
+    release(w);
+    return hits;
+  }
+
+  /** One handoff to the worker, charged to this search's budget. */
+  private async matchBatch(w: Worker, lines: string[], limit: number): Promise<number[]> {
+    const remaining = this.budgetMs - this.spentMs;
+    if (remaining <= 0) throw new PatternTooExpensiveError(this.source, this.budgetMs);
+    const reply = await run(w, { source: this.source, flags: this.flags, lines, limit }, remaining + TRANSFER_GRACE_MS);
     if (reply === 'timeout') {
-      // Terminating is what stops a regex mid-backtrack; the pool replaces it.
-      void w.terminate();
       this.spentMs = this.budgetMs;
       throw new PatternTooExpensiveError(this.source, this.budgetMs);
     }
-    release(w);
     if ('error' in reply) throw new ToolError(`Invalid regex: ${reply.error}`, 400);
     this.spentMs += reply.elapsed;
     if (this.spentMs > this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
     return reply.hits;
   }
+}
+
+/** Where the batch starting at `from` ends: about {@link BATCH_CHARS} characters on, and never empty. */
+function batchEnd(lines: string[], from: number): number {
+  let to = from;
+  let chars = 0;
+  while (to < lines.length && (to === from || chars + lines[to]!.length <= BATCH_CHARS)) chars += lines[to++]!.length;
+  return to;
 }
