@@ -211,8 +211,8 @@ export function registerToolManualsTools(
         invalid: {
           type: 'array',
           description:
-            '`.tool` files the scan refused — the ONLY tools missing from `tools`; every other tool is listed, and ' +
-            'callable unless it is `skipped`. Each names the file and why it was refused, with the line/column or field where the validation ' +
+            '`.tool` files the scan refused — the ONLY tools missing from `tools`. Being listed does not ' +
+            'make a tool callable; a `skipped` one is not. Each names the file and why it was refused, with the line/column or field where the validation ' +
             'failed. Fix the file (or delete it) and the next call lists it as a normal tool, with nothing to restart ' +
             'or reconnect. Never contains a secret value.',
           items: {
