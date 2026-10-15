@@ -3296,6 +3296,12 @@ export class GitService implements IGitService {
         .finally(() => {
           if (this.changedEntriesInFlight.get(key) === pending) this.changedEntriesInFlight.delete(key);
         });
+      // Same bound as the memo: evicting an in-flight entry costs at most one
+      // redundant diff for that pair, never a lost answer.
+      if (this.changedEntriesInFlight.size >= GitService.CHANGED_ENTRIES_MAX) {
+        const oldest = this.changedEntriesInFlight.keys().next().value;
+        if (oldest !== undefined) this.changedEntriesInFlight.delete(oldest);
+      }
       this.changedEntriesInFlight.set(key, pending);
     }
     return pending;
