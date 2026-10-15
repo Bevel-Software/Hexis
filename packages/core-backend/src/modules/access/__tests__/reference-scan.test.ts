@@ -221,6 +221,52 @@ describe('KbReferenceScanner — candidates are the resolver\'s walk, not the ex
   });
 });
 
+describe('KbReferenceScanner — a folder the walk cannot list', () => {
+  /** The real walk, reporting `Locked` as a folder it could not list. */
+  function walkerWithHole(): ITreeWalker & { walks: number } {
+    const disk = new NodeFs();
+    const walker = {
+      walks: 0,
+      walk: (r: string, o: Parameters<NodeFs['walk']>[1], l: Parameters<NodeFs['walk']>[2]) => disk.walk(r, o, l),
+      walkFiles: (r: string, m: (b: string) => boolean, o?: { strict?: boolean }) => disk.walkFiles(r, m, o),
+      walkKb: async (r: string, l: Parameters<NodeFs['walkKb']>[1], o?: Parameters<NodeFs['walkKb']>[2]) => {
+        walker.walks++;
+        const result = await disk.walkKb(r, l, o);
+        return { holes: [...result.holes, 'Locked'] };
+      },
+    };
+    return walker;
+  }
+
+  it('a rename refuses with nothing written: the folder may hold references', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walkerWithHole());
+      await expect(
+        scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m)),
+      ).rejects.toThrow(/Cannot list Locked .*rename aborted with no changes/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the advisory scan still answers what it read, but never caches an incomplete result', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole2-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const walker = walkerWithHole();
+      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walker);
+      expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
+      await scanner.scan('ws-1');
+      // Not served from cache: the second scan retried the listing.
+      expect(walker.walks).toBe(2);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('KbReferenceScanner — event-bus cache invalidation', () => {
   it('drops the cached scan when a scanned-extension file changes in the workspace', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-bus-'));

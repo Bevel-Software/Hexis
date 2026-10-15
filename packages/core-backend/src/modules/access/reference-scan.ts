@@ -27,6 +27,7 @@ import { promises as fs } from 'node:fs';
 import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/platform-shared';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { NodeFs } from '../kb-fs/node-fs.js';
+import { logger } from '../../shared/logging.js';
 import {
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
@@ -35,6 +36,8 @@ import {
   parseAccessEntry,
   stripComment,
 } from '../access-model/access-grammar.js';
+
+const log = logger('access');
 
 /**
  * Resolve the [start, end) line range that role rewrites may touch — the YAML
@@ -392,10 +395,14 @@ export class KbReferenceScanner {
    * rename would strand them. Paths are relative to the KB dir. (`roles.yaml`
    * matches no scanned extension, so it's excluded; callers commit it
    * separately.)
+   *
+   * `holes` names every folder the walk could not list: the candidate set
+   * is INCOMPLETE when it is non-empty, and each caller decides what that
+   * means — the rewrite refuses, the advisory scan says so and does not cache.
    */
-  async collectCandidateFiles(workspaceId: string): Promise<string[]> {
+  async collectCandidateFiles(workspaceId: string): Promise<{ files: string[]; holes: string[] }> {
     const out: string[] = [];
-    await this.disk.walkKb(await this.repoDir(workspaceId), [
+    const { holes } = await this.disk.walkKb(await this.repoDir(workspaceId), [
       {
         onFile(dir, name) {
           const rel = dir ? `${dir}/${name}` : name;
@@ -403,7 +410,7 @@ export class KbReferenceScanner {
         },
       },
     ]);
-    return out;
+    return { files: out, holes };
   }
 
   /**
@@ -429,7 +436,12 @@ export class KbReferenceScanner {
     const startedUnder = flight.gen;
     try {
       const repoDir = await this.repoDir(workspaceId);
-      const candidates = await this.collectCandidateFiles(workspaceId);
+      const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
+      if (holes.length > 0) {
+        log.warn(
+          `reference scan: cannot list ${holes.map((h) => h || '.').join(', ')} — references there are not reported`,
+        );
+      }
       const texts = await Promise.all(
         candidates.map(async (repoRel) => {
           try {
@@ -452,7 +464,9 @@ export class KbReferenceScanner {
       // Cache only when no invalidation landed mid-scan; the caller still gets
       // this snapshot (at worst one write stale — same as the pre-scan world),
       // but a stale snapshot must never STICK for a TTL. The next call re-scans.
-      if (flight.gen === startedUnder) {
+      // An incomplete scan (a folder could not be listed) is never cached
+      // either: the next call retries the listing.
+      if (flight.gen === startedUnder && holes.length === 0) {
         this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
       }
       return byToken;
@@ -479,7 +493,14 @@ export class KbReferenceScanner {
     const oldTokens = typeof oldToken === 'string' ? [oldToken] : oldToken;
     const repoDir = await this.repoDir(workspaceId);
     const writes: ReferenceRewrite[] = [];
-    const candidates = await this.collectCandidateFiles(workspaceId);
+    const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
+    // A folder we cannot list might hold references to the old token — same
+    // fail-closed rule as an unreadable file below.
+    if (holes.length > 0) {
+      throw makeError(
+        `Cannot list ${holes.map((h) => h || '.').join(', ')} while rewriting references; rename aborted with no changes`,
+      );
+    }
     const texts = await Promise.all(
       candidates.map(async (repoRel) => {
         try {
