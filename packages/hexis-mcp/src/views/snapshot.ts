@@ -16,6 +16,8 @@
  * difference.
  */
 
+import { extractFrontmatter } from '@bevel-software/platform-shared';
+
 export const SNAPSHOT_FORMAT = 'hexis-kb-snapshot/1';
 
 /** How a page's snapshot was mirrored: the `CONFIG` of `mirror.chain.js`. */
@@ -140,23 +142,22 @@ interface Frontmatter {
   typeLink: string;
   id: string | null;
   owner: string | null;
-  start: number;
+  /** The lines after the closing fence. */
+  body: string[];
 }
 
-function parseFrontmatter(lines: string[]): Frontmatter | null {
-  if (!lines.length || lines[0]!.trim() !== '---') return null;
-  let close = -1;
-  for (let i = 1; i < lines.length; i += 1) {
-    if (lines[i]!.trim() === '---') {
-      close = i;
-      break;
-    }
-  }
-  if (close === -1) return null;
+/**
+ * A node's frontmatter: split off by the platform's one splitter
+ * (platform-shared `extractFrontmatter`, the fence rule every reader asks),
+ * then read for the three keys a snapshot carries.
+ */
+function parseFrontmatter(text: string): Frontmatter | null {
+  const split = extractFrontmatter(text);
+  if (!split) return null;
   let nt: RegExpMatchArray | null = null;
   let id: string | null = null;
   let owner: string | null = null;
-  for (const raw of lines.slice(1, close)) {
+  for (const raw of splitLines(split.frontmatter)) {
     const line = raw.trim();
     let m: RegExpMatchArray | null;
     if (nt === null && (m = line.match(NODETYPE_RE))) {
@@ -170,7 +171,7 @@ function parseFrontmatter(lines: string[]): Frontmatter | null {
     if (owner === null && (m = line.match(OWNER_RE))) owner = m[1] || null;
   }
   if (nt === null) return null;
-  return { typeName: nt[1]!, typeLink: nt[2]!, id, owner, start: close + 1 };
+  return { typeName: nt[1]!, typeLink: nt[2]!, id, owner, body: splitLines(split.body) };
 }
 
 /** Field name without its parameters, and its link category if any. */
@@ -289,11 +290,10 @@ function parseFields(lines: string[], sourceFile: string): Record<string, Field>
 
 /** Top-level field name -> link category, for one NodeType definition. */
 function parseNodeType(text: string): Record<string, string | null> | null {
-  const lines = splitLines(text);
-  const fm = parseFrontmatter(lines);
+  const fm = parseFrontmatter(text);
   if (!fm || fm.typeName !== 'NodeType') return null;
   const categories: Record<string, string | null> = {};
-  for (const line of lines.slice(fm.start)) {
+  for (const line of fm.body) {
     const hm = line.trim().match(HEADER_RE);
     if (hm && hm[1]!.length === 1) {
       const [name, category] = headerParams(hm[2]!.trim());
@@ -329,11 +329,10 @@ export function parseGraph(files: Record<string, string>): Record<string, Parsed
 
   const nodes: Record<string, ParsedNode> = {};
   for (const rel of Object.keys(files).filter((p) => KNOWLEDGE_PATH_RE.test(p)).sort()) {
-    const lines = splitLines(files[rel]!);
-    const fm = parseFrontmatter(lines);
+    const fm = parseFrontmatter(files[rel]!);
     if (!fm) continue;
     const typePath = resolveLink(fm.typeLink.replace(/\\/g, '/'), rel);
-    const fields = parseFields(lines.slice(fm.start), rel);
+    const fields = parseFields(fm.body, rel);
     const definition = types[typePath];
     const links: Record<string, Link[]> = {};
     for (const [fname, field] of Object.entries(fields)) {
@@ -498,12 +497,10 @@ export function buildSnapshot(
 // -- the mirror: mirror.chain.js, minus the access.md walk ---------------------
 
 function nodeTypeOf(text: string): { name: string; link: string } | null {
-  const lines = text.split(/\r?\n/);
-  if (!lines.length || lines[0]!.trim() !== '---') return null;
-  for (let i = 1; i < lines.length; i += 1) {
-    const l = lines[i]!.trim();
-    if (l === '---') return null;
-    const m = l.match(/^nodeType:\s*["']?\[([^\]]+)\]\(([^)]+)\)/);
+  const split = extractFrontmatter(text);
+  if (!split) return null;
+  for (const raw of splitLines(split.frontmatter)) {
+    const m = raw.trim().match(/^nodeType:\s*["']?\[([^\]]+)\]\(([^)]+)\)/);
     if (m) return { name: m[1]!, link: m[2]! };
   }
   return null;
@@ -512,26 +509,15 @@ function nodeTypeOf(text: string): { name: string; link: string } | null {
 /** Keep only the frontmatter and the wanted top-level fields, as the chain does. */
 function reduceToFields(text: string, want: Set<string>): string {
   if (!want.size) return text;
-  const lines = text.split(/\r?\n/);
-  const out: string[] = [];
-  let i = 0;
-  if (lines[0] && lines[0].trim() === '---') {
-    out.push(lines[0]);
-    i = 1;
-    while (i < lines.length && lines[i]!.trim() !== '---') {
-      out.push(lines[i]!);
-      i += 1;
-    }
-    out.push('---');
-    i += 1;
-  }
+  const split = extractFrontmatter(text);
+  const out: string[] = split ? ['---', ...splitLines(split.frontmatter), '---'] : [];
   let keep = false;
-  for (; i < lines.length; i += 1) {
-    const h = lines[i]!.trim().match(/^(#{1,6})\s+(.+)$/);
+  for (const line of (split ? split.body : text).split(/\r?\n/)) {
+    const h = line.trim().match(/^(#{1,6})\s+(.+)$/);
     if (h && h[1]!.length === 1) {
       keep = want.has(h[2]!.replace(/\s*\([^)]*\)\s*$/, '').trim()) || /^(Name|Title)$/i.test(h[2]!.trim());
     }
-    if (keep) out.push(lines[i]!);
+    if (keep) out.push(line);
   }
   return out.join('\n');
 }

@@ -96,6 +96,34 @@ describe('mirrorFiles (port of mirror.chain.js)', () => {
     expect(files[`${ONT}/Knowledge/Tasks/Bread.md`]).toContain('# Name');
   });
 
+  it("reads a file's frontmatter by the platform's one rule (platform-shared extractFrontmatter)", async () => {
+    const spaced = `${ONT}/Knowledge/Tasks/Spaced.md`;
+    const unclosed = `${ONT}/Knowledge/Tasks/Unclosed.md`;
+    const files: Record<string, string> = {
+      ...FILES,
+      // A fence is `---`, whitespace aside; line endings are the file's own.
+      [spaced]: ['  ---  ', 'nodeType: "[Task](../../NodeTypes/Task.md)"', ' --- ', '# Name', 'Spaced', '# Status', 'open'].join('\r\n'),
+      // A fence that never closes opens no frontmatter, so this is no node, whatever its first lines say.
+      [unclosed]: ['---', 'nodeType: "[Task](../../NodeTypes/Task.md)"', '# Name', 'Unclosed'].join('\n'),
+    };
+    const over: KbReader = {
+      list: async (path: string) => {
+        const names = new Map<string, string>();
+        for (const p of Object.keys(files)) {
+          if (!p.startsWith(`${path}/`)) continue;
+          const rest = p.slice(path.length + 1);
+          names.set(rest.split('/')[0]!, rest.includes('/') ? 'directory' : 'file');
+        }
+        return [...names].map(([name, type]) => ({ name, type }));
+      },
+      read: async (path: string) => files[path]!,
+    };
+    const { files: mirrored } = await mirrorFiles(over, { dirs: [`${ONT}/Knowledge`], deep: true, types: ['Task'], fields: ['Status'] });
+    expect(Object.keys(mirrored)).toContain(spaced);
+    expect(Object.keys(mirrored)).not.toContain(unclosed);
+    expect(buildSnapshot(mirrored, { type: ['Task'], fields: 'Name,Status' }, 'main').nodes[spaced]?.fields.Status?.text).toBe('open');
+  });
+
   it('reports a file it could not read instead of failing the mirror', async () => {
     const { errors } = await mirrorFiles(reader, { paths: [`${ONT}/Knowledge/Missing.md`] });
     expect(errors).toEqual([`${ONT}/Knowledge/Missing.md: no ${ONT}/Knowledge/Missing.md`]);
