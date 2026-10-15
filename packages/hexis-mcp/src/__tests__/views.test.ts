@@ -22,61 +22,9 @@ import {
   VIEW_LINK_TOOL,
   VIEW_MIME_TYPE,
 } from '../views/catalog.js';
+import { FILES, ONT, VIEW, fakeKb, page, snapshotOnPage } from './fixtures/views-kb.js';
 
-const ONT = 'KnowledgeBase/Ops';
 const hashOf = (url: string): string => createHash('sha256').update(url).digest('hex').slice(0, 8);
-const TASK_TYPE = [
-  '---',
-  'nodeType: "[NodeType](../NodeType.md)"',
-  '---',
-  '# Name',
-  '# Status',
-  '# Project (link outbound)',
-  '# Blocked By (link inbound)',
-].join('\n');
-const PROJECT_TYPE = ['---', 'nodeType: "[NodeType](../NodeType.md)"', '---', '# Name', '# Goal'].join('\n');
-
-const task = (name: string, extra: string[] = []): string =>
-  [
-    '---',
-    'nodeType: "[Task](../../NodeTypes/Task.md)"',
-    `id: task-${name.toLowerCase()}`,
-    'owner: "Juan <juan@bevel.software>"',
-    '---',
-    '# Name',
-    name,
-    '# Status',
-    'open',
-    ...extra,
-  ].join('\n');
-
-const FILES: Record<string, string> = {
-  [`${ONT}/NodeTypes/Task.md`]: TASK_TYPE,
-  [`${ONT}/NodeTypes/Project.md`]: PROJECT_TYPE,
-  [`${ONT}/Knowledge/Tasks/Bread.md`]: task('Bread', [
-    '# Project',
-    'For [Groceries](../Projects/Groceries.md).',
-    '<details>',
-    '<summary>Source of Information</summary>',
-    '',
-    '1. Binding Slack thread — the status (2026-09-29)',
-    '</details>',
-    '# Blocked By',
-    'Waiting on [Dentist](task-dentist).',
-    '# Notes',
-    'Not a selected field.',
-  ]),
-  [`${ONT}/Knowledge/Tasks/Dentist.md`]: task('Dentist'),
-  [`${ONT}/Knowledge/Projects/Groceries.md`]: [
-    '---',
-    'nodeType: "[Project](../../NodeTypes/Project.md)"',
-    '---',
-    '# Name',
-    'Groceries',
-    '# Goal',
-    'Food',
-  ].join('\n'),
-};
 
 describe('buildSnapshot (port of build_snapshot.py)', () => {
   const selection: Selection = { type: ['Task'], fields: 'Name,Status,Project,Blocked By', keep_soi: true };
@@ -156,10 +104,6 @@ describe('mirrorFiles (port of mirror.chain.js)', () => {
   });
 });
 
-const page = (snapshot: object): string =>
-  `<!doctype html>\n<html><head><title>To-do list</title></head><body>` +
-  `<script id="kb-snapshot">\nwindow.KB_SNAPSHOT = ${JSON.stringify(snapshot)};\n</script></body></html>`;
-
 describe('the page and its bridge', () => {
   it('reads the snapshot a page carries', () => {
     const html = page({ format: 'hexis-kb-snapshot/1', selection: { type: ['Task'] } });
@@ -203,7 +147,6 @@ describe('the page and its bridge', () => {
 });
 
 describe('the view catalog', () => {
-  const VIEW = 'KnowledgeBase/Juan/Dashboards/To-Do-List.html';
   const CONFIG = { baseUrl: 'https://kb.example', connectionKey: 'k' };
 
   it('finds views in a grep, learns the repository folder, and skips skill templates', () => {
@@ -224,48 +167,6 @@ describe('the view catalog', () => {
     expect(viewToolName('A/To-Do-List.html', taken)).toBe('show_to_do_list');
     expect(viewToolName('B/To-Do-List.html', taken)).toBe('show_to_do_list_2');
   });
-
-  const snapshotOnPage = {
-    format: 'hexis-kb-snapshot/1',
-    takenAt: '2026-10-01',
-    nodes: {},
-    selection: {
-      type: ['Task'],
-      fields: 'Name,Status',
-      mirror: { branch: 'main', dirs: [`${ONT}/Knowledge`], deep: true, types: ['Task'], fields: ['Name', 'Status'] },
-    },
-  };
-  const fakeKb = (pageHtml: string) =>
-    vi.fn(async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
-      const path = String(args.path ?? '').replace(/^knowledge-base\//, '');
-      switch (tool) {
-        case 'start_session':
-          return { sessionId: 's-1' };
-        case 'grep':
-          return {
-            matches: [
-              { path: `knowledge-base/${VIEW}`, text: '<title>To-do list</title>' },
-              { path: `knowledge-base/${VIEW}`, text: '<script id="kb-snapshot">' },
-            ],
-          };
-        case 'read_file':
-          if (path === VIEW) return { path, content: pageHtml };
-          if (path in FILES) return { path, content: FILES[path] };
-          throw new Error(`no ${path}`);
-        case 'list_files': {
-          const prefix = `${path}/`;
-          const names = new Map<string, string>();
-          for (const p of Object.keys(FILES)) {
-            if (!p.startsWith(prefix)) continue;
-            const rest = p.slice(prefix.length);
-            names.set(rest.split('/')[0]!, rest.includes('/') ? 'directory' : 'file');
-          }
-          return { entries: [...names].map(([name, type]) => ({ name, type })) };
-        }
-        default:
-          throw new Error(`unexpected ${tool}`);
-      }
-    });
 
   it('lists a tool per view that points at its ui:// page, plus the app-only data tool', async () => {
     const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
