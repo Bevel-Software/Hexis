@@ -223,7 +223,7 @@ describe('KbReferenceScanner — candidates are the resolver\'s walk, not the ex
 
 describe('KbReferenceScanner — a folder the walk cannot list', () => {
   /** The real walk, reporting `Locked` as a folder it could not list. */
-  function walkerWithHole(): ITreeWalker & { walks: number } {
+  function walkerWithHole(hole = 'Locked'): ITreeWalker & { walks: number } {
     const disk = new NodeFs();
     const walker = {
       walks: 0,
@@ -232,7 +232,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       walkKb: async (r: string, l: Parameters<NodeFs['walkKb']>[1], o?: Parameters<NodeFs['walkKb']>[2]) => {
         walker.walks++;
         const result = await disk.walkKb(r, l, o);
-        return { holes: [...result.holes, 'Locked'] };
+        return { holes: [...result.holes, hole] };
       },
     };
     return walker;
@@ -246,6 +246,21 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       await expect(
         scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m)),
       ).rejects.toThrow(/Cannot list Locked .*rename aborted with no changes/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a folder name with a line break cannot forge a second line in the refusal', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole3-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walkerWithHole('Lo\nFAKE: line'));
+      const err = await scanner
+        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m))
+        .catch((e: Error) => e);
+      expect((err as Error).message).not.toContain('\n');
+      expect((err as Error).message).toContain('Lo\\nFAKE: line');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

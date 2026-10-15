@@ -28,6 +28,7 @@ import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/plat
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { NodeFs } from '../kb-fs/node-fs.js';
 import { logger } from '../../shared/logging.js';
+import { printable, sanitizedPath } from '../../shared/printable.js';
 import {
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
@@ -439,7 +440,7 @@ export class KbReferenceScanner {
       const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
       if (holes.length > 0) {
         log.warn(
-          `reference scan: cannot list ${holes.map((h) => h || '.').join(', ')} — references there are not reported`,
+          `reference scan: cannot list ${holes.map((h) => printable(h || '.')).join(', ')} — references there are not reported`,
         );
       }
       const texts = await Promise.all(
@@ -498,7 +499,7 @@ export class KbReferenceScanner {
     // fail-closed rule as an unreadable file below.
     if (holes.length > 0) {
       throw makeError(
-        `Cannot list ${holes.map((h) => h || '.').join(', ')} while rewriting references; rename aborted with no changes`,
+        `Cannot list ${holes.map((h) => sanitizedPath(h || '.')).join(', ')} while rewriting references; rename aborted with no changes`,
       );
     }
     const texts = await Promise.all(
