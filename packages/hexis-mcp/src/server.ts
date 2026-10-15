@@ -50,6 +50,7 @@ import {
   ConnectionKeyRejectedError,
   fetchAllManuals,
   fetchMcpApps,
+  fetchToolHints,
   fetchCatalogRevision,
   fetchLocalOnlyManuals,
   resolveDeployment,
@@ -253,6 +254,14 @@ export function listedTools(
    * is the one point where it becomes a listing entry a client reads.
    */
   views: Record<string, { resourceUri: string }> = {},
+  /**
+   * The read-only hint of each platform tool and meta-tool, by name, as the
+   * deployment serves them (`fetchToolHints`). Joined on here for the same
+   * reason as the views: the deployment's tools reach this process through its
+   * MCP endpoint, and the UTCP MCP protocol keeps no annotation on the way in.
+   * A tool from a local manual is never in it, and lists no hint.
+   */
+  hints: Readonly<Record<string, boolean>> = {},
 ): McpTool[] {
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
@@ -262,7 +271,8 @@ export function listedTools(
     // Own keys only: a tool named `constructor` or `toString` is not one an
     // app view was published for.
     const view = Object.hasOwn(views, tool.mcpName) ? views[tool.mcpName] : undefined;
-    const entry = toListedTool(view ? { ...tool, ui: view } : tool); // logs its own reason on a name/schema drop
+    const hinted = withReadOnlyHint(tool, hints);
+    const entry = toListedTool(view ? { ...hinted, ui: view } : hinted); // logs its own reason on a name/schema drop
     if (!entry) {
       dropped.push(tool.mcpName);
       continue;
@@ -288,7 +298,7 @@ export function listedTools(
   // the deployment under (`hexis`), not the one the hosted endpoint uses
   // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
   // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
-  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, examplePool);
+  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, examplePool, { readOnly: hints });
   if (dropped.length) {
     console.error(
       `[hexis-mcp] serving ${metaTools.length + listed.length} tool(s); ` +
@@ -296,6 +306,19 @@ export function listedTools(
     );
   }
   return [...metaTools, ...listed];
+}
+
+/**
+ * A tool with the hint the deployment serves for it: the deployment's own
+ * tools only, by name, and none when the deployment named none (an older one,
+ * or a read that failed) — never the `false` an empty tag list would read as.
+ */
+function withReadOnlyHint(tool: ProxiedTool, hints: Readonly<Record<string, boolean>>): ProxiedTool {
+  const rest: ProxiedTool = { ...tool };
+  delete rest.readOnly;
+  if (tool.manualName !== REMOTE_MANUAL_NAME) return rest;
+  const hint = Object.hasOwn(hints, tool.mcpName) ? hints[tool.mcpName] : undefined;
+  return typeof hint === 'boolean' ? { ...rest, readOnly: hint } : rest;
 }
 
 /**
@@ -528,6 +551,8 @@ export async function createHexisMcpServer(
    * listed and answers its text.
    */
   let apps: McpAppManifest = { tools: {}, resources: [] };
+  /** The read-only hints last read from the deployment, kept through a failed read. */
+  let hints: Record<string, boolean> = {};
   /**
    * The SDK server, declared up here rather than beside `shutdown`: the
    * catalog refresh below sends notifications on it, and a closure defined
@@ -1094,7 +1119,11 @@ export async function createHexisMcpServer(
       // look the notice above exists to prevent. The truth is the same one
       // the call handler gives: this server is going away.
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools, apps.tools) };
+      // The hints are read per listing, so an admin's change on the Tools page
+      // is in the very next one (see `fetchToolHints`).
+      hints = await fetchToolHints(config, hints);
+      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      return { tools: listedTools(tools, apps.tools, hints) };
     });
 
     // The deployment's MCP App views, served from here so a host connected

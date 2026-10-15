@@ -612,3 +612,59 @@ export async function fetchMcpApps(
     return kept;
   }
 }
+
+/**
+ * The read-only hint of every platform tool and every code-mode meta-tool, as
+ * the deployment has them now: its built-in value, or an admin's override.
+ *
+ * Read per LISTING rather than once: an admin who flips a hint on the Tools
+ * page expects the next `tools/list` to carry it, and the tool discovery this
+ * server registered at startup goes through the deployment's MCP endpoint,
+ * whose `annotations` the UTCP MCP protocol drops on the way in. One small
+ * read, beside the catalog check a listing already awaits.
+ *
+ * Never fatal, and never louder than once per kind of failure: a deployment
+ * that predates the route answers 404, and the right listing for it is the one
+ * it got before — no hints at all. A transient failure keeps `previous`, the
+ * hints already served, so a deployment mid-redeploy does not flip every hint
+ * off for one listing.
+ */
+export async function fetchToolHints(
+  config: HexisMcpConfig,
+  previous: Readonly<Record<string, boolean>> = {},
+): Promise<Record<string, boolean>> {
+  try {
+    const body = await getJson(`${config.baseUrl}/api/agent/tool-hints`, {
+      label: 'the tool hints',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+    const tools = (body as { tools?: unknown } | null)?.tools;
+    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) {
+      throw new Error('the answer is not a tool-hint map (expected { tools: { <name>: true | false } })');
+    }
+    const hints: Record<string, boolean> = {};
+    for (const [name, value] of Object.entries(tools as Record<string, unknown>)) {
+      if (typeof value === 'boolean') hints[name] = value;
+    }
+    lastToolHintsFailure = null;
+    return hints;
+  } catch (err) {
+    // A rejected key is the discovery's to report, as for the app manifest.
+    const gone = err instanceof ConnectionKeyRejectedError || (err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0));
+    const kept = gone ? {} : { ...previous };
+    const reason = err instanceof Error ? err.message : String(err);
+    const key = gone ? 'gone' : reason;
+    if (lastToolHintsFailure !== key) {
+      lastToolHintsFailure = key;
+      console.error(
+        `[hexis-mcp] could not read the deployment's tool hints (${reason}); ` +
+          (Object.keys(kept).length ? 'keeping the hints read before.' : 'tools are listed without a read-only hint.'),
+      );
+    }
+    return kept;
+  }
+}
+
+/** The last tool-hint failure logged, so a deployment without the route is said once, not per listing. */
+let lastToolHintsFailure: string | null = null;

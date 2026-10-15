@@ -22,7 +22,24 @@ export interface ProxiedTool {
    * ignores the field, so carrying it costs nothing.
    */
   ui?: McpAppToolUi;
+  /**
+   * Whether MCP clients are told this tool only reads (`annotations.readOnlyHint`).
+   *
+   * Set for the platform's own tools only, from the {@link READ_ONLY_TAG} the
+   * deployment's manual carries on each one it judges read-only — its write
+   * declaration, or an admin's override of it. Left unset for a tool from
+   * anywhere else (a `.tool` manual, a plugin's MCP server): such a tool is
+   * listed with no annotation at all, exactly as before.
+   */
+  readOnly?: boolean;
 }
+
+/**
+ * The UTCP tag the deployment's manual puts on a platform tool whose
+ * effective read-only hint is true. A tag rather than a field because tags are
+ * already part of the UTCP tool shape and survive the manual serializer.
+ */
+export const READ_ONLY_TAG = 'read-only';
 
 /**
  * MCP tool-name grammar (also the Anthropic API's), and a length bound. A
@@ -96,6 +113,9 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
     // every client is required to tolerate, so a client without the
     // extension reads the tool exactly as it did before.
     ...(tool.ui ? { _meta: toolUiMeta(tool.ui) } : {}),
+    // The read-only hint, and no other annotation: only for a tool whose
+    // effect the platform knows (see `ProxiedTool.readOnly`).
+    ...(tool.readOnly !== undefined ? { annotations: { readOnlyHint: tool.readOnly } } : {}),
   };
 }
 
@@ -407,6 +427,9 @@ export function flattenManualTool(tool: UtcpTool, kbManualName: string): Proxied
     description: tool.description,
     inputSchema: tool.inputs,
     manualName: manual,
+    // Only the platform's own manual speaks for its tools' effect; every other
+    // manual's tags are its author's, and its tools stay unannotated.
+    ...(manual === kbManualName ? { readOnly: (tool.tags ?? []).includes(READ_ONLY_TAG) } : {}),
   };
 }
 

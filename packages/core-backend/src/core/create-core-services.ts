@@ -32,6 +32,7 @@ import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-f
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
+import { ToolReadOnlyHints } from '../modules/tool-registry/read-only-hints.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -386,6 +387,8 @@ export interface CoreServices {
   /** The Audit log: what every connected agent and key called, and the revoke of an agent's grant. */
   agentAuditService: AgentAuditService;
   toolRegistry: ToolRegistry;
+  /** Each platform tool's and meta-tool's read-only hint, and an admin's overrides of them. */
+  readOnlyHints: ToolReadOnlyHints;
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
@@ -1336,6 +1339,8 @@ export async function createCoreServices(
       // the setup save applies lands without a restart.
       kbLayout: () => kb.layout,
       secretsScope,
+      // Read at listing time, by when the hints below exist.
+      readOnlyOverrides: () => readOnlyHints.overrides(),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1404,6 +1409,9 @@ export async function createCoreServices(
   // `internalTokenService` minted above (shared with the agent factories) is
   // the same one the tool-auth middleware verifies internal tokens against.
   const toolRegistry = new ToolRegistry();
+  // What MCP clients are told about each platform tool's effect: its write
+  // declaration, or an admin's override from the Tools page.
+  const readOnlyHints = new ToolReadOnlyHints(toolRegistry, settings);
   const resolveToolContext = createToolContextResolver({
     authService,
     workspaceService,
@@ -1656,6 +1664,7 @@ export async function createCoreServices(
     mcpResourceMetadataUrl,
     agentAuditService,
     toolRegistry,
+    readOnlyHints,
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,

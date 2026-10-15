@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
 import { authFetch } from '../../lib/api';
+import { useConfirm } from '../../shared/components';
+import { fetchToolHints, setToolReadOnly, type ToolHint, type ToolHints } from './tool-hints.api';
 
 /**
  * A read-only explorer for the tools Bevel exposes to external agents — it
@@ -20,7 +22,98 @@ import { authFetch } from '../../lib/api';
  * agent's loopback and never surfaced to users, so the UI doesn't offer them.)
  * Tool EXECUTION is unchanged: it always requires a key / internal token at the
  * tool endpoints (a JWT is admitted on the manual only, never to invoke a tool).
+ *
+ * Each platform tool, and each code-mode meta-tool, also shows the read-only
+ * hint MCP clients are given for it (`GET /api/tool-hints`). An admin gets a
+ * toggle and a reset; everyone else sees the value. The meta-tools are not in
+ * the manual — they are the MCP servers' own — so they sit in a section of
+ * their own below the endpoints.
  */
+
+/** The manual tag the deployment puts on a read-only tool; shown as the hint control, not as a chip. */
+const READ_ONLY_TAG = 'read-only';
+
+/**
+ * What each code-mode meta-tool does, in a line. The MCP servers build their
+ * full descriptions per connection, so the page carries its own summary.
+ */
+const META_TOOL_SUMMARIES: Record<string, string> = {
+  list_tools: 'Lists every tool registered on the connection, by the name a chain calls it with.',
+  tools_info: 'Answers the TypeScript interface of the tools it is asked about.',
+  call_tool_chain: 'Runs JavaScript that calls any of the tools, writing ones included, in one round trip.',
+};
+
+/** Change one tool's hint: a value, or `null` to put the built-in value back. */
+type SetHint = (hint: ToolHint, readOnly: boolean | null) => void;
+
+/**
+ * The read-only hint of one tool: a switch and a reset for an admin, the value
+ * alone for anyone else.
+ */
+function ReadOnlyControl({
+  hint,
+  canEdit,
+  busy,
+  onSet,
+}: {
+  hint: ToolHint;
+  canEdit: boolean;
+  busy: boolean;
+  onSet: SetHint;
+}) {
+  const overridden = hint.override !== null;
+  const builtInLabel = hint.builtIn ? 'read-only' : 'not read-only';
+  return (
+    <span className="flex items-center gap-2 shrink-0" data-testid={`read-only-${hint.name}`}>
+      {canEdit ? (
+        <label className="flex items-center gap-1.5 text-[11px] text-ink-muted cursor-pointer">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={hint.readOnly}
+            aria-label={`Read-only: ${hint.name}`}
+            disabled={busy}
+            onClick={() => onSet(hint, !hint.readOnly)}
+            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors disabled:opacity-50 ${
+              hint.readOnly ? 'bg-emerald-600' : 'bg-line'
+            }`}
+          >
+            <span
+              className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                hint.readOnly ? 'translate-x-3.5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+          Read-only
+        </label>
+      ) : (
+        <span
+          className={`text-[10px] px-1.5 py-0.5 rounded ${
+            hint.readOnly ? 'bg-emerald-50 text-emerald-700' : 'bg-sunken text-ink-muted'
+          }`}
+        >
+          {hint.readOnly ? 'Read-only' : 'Not read-only'}
+        </span>
+      )}
+      {overridden && (
+        <span className="text-[10px] text-amber-700" title={`Built-in value: ${builtInLabel}`}>
+          overridden
+        </span>
+      )}
+      {canEdit && overridden && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onSet(hint, null)}
+          aria-label={`Reset ${hint.name} to its built-in value (${builtInLabel})`}
+          className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-line text-ink-muted hover:bg-hover disabled:opacity-50"
+        >
+          Reset
+        </button>
+      )}
+    </span>
+  );
+}
 
 /**
  * `${API_URL}/api/agent/tools/x` → `/api/agent/tools/x`; undefined unless this is
@@ -175,27 +268,30 @@ function SchemaView({ schema, depth = 0 }: { schema: JsonSchema; depth?: number 
   );
 }
 
-function ToolCard({ tool }: { tool: UtcpTool }) {
+function ToolCard({ tool, hintControl }: { tool: UtcpTool; hintControl?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const http = httpPath(tool);
   const input = unwrapBody(tool.inputs);
   return (
     <div className="border border-line rounded-lg bg-white">
-      <button onClick={() => setOpen((v) => !v)} className="w-full text-left px-4 py-3 flex items-start gap-3">
-        <span className="text-ink-faint mt-0.5">{open ? '▾' : '▸'}</span>
-        <span className="flex-1 min-w-0">
-          <span className="flex items-center gap-2 flex-wrap">
-            <code className="text-sm font-semibold text-ink">{tool.name}</code>
-            <span className="text-[10px] font-mono uppercase tracking-wide text-ink-faint">
-              {http ? `${http.method} ${http.path}` : tool.tool_call_template?.call_template_type ?? 'unknown'}
+      <div className="flex items-start gap-2 pr-4">
+        <button onClick={() => setOpen((v) => !v)} className="flex-1 min-w-0 text-left pl-4 py-3 flex items-start gap-3">
+          <span className="text-ink-faint mt-0.5">{open ? '▾' : '▸'}</span>
+          <span className="flex-1 min-w-0">
+            <span className="flex items-center gap-2 flex-wrap">
+              <code className="text-sm font-semibold text-ink">{tool.name}</code>
+              <span className="text-[10px] font-mono uppercase tracking-wide text-ink-faint">
+                {http ? `${http.method} ${http.path}` : tool.tool_call_template?.call_template_type ?? 'unknown'}
+              </span>
+              {tool.tags?.filter((t) => t !== READ_ONLY_TAG).map((t) => (
+                <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-sunken text-ink-muted">{t}</span>
+              ))}
             </span>
-            {tool.tags?.map((t) => (
-              <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-sunken text-ink-muted">{t}</span>
-            ))}
+            <span className="block text-xs text-ink-muted leading-snug mt-1 line-clamp-2">{tool.description}</span>
           </span>
-          <span className="block text-xs text-ink-muted leading-snug mt-1 line-clamp-2">{tool.description}</span>
-        </span>
-      </button>
+        </button>
+        {hintControl && <span className="pt-3">{hintControl}</span>}
+      </div>
       {open && (
         <div className="px-4 pb-4 pt-1 space-y-4 border-t border-line">
           <p className="text-xs text-ink-muted leading-snug whitespace-pre-wrap">{tool.description}</p>
@@ -262,6 +358,64 @@ export function ToolsExplorerPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  const [hints, setHints] = useState<ToolHints | null>(null);
+  const [hintError, setHintError] = useState<string | null>(null);
+  const [savingHint, setSavingHint] = useState<string | null>(null);
+  const confirm = useConfirm();
+
+  // The read-only hints, with the session: the same for every key pasted
+  // below, since they are the deployment's, not a key's. A failure costs the
+  // controls, never the catalog.
+  useEffect(() => {
+    let live = true;
+    fetchToolHints()
+      .then((h) => live && setHints(h))
+      .catch((err: unknown) => live && setHintError(err instanceof Error ? err.message : String(err)));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const hintByName = useMemo(() => new Map((hints?.tools ?? []).map((h) => [h.name, h])), [hints]);
+  const metaHints = useMemo(() => (hints?.tools ?? []).filter((h) => h.kind === 'meta'), [hints]);
+
+  const setHint = useCallback<SetHint>(
+    (hint, readOnly) => {
+      void (async () => {
+        // Telling clients a WRITING tool only reads is what lets them run it
+        // without asking: said, and confirmed, before it is saved. The other
+        // direction only makes clients more careful, and asks nothing.
+        if (readOnly === true && !hint.builtIn) {
+          const { confirmed } = await confirm({
+            title: `Mark ${hint.name} as read-only?`,
+            message:
+              `${hint.name} can change the knowledge base. Marked read-only, MCP clients such as Claude will stop ` +
+              'asking before they run it, so it can change the knowledge base without anyone approving the call.',
+            confirmLabel: 'Mark read-only',
+            destructive: true,
+          });
+          if (!confirmed) return;
+        }
+        setSavingHint(hint.name);
+        setHintError(null);
+        try {
+          const saved = await setToolReadOnly(hint.name, readOnly);
+          setHints((h) => (h ? { ...h, tools: h.tools.map((t) => (t.name === saved.name ? saved : t)) } : h));
+        } catch (err) {
+          setHintError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setSavingHint(null);
+        }
+      })();
+    },
+    [confirm],
+  );
+
+  const hintControl = (name: string) => {
+    const hint = hintByName.get(name);
+    if (!hint || !hints) return undefined;
+    return <ReadOnlyControl hint={hint} canEdit={hints.canEdit} busy={savingHint === name} onSet={setHint} />;
+  };
 
   const load = useCallback(async () => {
     if (!bearer.trim()) return;
@@ -361,8 +515,15 @@ export function ToolsExplorerPage() {
           {error && <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">{error}</div>}
         </div>
 
+        {hintError && (
+          <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">{hintError}</div>
+        )}
+
         {tools && (
-          <>
+          <section aria-labelledby="endpoint-tools" className="space-y-2" data-testid="endpoint-section">
+            <h2 id="endpoint-tools" className="text-sm font-semibold text-ink">
+              Endpoints of this deployment
+            </h2>
             <div className="flex items-center justify-between">
               <input
                 value={filter}
@@ -374,10 +535,39 @@ export function ToolsExplorerPage() {
             </div>
             <div className="space-y-2">
               {shown.map((t) => (
-                <ToolCard key={t.name} tool={t} />
+                <ToolCard key={t.name} tool={t} hintControl={hintControl(t.name)} />
               ))}
             </div>
-          </>
+          </section>
+        )}
+
+        {metaHints.length > 0 && (
+          <section aria-labelledby="code-mode-tools" className="space-y-2" data-testid="code-mode-section">
+            <div className="space-y-1">
+              <h2 id="code-mode-tools" className="text-sm font-semibold text-ink">
+                Code mode
+              </h2>
+              <p className="text-xs text-ink-muted">
+                These tools are features of the MCP servers (<code>/api/mcp</code> and <code>hexis-mcp</code>), not
+                endpoints of this deployment: they list the tools above and run code that calls them. Their read-only
+                hint is what MCP clients are told about them.
+              </p>
+            </div>
+            {metaHints.map((hint) => (
+              <div
+                key={hint.name}
+                className="border border-line rounded-lg bg-white px-4 py-3 flex items-start gap-3"
+              >
+                <span className="flex-1 min-w-0">
+                  <code className="text-sm font-semibold text-ink">{hint.name}</code>
+                  <span className="block text-xs text-ink-muted leading-snug mt-1">
+                    {META_TOOL_SUMMARIES[hint.name] ?? ''}
+                  </span>
+                </span>
+                {hintControl(hint.name)}
+              </div>
+            ))}
+          </section>
         )}
       </div>
     </div>
