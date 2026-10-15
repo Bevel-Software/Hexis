@@ -67,6 +67,7 @@ import {
   resetLocalVariableResolver,
 } from './local-variables.js';
 import { closeRenewal } from './renewal.js';
+import { createViewCatalog, type ViewCatalogOptions } from './views/catalog.js';
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
 const SERVER_NAME = 'hexis-mcp';
@@ -448,6 +449,13 @@ export async function createHexisMcpServer(
      * is the contract the knowledge base's guide states.
      */
     catalogCheck?: false | { minIntervalMs?: number };
+    /**
+     * How the knowledge views read the knowledge base and where they keep
+     * their list between runs (see views/catalog.ts). Here for tests, which
+     * fake the reads and keep nothing on disk; the default reads the
+     * deployment's KB tools and keeps the list under `~/.hexis/views`.
+     */
+    views?: Omit<ViewCatalogOptions, 'onChange'>;
   } = {},
 ): Promise<HexisMcpHandle> {
   const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
@@ -536,6 +544,22 @@ export async function createHexisMcpServer(
   let server: Server | null = null;
   /** The catalog checker, once discovery has a baseline to check against. */
   let catalogCheck: CatalogCheck | null = null;
+  /**
+   * Knowledge views as MCP Apps (see views/catalog.ts). They read through the
+   * deployment's KB tools directly, not through the UTCP client, so they are
+   * independent of discovery and of credential swaps (each read takes the
+   * current `config.connectionKey`). Their search starts NOW, alongside
+   * discovery, and a list kept from the last run answers before it ends; a
+   * change it finds reaches a connected client as `list_changed`.
+   */
+  const views = createViewCatalog(config, {
+    ...options.views,
+    onChange: () => {
+      void server?.sendToolListChanged().catch(() => {});
+      void server?.sendResourceListChanged().catch(() => {});
+    },
+  });
+  views.prefetch();
   /**
    * The local-only manuals this process CURRENTLY has registered, by UTCP
    * name, and what the deployment says about each. Both are LIVE maps, mutated
@@ -1065,7 +1089,9 @@ export async function createHexisMcpServer(
           // and the handshake happens once. The two handlers below answer an
           // empty list and a plain "no such resource" while there is nothing,
           // which is what a client must tolerate from any resource server.
-          resources: {},
+          // `listChanged`: the knowledge views' search announces a view that
+          // appears or goes away (see `views` above).
+          resources: { listChanged: true },
         },
         ...(instructions !== undefined ? { instructions } : {}),
       },
@@ -1094,23 +1120,43 @@ export async function createHexisMcpServer(
       // look the notice above exists to prevent. The truth is the same one
       // the call handler gives: this server is going away.
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools, apps.tools) };
+      // The knowledge views come last and never collide: a discovered tool of
+      // the same name wins, the way remote tools win over local ones.
+      const listed = listedTools(tools, apps.tools);
+      const names = new Set(listed.map((t) => t.name));
+      return { tools: [...listed, ...(await views.listTools()).filter((t) => !names.has(t.name))] };
     });
 
     // The deployment's MCP App views, served from here so a host connected
     // through this server renders a page exactly as one connected straight to
-    // the deployment does.
+    // the deployment does, and the knowledge views (views/catalog.ts) beside
+    // them. The two never share an address: the deployment names its view
+    // `ui://hexis/page-<hash>.html`, the knowledge views live under
+    // `ui://hexis/views/`.
     server.setRequestHandler(ListResourcesRequestSchema, async () => {
       await ready;
-      return { resources: apps.resources.map((r) => toListedResource(r)) };
+      return {
+        resources: [...apps.resources.map((r) => toListedResource(r)), ...(await views.listResources()).resources],
+      };
     });
     server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const uri = request.params.uri;
+      // A knowledge view is not behind `ready`: it needs nothing discovery
+      // builds, and a host that preloads a view's page at connect time should
+      // not wait out a cold plugin download for it.
+      if (views.handlesResource(uri)) {
+        try {
+          return await views.readResource(uri);
+        } catch (err) {
+          throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));
+        }
+      }
       await ready;
-      const resource = apps.resources.find((r) => r.uri === request.params.uri);
+      const resource = apps.resources.find((r) => r.uri === uri);
       if (!resource) {
         throw new McpError(
           ErrorCode.InvalidParams,
-          `No resource at ${request.params.uri}. This server serves the workspace's MCP App views ` +
+          `No resource at ${uri}. This server serves the workspace's MCP App views ` +
             `and nothing else${apps.resources.length ? `: ${apps.resources.map((r) => r.uri).join(', ')}` : ' — and this workspace serves none'}.`,
         );
       }
@@ -1127,6 +1173,13 @@ export async function createHexisMcpServer(
           ErrorCode.InternalError,
           `hexis-mcp could not load this workspace's tools: ${discoveryError}`,
         );
+      }
+      // A knowledge view, or its data tool, unless a discovered tool owns the
+      // name (the listing gives it to the discovered tool too). Views read
+      // through the deployment directly, so no re-registration gate applies.
+      const requested = request.params.name;
+      if (views.handles(requested) && !tools.some((t) => t.mcpName === requested)) {
+        return views.callTool(requested, request.params.arguments ?? {});
       }
       // Never start a call mid-re-registration — a swap or a recovery may have
       // the manual between its deregister and its register, where a repository
