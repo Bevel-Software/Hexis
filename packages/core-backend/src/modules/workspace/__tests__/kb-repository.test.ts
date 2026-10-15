@@ -251,3 +251,70 @@ describe('KbRepository.forgetWorktrees', () => {
     expect((await git(checkout('bob/b'), ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('bob/b');
   });
 });
+
+describe('KbRepository.addWorktree', () => {
+  it('reads the local ref inside its section: a removal queued before it does not take the ref it uses', async () => {
+    const inner = new NodeGitRunner();
+    /** How many `exclusive` sections have been queued. */
+    let queued = 0;
+    let onQueued = (): void => undefined;
+    class QueueWatchingRepository extends KbRepository {
+      override exclusive<T>(fn: () => Promise<T>): Promise<T> {
+        const section = super.exclusive(fn);
+        queued += 1;
+        onQueued();
+        return section;
+      }
+    }
+    const queuedCount = (n: number) =>
+      new Promise<void>((resolve) => {
+        onQueued = () => { if (queued >= n) resolve(); };
+        onQueued();
+      });
+    let releaseGate = (): void => undefined;
+    let removing: Promise<void> | null = null;
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        const result = await inner.run(cwd, args, opts as never);
+        if (removing === null && args.includes('fetch') && args.includes('+refs/heads/alice/a:refs/remotes/origin/alice/a')) {
+          // The add has asked the remote and has not reached its section:
+          // the administrator is busy, and the workspace's removal queues
+          // first. The add's section comes after it.
+          const base = queued;
+          void repository.exclusive(() => new Promise<void>((resolve) => { releaseGate = resolve; }));
+          removing = repository.removeWorktree(path.join(workspacesRoot, 'gone', 'knowledge-base'), 'alice/a');
+          await queuedCount(base + 2);
+          void queuedCount(base + 3).then(() => releaseGate());
+        }
+        return result;
+      },
+    } as unknown as IGitRunner;
+    const repository: QueueWatchingRepository = new QueueWatchingRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner,
+    });
+    await repository.ensure();
+    // A local ref with no worktree of it (a workspace deleted with its ref
+    // still to go), behind the remote, which has moved on since: the removal
+    // deletes it, and the add would otherwise move a ref that is gone.
+    await git(repository.dir, ['update-ref', 'refs/heads/alice/a', 'refs/remotes/origin/alice/a']);
+    const seed = path.join(root, '.seed');
+    await git(seed, ['checkout', '-q', 'alice/a']);
+    await fs.writeFile(path.join(seed, 'later.md'), 'later\n');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', 'later']);
+    await git(seed, ['push', '-q', upstream, 'alice/a']);
+    const remoteTip = (await git(seed, ['rev-parse', 'HEAD'])).trim();
+    const checkoutDir = path.join(workspacesRoot, encodeURIComponent('alice/a'), 'knowledge-base');
+
+    await repository.addWorktree('alice/a', checkoutDir);
+    await removing;
+
+    expect((await git(checkoutDir, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('alice/a');
+    expect((await git(checkoutDir, ['rev-parse', 'HEAD'])).trim()).toBe(remoteTip);
+    expect((await git(repository.dir, ['config', '--get', 'branch.alice/a.merge'])).trim()).toBe('refs/heads/alice/a');
+  });
+});

@@ -563,17 +563,19 @@ export class KbRepository implements IKbRepository {
           await this.git(['update-ref', '-d', `refs/remotes/origin/${branch}`]).catch(() => undefined);
         }
       }
-      const local = await this.revParse(`refs/heads/${branch}`);
-      if (missing && !(opts.allowLocalOnly && local !== null)) {
-        throw new Error(`Remote branch ${branch} not found in upstream origin`);
-      }
-      await fs.mkdir(path.dirname(checkoutDir), { recursive: true });
-      // As the administrator, from the prune to the config writes: the
-      // worktree list is the one thing git does not lock (a prune beside
-      // another branch's `worktree add` can take the entry being made), and
-      // `worktree add --track` writes the shared config, which git refuses a
-      // second writer of.
+      // As the administrator, from reading the local ref to the config
+      // writes: the worktree list is the one thing git does not lock (a prune
+      // beside another branch's `worktree add` can take the entry being
+      // made), `worktree add --track` writes the shared config, which git
+      // refuses a second writer of, and a `removeWorktree` queued before this
+      // section deletes the branch's local ref — read here, it is the ref
+      // the add uses, not one read before that removal and gone by then.
       await this.exclusive(async () => {
+        const local = await this.revParse(`refs/heads/${branch}`);
+        if (missing && !(opts.allowLocalOnly && local !== null)) {
+          throw new Error(`Remote branch ${branch} not found in upstream origin`);
+        }
+        await fs.mkdir(path.dirname(checkoutDir), { recursive: true });
         // A registration left behind by a folder deleted without git (a crash,
         // an operator) would make git refuse the path, or the branch, as taken.
         await this.git(['worktree', 'prune']);
