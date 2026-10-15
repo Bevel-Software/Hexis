@@ -1,8 +1,8 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
-import type { IToolRegistry, ToolManualContext, UtcpTool } from './tool.contract.js';
+import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
 import { requireInternalSource } from '../tool-auth/tool-auth.middleware.js';
-import type { ToolReadOnlyHints } from './read-only-hints.js';
+import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -50,10 +50,6 @@ function toManual(tools: UtcpTool[]) {
  * on top of it. (External callers are always write-scoped, so the external
  * manual needs no variant.)
  */
-function isWriteTool(tool: { tags?: string[] }): boolean {
-  return (tool.tags ?? []).includes('write');
-}
-
 export function createManualRoutes(
   registry: IToolRegistry,
   manualAuth: RequestHandler,
@@ -63,7 +59,7 @@ export function createManualRoutes(
    * as the `read-only` tag the MCP servers turn into `annotations.readOnlyHint`.
    * Absent, the manual carries the tools' own tags only.
    */
-  readOnlyHints?: Pick<ToolReadOnlyHints, 'apply'>,
+  readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
 ): express.Router {
   const router = express.Router();
 
@@ -87,7 +83,7 @@ export function createManualRoutes(
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
     const internal = await registry.listInternal(await context(req));
-    const tools = req.toolAuth?.scope === 'read' ? internal.filter((t) => !isWriteTool(t)) : internal;
+    const tools = req.toolAuth?.scope === 'read' ? internal.filter((t) => !declaresWrite(t)) : internal;
     res.json(toManual(tools));
   });
 

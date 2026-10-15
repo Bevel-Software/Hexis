@@ -1,6 +1,7 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { META_TOOL_NAMES, META_TOOL_READ_ONLY, READ_ONLY_TAG } from '@bevel-software/platform-mcp-core';
-import type { IToolRegistry, UtcpTool } from './tool.contract.js';
+import { declaresWrite, type IToolRegistry, type UtcpTool } from './tool.contract.js';
+import type { IToolReadOnlyHints, ToolReadOnlyEntry } from './read-only-hints.contract.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import {
   parseToolReadOnlyOverrides,
@@ -13,6 +14,18 @@ const log = logger('tool-read-only-hints');
 
 /** The deployment setting the overrides live in — see `CORE_SETTINGS`. */
 export const TOOL_READ_ONLY_SETTING = 'toolReadOnlyOverrides';
+
+export type { IToolReadOnlyHints, ToolReadOnlyEntry };
+
+type SettingsPort = Pick<DeploymentSettingsService, 'reload' | 'recordIfAbsent' | 'swapIfValue'>;
+
+/** A name that is neither a platform tool nor a meta-tool. */
+export class UnknownToolError extends Error {
+  constructor(readonly toolName: string) {
+    super(`"${toolName}" is not a platform tool or a code-mode meta-tool of this deployment.`);
+    this.name = 'UnknownToolError';
+  }
+}
 
 /**
  * What MCP clients are told about each platform tool's effect.
@@ -36,33 +49,7 @@ export const TOOL_READ_ONLY_SETTING = 'toolReadOnlyOverrides';
  * `GET /agent/tool-hints`. Tools from the knowledge base (`.tool` manuals,
  * plugin MCP servers) are not the registry's and are untouched.
  */
-export interface ToolReadOnlyEntry {
-  name: string;
-  /** `platform`: an endpoint of this deployment. `meta`: a feature of the MCP servers. */
-  kind: 'platform' | 'meta';
-  /** What the tool's own declaration makes it. */
-  builtIn: boolean;
-  /** The admin's override, or null when there is none. */
-  override: boolean | null;
-  /** What clients are told: the override when set, else the built-in value. */
-  readOnly: boolean;
-}
-
-type SettingsPort = Pick<DeploymentSettingsService, 'reload' | 'recordIfAbsent' | 'swapIfValue'>;
-
-/** A name that is neither a platform tool nor a meta-tool. */
-export class UnknownToolError extends Error {
-  constructor(readonly toolName: string) {
-    super(`"${toolName}" is not a platform tool or a code-mode meta-tool of this deployment.`);
-    this.name = 'UnknownToolError';
-  }
-}
-
-function declaresWrite(tool: Pick<UtcpTool, 'tags'>): boolean {
-  return (tool.tags ?? []).includes('write');
-}
-
-export class ToolReadOnlyHints {
+export class ToolReadOnlyHints implements IToolReadOnlyHints {
   constructor(
     private readonly registry: Pick<IToolRegistry, 'listExternal'>,
     private readonly settings: SettingsPort,
@@ -159,7 +146,7 @@ export class ToolReadOnlyHints {
 }
 
 /**
- * The routes over {@link ToolReadOnlyHints}:
+ * The routes over {@link IToolReadOnlyHints}:
  *
  *   GET /agent/tool-hints     — every tool's effective hint, for `hexis-mcp`
  *                               (behind `manualAuth`, like the manual itself)
@@ -172,7 +159,7 @@ export class ToolReadOnlyHints {
  * The agent route is returned separately so it can mount on the tools router,
  * ahead of the JWT `/api` mounts; the other two mount behind `authMiddleware`.
  */
-export function createToolHintsAgentRoutes(hints: ToolReadOnlyHints, manualAuth: RequestHandler): express.Router {
+export function createToolHintsAgentRoutes(hints: IToolReadOnlyHints, manualAuth: RequestHandler): express.Router {
   const router = express.Router();
   router.get('/agent/tool-hints', manualAuth, async (_req, res) => {
     try {
@@ -186,7 +173,7 @@ export function createToolHintsAgentRoutes(hints: ToolReadOnlyHints, manualAuth:
 }
 
 export function createToolHintsRoutes(
-  hints: ToolReadOnlyHints,
+  hints: IToolReadOnlyHints,
   adminAccess: Pick<IAdminAccessService, 'isAdmin'>,
 ): express.Router {
   const router = express.Router();

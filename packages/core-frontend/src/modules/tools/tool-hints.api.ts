@@ -2,7 +2,7 @@ import { authFetch } from '../../lib/api';
 
 /**
  * What MCP clients are told about one tool's effect — `GET /api/tool-hints`.
- * Mirrors `ToolReadOnlyEntry` in the backend's `read-only-hints.ts`.
+ * Mirrors `ToolReadOnlyEntry` in the backend's `read-only-hints.contract.ts`.
  */
 export interface ToolHint {
   name: string;
