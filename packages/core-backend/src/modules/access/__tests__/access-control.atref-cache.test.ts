@@ -577,6 +577,29 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(revParses()).toBe(0);
   });
 
+  it('remembers what a blob declares for itself, never a blob the batch could not read', async () => {
+    const SECRET = 'Team/Secret.md';
+    await pushFromOther('a page that denies the admin for itself', () =>
+      fs.writeFile(path.join(other, SECRET), '---\nwrite:\n  - deny Admin\n---\n# secret\n'),
+    );
+    // Build the model first, so the next batch is the own-entries read.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    // The own-entries batch loses the blob (a lost object reads as missing,
+    // exactly like an absent path): answered as no own entries, as before —
+    // the inherited write stands — but NOT remembered for the commit.
+    injected.rewriteNext = (argv) => (argv.includes('cat-file') ? rewriteBatchRecord(/:Team\/Secret\.md$/, 'missing') : null);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(true);
+    expect(injected.rewriteNext).toBeNull();
+    // The next call reads the blob again, and its own denial now holds...
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(false);
+    expect(catFileBatches()).toBe(1);
+    // ...and that answer, a fact about the commit, is remembered.
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(false);
+    expect(catFileBatches()).toBe(0);
+  });
+
   it('holds the models of far more commits than one listing resolves', async () => {
     // A listing resolves access at every open change request's two refs: a
     // knowledge base with a hundred open requests spans a hundred commits.

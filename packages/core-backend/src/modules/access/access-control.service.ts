@@ -69,7 +69,7 @@ import {
 
 /** A full object id, which is what every at-ref gate resolves its ref to before reading. */
 function isCommitSha(ref: string): boolean {
-  return /^[0-9a-f]{40,64}$/.test(ref);
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref);
 }
 
 /**
@@ -2614,9 +2614,16 @@ export class AccessControlService implements IAccessControl {
     const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
-      const own =
-        text === null ? null : isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
+      if (text === null) {
+        // Absent at the commit, or a blob git could not read: the batch says
+        // "missing" for both, and only the first is a fact about the commit.
+        // Answered as no own entries, as before, but never remembered.
+        result.set(p, null);
+        return;
+      }
+      const own = isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
       result.set(p, own);
+      // What a blob declares for itself — including nothing — is a fact about the commit.
       if (memo) this.rememberOwnEntriesAtCommit(`${ref}\0${p}`, own);
     });
     return result;
