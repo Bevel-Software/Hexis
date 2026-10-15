@@ -6,7 +6,7 @@ import type { ISkippedToolsService } from '../skipped-tools.service.js';
  * deployment does. It honours the two behaviours the routes lean on — a skip
  * is one row per person and tool however often it is made, and including a
  * tool that was never skipped is a no-op. That those hold on the real table is
- * pinned by `skipped-tools.service.pg.test.ts`.
+ * pinned by the real-Postgres block of `skipped-tool.route.test.ts`.
  */
 export class FakeSkippedToolsService implements ISkippedToolsService {
   private readonly byUser = new Map<string, Set<string>>();
