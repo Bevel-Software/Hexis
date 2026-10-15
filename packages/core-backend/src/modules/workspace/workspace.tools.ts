@@ -70,7 +70,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import { BoundedMatcher, PatternTooExpensiveError } from './bounded-matcher.js';
+import { BoundedMatcher, endsTheSearch } from './bounded-matcher.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
@@ -698,6 +698,8 @@ async function grepOneFile(
   }
   if (content === null) return 'no-text';
   const lines = content.split('\n');
+  // matchingLines posts these to the worker in BATCH_CHARS pieces, so no one
+  // copy of a large file runs on the request thread.
   for (const i of await matcher.matchingLines(lines, max - out.length)) {
     out.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
   }
@@ -778,12 +780,12 @@ async function grepWalk(
       await notifyRead(p);
       // A file the walk cannot read is silently skipped: one unreadable entry
       // must not fail a search over the whole tree.
-      // A pattern too expensive to finish is not an unreadable file: it ends
-      // the whole search.
+      // A pattern too expensive to finish, or no worker free to run it, is not
+      // an unreadable file: either ends the whole search.
       try {
         await grepOneFile(fs, p, matcher, out, max, docs);
       } catch (err) {
-        if (err instanceof PatternTooExpensiveError) throw err;
+        if (endsTheSearch(err)) throw err;
         continue;
       }
     }

@@ -14,7 +14,7 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { PATTERN_BUDGET_MS } from '../bounded-matcher.js';
+import { BoundedMatcher, MAX_WAITING, PATTERN_BUDGET_MS } from '../bounded-matcher.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
 import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
@@ -1553,6 +1553,23 @@ describe('a pattern too expensive to match', () => {
     const res = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$' });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/^Pattern too expensive: /);
+  });
+
+  it('answers a directory walk 503 when no worker is free, rather than skipping every file as unreadable', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/hit.md`, 'needle\n');
+    // Every worker held by a pattern that runs out its budget, the queue filled behind them.
+    const holding = Promise.allSettled(
+      Array.from({ length: 4 }, () => new BoundedMatcher('^(a+)+$', '').matchingLines([LONG_LINE], 1)),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    const queued = Promise.allSettled(
+      Array.from({ length: MAX_WAITING }, () => new BoundedMatcher('b', '').matchingLines(['b'], 1)),
+    );
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { code?: string }).code).toBe('search_busy');
+    await Promise.all([holding, queued]);
   });
 
   it('a control pattern over the same line still matches', async () => {

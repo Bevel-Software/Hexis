@@ -62,6 +62,23 @@ export class PatternTooExpensiveError extends ToolError {
   }
 }
 
+/** Every worker busy and the queue for one full — a 503, so the caller retries rather than reads a partial answer. */
+export class SearchBusyError extends ToolError {
+  constructor() {
+    super('Too many searches are running at once; try again in a few seconds.', 503, { code: 'search_busy' });
+    this.name = 'SearchBusyError';
+  }
+}
+
+/**
+ * Whether `err` ends a whole search rather than one file's part of it: a
+ * directory walk that skipped a file for either would answer an incomplete
+ * result as if it were the whole one.
+ */
+export function endsTheSearch(err: unknown): boolean {
+  return err instanceof PatternTooExpensiveError || err instanceof SearchBusyError;
+}
+
 /** The worker: compiles the pattern it is handed and answers the indices of the lines it matches. */
 const WORKER_SOURCE = `
 const { parentPort } = require('node:worker_threads');
@@ -106,11 +123,7 @@ function spawn(): Worker {
 }
 
 async function acquire(): Promise<Worker> {
-  if (idle.length === 0 && live >= POOL_MAX && waiting.length >= MAX_WAITING) {
-    throw new ToolError('Too many searches are running at once; try again in a few seconds.', 503, {
-      code: 'search_busy',
-    });
-  }
+  if (idle.length === 0 && live >= POOL_MAX && waiting.length >= MAX_WAITING) throw new SearchBusyError();
   const w = idle.pop() ?? (live < POOL_MAX ? spawn() : await new Promise<Worker>((resolve) => waiting.push(resolve)));
   w.ref();
   return w;
