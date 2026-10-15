@@ -593,6 +593,20 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(0);
   });
 
+  it('knows from the tree that a path is absent at a commit, and reads nothing for it', async () => {
+    // A change request that adds a file asks about it at the base, where it
+    // does not exist yet. The model's listing already named every path the
+    // commit carries, so the absence is a fact about the commit: remembered,
+    // and not read — on the first call or any later one.
+    const NEW = 'Team/New.md';
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [NEW])).toEqual(new Map([[NEW, true]]));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(0);
+    expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+  });
+
   it('remembers what a blob declares for itself, never a blob the batch could not read', async () => {
     const SECRET = 'Team/Secret.md';
     await pushFromOther('a page that denies the admin for itself', () =>

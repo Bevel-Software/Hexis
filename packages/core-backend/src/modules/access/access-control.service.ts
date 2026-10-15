@@ -1376,7 +1376,13 @@ function ineligibleNamedEmailsResolved(
  * was built from (not the ref name that led there), so the per-file
  * own-entries reads that follow a gate resolve against exactly that tree.
  */
-type AtRefModel = { model: AccessModel; resolvedRef: string };
+/**
+ * A model built at a commit, with the commit it was built at and, when the
+ * tree is not too large to hold, every path the commit carries: what the
+ * own-entries reads need to tell a path that is absent at the commit (a
+ * fact, remembered) from a blob the batch could not read (never remembered).
+ */
+type AtRefModel = { model: AccessModel; resolvedRef: string; tree: ReadonlySet<string> | null };
 /**
  * One build's outcome: a model, no roles.yaml at the commit, or one that
  * doesn't parse. A git read failure is none of these: it throws
@@ -1457,6 +1463,8 @@ export class AccessControlService implements IAccessControl {
    */
   private readonly ownEntriesAtCommit = new Map<string, OwnEntries | null>();
   private static readonly OWN_ENTRIES_AT_COMMIT_MAX = 16_384;
+  /** Paths a cached model keeps of its commit's tree, at most; a larger tree is not kept. */
+  private static readonly TREE_INDEX_MAX_PATHS = 20_000;
 
   /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
@@ -2153,7 +2161,7 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return hasPermissionResolved(loaded.model, 'write', userEmail, relativePath, own);
   }
 
@@ -2166,7 +2174,7 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return canReadResolved(loaded.model, userEmail, relativePath, own);
   }
 
@@ -2189,7 +2197,7 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole path set — a per-path `git
     // show` spawn made CR owner-routing take minutes on large change sets.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
       const machineOwned = machineAnswers.get(p);
@@ -2214,7 +2222,7 @@ export class AccessControlService implements IAccessControl {
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole set — see canWriteBatchAtRef.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
       result.set(p, canReadResolved(loaded.model, userEmail, p, owns.get(p) ?? null));
@@ -2237,7 +2245,7 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
   }
 
@@ -2351,7 +2359,7 @@ export class AccessControlService implements IAccessControl {
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     for (const p of relativePaths) {
       if (result.has(p)) continue;
       const own = owns.get(p) ?? null;
@@ -2569,12 +2577,13 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePath: string,
+    tree: ReadonlySet<string> | null = null,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
     // At a commit (what every gate passes: `resolvedRef`), the batched read
     // and its memo answer; a single `git show` stays for a symbolic ref.
     if (isCommitSha(ref)) {
-      return (await this.readOwnEntriesAtRefBatch(repoDir, ref, [relativePath])).get(relativePath) ?? null;
+      return (await this.readOwnEntriesAtRefBatch(repoDir, ref, [relativePath], tree)).get(relativePath) ?? null;
     }
     const text = await this.showAtRef(repoDir, ref, relativePath);
     if (text === null) return null;
@@ -2594,6 +2603,7 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePaths: string[],
+    tree: ReadonlySet<string> | null = null,
   ): Promise<Map<string, OwnEntries | null>> {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
@@ -2608,6 +2618,15 @@ export class AccessControlService implements IAccessControl {
         result.set(p, memo.get(key) ?? null);
         continue;
       }
+      // A path the commit's tree does not carry has no own entries, as a
+      // fact about the commit: remembered, and not read. (A change request
+      // that adds a file asks about it at the base, where it does not exist
+      // yet; one that deletes a file asks at the head.)
+      if (tree && !tree.has(p)) {
+        result.set(p, null);
+        if (memo) this.rememberOwnEntriesAtCommit(key, null);
+        continue;
+      }
       if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
@@ -2615,9 +2634,10 @@ export class AccessControlService implements IAccessControl {
     wanted.forEach((p, i) => {
       const text = texts[i];
       if (text === null) {
-        // Absent at the commit, or a blob git could not read: the batch says
-        // "missing" for both, and only the first is a fact about the commit.
-        // Answered as no own entries, as before, but never remembered.
+        // Absent at the commit (when no tree was there to say so first), or
+        // a blob git could not read: the batch says "missing" for both, and
+        // only the first is a fact about the commit. Answered as no own
+        // entries, as before, but never remembered.
         result.set(p, null);
         return;
       }
@@ -2698,11 +2718,12 @@ export class AccessControlService implements IAccessControl {
   private async listAccessFilesAtRef(
     repoDir: string,
     ref: string,
-  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string> } | 'error'> {
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[] } | 'error'> {
     try {
       const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
+      const all: string[] = [];
       // The fixed-name sources the tree carries (roles.yaml, the groups
       // files): a read of one of these that comes back empty is "absent"
       // only when the tree does not name it.
@@ -2710,13 +2731,14 @@ export class AccessControlService implements IAccessControl {
       const { pluginsDir } = this.kb.layout;
       for (const p of stdout.split('\0')) {
         if (!p) continue;
+        all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
         else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         }
       }
-      return { accessFiles: out, pluginDirs, named };
+      return { accessFiles: out, pluginDirs, named, all };
     } catch {
       return 'error';
     }
@@ -2997,6 +3019,10 @@ export class AccessControlService implements IAccessControl {
         deploymentOwners: this.deploymentOwners,
       },
       resolvedRef: commit,
+      // The listing already named every path; held so an own-entries read
+      // can tell absence from a lost blob, unless the tree is too large to
+      // hold for every cached commit (then absence is simply not remembered).
+      tree: listed.all.length <= AccessControlService.TREE_INDEX_MAX_PATHS ? new Set(listed.all) : null,
     };
   }
 }
