@@ -321,8 +321,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * By workspace and path, the number of the latest-issued read whose bytes
    * became the open tab's saved content (`applyReadBytes`, the
-   * `file-changed` handler). A read issued before it answers late with older
-   * bytes, and must not replace what that newer read brought. A read that
+   * `file-changed` handler), or of a write of this tab's that completed
+   * (`markWritten`). A read issued before it answers late with older bytes,
+   * and must not replace what that newer read or write brought. A read that
    * left the tab alone (unsaved edits, a pending preview) does not count: the
    * `file-changed` read after it still has to merge its bytes into the edits.
    */
@@ -336,6 +337,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const key = existenceKey(readFrom, path);
     if ((landedAtSeqRef.current.get(key) ?? -1) < seq) landedAtSeqRef.current.set(key, seq);
   }, []);
+  /**
+   * A write of this tab's completed: its bytes are now the saved content, and
+   * every read issued before it may hold what the disk had before the write.
+   * Numbered as if it were a read issued now, so those reads land on nothing.
+   */
+  const markWritten = useCallback((readFrom: string, path: string) => {
+    markLanded(readFrom, path, ++existenceReadSeqRef.current);
+  }, [markLanded]);
   const isStaleFind = useCallback(
     (readFrom: string, path: string, seq: number) =>
       (goneAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
@@ -1633,6 +1642,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     }
     await writeFile(workspaceId, relativePath, content);
+    markWritten(workspaceId, relativePath);
     // Update the matching tab — both the cached current value and the on-disk
     // baseline now equal `content`; clear dirty.
     setOpenTabs((prev) => {
@@ -1643,7 +1653,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return next;
     });
     bumpFs();
-  }, [workspaceId, bumpFs]);
+  }, [workspaceId, bumpFs, markWritten]);
 
   const clearChangedOnBranch = useCallback((relativePath: string) => {
     setOpenTabs((prev) => {
@@ -1714,13 +1724,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const baseline = active?.savedContent ?? active?.content ?? null;
     if (!active || baseline === null) return;
     await writeFile(workspaceId, path, baseline);
+    markWritten(workspaceId, path);
     setOpenTabs((prev) => prev.map((t) => (
       t.path === path
         ? { ...t, content: baseline, savedContent: baseline, pendingFileContent: null, isDirty: false }
         : t
     )));
     bumpFs();
-  }, [workspaceId, bumpFs]);
+  }, [workspaceId, bumpFs, markWritten]);
 
   // ── fsRevision invalidation ───────────────────────────────────────────────
 

@@ -1104,6 +1104,44 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nChanged since.');
   });
 
+  it('a reload issued while a save was out does not replace the saved text with the bytes it read before the save', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'my saved text');
+
+    // The save's write is held; the reload issued meanwhile reads the old bytes.
+    const write: { finish: () => void } = { finish: () => { throw new Error('Write was not started'); } };
+    apiMocks.writeFile.mockImplementationOnce((_ws: string, path: string, content: string) => new Promise<void>((resolve) => {
+      write.finish = () => { disk.set(path, content); resolve(); };
+    }));
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'my saved text'); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+    const read: { answer: () => void } = { answer: () => { throw new Error('Reload read was not started'); } };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      read.answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    let reloading!: Promise<void>;
+    act(() => { reloading = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+    // The re-read the save's revision bump starts is slow: it has not answered
+    // by the time the reload does, so only the save itself orders the two.
+    apiMocks.readFile.mockImplementationOnce(() => new Promise(() => {}));
+
+    // The save finishes first, then the reload answers with what it read before it.
+    await act(async () => { write.finish(); await saving; });
+    await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledTimes(2));
+    expect(result.current.activeTab?.savedContent).toBe('my saved text');
+    await act(async () => { read.answer(); await reloading; });
+    await settle();
+
+    expect(result.current.activeTab?.content).toBe('my saved text');
+    expect(result.current.activeTab?.savedContent).toBe('my saved text');
+    expect(result.current.activeTab?.isDirty).toBe(false);
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
