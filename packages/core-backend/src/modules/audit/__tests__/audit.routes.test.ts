@@ -5,6 +5,7 @@ import { createAuditRoutes } from '../audit.routes.js';
 import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
+  pagePrincipalId,
   type AuditPrincipal,
   type IAgentAuditService,
 } from '../audit.contract.js';
@@ -31,7 +32,9 @@ const ALICE_KEY: AuditPrincipal = {
 };
 
 /** Who owns what, as the fake service answers `ownerOf`. */
-const OWNERS: Record<string, string> = { [KEY_ID]: ALICE.id, [AGENT_ID]: BOB.id, [ALICE_AGENT_ID]: ALICE.id };
+/** A page Alice's views have called tools from; its id names a person by uuid, so it is minted for one. */
+const ALICE_PAGE_ID = pagePrincipalId('33333333-4444-4555-8666-777777777777', 'Dashboards/Roadmap.html');
+const OWNERS: Record<string, string> = { [KEY_ID]: ALICE.id, [AGENT_ID]: BOB.id, [ALICE_AGENT_ID]: ALICE.id, [ALICE_PAGE_ID]: ALICE.id };
 
 const audit = {
   listPrincipals: vi.fn(async () => [ALICE_KEY]),
@@ -101,6 +104,14 @@ describe('audit routes — events', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ events: [], total: 0, nextCursor: null });
     expect(audit.listEvents).toHaveBeenCalledWith({ kind: 'key', id: KEY_ID }, { before: '123.e-9', limit: 200 });
+  });
+
+  it("serves a page's events to its viewer, and 404s an id that names no page", async () => {
+    const base = await listen(makeApp({ admin: false }));
+    const res = await fetch(`${base}/api/audit/principals/page/${ALICE_PAGE_ID}/events`);
+    expect(res.status).toBe(200);
+    expect(audit.listEvents).toHaveBeenCalledWith({ kind: 'page', id: ALICE_PAGE_ID }, { before: undefined, limit: 50 });
+    expect((await fetch(`${base}/api/audit/principals/page/not-a-page/events`)).status).toBe(404);
   });
 
   it('answers a cursor the service does not recognise with 400, not 500', async () => {

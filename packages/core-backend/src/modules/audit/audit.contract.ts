@@ -24,19 +24,69 @@ declare global {
 /** What was called: the platform's own tool, a manual's tool, or a skill read. */
 export type AgentEventKind = 'capability' | 'tool' | 'skill';
 
-/** How the call ended. `denied`: the caller's sign-in for the tool was missing, so nothing ran. */
-export type AgentEventOutcome = 'ok' | 'error' | 'denied';
+/**
+ * How the call ended. `denied`: the caller's sign-in for the tool was
+ * missing, so nothing ran. `refused`: a page asked to write and the person
+ * viewing it answered Deny, so nothing ran.
+ */
+export type AgentEventOutcome = 'ok' | 'error' | 'denied' | 'refused';
 
 /**
  * Who a call is attributed to: the connection key it was authenticated with,
- * or the agent connection behind its OAuth grant. Exactly one.
+ * the agent connection behind its OAuth grant, or the knowledge-base page
+ * whose script made it as the person viewing it. Exactly one.
+ *
+ * A page has no row of its own: it is a person and a path, and its `id` is
+ * both, encoded by {@link pagePrincipalId} so the Audit log's routes can name
+ * it like the other two.
  */
-export type AuditPrincipalRef = { kind: 'key'; id: string } | { kind: 'agent'; id: string };
+export type AuditPrincipalRef = { kind: 'key'; id: string } | { kind: 'agent'; id: string } | { kind: 'page'; id: string };
+
+/** Who a call is attributed to, as the recorder takes it: a page by its path, the recorder knows the person. */
+export type RecordedPrincipal = { kind: 'key'; id: string } | { kind: 'agent'; id: string } | { kind: 'page'; path: string };
+
+/** The longest page path a page principal may carry. A path is a file in the knowledge base, never longer. */
+export const MAX_PAGE_PATH_LENGTH = 1024;
+
+/**
+ * A page principal's id: the person and the page's path, encoded so it is one
+ * URL segment. Opaque to the client, which only ever echoes it back.
+ */
+export function pagePrincipalId(userId: string, path: string): string {
+  return Buffer.from(`${userId}\n${path}`, 'utf8').toString('base64url');
+}
+
+/** The person and the path a page principal's id names, or null when it names none. */
+export function parsePagePrincipalId(id: string): { userId: string; path: string } | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return null;
+  const decoded = Buffer.from(id, 'base64url').toString('utf8');
+  const cut = decoded.indexOf('\n');
+  if (cut < 0) return null;
+  const userId = decoded.slice(0, cut);
+  const path = decoded.slice(cut + 1);
+  if (!isUuid(userId) || !isPagePath(path)) return null;
+  return { userId, path };
+}
+
+/**
+ * Whether `path` can be a page principal: a non-empty knowledge-base path of
+ * printable characters, bounded. A page names itself through a request
+ * header, so this is the check that keeps a line break or a control character
+ * out of the log and its listing.
+ */
+export function isPagePath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    path.length <= MAX_PAGE_PATH_LENGTH &&
+    // eslint-disable-next-line no-control-regex -- the point is to refuse control characters
+    !/[\u0000-\u001f\u007f]/.test(path)
+  );
+}
 
 /** One recorded call, as the recorder takes it. */
 export interface AgentEventInput {
   userId: string;
-  principal: AuditPrincipalRef;
+  principal: RecordedPrincipal;
   kind: AgentEventKind;
   /** The MCP server / `.tool` manual for a tool, the skill folder for a skill; null for a capability. */
   manual: string | null;
@@ -54,18 +104,18 @@ export interface IAgentEventRecorder {
   record(event: AgentEventInput): void;
 }
 
-/** One row of the Audit log: an agent connection or a connection key, with its owner. */
+/** One row of the Audit log: an agent connection, a connection key or a page, with its owner. */
 export interface AuditPrincipal {
-  kind: 'key' | 'agent';
+  kind: 'key' | 'agent' | 'page';
   id: string;
-  /** The key's label, or the agent's registered client name. */
+  /** The key's label, the agent's registered client name, or the page's knowledge-base path. */
   label: string;
   /**
    * For a key: what it was minted as (`key` by hand, `github-link` for a
    * Claude link). Absent for an agent.
    */
   keyKind?: string;
-  /** When the key was created / the agent connected. Epoch ms. */
+  /** When the key was created / the agent connected / the page first called a tool. Epoch ms. */
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;

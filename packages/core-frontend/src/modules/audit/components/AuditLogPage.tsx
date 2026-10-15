@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronRight, KeyRound } from 'lucide-react';
+import { Bot, ChevronRight, FileCode2, KeyRound } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { Badge, Banner, Button } from '../../../shared/components';
@@ -27,6 +27,7 @@ function formatAbsolute(ts: number | null): string | undefined {
 /** What a row is, in the words the page uses: an OAuth agent, a Claude link, or a hand-made key. */
 function kindLabel(p: AuditPrincipal): string {
   if (p.kind === 'agent') return 'Agent · OAuth';
+  if (p.kind === 'page') return 'Page';
   return p.keyKind === GITHUB_LINK_KIND ? 'Claude link' : 'Connection key';
 }
 
@@ -219,7 +220,7 @@ export function AuditLogPage() {
                         const revoked = p.revokedAt !== null;
                         const open = !!expanded[key];
                         const panelId = `audit-events-${p.kind}-${p.id}`;
-                        const Icon = p.kind === 'agent' ? Bot : KeyRound;
+                        const Icon = p.kind === 'agent' ? Bot : p.kind === 'page' ? FileCode2 : KeyRound;
                         return (
                           <li key={key}>
                             {/* The WHOLE row opens the events, chevron at its far edge, the
@@ -271,7 +272,8 @@ export function AuditLogPage() {
                                   </span>
                                   <span className="block text-meta text-ink-muted">
                                     <span title={formatAbsolute(p.createdAt)}>
-                                      {p.kind === 'agent' ? 'Connected' : 'Created'} {formatRelative(p.createdAt)}
+                                      {p.kind === 'agent' ? 'Connected' : p.kind === 'page' ? 'First call' : 'Created'}{' '}
+                                      {formatRelative(p.createdAt)}
                                     </span>
                                     {' · '}
                                     <span title={formatAbsolute(p.lastUsedAt)}>Last used {formatRelative(p.lastUsedAt)}</span>
@@ -286,7 +288,8 @@ export function AuditLogPage() {
                                   </span>
                                 </span>
                               </button>
-                              {!revoked && (
+                              {/* A page has nothing to revoke: it acts only while its viewer has it open. */}
+                              {!revoked && p.kind !== 'page' && (
                                 <Button
                                   variant="danger"
                                   size="sm"

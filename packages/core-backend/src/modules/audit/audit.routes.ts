@@ -7,6 +7,7 @@ import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
   isUuid,
+  parsePagePrincipalId,
   type AuditPrincipalRef,
   type IAgentAuditService,
 } from './audit.contract.js';
@@ -20,7 +21,7 @@ const DEFAULT_EVENT_PAGE = 50;
 /**
  * The Audit log's routes, JWT-only (mounted behind the session middleware):
  *
- *   GET    /api/audit/principals?scope=me|all           — agents + keys, with owners and event counts
+ *   GET    /api/audit/principals?scope=me|all           — agents, keys and pages, with owners and event counts
  *   GET    /api/audit/principals/:kind/:id/events        — one principal's events, newest first, cursor-paged
  *   DELETE /api/audit/agents/:id                         — revoke an agent (owner or admin)
  *   DELETE /api/audit/keys/:id                           — revoke a key (owner or admin)
@@ -44,6 +45,7 @@ export function createAuditRoutes(
   const principalOf = (req: express.Request): AuditPrincipalRef | null => {
     const kind = String(req.params.kind);
     const id = String(req.params.id);
+    if (kind === 'page') return parsePagePrincipalId(id) ? { kind, id } : null;
     if ((kind !== 'key' && kind !== 'agent') || !isUuid(id)) return null;
     return { kind, id };
   };

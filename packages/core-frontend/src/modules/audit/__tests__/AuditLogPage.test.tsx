@@ -187,6 +187,37 @@ describe('AuditLogPage', () => {
     expect(screen.getByText(/18 events/)).toBeInTheDocument();
   });
 
+  it("lists a page under its viewer by its path, with its refused calls, and offers nothing to revoke", async () => {
+    const page: AuditPrincipal = {
+      kind: 'page',
+      id: 'cGFnZQ',
+      label: 'Dashboards/Roadmap.html',
+      createdAt: NOW - DAY,
+      lastUsedAt: NOW - 60 * 1000,
+      revokedAt: null,
+      revokedBy: null,
+      eventCount: 2,
+      user: ALICE,
+    };
+    vi.mocked(listPrincipals).mockResolvedValue([page]);
+    vi.mocked(listEvents).mockResolvedValue({
+      events: [
+        { id: 'e1', kind: 'capability', manual: null, name: 'read_file', outcome: 'ok', at: NOW - 2 * 60 * 1000 },
+        { id: 'e2', kind: 'capability', manual: null, name: 'edit_file', outcome: 'refused', at: NOW - 60 * 1000 },
+      ],
+      total: 2,
+      nextCursor: null,
+    });
+    renderPage();
+    const row = await screen.findByRole('button', { name: /Dashboards\/Roadmap\.html/, expanded: false });
+    expect(within(row).getByText('Page')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Revoke/ })).not.toBeInTheDocument();
+    await userEvent.click(row);
+    await waitFor(() => expect(screen.getByText('refused')).toBeInTheDocument());
+    expect(listEvents).toHaveBeenCalledWith('page', 'cGFnZQ', { limit: 50 });
+    expect(screen.getByText('edit_file')).toBeInTheDocument();
+  });
+
   it('expands a row to its events once, keeps them across a collapse, and filters them', async () => {
     vi.mocked(listPrincipals).mockResolvedValue([ALICE_CLAUDE]);
     renderPage();

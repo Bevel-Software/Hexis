@@ -143,7 +143,32 @@ describe('the html-views guide section agrees with the renderer', () => {
   it('names exactly the window.bevel members core defines, and leaves data members to a distribution', () => {
     const named = new Set([...guide.matchAll(/window\.bevel\??\.(\w+)/g)].map((m) => m[1]!));
     expect([...named].sort()).toEqual(Object.keys(runBridge().bevel).sort());
-    expect([...named].sort()).toEqual(['navigate', 'openNode']);
+    expect([...named].sort()).toEqual(Object.keys(runBridge({}, { toolBridge: true }).bevel).sort());
+    expect([...named].sort()).toEqual(['navigate', 'openNode', 'requireTools', 'tools']);
     expect(flat).toContain('A distribution may add data members of its own to `window.bevel`');
+  });
+
+  it('names the four functions of window.bevel.tools the runtime defines, where it is null, and requireTools with its card', async () => {
+    const named = [...new Set([...guide.matchAll(/window\.bevel\.tools\.(\w+)\(/g)].map((m) => m[1]!))].sort();
+    const onFilePage = runBridge({}, { toolBridge: true });
+    expect(named).toEqual(Object.keys(onFilePage.bevel.tools as object).sort());
+    expect(named).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo']);
+
+    // Null everywhere else, and the guide tells a page to check before every use.
+    expect(runBridge().bevel.tools).toBeNull();
+    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed, on a skill page and in any preview that is not the app\'s file page.');
+    expect(flat).toContain('Check it before every use, and render the page without tools when it is `null`');
+
+    // The consent rule and the two cards, in the app's words.
+    expect(flat).toContain('A call to a tool that only reads runs with no prompt.');
+    expect(flat).toContain('"<page name> wants to write to the knowledge base", with the page\'s path under it and Allow while open and Deny.');
+    expect(flat).toContain('Deny runs nothing and rejects the call with `denied`');
+    expect(flat).toContain('"<page name> uses tools that are only available in the platform", with Continue without tools and Open in the platform');
+
+    // requireTools exists on both, and asks the app.
+    for (const bridge of [runBridge(), onFilePage]) {
+      void (bridge.bevel.requireTools as () => Promise<boolean>)();
+      expect((bridge.posted.at(-1) as { type: string }).type).toBe('bevel.tools.require');
+    }
   });
 });
