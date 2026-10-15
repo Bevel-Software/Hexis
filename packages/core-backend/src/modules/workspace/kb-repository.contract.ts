@@ -20,8 +20,8 @@ export interface FetchOptions {
   /** A fetch that SUCCEEDED this recently is fresh enough; nothing runs. */
   maxAgeMs: number;
   /**
-   * An instant: a success counts as fresh only when its fetch started at or
-   * after it, however young it is (a fetch from before a listing may lack
+   * An instant (`fetchInstant()`): a success counts as fresh only when
+   * its fetch started after it, however young it is (a fetch from before a listing may lack
    * what the listing saw). A fetch in flight that started before it is
    * waited for, not joined, and a fresh one runs.
    */
@@ -42,7 +42,8 @@ export interface AddWorktreeOptions {
   /** A conversion: a local ref behind the remote stays where it is. */
   keepLocalTip?: boolean;
   /**
-   * Reuse the repository's own fetch when it started at or after this instant
+   * Reuse the repository's own fetch when it started after this instant
+   * (`fetchInstant()`)
    * and knows the branch. An instant, not an age: it is compared inside the
    * reservation, so time spent waiting for it cannot age a fetch out.
    */

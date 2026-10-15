@@ -5,6 +5,7 @@ import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
+import { fetchInstant } from './fetch-instant.js';
 import {
   cloneCredentialConfigArgs,
   cloneTrackingConfigArgs,
@@ -249,14 +250,14 @@ export class KbRepository implements IKbRepository {
     // cleared and made again.
     await fs.rm(this.dir, { recursive: true, force: true });
     await fs.mkdir(this.dir, { recursive: true });
-    let fetchedAt = Date.now();
+    let fetchedAt = fetchInstant();
     try {
       await this.gitRunner.run(this.dir, ['init', '--bare', '--quiet', this.dir]);
       for (const args of this.configArgs(url)) await this.gitRunner.run(this.dir, args);
       for (const args of cloneCredentialConfigArgs(this.gitRunner.credentials)) {
         await this.gitRunner.run(this.dir, args).catch(() => undefined);
       }
-      fetchedAt = Date.now();
+      fetchedAt = fetchInstant();
       await this.gitRunner.run(this.dir, ['fetch', '--prune', '--no-write-fetch-head', '--quiet', 'origin'], {
         timeoutMs: Math.max(this.gitRunner.defaultTimeoutMs, FIRST_FETCH_TIMEOUT_MS),
       });
@@ -416,25 +417,27 @@ export class KbRepository implements IKbRepository {
     if (
       !opts.force &&
       now - this.lastSuccessAt < opts.maxAgeMs &&
-      (opts.fetchedSince === undefined || this.lastSuccessAt >= opts.fetchedSince)
+      (opts.fetchedSince === undefined || this.lastSuccessAt > opts.fetchedSince)
     ) {
       return true;
     }
     if (this.inFlightFetch) {
-      if (opts.fetchedSince === undefined || this.inFlightStartedAt >= opts.fetchedSince) return this.inFlightFetch;
+      if (opts.fetchedSince === undefined || this.inFlightStartedAt > opts.fetchedSince) return this.inFlightFetch;
       // Started before the caller's instant: its refs may be older than what
-      // the caller must see (a branch deleted since). Waited for, then asked
-      // again; the next fetch starts after the instant, so this ends.
+      // the caller must see (a branch deleted since). Waited for, then a
+      // fetch after the instant is joined or run: forced, so neither the
+      // waited-for one's success nor its failure (the backoff) stands in for
+      // it. Any fetch in flight now started after the instant, so this ends.
       await this.inFlightFetch;
-      return this.fetch(opts);
+      return this.fetch({ ...opts, force: true });
     }
     if (!opts.force && opts.failureBackoffMs && now - this.lastFailureAt < opts.failureBackoffMs) {
       return false;
     }
     const generation = this.generation;
-    let startedAt = Date.now();
+    let startedAt = fetchInstant();
     const promise = (async () => {
-      startedAt = Date.now();
+      startedAt = fetchInstant();
       // A repository not made yet is made here, which fetches it once: that
       // first fetch is this one.
       const existed = await this.exists();
@@ -526,7 +529,7 @@ export class KbRepository implements IKbRepository {
    * phase's own update moves it on, as it moved the clone.
    *
    * `fetchedSince` (the startup phase, opening every branch) skips asking
-   * the remote when the repository's own fetch succeeded, starting no earlier
+   * the remote when the repository's own fetch succeeded, starting after it,
    * and already has `origin/<branch>`: that fetch brought every branch, so
    * opening a hundred branches costs one fetch, not a hundred. A branch it
    * does not know yet is asked for as usual.
@@ -546,7 +549,7 @@ export class KbRepository implements IKbRepository {
       const fresh =
         opts.fetchedSince !== undefined &&
         this.lastSuccessAt > 0 &&
-        this.lastSuccessAt >= opts.fetchedSince &&
+        this.lastSuccessAt > opts.fetchedSince &&
         (await this.revParse(`refs/remotes/origin/${branch}`)) !== null;
       if (!fresh) {
         try {

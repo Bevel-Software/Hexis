@@ -23,6 +23,7 @@ import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-u
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
 import { workingCopyShape, type WorkingCopyShape } from '../kb-repository.js';
 import type { FetchOptions, IKbRepository } from '../kb-repository.contract.js';
+import { fetchInstant } from '../fetch-instant.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
 /**
@@ -466,7 +467,7 @@ export class KbStartupRunner {
       // What a previous run found deleted may have been pushed again since:
       // each run asks afresh.
       this.goneFromRemote.clear();
-      this.listedAt = Date.now();
+      this.listedAt = fetchInstant();
       const heads = await this.ensureRemote();
       // AFTER the remote answered: the configured address is known to be a
       // repository we can reach, so a clone of a different one is stale, not
@@ -958,8 +959,9 @@ export class KbStartupRunner {
   /**
    * Copy the files git ignores in the clone at `from` into the worktree at
    * `to`: they are in no commit the import carried, yet they are the
-   * clone's. Copied, not moved, so an undo puts the clone back whole; a file
-   * already there (a copy a crash cut short) is left as it is.
+   * clone's. Copied, not moved, so an undo puts the clone back whole; and
+   * over whatever is there, so a copy a crash cut short (a partial file) is
+   * made whole again before the clone goes.
    */
   private async copyIgnoredFiles(from: string, to: string): Promise<void> {
     const ignored = (
@@ -970,7 +972,7 @@ export class KbStartupRunner {
       .filter(Boolean);
     for (const rel of ignored) {
       await fs.mkdir(path.dirname(path.join(to, rel)), { recursive: true });
-      await fs.cp(path.join(from, rel), path.join(to, rel), { recursive: true, force: false, verbatimSymlinks: true });
+      await fs.cp(path.join(from, rel), path.join(to, rel), { recursive: true, force: true, verbatimSymlinks: true });
     }
   }
 

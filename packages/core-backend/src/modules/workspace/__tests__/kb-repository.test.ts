@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { KbRepository, repositoryDirFor } from '../kb-repository.js';
+import { fetchInstant } from '../fetch-instant.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
 
@@ -118,7 +119,7 @@ describe('KbRepository.fetch', () => {
     ).rejects.toThrow();
   });
 
-  it('joins a fetch in flight that started at or after the caller\'s instant', async () => {
+  it('joins a fetch in flight that started after the caller\'s instant', async () => {
     const inner = new NodeGitRunner();
     let fetches = 0;
     const gitRunner = {
@@ -145,6 +146,71 @@ describe('KbRepository.fetch', () => {
     ]);
     expect([a, b]).toEqual([true, true]);
     expect(fetches).toBe(1);
+  });
+});
+
+describe('KbRepository.fetch, an instant in the same millisecond', () => {
+  /** A repository whose fetches of origin are counted and held while `gate` is set; with `failFirst`, the first after it is made fails. */
+  async function gatedRepository(failFirst = false) {
+    const inner = new NodeGitRunner();
+    const state = { fetches: 0, gate: null as Promise<void> | null, failFirst: false };
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (!isOriginFetch(args)) return inner.run(cwd, args, opts as never);
+        state.fetches += 1;
+        const first = state.fetches === 1;
+        if (state.gate) await state.gate;
+        if (state.failFirst && first) throw new Error('fatal: unable to access the remote');
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const repository = new KbRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner,
+    });
+    await repository.ensure();
+    state.fetches = 0;
+    state.failFirst = failFirst;
+    return { repository, state };
+  }
+
+  it('reads instants that never compare equal, however close together', () => {
+    const readings = Array.from({ length: 1000 }, () => fetchInstant());
+    for (let i = 1; i < readings.length; i++) expect(readings[i]).toBeGreaterThan(readings[i - 1]!);
+  });
+
+  it('does not join a fetch that started just before the caller\'s instant, in the same millisecond', async () => {
+    const { repository, state } = await gatedRepository();
+    let release!: () => void;
+    state.gate = new Promise((r) => { release = r; });
+    const older = repository.fetch({ maxAgeMs: 0, force: true });
+    // Read right after the older fetch started: the same millisecond, as a rule.
+    const since = fetchInstant();
+    const newer = repository.fetch({ maxAgeMs: 60_000, fetchedSince: since });
+    state.gate = null;
+    release();
+
+    expect(await older).toBe(true);
+    expect(await newer).toBe(true);
+    expect(state.fetches).toBe(2);
+  });
+
+  it('fetches after the instant even when the older fetch it waited for failed within the backoff', async () => {
+    const { repository, state } = await gatedRepository(true);
+    let release!: () => void;
+    state.gate = new Promise((r) => { release = r; });
+    const older = repository.fetch({ maxAgeMs: 0, force: true });
+    const since = fetchInstant();
+    const newer = repository.fetch({ maxAgeMs: 60_000, fetchedSince: since, failureBackoffMs: 60_000 });
+    state.gate = null;
+    release();
+
+    expect(await older).toBe(false);
+    expect(await newer).toBe(true);
+    expect(state.fetches).toBe(2);
   });
 });
 

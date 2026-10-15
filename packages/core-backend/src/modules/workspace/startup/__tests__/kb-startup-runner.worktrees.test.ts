@@ -382,6 +382,8 @@ describe('a deployment upgraded over full clones', () => {
     await git(root, ['clone', '-q', '-b', 'alice/a', upstream, aside]);
     await fs.appendFile(path.join(aside, '.git', 'info', 'exclude'), '\nnotes.local\n', 'utf8');
     await fs.writeFile(path.join(aside, 'notes.local'), 'not in any commit', 'utf8');
+    // And a copy of it the crash cut short.
+    await fs.writeFile(path.join(alice, 'notes.local'), 'not in', 'utf8');
 
     await makeRunner([]).runAll();
 
