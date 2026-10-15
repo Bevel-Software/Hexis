@@ -132,6 +132,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -216,6 +217,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -279,6 +281,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -303,6 +306,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );

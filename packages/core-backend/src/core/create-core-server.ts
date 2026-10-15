@@ -682,6 +682,7 @@ export async function createCoreServer(
     core.eventBus,
     core.db,
     core.kb,
+    core.disk,
     [core.config.adminEmail],
   ));
   // Asking for Can edit or Owner on an item from its Manage access dialog, and

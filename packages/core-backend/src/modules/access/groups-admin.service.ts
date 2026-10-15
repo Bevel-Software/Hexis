@@ -31,6 +31,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   GROUP_REF_PREFIX,
@@ -113,6 +114,8 @@ export class GroupsAdminService {
     private readonly workspaceService: IWorkspaceService,
     private readonly workflowService: IWorkflowService,
     private readonly accessControl: IAccessControl,
+    /** The composition root's walk — the one the resolver finds access rules with. */
+    disk: ITreeWalker,
     private readonly kbDirName: string,
     /** Live-binding thunk — see RolesAdminService's identical note. */
     private readonly defaultBranchOf: () => string,
@@ -133,7 +136,7 @@ export class GroupsAdminService {
     // The event bus keeps the roster's `referencedBy` fresh: a share-dialog
     // grant/revoke on any access.md happens outside this service, and the
     // scanner invalidates its cache on those writes' events (TTL as backstop).
-    this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
+    this.references = new KbReferenceScanner(workspaceService, disk, kbDirName, eventBus);
   }
 
   private get defaultBranch(): string {

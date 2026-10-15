@@ -12,6 +12,7 @@ import { createAccessRoutes } from '../access.routes.js';
 import type { Database } from '../../database/connection.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * A grant to an email with NO ACCOUNT says so, and stays allowed.
@@ -110,6 +111,7 @@ async function makeHarness(opts: {
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       opts.db ?? usersDbDouble(opts.accounts ?? []),
       testKbContext({ kbDirName: KB }),
+      new NodeFs(),
     ),
   );
 

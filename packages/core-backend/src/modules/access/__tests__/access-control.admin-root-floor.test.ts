@@ -321,6 +321,7 @@ describe('Admin write floor at the repository root', () => {
           { emit: () => {} } as unknown as WorkflowEventBus,
           usersDbDouble(),
           testKbContext({ kbDirName: KB }),
+          new NodeFs(),
         ),
       );
       server = await new Promise<Server>((resolve) => {

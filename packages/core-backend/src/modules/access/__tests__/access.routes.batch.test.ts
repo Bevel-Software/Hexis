@@ -11,6 +11,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP contract for `POST /access/batch` — the verb dispatch. Existing callers
@@ -66,6 +67,7 @@ async function makeHarness(): Promise<Harness> {
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       usersDbDouble(),
       testKbContext({ kbDirName: KB }),
+      new NodeFs(),
     ),
   );
 

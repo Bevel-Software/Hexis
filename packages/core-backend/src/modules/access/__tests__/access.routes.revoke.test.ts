@@ -11,6 +11,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -136,7 +137,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

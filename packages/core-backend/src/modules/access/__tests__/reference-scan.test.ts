@@ -168,7 +168,7 @@ describe('KbReferenceScanner — .tool frontmatter is scanned and rewritten like
       const toolBody = 'name: crm\ntype: mcp\n# not frontmatter below\n';
       await write(repo, 'Plugins/GTM/crm.tool', `---\nread:\n  - GTM Team\n---\n${toolBody}`);
       await write(repo, 'Plugins/GTM/notes.md', '---\nowner: GTM Team\n---\n# notes\n');
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
 
       const byToken = await scanner.scan('ws-1');
       const hits = (byToken.get('gtm team') ?? []).map((h) => h.path).sort();
@@ -210,7 +210,7 @@ describe('KbReferenceScanner — candidates are the resolver\'s walk, not the ex
           return prune(tree);
         },
       } as unknown as IWorkspaceService;
-      const scanner = new KbReferenceScanner(ws, KB);
+      const scanner = new KbReferenceScanner(ws, new NodeFs(), KB);
 
       expect((await scanner.scan('ws-1')).get('admin')).toEqual([{ path: 'Archive/access.md', verb: 'write' }]);
       const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m));
@@ -242,7 +242,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-'));
     try {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walkerWithHole());
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
       await expect(
         scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m)),
       ).rejects.toThrow(/Cannot list Locked .*rename aborted with no changes/);
@@ -255,7 +255,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole3-'));
     try {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walkerWithHole('Lo\nFAKE: line'));
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole('Lo\nFAKE: line'), KB);
       const err = await scanner
         .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m))
         .catch((e: Error) => e);
@@ -271,7 +271,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
     try {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const walker = walkerWithHole();
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walker);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
       expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
       await scanner.scan('ws-1');
       // Not served from cache: the second scan retried the listing.
@@ -290,7 +290,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
       const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB, bus);
 
       expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
 
@@ -330,7 +330,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
           return result;
         },
       };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walker);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
 
       // The caller still gets the snapshot it asked for...
       expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
@@ -351,7 +351,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
       const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB, bus);
 
       const first = await scanner.scan('ws-1');
       for (const l of listeners) {
@@ -371,7 +371,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
       const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB, bus);
 
       const first = await scanner.scan('ws-1');
       for (const l of listeners) {

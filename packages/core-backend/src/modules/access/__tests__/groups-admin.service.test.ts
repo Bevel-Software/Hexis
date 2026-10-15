@@ -108,6 +108,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -309,6 +310,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -355,6 +357,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -394,6 +397,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -449,6 +453,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
         workspace,
         stubWorkflow().svc,
         new AccessControlService(workspace as never, KB, new NodeFs()),
+        new NodeFs(),
         KB,
         () => DEFAULT_BRANCH,
       );

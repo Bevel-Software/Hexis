@@ -169,7 +169,7 @@ describe('RolesAdminService', () => {
     access = new AccessControlService(ws, KB, new NodeFs());
     workflow = stubWorkflow();
     bus = stubEventBus();
-    svc = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus, [
+    svc = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus, [
       'recovery-admin@example.com',
     ]);
   });
@@ -191,7 +191,7 @@ describe('RolesAdminService', () => {
     // `DEFAULT_BRANCH` and froze it — every roles route then failed branch
     // validation with `Invalid branch name "": empty name` until a restart.
     let branch = '';
-    const late = new RolesAdminService(ws, workflow.svc, access, KB, () => branch, bus.bus);
+    const late = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => branch, bus.bus);
     branch = DEFAULT_BRANCH;
     const roster = await late.getRoster();
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
@@ -255,7 +255,7 @@ describe('RolesAdminService', () => {
     const corrupt = 'roles:\n  Admin:\n    - a@x.eu\n  Admin:\n    - b@x.eu\n';
     await write(repo, 'roles.yaml', corrupt);
     access.invalidate(WS);
-    const adminless = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus);
+    const adminless = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus);
     // 409, not 500: the route helper hides >=500 bodies behind a generic
     // message, and this break-glass refusal must reach the operator verbatim.
     await expect(adminless.recover(ADMIN)).rejects.toMatchObject({
@@ -560,6 +560,7 @@ describe('roster referencedBy under group shadowing', () => {
       ws,
       stubWorkflow().svc,
       new AccessControlService(ws, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
       stubEventBus().bus,
@@ -617,6 +618,7 @@ describe('Admin fixed members — the deployment admin', () => {
       ws,
       workflow.svc,
       new AccessControlService(ws, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
       stubEventBus().bus,

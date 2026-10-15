@@ -19,6 +19,7 @@ import type {
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
@@ -95,6 +96,8 @@ export function createAccessRoutes(
   eventBus: WorkflowEventBus,
   db: Database,
   kb: KbContext,
+  /** The composition root's walk, for the roles admin's reference scan. */
+  disk: ITreeWalker,
   /** This deployment's configured admins — the break-glass recovery roster. */
   recoveryAdmins: readonly string[] = [],
 ): express.Router {
@@ -105,6 +108,7 @@ export function createAccessRoutes(
     workspaceService,
     workflowService,
     accessControl,
+    disk,
     kbDirName,
     () => kb.defaultBranch,
     eventBus,

@@ -26,7 +26,6 @@ import { promises as fs } from 'node:fs';
 
 import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/platform-shared';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
-import { NodeFs } from '../kb-fs/node-fs.js';
 import { logger } from '../../shared/logging.js';
 import { printable, sanitizedPath } from '../../shared/printable.js';
 import {
@@ -361,9 +360,10 @@ export class KbReferenceScanner {
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
+    /** The resolver's walk (see `collectCandidateFiles`), injected by the composition root. */
+    private readonly disk: ITreeWalker,
     private readonly kbDirName: string,
     eventBus?: ReferenceScanInvalidationBus,
-    private readonly disk: ITreeWalker = new NodeFs(),
   ) {
     eventBus?.onEmit?.((event) => {
       if (event.kind !== 'file-changed' && event.kind !== 'lock-released') return;

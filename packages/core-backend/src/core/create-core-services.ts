@@ -1544,6 +1544,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    disk,
     kbDirName,
     () => kb.defaultBranch,
     eventBus,
