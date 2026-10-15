@@ -85,6 +85,15 @@ describe('WorkerPatternMatcher', () => {
     expect(await matcher().search('x', '').matchingLines(['x', 'y', 'x', 'x'], 2)).toEqual([0, 2]);
   });
 
+  it('refuses a sizing that could never serve a search when it is built, not when a search hangs on it', () => {
+    expect(() => new WorkerPatternMatcher({ poolMax: 0 })).toThrow(/poolMax must be an integer of at least 1/);
+    expect(() => new WorkerPatternMatcher({ poolMax: 1.5 })).toThrow(RangeError);
+    expect(() => new WorkerPatternMatcher({ budgetMs: 0 })).toThrow(/budgetMs/);
+    expect(() => new WorkerPatternMatcher({ maxWaiting: -1 })).toThrow(/maxWaiting/);
+    expect(() => new WorkerPatternMatcher({ batchChars: Number.NaN })).toThrow(/batchChars/);
+    expect(() => matcher({ maxWaiting: 0 })).not.toThrow();
+  });
+
   it('refuses invalid syntax with the 400 grep always gave', () => {
     expect(() => matcher().search('(', '')).toThrow(/^Invalid regex: /);
   });

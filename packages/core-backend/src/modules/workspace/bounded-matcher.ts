@@ -103,11 +103,13 @@ export class WorkerPatternMatcher implements IPatternMatcher {
   };
 
   constructor(opts: WorkerPatternMatcherOptions = {}) {
-    this.budgetMs = opts.budgetMs ?? 5_000;
-    this.poolMax = opts.poolMax ?? 4;
-    this.maxWaiting = opts.maxWaiting ?? 16;
-    this.maxPatternLength = opts.maxPatternLength ?? 1_000;
-    this.batchChars = opts.batchChars ?? 1_000_000;
+    this.budgetMs = option('budgetMs', opts.budgetMs ?? 5_000, 1);
+    // A pool of none would leave every search waiting for a worker that never comes.
+    this.poolMax = option('poolMax', opts.poolMax ?? 4, 1);
+    // No queue at all is allowed: every search past the pool is refused busy.
+    this.maxWaiting = option('maxWaiting', opts.maxWaiting ?? 16, 0);
+    this.maxPatternLength = option('maxPatternLength', opts.maxPatternLength ?? 1_000, 1);
+    this.batchChars = option('batchChars', opts.batchChars ?? 1_000_000, 1);
   }
 
   search(source: string, flags: string): IPatternSearch {
@@ -246,4 +248,12 @@ function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'ti
     w.on('exit', onExit);
     w.postMessage(message);
   });
+}
+
+/** A sizing option as given, refused at construction unless it is an integer of at least `min`. */
+function option(name: string, value: number, min: number): number {
+  if (!Number.isInteger(value) || value < min) {
+    throw new RangeError(`WorkerPatternMatcher: ${name} must be an integer of at least ${min}, got ${value}.`);
+  }
+  return value;
 }
