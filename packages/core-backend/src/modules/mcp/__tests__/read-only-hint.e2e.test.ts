@@ -141,15 +141,15 @@ describe('the hosted MCP endpoint lists the read-only hint', () => {
     const client = await connect(baseUrl);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
 
-    await hints.set('read_file', false, 'admin@x');
-    await hints.set('write_file', true, 'admin@x');
-    await hints.set('call_tool_chain', true, 'admin@x');
+    await hints.set('read_file', false, '00000000-0000-4000-8000-00000000000a');
+    await hints.set('write_file', true, '00000000-0000-4000-8000-00000000000a');
+    await hints.set('call_tool_chain', true, '00000000-0000-4000-8000-00000000000a');
     let listed = await annotationsOf(client);
     expect(listed.read_file).toEqual({ readOnlyHint: false });
     expect(listed.write_file).toEqual({ readOnlyHint: true });
     expect(listed.call_tool_chain).toEqual({ readOnlyHint: true });
 
-    for (const name of ['read_file', 'write_file', 'call_tool_chain']) await hints.set(name, null, 'admin@x');
+    for (const name of ['read_file', 'write_file', 'call_tool_chain']) await hints.set(name, null, '00000000-0000-4000-8000-00000000000a');
     listed = await annotationsOf(client);
     expect(listed.read_file).toEqual({ readOnlyHint: true });
     expect(listed.write_file).toEqual({ readOnlyHint: false });

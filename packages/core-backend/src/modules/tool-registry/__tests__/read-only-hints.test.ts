@@ -137,6 +137,20 @@ function platformRegistry(): ToolRegistry {
   return registry;
 }
 
+/** An admin's user id: what `deployment_settings.updated_by` (a uuid column) records. */
+const ADMIN_ID = '00000000-0000-4000-8000-00000000000a';
+
+/**
+ * Refuse what Postgres refuses: `updated_by` is a uuid referencing `users.id`.
+ * An email there answered every real save with a 500 that a fake taking any
+ * string hid.
+ */
+function assertUuid(by: string | null): void {
+  if (by !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(by)) {
+    throw new Error(`invalid input syntax for type uuid: "${by}"`);
+  }
+}
+
 /** The deployment-settings surface the hints use, over one in-memory row. */
 function memorySettings(initial = '') {
   const state = { value: initial, writes: 0, updatedBy: null as string | null };
@@ -145,6 +159,7 @@ function memorySettings(initial = '') {
     port: {
       reload: async (key: string) => (key === TOOL_READ_ONLY_SETTING ? state.value : ''),
       recordIfAbsent: async (_key: string, value: string, by: string | null) => {
+        assertUuid(by);
         if (state.value) return false;
         if (parseToolReadOnlyOverrides(value) === null) return false;
         state.value = value;
@@ -153,6 +168,7 @@ function memorySettings(initial = '') {
         return true;
       },
       swapIfValue: async (_key: string, expected: string, next: string | null, by: string | null) => {
+        assertUuid(by);
         if (state.value !== expected) return false;
         state.value = next ?? '';
         state.writes += 1;
@@ -231,16 +247,16 @@ describe('an override', () => {
     const settings = memorySettings();
     const hints = new ToolReadOnlyHints(registry, settings.port);
 
-    expect(await hints.set('read_file', false, 'admin@x')).toMatchObject({ builtIn: true, override: false, readOnly: false });
-    expect(await hints.set('write_file', true, 'admin@x')).toMatchObject({ builtIn: false, override: true, readOnly: true });
+    expect(await hints.set('read_file', false, ADMIN_ID)).toMatchObject({ builtIn: true, override: false, readOnly: false });
+    expect(await hints.set('write_file', true, ADMIN_ID)).toMatchObject({ builtIn: false, override: true, readOnly: true });
     expect(JSON.parse(settings.state.value)).toEqual({ read_file: false, write_file: true });
-    expect(settings.state.updatedBy).toBe('admin@x');
+    expect(settings.state.updatedBy).toBe(ADMIN_ID);
     let listing = await hostedListing(registry, hints);
     expect(listing.get('read_file')?.annotations).toEqual({ readOnlyHint: false });
     expect(listing.get('write_file')?.annotations).toEqual({ readOnlyHint: true });
 
-    expect(await hints.set('write_file', null, 'admin@x')).toMatchObject({ override: null, readOnly: false });
-    expect(await hints.set('read_file', null, 'admin@x')).toMatchObject({ override: null, readOnly: true });
+    expect(await hints.set('write_file', null, ADMIN_ID)).toMatchObject({ override: null, readOnly: false });
+    expect(await hints.set('read_file', null, ADMIN_ID)).toMatchObject({ override: null, readOnly: true });
     // The last override gone is the row gone: every tool on its built-in value.
     expect(settings.state.value).toBe('');
     listing = await hostedListing(registry, hints);
@@ -292,7 +308,7 @@ describe('the routes', () => {
     server = undefined;
   });
 
-  /** A deployment with the three routes and the agent manual; `x-email` stands in for the session. */
+  /** A deployment with the three routes and the agent manual; `x-email` stands in for the session, with its user id. */
   async function start(admins: string[]) {
     const registry = platformRegistry();
     const settings = memorySettings();
@@ -305,6 +321,7 @@ describe('the routes', () => {
       '/api',
       (req, _res, next) => {
         req.userEmail = req.header('x-email') ?? undefined;
+        req.userId = req.userEmail === 'admin@x' ? ADMIN_ID : req.userEmail ? '00000000-0000-4000-8000-00000000000b' : undefined;
         next();
       },
       createToolHintsRoutes(hints, { isAdmin: async (email) => !!email && admins.includes(email) }),
@@ -346,11 +363,13 @@ describe('the routes', () => {
   });
 
   it("applies an admin's override to the next manual and hint map, and a reset removes it", async () => {
-    const { put, manualTags, base } = await start(['admin@x']);
+    const { put, manualTags, base, settings } = await start(['admin@x']);
     expect(await manualTags('write_file')).not.toContain('read-only');
 
     const res = await put('write_file', { readOnly: true }, 'admin@x');
     expect(res.status).toBe(200);
+    // Recorded under the admin's user id — the uuid the column holds — not their email.
+    expect(settings.state.updatedBy).toBe(ADMIN_ID);
     expect(await res.json()).toMatchObject({ name: 'write_file', override: true, readOnly: true });
     expect(await manualTags('write_file')).toContain('read-only');
     const hints = (await (await fetch(`${base}/agent/tool-hints`)).json()) as { tools: Record<string, boolean> };

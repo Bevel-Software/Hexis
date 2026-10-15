@@ -7,7 +7,7 @@ import {
   type DeploymentSettingsService,
 } from '../settings/deployment-settings.service.js';
 import { logger } from '../../shared/logging.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userEmail)
+import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId, req.userEmail)
 
 const log = logger('tool-read-only-hints');
 
@@ -123,6 +123,10 @@ export class ToolReadOnlyHints {
    * Set one tool's override, or remove it (`null`), and answer the tool as it
    * now stands. A compare-and-swap on the stored map, retried, so two admins
    * saving different tools at once both land.
+   *
+   * `updatedBy` is the admin's USER ID, never their email: it lands in
+   * `deployment_settings.updated_by`, a uuid referencing `users.id`, and
+   * anything else is refused by the database.
    */
   async set(name: string, readOnly: boolean | null, updatedBy: string | null): Promise<ToolReadOnlyEntry> {
     const known = (await this.describe()).find((e) => e.name === name);
@@ -200,7 +204,8 @@ export function createToolHintsRoutes(
     }
     try {
       const name = String(req.params.name);
-      const entry = await hints.set(name, readOnly, req.userEmail ?? null);
+      // The user ID, as the setup routes record it: `updated_by` is a uuid column.
+      const entry = await hints.set(name, readOnly, req.userId ?? null);
       log.info(`${req.userEmail ?? 'an admin'} set the read-only hint of "${name}" to ${readOnly === null ? 'its built-in value' : String(readOnly)}`);
       res.json(entry);
     } catch (err) {

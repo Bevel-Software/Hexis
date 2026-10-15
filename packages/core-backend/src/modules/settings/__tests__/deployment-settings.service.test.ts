@@ -706,7 +706,7 @@ describe('DeploymentSettingsService — the read-only overrides', () => {
     const { db, rows } = makeDb();
     const before = new DeploymentSettingsService(db, ENC_KEY);
     await before.load();
-    await new ToolReadOnlyHints(registry(), before).set('write_file', true, 'admin@x');
+    await new ToolReadOnlyHints(registry(), before).set('write_file', true, '00000000-0000-4000-8000-00000000000a');
     expect(rows.find((r) => r.key === 'toolReadOnlyOverrides')?.value).toBe('{"write_file":true}');
 
     const after = new DeploymentSettingsService(db, ENC_KEY);
@@ -715,7 +715,7 @@ describe('DeploymentSettingsService — the read-only overrides', () => {
     expect((await hints.describe()).find((e) => e.name === 'write_file')).toMatchObject({ override: true, readOnly: true });
 
     // And the reset removes the row, every tool back on its built-in value.
-    await hints.set('write_file', null, 'admin@x');
+    await hints.set('write_file', null, '00000000-0000-4000-8000-00000000000a');
     expect(rows.find((r) => r.key === 'toolReadOnlyOverrides')).toBeUndefined();
   });
 
