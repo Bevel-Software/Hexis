@@ -41,17 +41,27 @@ const MANUALS = [
   },
 ];
 
+/** What the workspace's `.tool` files declare right now; a test may edit one. */
+let manuals: { slug: string; name: string; path: string; type: 'mcp' | 'http'; variables: unknown[] }[] = MANUALS;
+
 /** Readable by everyone except the tool `secret` — which nobody here may read. */
 const toolManualService = {
-  listAccessible: async () => MANUALS,
+  listAccessible: async () => manuals,
   toManualCallTemplates: async () =>
-    MANUALS.map((m) => ({ name: m.name, call_template_type: 'http', url: `https://example.test/${m.slug}` })),
-  catalogFingerprints: async () => MANUALS.map((m) => `${m.slug}\u0000${m.name}`),
+    manuals.map((m) => ({ name: m.name, call_template_type: 'http', url: `https://example.test/${m.slug}` })),
+  catalogFingerprints: async () => manuals.map((m) => `${m.slug}\u0000${m.name}`),
 } as unknown as IToolManualService;
 
 const secretsVault = {
   statusFor: async (_u: string, keys: string[]) =>
-    keys.map((key) => ({ key, adminConfigured: true, adminKind: 'oauth' as const, userConfigured: false, userKind: null })),
+    // The workspace has set every value, each of the kind its var declares.
+    keys.map((key) => ({
+      key,
+      adminConfigured: true,
+      adminKind: key.endsWith('_TOKEN') ? ('oauth' as const) : ('static' as const),
+      userConfigured: false,
+      userKind: null,
+    })),
   list: async () => [],
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
 
@@ -61,7 +71,10 @@ const servers: HttpServer[] = [];
  * One server per "session" — a reload, or a second browser — all over the same
  * store. The user is whoever the `x-user` header names.
  */
-async function session(skippedTools: InMemorySkippedToolsService): Promise<string> {
+async function session(
+  skippedTools: InMemorySkippedToolsService,
+  resolveUserEmail: (id: string) => Promise<string | undefined> = async (id) => `${id}@x.com`,
+): Promise<string> {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -98,7 +111,7 @@ async function session(skippedTools: InMemorySkippedToolsService): Promise<strin
       toolManuals: toolManualService,
       skills: { listSkills: async () => [] },
       manualAuth,
-      resolveUserEmail: async (id) => `${id}@x.com`,
+      resolveUserEmail,
       skippedTools,
     }),
   );
@@ -110,6 +123,7 @@ async function session(skippedTools: InMemorySkippedToolsService): Promise<strin
 }
 
 afterEach(async () => {
+  manuals = MANUALS;
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
@@ -187,6 +201,44 @@ describe('a skipped tool stays skipped', () => {
 
     await setSkipped(base, 'qa-userkey', false);
     expect(await catalog(base)).toContain('qa_userkey');
+    expect(await revision(base)).toBe(before);
+  });
+
+  it('still offers Include once the tool has no key of the reader’s left to show', async () => {
+    const store = new InMemorySkippedToolsService();
+    const base = await session(store);
+    await setSkipped(base, 'qa-userkey', true);
+
+    // The `.tool` is edited after the skip: its key becomes the workspace's,
+    // and the workspace has set it — nothing left for a key row to ask for.
+    manuals = MANUALS.map((m) =>
+      m.slug === 'qa-userkey' ? { ...m, variables: [{ name: 'API_KEY', scope: 'admin' as const, label: null }] } : m,
+    );
+    const view = await pending(base);
+    expect(view.tools).toEqual([expect.objectContaining({ slug: 'qa-userkey', skipped: true, variables: [] })]);
+    expect(await catalog(base)).not.toContain('qa_userkey');
+
+    // Included, it has nothing to show again, so it leaves the page — and is
+    // back on the agent.
+    await setSkipped(base, 'qa-userkey', false);
+    expect((await pending(base)).tools).toEqual([]);
+    expect(await catalog(base)).toContain('qa_userkey');
+  });
+
+  it('a skipped sign-in tool is carried by its sign-in row, not by an empty key card too', async () => {
+    const base = await session(new InMemorySkippedToolsService());
+    await setSkipped(base, 'granola', true);
+
+    const view = await pending(base);
+    expect(view.toolOAuth).toEqual([expect.objectContaining({ slug: 'granola', skipped: true })]);
+    expect(view.tools.map((t) => t.slug)).not.toContain('granola');
+  });
+
+  it('does not move the revision for a caller with no catalog for a skip to change', async () => {
+    const base = await session(new InMemorySkippedToolsService(), async () => undefined);
+    const before = await revision(base);
+
+    await setSkipped(base, 'qa-userkey', true);
     expect(await revision(base)).toBe(before);
   });
 

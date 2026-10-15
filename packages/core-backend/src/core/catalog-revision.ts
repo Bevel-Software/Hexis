@@ -118,8 +118,9 @@ export function createCatalogRevisionRoutes(deps: {
       const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
       // Joined onto the manual half as lines no manual fingerprint can be (the
       // \u0002 lead), rather than by filtering it: a fingerprint is opaque
-      // here and does not say which manual it is.
-      const skipped = userId && deps.skippedTools ? [...(await deps.skippedTools.skippedBy(userId))] : [];
+      // here and does not say which manual it is. Gated on `email` as the
+      // manuals are: a caller with no catalog has nothing a skip could change.
+      const skipped = userId && email && deps.skippedTools ? [...(await deps.skippedTools.skippedBy(userId))] : [];
       const manualLines = [...manuals, ...skipped.map((name) => `\u0002skipped\u0000${name}`)];
       res.json({
         revision: catalogRevision(manualLines, skills, views),

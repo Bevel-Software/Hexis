@@ -418,8 +418,11 @@ export function ConnectToolsPage() {
                     const on = !o.skipped;
                     // The provider was never registered, so there is no consent
                     // screen for Authorize to open. Whose job that is decides
-                    // whether this is a greyed reason or a field.
-                    if (!o.ownerConfigured) {
+                    // whether this is a greyed reason or a field. Not for a
+                    // skipped tool, though: the skip is the reader's own and
+                    // stored, so its row and Include come first — the owner's
+                    // state is back on the row the moment it is included.
+                    if (!o.ownerConfigured && on) {
                       return o.ownerOnly ? (
                         <ConnectRow
                           key={o.key}
@@ -513,10 +516,13 @@ export function ConnectToolsPage() {
                 <Section title="Keys">
                   {tools.map((tool) => {
                     // A tool whose every remaining variable belongs to somebody
-                    // else offers nothing to opt into, so it gets no toggle —
-                    // and cannot be "skipped by you", because you never had it.
+                    // else offers nothing to opt into, so it gets no toggle. A
+                    // STORED skip still shows, whatever is left on the card: it
+                    // may have been made through the tool's sign-in, or before
+                    // its last key of the reader's went, and the agent goes on
+                    // leaving the tool out until Include clears it.
                     const actionable = tool.variables.filter(isActionable);
-                    const on = actionable.length === 0 || !tool.skipped;
+                    const on = !tool.skipped;
                     const unset = actionable.filter((v) => !v.configured).length;
                     const ownerVar = tool.variables.find((v) => v.ownerOnly);
                     // Grey the CARD only when nothing on it is the reader's to
@@ -553,7 +559,7 @@ export function ConnectToolsPage() {
                           state={state}
                           reason={state === 'owner-only' && ownerVar ? ownerReason(ownerVar.name) : undefined}
                           onToggle={
-                            actionable.length === 0
+                            actionable.length === 0 && on
                               ? undefined
                               : () => void onToggle(tool.slug, on)
                           }

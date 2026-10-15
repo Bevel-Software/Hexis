@@ -364,6 +364,50 @@ describe('a tool the reader skipped stays skipped', () => {
     expect(await within(await rowFor('granola')).findByText('Needs your sign-in')).toBeInTheDocument();
     expect(within(await rowFor('granola')).getByRole('button', { name: 'Authorize' })).toBeInTheDocument();
   });
+
+  it('keeps a skipped sign-in skipped once its provider registration goes missing', async () => {
+    // Skipped while the owner had registered the provider; the registration
+    // has since gone. The owner's row used to win, and with it the Include.
+    const catalog = [
+      tool({
+        slug: 'google',
+        variables: [v({ name: 'GOOGLE_TOKEN', key: 'google_GOOGLE_TOKEN', oauth: true })],
+      }),
+    ];
+    skippedOnServer.add('google');
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    renderPage();
+    const google = await rowFor('google');
+    expect(within(google).getByText('Skipped by you')).toBeInTheDocument();
+
+    fireEvent.click(within(google).getByRole('button', { name: 'Include' }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('google', false));
+    expect(
+      await within(await rowFor('google')).findByText('Needs an owner to set GOOGLE_TOKEN'),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps a skipped key card skipped when only an owner’s key is left on it', async () => {
+    // The reader's own key went from the `.tool` after the skip (or the skip
+    // was made through the tool's sign-in): nothing left is theirs to fill in,
+    // but the agent still leaves the tool out, so the card must say so and
+    // offer the way back.
+    const catalog = [
+      tool({ slug: 'apollo', variables: [v({ name: 'ADMIN_KEY', key: 'apollo_ADMIN_KEY', scope: 'admin' })] }),
+    ];
+    skippedOnServer.add('apollo');
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    renderPage();
+    const apollo = await rowFor('apollo');
+    expect(within(apollo).getByText('Skipped by you')).toBeInTheDocument();
+
+    fireEvent.click(within(apollo).getByRole('button', { name: 'Include' }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('apollo', false));
+    const back = await rowFor('apollo');
+    expect(await within(back).findAllByText('Needs an owner to set ADMIN_KEY')).not.toHaveLength(0);
+    // Included, it is the owner's again — nothing for the reader to opt out of.
+    expect(within(back).queryByRole('checkbox')).not.toBeInTheDocument();
+  });
 });
 
 describe('the Connect page says why, when the reader cannot act', () => {

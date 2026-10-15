@@ -337,8 +337,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               .filter((v) => v.scope !== 'admin' || !v.configured),
           };
         })
-        // Only surface tools that actually have something to show.
-        .filter((t) => t.variables.length > 0);
+        // Only surface tools that actually have something to show — and a
+        // skipped tool always does: its Include. A manual that lost its last
+        // key row after the skip would otherwise vanish from the page while
+        // the agent's catalog still leaves it out, with no way back.
+        .filter((t) => t.variables.length > 0 || t.skipped);
 
       // OAuth-backed per-user vars render as Authorize buttons under "Sign-ins".
       // Keyed by slug+var (the caller's row may not exist yet), with authorized
@@ -387,7 +390,12 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         .filter((s) => s.kind === 'oauth' && !toolOAuthKeys.has(s.key))
         .map((s) => ({ id: s.id, key: s.key, label: s.label, authorized: s.authorized ?? false }));
 
-      res.json({ tools, oauth, toolOAuth });
+      // A skipped tool kept only for its Include does not need a key card
+      // when one of its sign-in rows already carries that Include.
+      const signInSlugs = new Set(toolOAuth.map((o) => o.slug));
+      const keyCards = tools.filter((t) => t.variables.length > 0 || !signInSlugs.has(t.slug));
+
+      res.json({ tools: keyCards, oauth, toolOAuth });
     } catch (err) {
       log.error('connect/pending failed:', { err });
       res.status(500).json({ error: 'Internal error' });
