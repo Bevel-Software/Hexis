@@ -1588,6 +1588,48 @@ describe('a pattern too expensive to match', () => {
     expect(after.status).toBe(200);
   });
 
+  it('spends one budget across every file a search reads: each alone fits, all of them together do not', async () => {
+    // How long the pattern takes over one line IN A WORKER, which backtracks at
+    // its own pace, not this thread's: once on a fresh worker (`first`, which
+    // can be several times slower) and then again on the same one (`again`).
+    // Timed through a probe matcher of the same kind, on a line long enough
+    // that `again` is at least 50 ms.
+    let line = '';
+    let first = 0;
+    let again = 0;
+    for (let n = 16; again < 50; n++) {
+      line = `${'a'.repeat(n)}!`;
+      const probe = new WorkerPatternMatcher();
+      try {
+        await probe.search('x', '').matchingLines(['x'], 1); // the worker is up before anything is timed
+        let t = performance.now();
+        await probe.search('^(a+)+$', '').matchingLines([line], 1);
+        first = performance.now() - t;
+        t = performance.now();
+        await probe.search('^(a+)+$', '').matchingLines([line], 1);
+        again = performance.now() - t;
+      } finally {
+        await probe.close();
+      }
+    }
+    // A budget well above what any one file costs, and enough files that
+    // together they cost about twice the budget.
+    const budgetMs = Math.ceil(Math.max(first, again) * 1.5) + 200;
+    const files = Math.ceil((2 * budgetMs) / again);
+    matcherOptions = { budgetMs };
+    const base = await start();
+    for (let i = 1; i <= files; i++) await fs.writeFile(`${KB_DIR}/slow-${String(i).padStart(3, '0')}.md`, `${line}\n`);
+    const all = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$' });
+    expect(all.status).toBe(400);
+    const body = (await all.json()) as { error: string; code?: string };
+    expect(body.code).toBe('pattern_too_expensive');
+    expect(body.error).toMatch(/^Pattern too expensive: /);
+    // Any one of the same files, searched alone, fits the same budget.
+    const one = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$', path: `${KB_DIR}/slow-001.md` });
+    expect(one.status).toBe(200);
+    expect(((await one.json()) as { matches: unknown[] }).matches).toEqual([]);
+  });
+
   it('a control pattern over the same line still matches', async () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/redos.md`, `intro\n${LONG_LINE}\n`);
