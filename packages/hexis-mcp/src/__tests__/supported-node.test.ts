@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SUPPORTED_NODE, SUPPORTED_NODE_MAJORS, enginesRange, supportedNodePhrase } from '../preflight.js';
@@ -40,14 +40,27 @@ describe('the supported Node majors', () => {
     expect(SUPPORTED_NODE.map((n) => n.floor)).toEqual(['22.13', '24']);
   });
 
-  it('are what `engines` promises, in both published packages', () => {
+  it('are what `engines` promises, here and in every workspace package this one installs', () => {
     // One `>=floor <major+1` clause each, never a single span: `>=22 <25`
     // would promise Node 23, which has no binary and would put a C++ compile
     // on the user's machine.
     const range = enginesRange();
     expect(range).toBe('>=22.13 <23 || >=24 <25');
     expect(engines(join(pkgDir, 'package.json'))).toBe(range);
-    expect(engines(join(repoRoot, 'packages', 'mcp-core', 'package.json'))).toBe(range);
+    // A dependency that promises fewer majors makes an engine-strict install
+    // of this package fail on a major it supports, so each one is held to the
+    // same range: read from this package's own dependencies, not listed here.
+    const dependencies = (JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf-8')) as { dependencies: Record<string, string> })
+      .dependencies;
+    const workspace = Object.keys(dependencies).filter((name) => dependencies[name]!.startsWith('workspace:'));
+    expect(workspace.sort()).toEqual(['@bevel-software/platform-mcp-core', '@bevel-software/platform-shared']);
+    const packageDirs = new Map(
+      readdirSync(join(repoRoot, 'packages')).map((dir) => {
+        const file = join(repoRoot, 'packages', dir, 'package.json');
+        return [(JSON.parse(readFileSync(file, 'utf-8')) as { name: string }).name, file] as const;
+      }),
+    );
+    for (const name of workspace) expect(engines(packageDirs.get(name)!), name).toBe(range);
   });
 });
 
