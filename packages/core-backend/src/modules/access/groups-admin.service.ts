@@ -81,7 +81,8 @@ export interface GroupRosterEntry {
    * name exists. A bare name is the role, so these rules grant the role, not
    * this group — rules written while bare names still meant the group change
    * meaning here. An Admin rewrites each as `group/<Name>` if the group was
-   * meant. Empty when no role shares the name.
+   * meant. Empty when no role shares the name. Only files the roster's
+   * viewer can read are listed (see `getRoster`).
    */
   bareNameResolvesToRole: { path: string; verb: string }[];
   /**
@@ -181,8 +182,12 @@ export class GroupsAdminService {
    *     fallback to manual, which would resurrect retired groups).
    *   - Manual mode, broken groups.yaml: 422 with the parse message — the
    *     repair path must show the operator what to fix, never a dead page.
+   *
+   * `viewerEmail` is who the roster is for: `bareNameResolvesToRole` names
+   * only the files that viewer can read. Being an Admin is not read access to
+   * every file, and a path is itself a disclosure.
    */
-  async getRoster(): Promise<GroupsRoster> {
+  async getRoster(viewerEmail: string): Promise<GroupsRoster> {
     const workspaceId = await this.ensureWorkspace();
     const active = await loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f));
     if (active.sourceFile === GROUPS_YAML && !active.health.ok) {
@@ -218,7 +223,22 @@ export class GroupsAdminService {
         assignedToRoles: assignedByGroup.get(canonical) ?? [],
       });
     }
+    await this.keepReadableCollisions(workspaceId, viewerEmail, groups);
     return { mode, groups, groupsHealth: active.health };
+  }
+
+  /** Drop every `bareNameResolvesToRole` row whose file the viewer cannot read. */
+  private async keepReadableCollisions(
+    workspaceId: string,
+    viewerEmail: string,
+    groups: GroupRosterEntry[],
+  ): Promise<void> {
+    const paths = [...new Set(groups.flatMap((g) => g.bareNameResolvesToRole.map((r) => r.path)))];
+    if (paths.length === 0) return;
+    const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
+    for (const g of groups) {
+      g.bareNameResolvesToRole = g.bareNameResolvesToRole.filter((r) => readable.get(r.path) === true);
+    }
   }
 
   /**
@@ -248,7 +268,7 @@ export class GroupsAdminService {
     await this.assertManualMode(await this.ensureWorkspace());
     await this.assertRoleNameFree(displayName);
     await this.runEdit(actor, (text) => editCreateGroup(text, displayName));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -298,17 +318,17 @@ export class GroupsAdminService {
       );
       this.afterWrite(workspaceId, actor, files.map((f) => f.repoRel));
     });
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   async addMember(actor: AuthUser, canonical: string, email: string): Promise<GroupsRoster> {
     await this.runEdit(actor, (text) => editAddMember(text, canonical, email));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   async removeMember(actor: AuthUser, canonical: string, email: string): Promise<GroupsRoster> {
     await this.runEdit(actor, (text) => editRemoveMember(text, canonical, email));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -328,7 +348,7 @@ export class GroupsAdminService {
     await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], () =>
       this.renameGroupLocked(workspaceId, actor, canonical, newCanonical, newDisplayName),
     );
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   private async renameGroupLocked(

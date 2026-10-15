@@ -11,6 +11,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
 import { GroupsAdminService, GroupsAdminError } from '../groups-admin.service.js';
 import { createGroup, addGroupMember, GroupsEditError } from '../groups-edit.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 
 const KB = 'knowledge-base';
 const ADMIN: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
@@ -127,7 +128,7 @@ describe('GroupsAdminService', () => {
       'roles.yaml',
       'roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n    - group:gtm team\n',
     );
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('manual');
     expect(roster.groupsHealth).toEqual({ ok: true });
     expect(roster.groups.map((g) => g.displayName).sort()).toEqual(['GTM Team', 'Product']);
@@ -142,7 +143,7 @@ describe('GroupsAdminService', () => {
 
   it('a broken MANUAL groups.yaml answers the roster with 422 + the parse message', async () => {
     await write(repo, 'groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
-    const err = await service.getRoster().catch((e: unknown) => e);
+    const err = await service.getRoster('admin@x.io').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GroupsAdminError);
     expect((err as GroupsAdminError).status).toBe(422);
     expect((err as GroupsAdminError).message).toMatch(/groups.yaml/);
@@ -153,7 +154,7 @@ describe('GroupsAdminService', () => {
 
   it('a broken SYNCED file keeps IdP mode: empty roster + groupsHealth marker (no manual fallback)', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('idp');
     // Falling back to groups.yaml would resurrect retired manual groups.
     expect(roster.groups).toEqual([]);
@@ -219,7 +220,7 @@ describe('GroupsAdminService', () => {
 
   it('IdP mode: mutations refuse with the typed 409; reads still work', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - ada@x.io\n');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('idp');
     // The roster IS the synced file now — not the retired manual list.
     expect(roster.groups.map((g) => g.canonical)).toEqual(['engineering']);
@@ -268,7 +269,7 @@ describe('GroupsAdminService', () => {
       '---\nwrite:\n  - Admin\n---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n',
     );
     // The scan must see the body rule too (delete warnings / referencedBy).
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     const gtm = roster.groups.find((g) => g.canonical === 'gtm team');
     expect(gtm?.referencedBy).toContainEqual({ path: 'Knowledge/Sales/access.md', verb: 'read' });
 
@@ -457,7 +458,8 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
         KB,
         () => DEFAULT_BRANCH,
       );
-      const roster = await svc.getRoster();
+      // rev@x.io holds the Reviewer role, so it can read team/access.md.
+      const roster = await svc.getRoster('rev@x.io');
       const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
       expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'owner' }]);
       expect(reviewer.bareNameResolvesToRole).toEqual([{ path: 'team/access.md', verb: 'read' }]);
@@ -471,6 +473,38 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       );
       expect(ops.referencedBy).toHaveLength(2);
       expect(ops.bareNameResolvesToRole).toEqual([]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('bareNameResolvesToRole names only the files the viewer can read', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      await write(repo2, 'roles.yaml', ROLES); // Admin: admin@x.io, Reviewer: rev@x.io
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
+      await write(repo2, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+      // Two bare Reviewer rules: one in an open folder, one in a node only
+      // the Reviewer role may read.
+      await write(repo2, 'team/access.md', '---\nwrite:\n  - Reviewer\n---\n');
+      await write(repo2, 'secret/Plan.md', '---\nread:\n  - deny everyone\n  - Reviewer\n---\n# Plan\n');
+      const workspace = stubWorkspace(root2);
+      const access = new AccessControlService(workspace as never, KB, new NodeFs());
+      const svc = new GroupsAdminService(workspace, stubWorkflow().svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      const rowsFor = async (email: string) =>
+        (await svc.getRoster(email)).groups.find((g) => g.canonical === 'reviewer')!.bareNameResolvesToRole;
+
+      expect(await rowsFor('rev@x.io')).toEqual(
+        expect.arrayContaining([
+          { path: 'team/access.md', verb: 'write' },
+          { path: 'secret/Plan.md', verb: 'read' },
+        ]),
+      );
+      // pat@x.io is in the Reviewer GROUP, not the role: the bare grant is the
+      // role's, so the secret file is closed to pat, and so is its path.
+      expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), 'pat@x.io', 'secret/Plan.md')).toBe(false);
+      expect(await rowsFor('pat@x.io')).toEqual([{ path: 'team/access.md', verb: 'write' }]);
     } finally {
       await fs.rm(root2, { recursive: true, force: true });
     }
