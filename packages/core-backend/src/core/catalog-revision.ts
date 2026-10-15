@@ -94,8 +94,9 @@ export function createCatalogRevisionRoutes(deps: {
   resolveUserEmail: (userId: string) => Promise<string | undefined>;
   /**
    * The manuals the caller skipped on the Connect page. `all-tools` leaves
-   * those out, so skipping or including one changes the catalog a running
-   * server holds and has to move the revision. Absent, nothing is skipped.
+   * those out, so they are left out of the fingerprint too: skipping or
+   * including one moves the revision, editing a skipped one does not. Absent,
+   * nothing is skipped.
    */
   skippedTools?: { skippedBy(userId: string): Promise<ReadonlySet<string>> };
   /** The MCP App views served; absent on a deployment that serves none. */
@@ -110,20 +111,18 @@ export function createCatalogRevisionRoutes(deps: {
       // No resolvable caller is an EMPTY catalog, not a failure: that is what
       // both list surfaces answer such a caller, so the fingerprint agrees
       // with them rather than inventing a third verdict.
+      // A skipped manual is not in the catalog `all-tools` serves the caller,
+      // so it is left out BEFORE fingerprinting: its line would otherwise move
+      // the revision when someone edits a tool this caller is never served.
+      const skipped = userId && email && deps.skippedTools ? await deps.skippedTools.skippedBy(userId) : undefined;
       const [manuals, skills] = email
-        ? await Promise.all([deps.toolManuals.catalogFingerprints(email), deps.skills.listSkills(email)])
+        ? await Promise.all([deps.toolManuals.catalogFingerprints(email, skipped), deps.skills.listSkills(email)])
         : [[], []];
       // A manifest that cannot be read counts as no views, which is also what
       // the MCP endpoint serves in that state.
       const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
-      // Joined onto the manual half as lines no manual fingerprint can be (the
-      // \u0002 lead), rather than by filtering it: a fingerprint is opaque
-      // here and does not say which manual it is. Gated on `email` as the
-      // manuals are: a caller with no catalog has nothing a skip could change.
-      const skipped = userId && email && deps.skippedTools ? [...(await deps.skippedTools.skippedBy(userId))] : [];
-      const manualLines = [...manuals, ...skipped.map((name) => `\u0002skipped\u0000${name}`)];
       res.json({
-        revision: catalogRevision(manualLines, skills, views),
+        revision: catalogRevision(manuals, skills, views),
         tools: manuals.length,
         skills: skills.length,
       });

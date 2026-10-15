@@ -57,7 +57,8 @@ const toolManualService = {
   listAccessible: async () => manuals,
   toManualCallTemplates: async () =>
     manuals.map((m) => ({ name: m.name, call_template_type: 'http', url: `https://example.test/${m.slug}` })),
-  catalogFingerprints: async () => manuals.map((m) => `${m.slug}\u0000${m.name}`),
+  catalogFingerprints: async (_email: string, except?: ReadonlySet<string>) =>
+    manuals.filter((m) => !except?.has(m.name)).map((m) => `${m.slug}\u0000${m.name}\u0000${m.path}`),
 } as unknown as IToolManualService;
 
 const secretsVault = {
@@ -210,6 +211,20 @@ describe('a skipped tool stays skipped', () => {
     await setSkipped(base, 'qa-userkey', false);
     expect(await catalog(base)).toContain('qa_userkey');
     expect(await revision(base)).toBe(before);
+  });
+
+  it('does not move the revision when a tool the caller skipped is edited', async () => {
+    const base = await session(new FakeSkippedToolsService());
+    await setSkipped(base, 'qa-userkey', true);
+    const before = await revision(base);
+
+    // The skipped tool's file moves; nothing the caller is served changed.
+    manuals = MANUALS.map((m) => (m.slug === 'qa-userkey' ? { ...m, path: 'Plugins/GTM/moved.tool' } : m));
+    expect(await revision(base)).toBe(before);
+
+    // An edit to a tool they are served still moves it.
+    manuals = manuals.map((m) => (m.slug === 'granola' ? { ...m, path: 'Plugins/GTM/granola-2.tool' } : m));
+    expect(await revision(base)).not.toBe(before);
   });
 
   it('still offers Include once the tool has no key of the reader’s left to show', async () => {

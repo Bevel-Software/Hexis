@@ -479,6 +479,12 @@ describe('ToolManualService', () => {
       expect(await inlineLine()).not.toBe(before);
     });
 
+    test('drops the line of a manual named in `except`, and only that one', async () => {
+      const lines = await svc().catalogFingerprints('user@x.eu', new Set(['billing']));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('weather');
+    });
+
     test('drops a line for a manual the caller cannot read', async () => {
       const lines = await svc(denyBilling).catalogFingerprints('user@x.eu');
       expect(lines).toHaveLength(1);

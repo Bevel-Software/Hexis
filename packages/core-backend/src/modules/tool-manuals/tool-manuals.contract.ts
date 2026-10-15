@@ -405,8 +405,12 @@ export interface IToolManualService {
    * catalog is still correct, which a change to a manual's `url` or an inline
    * manual's embedded tools breaks without touching anything a summary shows.
    * Opaque to callers: only equality is ever asked of these lines.
+   *
+   * `except` names manuals (by `name`, the key `/agent/all-tools` leaves them
+   * out by) the caller is not served, so none of their lines is rendered: a
+   * manual outside the served catalog cannot move its fingerprint.
    */
-  catalogFingerprints(userEmail: string): Promise<string[]>;
+  catalogFingerprints(userEmail: string, except?: ReadonlySet<string>): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
