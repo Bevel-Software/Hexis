@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bridgeScript, type BridgeConfig } from '../views/bridge.js';
 import { nativeMarkup } from '../views/native.js';
 
@@ -8,7 +8,61 @@ import { nativeMarkup } from '../views/native.js';
  * compact presentation (native.ts) executed in a DOM, talking to a fake host
  * over the same postMessage JSON-RPC a real host speaks. The host is the
  * view's `window.parent`; its answers arrive as `message` events from it.
+ *
+ * Every test mounts a view into the ONE window this file shares, so each
+ * test takes down what its view put there: the listeners it added to the
+ * window and the document, its timers (all fake, so `vi.waitFor` advances
+ * them), its resize observers, and its host, which answers nothing after.
+ * Otherwise a late message or timer from one test's view could change the
+ * page another test is reading.
  */
+let teardown: (() => void)[] = [];
+
+/** Puts back a property as it was: its own descriptor if it had one, else the inherited one. */
+function restoring(target: object, key: string): () => void {
+  const own = Object.getOwnPropertyDescriptor(target, key);
+  return () => {
+    if (own) Object.defineProperty(target, key, own);
+    else delete (target as Record<string, unknown>)[key];
+  };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  teardown.push(restoring(window, 'parent'));
+  for (const target of [window, document] as EventTarget[]) {
+    const add = target.addEventListener;
+    const putBack = restoring(target, 'addEventListener');
+    Object.defineProperty(target, 'addEventListener', {
+      configurable: true,
+      value(this: EventTarget, type: string, fn: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) {
+        if (fn) teardown.push(() => target.removeEventListener(type, fn, options));
+        add.call(this, type, fn, options);
+      },
+    });
+    teardown.push(putBack);
+  }
+  const Observer = globalThis.ResizeObserver;
+  if (typeof Observer === 'function') {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class extends Observer {
+        constructor(callback: ResizeObserverCallback) {
+          super(callback);
+          teardown.push(() => this.disconnect());
+        }
+      },
+    );
+  }
+});
+
+afterEach(() => {
+  for (const undo of teardown.reverse()) undo();
+  teardown = [];
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 const CONFIG: BridgeConfig = {
   view: 'show_to_do_list',
@@ -45,7 +99,10 @@ type Answer = (params: Record<string, unknown> | undefined) => unknown;
 /** A host that answers the view's requests by method; a method with no answer is never answered. */
 function fakeHost(answers: Record<string, Answer>) {
   const sent: Msg[] = [];
+  let closed = false;
+  teardown.push(() => (closed = true));
   const deliver = (data: unknown): void => {
+    if (closed) return;
     window.dispatchEvent(new MessageEvent('message', { data, source: host as never }));
   };
   const host = {
@@ -93,10 +150,6 @@ const click = (selector: string): void => {
 const bevel = (): { buildGraph(): Promise<{ nodes: Map<string, unknown> }> } =>
   (window as unknown as { bevel: { buildGraph(): Promise<{ nodes: Map<string, unknown> }> } }).bevel;
 
-afterEach(() => {
-  vi.useRealTimers();
-});
-
 describe('links in a view', () => {
   it('opens a workspace URL in the web app as it is, and a relative link against the page', async () => {
     const h = fakeHost({ 'ui/initialize': initialize({ openLinks: {} }), 'ui/open-link': () => ({}) });
@@ -139,7 +192,6 @@ describe('live data a view asks for itself', () => {
   });
 
   it('gives up on a host that neither advertises serverTools nor answers, instead of loading forever', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const h = fakeHost({ 'ui/initialize': initialize({}) });
     mount(h.host);
     await vi.advanceTimersByTimeAsync(0);
@@ -167,7 +219,8 @@ describe('the compact presentation', () => {
     expect(compact()).toBe(true);
     click('#hx-native [data-act="full"]');
     await vi.waitFor(() => expect(h.requests('ui/request-display-mode')).toHaveLength(1));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The host's own context message, sent right after its answer.
+    await vi.advanceTimersByTimeAsync(20);
     expect(compact()).toBe(false);
   });
 
@@ -190,7 +243,7 @@ describe('the compact presentation', () => {
     answerMessage();
     // The bridge says so once the host took the message; the view settles its queue right after.
     await vi.waitFor(() => expect(document.getElementById('hexis-bridge-toast')?.textContent).toMatch(/Sent to the chat/));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
     expect(document.querySelector('.hx-pending-n')?.textContent).toBe('1 change');
     click('[data-act="send"]');
     await vi.waitFor(() => expect(h.requests('ui/message')).toHaveLength(2));
