@@ -252,8 +252,11 @@ const BRIDGE_SOURCE = String.raw`
     }
   }
   // A file of the knowledge base, by its path in the repository's folder: a
-  // root-relative link, which the grammar reads as exactly that path.
-  const openKbFile = (repoPath) => openHref('/' + CFG.kbDir + '/' + repoPath);
+  // root-relative link, which the grammar reads as exactly that path. Each
+  // segment is encoded, so a # or % in a file's name stays part of the name
+  // instead of starting a fragment or an escape.
+  const openKbFile = (repoPath) =>
+    openHref('/' + [CFG.kbDir].concat(repoPath.split('/')).map((part) => encodeURIComponent(part)).join('/'));
 
   // -- size, display mode and the host's look ------------------------------------
   // The page as written is tall (and often 100vh); the compact presentation is

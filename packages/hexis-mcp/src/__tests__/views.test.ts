@@ -212,6 +212,8 @@ describe('the view catalog', () => {
     ['../Tasks/Bread.md', { branch: 'dev' }, 'https://kb.example/workspace/dev/knowledge-base/KnowledgeBase/Juan/Tasks/Bread.md'],
     ['  https://example.com/x  ', {}, 'https://example.com/x'],
     ['//cdn.example.com/x', {}, '//cdn.example.com/x'],
+    // A file name with a `#` and a `%` in it, as the bridge sends one (each segment encoded).
+    ['/knowledge-base/KnowledgeBase/Ops/Q%231%20100%25.md', {}, 'https://kb.example/workspace/main/knowledge-base/KnowledgeBase/Ops/Q%231%20100%25.md'],
   ])('opens %s where the app does', async (href, extra, url) => {
     const views = createViewCatalog(CONFIG, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: null });
     await views.listTools();

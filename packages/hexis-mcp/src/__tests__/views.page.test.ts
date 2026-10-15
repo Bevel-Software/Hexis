@@ -210,6 +210,15 @@ describe('links in a view', () => {
     expect(linkCalls(h)).toEqual(['/workspace/main/knowledge-base/KnowledgeBase/Ops/A.md', 'https://example.com/x']);
   });
 
+  it('opens a file whose name holds # or %, by its path, not as a fragment or an escape', async () => {
+    const h = linkHost();
+    mount(h.host);
+    await h.initialized();
+    (window as unknown as { __hexis: { openKbFile(path: string): Promise<void> } }).__hexis.openKbFile('KnowledgeBase/Ops/Q#1 100%.md');
+    await vi.waitFor(() => expect(h.requests('ui/open-link')).toHaveLength(1));
+    expect(linkCalls(h)).toEqual(['/knowledge-base/KnowledgeBase/Ops/Q%231%20100%25.md']);
+  });
+
   it('scrolls a fragment inside the frame and asks the server nothing', async () => {
     const h = linkHost();
     mount(h.host, '<a id="jump" href="#due">Due</a><h2 id="due">Due</h2>');
