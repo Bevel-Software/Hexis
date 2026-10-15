@@ -1076,6 +1076,34 @@ describe('a file deleted by someone else', () => {
     expect(apiMocks.writeFile).not.toHaveBeenCalled();
   });
 
+  it("a switched-to tab's late read does not replace the newer bytes a later read already brought", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    await act(async () => { result.current.bumpFsRevision(); });
+    await settle();
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBeNull();
+
+    // The switch's read is held, answering with the bytes it saw then.
+    const held: { answer: () => void } = { answer: () => { throw new Error('Activation read was not started'); } };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      held.answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    act(() => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    // The file changes, and a newer read brings the new bytes.
+    disk.set('KB/Draft.md', '# Draft\n\nChanged since.');
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    await waitFor(() => expect(result.current.activeTab?.content).toBe('# Draft\n\nChanged since.'));
+
+    await act(async () => { held.answer(); });
+    await settle();
+
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nChanged since.');
+    expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nChanged since.');
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');

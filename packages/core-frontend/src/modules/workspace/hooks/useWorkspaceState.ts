@@ -318,6 +318,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const existenceReadSeqRef = useRef(0);
   const goneAtSeqRef = useRef<Map<string, number>>(new Map());
+  /**
+   * By workspace and path, the number of the latest-issued read that answered
+   * with the file. A refresh read issued before it answers late with older
+   * bytes, and must not replace what that newer read brought (see
+   * `applyReadBytes`).
+   */
+  const foundAtSeqRef = useRef<Map<string, number>>(new Map());
   const isStaleFind = useCallback(
     (readFrom: string, path: string, seq: number) =>
       (goneAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
@@ -327,7 +334,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const seq = ++existenceReadSeqRef.current;
     const key = existenceKey(readFrom, path);
     const thisGone = read.then(
-      () => false,
+      () => {
+        if ((foundAtSeqRef.current.get(key) ?? -1) < seq) foundAtSeqRef.current.set(key, seq);
+        return false;
+      },
       (err: unknown) => {
         const isGone = err instanceof WorkspaceApiError && err.status === 404;
         if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
@@ -361,8 +371,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * Put the bytes of a refresh read (`activateTab`, `reloadTabFromDisk`, the
    * eager refetch, `lock-released`) into the open tab, under the one policy
    * they share. Nothing lands when the workspace moved on, when a read issued
-   * after this one (`seq`, from `trackExistenceCheck`) found the file gone,
-   * or when the tab, as it is NOW, was marked deleted, holds unsaved edits or
+   * after this one (`seq`, from `trackExistenceCheck`) found the file gone
+   * or already answered with it (its bytes are newer than these), or when the tab, as it is NOW, was marked deleted, holds unsaved edits or
    * a pending agent preview: newer state always wins over a late answer.
    * `stillApplies` adds a caller's own check on the tab as it is now.
    */
@@ -375,6 +385,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   ) => {
     if (workspaceIdRef.current !== readFrom) return;
     if (isStaleFind(readFrom, path, seq)) return;
+    if ((foundAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq) return;
     setOpenTabs((tabs) => tabs.map((t) => {
       if (t.path !== path) return t;
       if (t.deletedBy || t.isDirty || t.pendingFileContent !== null) return t;
