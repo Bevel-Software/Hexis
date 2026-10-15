@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -135,6 +135,29 @@ describe('readRefSha', () => {
     expect(await readRefSha(clone, 'refs/remotes/origin/nope')).toBe('missing');
     await git(clone, 'pack-refs', '--all');
     expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
+  });
+
+  it('reads packed-refs at most once per resolution, however many candidates a name tries', async () => {
+    await git(clone, 'pack-refs', '--all');
+    const reads = vi.spyOn(fs, 'readFile');
+    try {
+      // `origin/main` misses two prefixes and lands on the third; `nope`
+      // misses all six: one parse of the table each.
+      expect(await readRevSha(clone, 'origin/main')).toEqual({
+        sha: await git(clone, 'rev-parse', '--verify', 'origin/main^{commit}'),
+      });
+      const packedReads = () =>
+        reads.mock.calls.filter((call) => String(call[0]).endsWith('packed-refs')).length;
+      expect(packedReads()).toBe(1);
+      reads.mockClear();
+      expect(await readRevSha(clone, 'nope')).toBe('missing');
+      expect(packedReads()).toBe(1);
+      reads.mockClear();
+      expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
+      expect(packedReads()).toBe(1);
+    } finally {
+      reads.mockRestore();
+    }
   });
 
   it('tries the prefixes git tries for a full name too, before calling it missing', async () => {

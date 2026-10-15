@@ -49,11 +49,19 @@ function isSafeRefName(ref: string): boolean {
   return !ref.split('/').some((segment) => segment === '' || segment === '.' || segment === '..');
 }
 
+/**
+ * One resolution's view of the repository: the two directories, and the
+ * `packed-refs` table read at most once however many candidates a name
+ * tries — the table can grow with the history, and a name that is missing
+ * as itself consults it for every prefix.
+ */
 interface GitDirs {
   /** The worktree's own git directory: `HEAD` lives here. */
   gitDir: string;
   /** Where `refs/` and `packed-refs` live: the repository, shared by every worktree. */
   commonDir: string;
+  /** The `packed-refs` table, read on first need; null when it could not be read. */
+  packed?: Promise<Map<string, string> | null>;
 }
 
 async function gitDirsOf(repoDir: string): Promise<GitDirs | null> {
@@ -153,7 +161,7 @@ async function resolveIn(dirs: GitDirs, ref: string, depth: number): Promise<Ref
   const loose = await readLooseRef(dirs, ref === 'HEAD' ? dirs.gitDir : dirs.commonDir, ref, depth);
   if (loose !== 'missing') return decidedHere(ref, loose);
   if (ref === 'HEAD') return 'missing';
-  const packed = await readPackedRefs(dirs.commonDir);
+  const packed = await (dirs.packed ??= readPackedRefs(dirs.commonDir));
   if (!packed) return 'unreadable';
   const sha = packed.get(ref);
   return sha ? decidedHere(ref, { sha }) : 'missing';
