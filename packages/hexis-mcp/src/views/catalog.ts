@@ -28,7 +28,16 @@
  * sign-in beside it) together with each page and each view's last live data.
  * A restart answers from that copy at once and refreshes behind it; a change
  * found by the refresh is announced with `list_changed` notifications.
+ *
+ * WHOSE COPY. Everything kept, on disk and in memory, belongs to the reader
+ * whose credential read it, and is shown to no one else: the knowledge base
+ * decided what that reader may see, not what the next one may. The copy is
+ * tagged with a fingerprint of the credential (never the credential), a copy
+ * tagged for another is not loaded, and a credential that changes mid-run
+ * drops everything kept before it. A renewed credential cannot be told apart
+ * from another person's, so it starts afresh too.
  */
+import { createHash } from 'node:crypto';
 import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Resource, Tool as McpTool, CallToolResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
@@ -67,7 +76,8 @@ const PAGE_TTL_MS = 30_000;
 const KEPT_REFRESH_DELAY_MS = 20_000;
 /** Nodes the model's summary lists before it says how many more there are. */
 const SUMMARY_NODES = 80;
-const CACHE_VERSION = 1;
+/** 2: the copy names the reader it belongs to. */
+const CACHE_VERSION = 2;
 /**
  * The search matches the snapshot block alone, one line per view, so its
  * result cap is spent on views. A title pattern beside it matched the title of
@@ -173,10 +183,12 @@ export interface ViewCatalog {
   readResource(uri: string): Promise<ReadResourceResult>;
 }
 
-/** What is kept between runs, per deployment. */
+/** What is kept between runs, per deployment, for one reader. */
 interface CacheFile {
   version: number;
   baseUrl: string;
+  /** The fingerprint of the credential that read all of this (`readerOf`). */
+  reader: string;
   kbDir: string;
   at: number;
   views: ViewEntry[];
@@ -193,6 +205,11 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     options.cacheDir === null ? null : path.join(options.cacheDir ?? path.join(hexisHome(), 'views'), `${hostKey(config.baseUrl)}.json`);
 
   // -- state, seeded from the last run --------------------------------------------------
+  /** The reader everything below was read for: a fingerprint of the credential. */
+  const readerOf = (): string => createHash('sha256').update(config.connectionKey ?? '').digest('hex').slice(0, 32);
+  let keptFor = readerOf();
+  /** Bumped when the reader changes, so a read begun for the last one keeps nothing it finds. */
+  let generation = 0;
   let kbDir = DEFAULT_KB_DIR;
   let views: ViewEntry[] | null = null;
   let viewsAt = 0;
@@ -201,7 +218,12 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   if (cacheFile) {
     try {
       const saved = JSON.parse(readFileSync(cacheFile, 'utf8')) as CacheFile;
-      if (saved.version === CACHE_VERSION && saved.baseUrl === config.baseUrl && Array.isArray(saved.views)) {
+      if (
+        saved.version === CACHE_VERSION &&
+        saved.baseUrl === config.baseUrl &&
+        saved.reader === keptFor &&
+        Array.isArray(saved.views)
+      ) {
         kbDir = saved.kbDir || DEFAULT_KB_DIR;
         views = saved.views;
         viewsAt = saved.at;
@@ -223,6 +245,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
       const body: CacheFile = {
         version: CACHE_VERSION,
         baseUrl: config.baseUrl,
+        reader: keptFor,
         kbDir,
         at: viewsAt,
         views: views ?? [],
@@ -275,6 +298,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   // -- finding the views ----------------------------------------------------------------
   let refreshing: Promise<ViewEntry[]> | null = null;
   const refresh = (): Promise<ViewEntry[]> => {
+    const gen = generation;
     refreshing ??= (async () => {
       try {
         // Case-insensitive, as the pattern's own `i` is: `.source` drops the flag.
@@ -284,6 +308,8 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
           ignore_case: true,
           max_results: SEARCH_CAP,
         });
+        // Found for a reader who is no longer the one asking.
+        if (gen !== generation) return [];
         const found = viewPathsFromGrep(result);
         if (found.kbDir) kbDir = found.kbDir;
         let paths = found.paths;
@@ -318,9 +344,10 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
       } catch (err) {
         console.error(`[hexis-mcp] knowledge views unavailable: ${err instanceof Error ? err.message : String(err)}`);
         // Keep serving what was found before rather than dropping every view.
-        return views ?? [];
+        return gen === generation ? (views ?? []) : [];
       } finally {
-        refreshing = null;
+        // A changed reader has already let go of this search, and may have started its own.
+        if (gen === generation) refreshing = null;
       }
     })();
     return refreshing;
@@ -333,6 +360,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
    * change to the list; a page that cannot be read keeps the title it has.
    */
   async function titlePages(list: ViewEntry[]): Promise<void> {
+    const gen = generation;
     let renamed = false;
     await Promise.all(
       list.map(async (v) => {
@@ -344,7 +372,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
       }),
     );
     // Only for the list still served: a newer search has titled its own.
-    if (renamed && views === list) {
+    if (renamed && gen === generation && views === list) {
       save();
       options.onChange?.();
     }
@@ -365,16 +393,20 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     const key = `${branch}\n${view.path}`;
     let read = pageReads.get(key);
     if (!read) {
-      read = reader(branch)
+      const gen = generation;
+      const started: Promise<string> = reader(branch)
         .read(view.path)
         .then((html) => {
-          if (branch === DEFAULT_BRANCH) {
+          if (branch === DEFAULT_BRANCH && gen === generation) {
             pages.set(view.path, { at: Date.now(), html });
             save();
           }
           return html;
         })
-        .finally(() => pageReads.delete(key));
+        .finally(() => {
+          if (pageReads.get(key) === started) pageReads.delete(key);
+        });
+      read = started;
       pageReads.set(key, read);
     }
     return read;
@@ -389,6 +421,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
   }
 
   async function liveSnapshot(view: ViewEntry, branch: string): Promise<{ snapshot: Snapshot; errors: string[] }> {
+    const gen = generation;
     const embedded = readEmbeddedSnapshot(await page(view, branch));
     const selection = embedded?.selection as Selection | undefined;
     const mirror = selection?.mirror;
@@ -399,11 +432,31 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     }
     const { files, errors } = await mirrorFiles(reader(branch), mirror);
     const snapshot = buildSnapshot(files, selection, branch);
-    if (branch === DEFAULT_BRANCH) {
+    if (branch === DEFAULT_BRANCH && gen === generation) {
       snapshots.set(view.path, snapshot);
       save();
     }
     return { snapshot, errors };
+  }
+
+  /**
+   * Lets go of everything kept when the credential is no longer the one it
+   * was kept for: the views, their pages, their last live data, the knowledge
+   * base session and any search in flight. Every way in calls this first.
+   */
+  function forgetAnotherReader(): void {
+    const now = readerOf();
+    if (now === keptFor) return;
+    keptFor = now;
+    generation += 1;
+    kbDir = DEFAULT_KB_DIR;
+    views = null;
+    viewsAt = 0;
+    pages.clear();
+    snapshots.clear();
+    pageReads.clear();
+    session = null;
+    refreshing = null;
   }
 
   const branchOf = (args: Record<string, unknown>): string =>
@@ -449,6 +502,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
 
   return {
     prefetch() {
+      forgetAnotherReader();
       // Nothing known: search now, alongside discovery. A list kept from the
       // last run already answers, so its refresh steps aside for a while.
       if (views === null) {
@@ -459,14 +513,19 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
       later.unref?.();
     },
 
-    handles: (tool) => tool === VIEW_DATA_TOOL || (views ?? []).some((v) => v.tool === tool),
+    handles: (tool) => {
+      forgetAnotherReader();
+      return tool === VIEW_DATA_TOOL || (views ?? []).some((v) => v.tool === tool);
+    },
 
     async listTools() {
+      forgetAnotherReader();
       const list = await current();
       return list.length ? [...list.map(viewTool), dataTool] : [];
     },
 
     async callTool(tool, args) {
+      forgetAnotherReader();
       if (tool === VIEW_DATA_TOOL) {
         const view = await byTool(String(args.view ?? ''));
         if (!view) return { isError: true, content: [{ type: 'text', text: `Unknown view "${String(args.view)}".` }] };
@@ -513,6 +572,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     handlesResource: (uri) => uri.startsWith(URI_PREFIX),
 
     async listResources() {
+      forgetAnotherReader();
       return {
         resources: (await current()).map((v) => ({
           uri: v.uri,
@@ -525,6 +585,7 @@ export function createViewCatalog(config: HexisMcpConfig, options: ViewCatalogOp
     },
 
     async readResource(uri) {
+      forgetAnotherReader();
       const view = (await current()).find((v) => v.uri === uri) ?? (await refresh()).find((v) => v.uri === uri);
       if (!view) throw new Error(`Unknown resource ${uri}`);
       let html = await page(view, DEFAULT_BRANCH);

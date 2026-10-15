@@ -450,6 +450,49 @@ describe('the view catalog', () => {
       await vi.waitFor(() => expect(never.mock.calls.length).toBeGreaterThan(0));
     });
 
+    /** A knowledge base that shows this reader nothing, as one with no access to the view would. */
+    const refusing = () =>
+      vi.fn(async (tool: string): Promise<unknown> => {
+        if (tool === 'start_session') return { sessionId: 's-2' };
+        if (tool === 'grep') return { matches: [], truncated: false };
+        throw new Error('not readable for this reader');
+      });
+
+    it('never shows one reader what was kept for another', async () => {
+      dir = mkdtempSync(path.join(tmpdir(), 'hexis-views-'));
+      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      try {
+        const first = createViewCatalog({ ...CONFIG, connectionKey: 'key-a' }, { callKb: fakeKb(page(snapshotOnPage)), cacheDir: dir });
+        await first.listTools();
+        await first.callTool('show_to_do_list', {});
+        await vi.runAllTimersAsync(); // the coalesced save
+      } finally {
+        vi.useRealTimers();
+      }
+      const file = path.join(dir, `kb.example-${hashOf(CONFIG.baseUrl)}.json`);
+      await vi.waitFor(() => expect(readFileSync(file, 'utf8')).toContain('show_to_do_list'));
+      expect(readFileSync(file, 'utf8')).not.toContain('key-a');
+
+      const other = createViewCatalog({ ...CONFIG, connectionKey: 'key-b' }, { callKb: refusing(), cacheDir: dir });
+      expect(await other.listTools()).toEqual([]);
+      await expect(other.readResource('ui://hexis/views/to_do_list.html')).rejects.toThrow(/Unknown resource/);
+    });
+
+    it('lets go of what it kept when the credential changes mid-run', async () => {
+      const config = { ...CONFIG, connectionKey: 'key-a' };
+      const kb = fakeKb(page(snapshotOnPage));
+      const views = createViewCatalog(config, { callKb: kb, cacheDir: null });
+      expect((await views.listTools()).map((t) => t.name)).toEqual(['show_to_do_list', VIEW_DATA_TOOL]);
+      await views.callTool('show_to_do_list', {});
+      config.connectionKey = 'key-b';
+      kb.mockImplementation(refusing());
+      expect(await views.listTools()).toEqual([]);
+      expect(views.handles('show_to_do_list')).toBe(false);
+      await expect(views.readResource('ui://hexis/views/to_do_list.html')).rejects.toThrow(/Unknown resource/);
+      // A session of its own for the new reader: one per reader, not the last one's reused.
+      expect(kb.mock.calls.filter(([tool]) => tool === 'start_session')).toHaveLength(2);
+    });
+
     it('announces a change the background refresh found', async () => {
       dir = mkdtempSync(path.join(tmpdir(), 'hexis-views-'));
       const kb = fakeKb(page(snapshotOnPage));
