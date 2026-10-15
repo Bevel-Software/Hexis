@@ -238,6 +238,9 @@ function refNameCandidates(ref: string): string[] | null {
   if (!ref || ref.startsWith('-')) return null;
   if (/[\^~:@{}\\\s]/.test(ref)) return null;
   if (/^[0-9a-f]{4,64}$/i.test(ref)) return null;
+  // `main-worktree/<ref>` and `worktrees/<name>/<ref>` reach another
+  // worktree's own refs (gitrevisions(7)): git's to resolve.
+  if (/^(?:main-worktree|worktrees)\//.test(ref)) return null;
   return [ref, ...prefixedCandidates(ref)];
 }
 

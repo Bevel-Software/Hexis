@@ -138,6 +138,12 @@ describe('readRefSha', () => {
     expect(await readRevSha(wt, 'worktree/probe')).toBe('unreadable');
     await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'refs/worktree/probe^{commit}')).rejects.toThrow();
     expect(await readRefSha(clone, 'refs/worktree/probe')).toBe('missing');
+    // The spellings that reach another worktree's refs are git's, never missing.
+    expect(await git(wt, 'rev-parse', '--verify', 'main-worktree/HEAD^{commit}')).toBe(await git(clone, 'rev-parse', 'HEAD'));
+    expect(await readRevSha(wt, 'main-worktree/HEAD')).toBe('unreadable');
+    expect(await git(clone, 'rev-parse', '--verify', 'worktrees/wt/HEAD^{commit}')).toBe(sha);
+    expect(await readRevSha(clone, 'worktrees/wt/HEAD')).toBe('unreadable');
+    expect(await readRevSha(clone, 'worktrees/wt/refs/worktree/probe')).toBe('unreadable');
   });
 
   it('says missing for a ref no file holds, before and after packing', async () => {
