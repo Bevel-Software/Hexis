@@ -255,10 +255,22 @@ describe('group principals on the share surface', () => {
       verb: 'read',
       principal: { kind: 'group', group: 'GTM Team' },
     });
-    // Same status, same body as a group that does not exist: the grant route
-    // confirms no group name the picker would not have offered.
+    // Same status, same body as a group that does not exist — the WHOLE
+    // answer, message included, with only the name asked about differing —
+    // so the grant route confirms no group name the picker would not have
+    // offered.
+    const ghost = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'Ghost Team' },
+    });
     expect(res.status).toBe(404);
-    expect(await res.json()).toMatchObject({ kind: 'unknown-group', group: 'GTM Team' });
+    expect(ghost.status).toBe(404);
+    const hiddenBody = (await res.json()) as Record<string, unknown>;
+    const ghostBody = (await ghost.json()) as Record<string, unknown>;
+    expect(hiddenBody).toMatchObject({ kind: 'unknown-group', group: 'GTM Team' });
+    expect(JSON.stringify(hiddenBody).replaceAll('GTM Team', 'Ghost Team')).toBe(JSON.stringify(ghostBody));
     expect(h.files.has(`${KB}/Sales/access.md`)).toBe(false);
   });
 
