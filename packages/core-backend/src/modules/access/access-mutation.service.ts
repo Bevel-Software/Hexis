@@ -372,10 +372,10 @@ export class AccessMutationService {
     // When present, strip ONLY this verb (a per-checkbox toggle in the share UI);
     // absent strips the principal from every verb (the whole-principal Remove).
     verb?: Verb,
-    // `tokenMatch` overrides the derived matching (see revokeTokenMatch). A
-    // TEST seam only: no production caller passes it — the route leans on the
-    // derived matching, which never strips across kinds. Pinning `'name'` here
-    // would bypass that guard.
+    // `tokenMatch` overrides the derived matching (see revokeTokenMatch).
+    // One production caller: the plugin-links unlink pins `'exact'` for its
+    // `plugin/<Name>/<verb>` tokens. Pin only `'exact'` — a pinned `'name'`
+    // would bypass the guard that never strips across kinds.
     opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     void _actingUserEmail; // referenced to satisfy no-unused-vars until something consumes it
@@ -456,7 +456,7 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
-    // Same override as `revoke` — a test seam, unused in production.
+    // Same override as `revoke`; no production caller passes it here.
     opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal);

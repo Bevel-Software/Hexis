@@ -361,52 +361,47 @@ describe('AccessMutationService', () => {
       expect(await access.canWrite(WS, 'razvan@bevel.software', 'Sales/access.md')).toBe(true);
     });
 
-    it('GROUP deny with a VANISHED group succeeds even when a same-named ROLE keeps a role/<Name> grant', async () => {
-      // The false-negative this pins: with tokenMatch pinned to 'exact' on the
-      // bare token, the deny strips/denies ONLY that token. The
-      // post-write effectiveness assert must judge the SAME exact identity —
-      // with the group vanished the name reads "unshadowed", and the
-      // alias-tolerant default would read the surviving `role/Product Team`
-      // grant as the GROUP still having access, roll back a fully effective
+    it('GROUP deny with a VANISHED group succeeds even when a same-named ROLE keeps its grants', async () => {
+      // The false-negative this pins: a role named Product Team exists, so the
+      // service matches the GROUP's revoke/deny 'exact' — it strips and denies
+      // only `group/Product Team`. The post-write effectiveness assert must
+      // judge the SAME exact identity: with the group vanished, an
+      // alias-tolerant check would read the role's surviving bare and role/
+      // grants as the group still having access, roll back a fully effective
       // deny, and answer 409 deny-ineffective.
       await write(
         repo,
         'Sales/access.md',
-        // The bare grant is the (now vanished) GROUP's; the role/ grant is the
-        // same-named ROLE's own. No groups.yaml exists — the group is gone.
-        '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n# Sales folder\n',
+        // The group/ grant is the (now vanished) GROUP's; the bare and role/
+        // grants are the same-named ROLE's. No groups.yaml — the group is gone.
+        '---\nwrite:\n  - group/Product Team\n  - Product Team\n  - role/Product Team\n---\n# Sales folder\n',
       );
       access.invalidate(WS);
 
-      const r = await mutation.denyHere(
-        WS,
-        'folder',
-        'Sales',
-        { kind: 'role', role: 'Product Team' },
-        undefined,
-        { tokenMatch: 'exact' },
-      );
+      const r = await mutation.denyHere(WS, 'folder', 'Sales', { kind: 'role', role: 'group/Product Team' });
       expect(r.changed).toBe(true);
       access.invalidate(WS);
 
       const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
-      // The bare (group) grant became a deny...
-      expect(text).toContain('deny Product Team');
-      // ...and the ROLE's own grant was never touched.
+      // The group's grant became a deny...
+      expect(text).toContain('deny group/Product Team');
+      // ...and the ROLE's own grants were never touched.
+      expect(text).toMatch(/^ {2}- Product Team$/m);
       expect(text).toContain('role/Product Team');
+      expect(text).not.toContain('deny Product Team');
       expect(text).not.toContain('deny role/Product Team');
-      // The role still resolves its grant through the surviving role/ entry.
+      // The role still resolves its grant.
       const roleSources = await access.grantSources(WS, 'folder', 'Sales', {
         kind: 'role',
         role: 'role/Product Team',
       });
       expect(roleSources.write).toEqual([{ kind: 'direct' }]);
-      // The exact bare token — the group's identity — holds nothing anymore.
+      // The group's exact token holds nothing anymore.
       const groupSources = await access.grantSources(
         WS,
         'folder',
         'Sales',
-        { kind: 'role', role: 'Product Team' },
+        { kind: 'role', role: 'group/Product Team' },
         { tokenMatch: 'exact' },
       );
       expect(groupSources).toEqual({});

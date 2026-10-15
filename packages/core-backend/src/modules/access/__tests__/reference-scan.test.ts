@@ -9,6 +9,8 @@ import {
   findRoleRefsInText,
   rewriteRoleTokensInText,
 } from '../reference-scan.js';
+import type { ITreeWalker } from '../../../shared/fs.contract.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * Unit tests for the shared reference scanner's parse rules (comments,
@@ -184,6 +186,41 @@ describe('KbReferenceScanner — .tool frontmatter is scanned and rewritten like
   });
 });
 
+describe('KbReferenceScanner — candidates are the resolver\'s walk, not the explorer\'s', () => {
+  it('scans and rewrites an access.md that .bevelignore hides from the explorer', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-ignore-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, '.bevelignore', 'Archive/\n');
+      // The resolver walks past .bevelignore, so this rule is ENFORCED.
+      await write(repo, 'Archive/access.md', '---\nwrite:\n  - Admin\n---\n');
+      // The explorer's listing, as the real one answers: what .bevelignore
+      // hides is not in it. A scan built on it would miss Archive/access.md.
+      const base = stubWorkspace(root);
+      const ws = {
+        ...base,
+        listFiles: async (id: string) => {
+          const tree = await base.listFiles(id);
+          const prune = (n: FileTreeEntry): FileTreeEntry => ({
+            ...n,
+            children: n.children
+              ?.filter((c) => c.relativePath !== `${KB}/Archive`)
+              .map(prune),
+          });
+          return prune(tree);
+        },
+      } as unknown as IWorkspaceService;
+      const scanner = new KbReferenceScanner(ws, KB);
+
+      expect((await scanner.scan('ws-1')).get('admin')).toEqual([{ path: 'Archive/access.md', verb: 'write' }]);
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m));
+      expect(writes.map((w) => w.repoRelativePath)).toEqual(['Archive/access.md']);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('KbReferenceScanner — event-bus cache invalidation', () => {
   it('drops the cached scan when a scanned-extension file changes in the workspace', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-bus-'));
@@ -216,22 +253,23 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
     try {
       const repo = path.join(root, KB);
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
-      // The workspace stub invalidates DURING the first scan's tree listing —
+      // The walker invalidates DURING the first scan's tree listing —
       // modelling a write that lands after the scan started reading.
-      const base = stubWorkspace(root);
+      const disk = new NodeFs();
       let armed = true;
-      const ws = {
-        ...base,
-        listFiles: async (id: string) => {
-          const tree = await base.listFiles(id);
+      const walker: ITreeWalker = {
+        walk: (r, o, l) => disk.walk(r, o, l),
+        walkFiles: (r, m, o) => disk.walkFiles(r, m, o),
+        walkKb: async (r, l, o) => {
+          const result = await disk.walkKb(r, l, o);
           if (armed) {
             armed = false;
             scanner.invalidate('ws-1');
           }
-          return tree;
+          return result;
         },
-      } as unknown as IWorkspaceService;
-      const scanner = new KbReferenceScanner(ws, KB);
+      };
+      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, undefined, walker);
 
       // The caller still gets the snapshot it asked for...
       expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);

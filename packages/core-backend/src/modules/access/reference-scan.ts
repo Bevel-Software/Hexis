@@ -24,7 +24,9 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-import { isFrontmatterFence, type FileTreeEntry, type IWorkspaceService } from '@bevel-software/platform-shared';
+import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/platform-shared';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
+import { NodeFs } from '../kb-fs/node-fs.js';
 import {
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
@@ -357,6 +359,7 @@ export class KbReferenceScanner {
     private readonly workspaceService: IWorkspaceService,
     private readonly kbDirName: string,
     eventBus?: ReferenceScanInvalidationBus,
+    private readonly disk: ITreeWalker = new NodeFs(),
   ) {
     eventBus?.onEmit?.((event) => {
       if (event.kind !== 'file-changed' && event.kind !== 'lock-released') return;
@@ -382,27 +385,24 @@ export class KbReferenceScanner {
    * resolver reads access verbs from — the shared
    * `ACCESS_FRONTMATTER_EXTENSIONS` set (`.md` AND `.tool`; a rename that
    * skipped `.tool` would strand a live frontmatter grant there). Sourced
-   * from the workspace file tree (which already skips `.git` and honours
-   * `.bevelignore`), filtered under the KB dir and returned bare
-   * repo-relative. (`roles.yaml` matches no scanned extension, so it's
-   * excluded; callers commit it separately.) Under save=share the working
-   * tree matches the committed set, so this is the same candidate list
-   * git-tracking would give.
+   * from the RESOLVER'S OWN walk (`walkKb`: dot-entries and vendored
+   * dependencies skipped, `.bevelignore` NOT honoured) — the resolver
+   * enforces an `access.md` the explorer hides, so a scan that honoured the
+   * ignore file would leave its rules out of the roster's reports and a
+   * rename would strand them. Paths are relative to the KB dir. (`roles.yaml`
+   * matches no scanned extension, so it's excluded; callers commit it
+   * separately.)
    */
   async collectCandidateFiles(workspaceId: string): Promise<string[]> {
-    const tree = await this.workspaceService.listFiles(workspaceId);
-    const prefix = `${this.kbDirName}/`;
     const out: string[] = [];
-    const visit = (node: FileTreeEntry): void => {
-      if (node.type === 'file') {
-        if (node.relativePath.startsWith(prefix) && hasAccessFrontmatterExtension(node.relativePath)) {
-          out.push(node.relativePath.slice(prefix.length));
-        }
-        return;
-      }
-      for (const child of node.children ?? []) visit(child);
-    };
-    visit(tree);
+    await this.disk.walkKb(await this.repoDir(workspaceId), [
+      {
+        onFile(dir, name) {
+          const rel = dir ? `${dir}/${name}` : name;
+          if (hasAccessFrontmatterExtension(rel)) out.push(rel);
+        },
+      },
+    ]);
     return out;
   }
 

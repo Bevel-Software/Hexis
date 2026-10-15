@@ -388,11 +388,12 @@ write:
     const asRole = spliceRevoke(ALL, 'write', { kind: 'role', role: 'role/Sales' });
     expect(asRole.text.split('\n')).toEqual(['---', 'write:', '  - group/Sales', '  - Admin', '---', '']);
 
-    // The splice primitive alone: 'name' takes the bare token for whichever
-    // kind is asked. The service never asks it for a GROUP while a role of the
-    // name exists (ALL has one) — it pins 'exact', pinned in the next test.
-    const asGroup = spliceRevoke(ALL, 'write', { kind: 'role', role: 'group/Sales' });
-    expect(asGroup.text.split('\n')).toEqual(['---', 'write:', '  - role/Sales', '  - Admin', '---', '']);
+    // The service asks 'name' for a GROUP only while no role shares the name
+    // (with one, as in ALL, it picks 'exact' — the last test below), so the
+    // group's case is a file where the bare token can only be the group.
+    const GROUP_ONLY = '---\nwrite:\n  - Sales\n  - group/Sales\n  - Admin\n---\n';
+    const asGroup = spliceRevoke(GROUP_ONLY, 'write', { kind: 'role', role: 'group/Sales' });
+    expect(asGroup.text.split('\n')).toEqual(['---', 'write:', '  - Admin', '---', '']);
   });
 
   it('REVOKE matches a spaced `group/ <Name>` request against the parsed `group/<name>` entry', () => {
