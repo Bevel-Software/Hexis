@@ -312,9 +312,11 @@ describe('readRevSha', () => {
   });
 
   it('hands git what it does not resolve itself', async () => {
-    for (const rev of ['', '-x', 'main^{commit}', 'HEAD~1', 'main@{1}', 'abc1234', 'a'.repeat(40), 'a b']) {
+    // `@` alone is git's shorthand for HEAD, `@{u}` an upstream: git's.
+    for (const rev of ['', '-x', '@', '@{u}', 'main^{commit}', 'HEAD~1', 'main@{1}', 'abc1234', 'a'.repeat(40), 'a b']) {
       expect(await readRevSha(clone, rev)).toBe('unreadable');
     }
+    expect(await readRevSha(clone, '@')).not.toBe('missing');
     expect(await readRevSha(path.join(root, 'nowhere'), 'main')).toBe('unreadable');
   });
 });
