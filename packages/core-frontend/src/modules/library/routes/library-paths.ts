@@ -7,7 +7,7 @@ import {
   isPersonalPluginFolder,
 } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace';
 import type { LibraryFilter } from '../utils/status';
 import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
 
@@ -250,4 +250,37 @@ export function libraryHomeForItemPath(
     return { label: labelOf(plugin), path: pathForPlugin(plugin) };
   }
   return { label: 'Everything', path: LIBRARY_ROOT };
+}
+
+/**
+ * The workspace-relative path a Library URL names, or null. Library item
+ * pages live at `/workspace/<default>/<kbDir>/...` — the inverse of
+ * `kbFileUrl`, segment by segment. Any other URL (the index, a lens, a
+ * plugin page) names no file, so no row is current.
+ */
+export function libraryItemWorkspacePath(pathname: string, kbDirName: string | null): string | null {
+  const prefix = `${KB_ROUTE_PREFIX}/`;
+  if (!pathname.startsWith(prefix)) return null;
+  const [branch, ...rest] = pathname.slice(prefix.length).split('/').map(safeDecode);
+  if (branch !== DEFAULT_BRANCH || rest.length < 2) return null;
+  if (kbDirName !== null && rest[0] !== kbDirName) return null;
+  return rest.join('/');
+}
+
+/**
+ * Whether deleting `deletedPath` took the Library item on screen with it — a
+ * skill's or a tool's page, which holds no tab, so the workspace's delete
+ * cannot say it closed the active one. True when the file the page's URL
+ * names is the deleted path or under it, and when the deleted path is the
+ * `SKILL.md` of the skill whose file is on screen: without it there is no
+ * skill. The caller lands as `landingAfterClose` says for no tab left:
+ * Skills & Tools.
+ */
+export function deleteTookLibraryItem(pathname: string, kbDirName: string | null, deletedPath: string): boolean {
+  if (!isLibraryLocation(pathname)) return false;
+  const onScreen = libraryItemWorkspacePath(pathname, kbDirName);
+  if (onScreen === null) return false;
+  if (onScreen === deletedPath || onScreen.startsWith(`${deletedPath}/`)) return true;
+  const skillMd = '/SKILL.md';
+  return deletedPath.endsWith(skillMd) && onScreen.startsWith(deletedPath.slice(0, -skillMd.length + 1));
 }

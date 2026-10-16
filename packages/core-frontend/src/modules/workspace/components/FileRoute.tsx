@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
@@ -13,8 +13,11 @@ import {
   fetchNodeWorkspacePath,
   fetchNodeId,
 } from '../routing/kb-routes';
+import { landingAfterClose } from '../routing/landing';
 import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
+import { DeletedFileNotice } from './DeletedFileNotice';
+import { ErrorScreen } from './ErrorScreen';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -24,6 +27,16 @@ type SyncError =
   | { kind: 'file-denied'; path: string }
   | { kind: 'file-load-failed'; path: string; message: string }
   | null;
+
+/**
+ * Every id → path this app has learned, keyed by branch and id. A deleted
+ * file's id no longer resolves, so returning to its id URL (Back, or a switch
+ * to its tab) loaded the id token as a path and said "File not found" over a
+ * tab that holds the deleted notice. The path it last had finds that tab —
+ * and, with no tab, still fails as missing, by name. Module-level so it
+ * outlives a remount of the page (Knowledge home and back).
+ */
+const knownIdPaths = new Map<string, string>();
 
 /**
  * `canonicalize` (default on): replace a path URL with the node's id URL once
@@ -115,7 +128,10 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     if (!branchFromUrl) return;
     let cancelled = false;
     (async () => {
-      const path = await fetchNodeWorkspacePath(branchFromUrl, segment);
+      const resolved = await fetchNodeWorkspacePath(branchFromUrl, segment);
+      const key = `${branchFromUrl}/${segment}`;
+      if (resolved) knownIdPaths.set(key, resolved);
+      const path = resolved ?? knownIdPaths.get(key) ?? null;
       if (!cancelled) setIdResolved({ seg: segment, branch: branchFromUrl, path });
     })();
     return () => {
@@ -141,6 +157,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     let cancelled = false;
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
+      if (nodeId) knownIdPaths.set(`${branchFromUrl}/${nodeId}`, segment);
       if (!cancelled && nodeId) {
         navigate(kbNodeUrl(branchFromUrl, nodeId) + location.hash, { replace: true, state: routerStateRef.current });
       }
@@ -524,8 +541,23 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
    */
   const resolvingId = segmentIsId && pathFromUrl === '';
 
+  /**
+   * The file on screen was deleted by someone else (`deletedBy` is set only
+   * for a delete this session did not make — its own close the tab and move
+   * the address). Shown in place of the file, whatever the tab still holds:
+   * a background tab whose bytes were dropped has nothing to load either.
+   */
+  const deletedTab =
+    !error &&
+    currentBranch === branchFromUrl &&
+    workspaceBranch === branchFromUrl &&
+    workspace.activeTab?.deletedBy && workspace.activeTab.path === pathFromUrl
+      ? workspace.activeTab
+      : null;
+
   const loadingFile =
     !error &&
+    !deletedTab &&
     !goneBranch &&
     !unknownBranch &&
     !bootstrapFailure &&
@@ -542,6 +574,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           : bootstrapFailure ? 'bootstrap-failed'
             : statusUnknown ? 'git-status-failed'
               : error ? error.kind
+                : deletedTab ? 'file-deleted'
                 : loadingFile ? 'loading'
                   : 'viewer';
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -646,6 +679,26 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     );
   }
 
+  if (deletedTab) {
+    return (
+      <DeletedFileNotice
+        fileName={basename(deletedTab.path)}
+        branch={branchFromUrl}
+        deletedBy={deletedTab.deletedBy}
+        edits={deletedTab.isDirty ? deletedTab.content ?? '' : null}
+        agentVersion={deletedTab.pendingFileContent}
+        onClose={async () => {
+          // Close lands as the person's own delete does (`landingAfterClose`).
+          // The notice already said the edits exist only here and offered to
+          // copy them, so it does not ask again.
+          const { closed, newActivePath } = await workspace.closeTab(deletedTab, { skipConfirm: true });
+          if (!closed) return;
+          navigate(landingAfterClose(location.pathname, branchFromUrl, newActivePath), { replace: true });
+        }}
+      />
+    );
+  }
+
   if (error?.kind === 'file-missing') {
     return (
       <ErrorScreen title="File not found">
@@ -735,29 +788,3 @@ function describeError(err: unknown): { status: number | null; message: string }
   };
 }
 
-/**
- * One frame for the four full-screen states this route can end in.
- *
- * They said the same thing four different ways before — four copies of the
- * centring, four hand-rolled buttons, four type scales. Every sentence they
- * carried is preserved verbatim, including the dirty-branch explanation;
- * only the chrome is shared.
- */
-function ErrorScreen({
-  title,
-  role,
-  children,
-}: {
-  title: string;
-  role?: 'alert';
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex h-full w-full items-center justify-center bg-canvas px-6">
-      <div role={role} className="max-w-md space-y-3 text-center">
-        <h2 className="text-head text-ink">{title}</h2>
-        {children}
-      </div>
-    </div>
-  );
-}

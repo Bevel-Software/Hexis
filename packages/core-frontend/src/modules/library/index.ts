@@ -3,6 +3,16 @@
  * without reaching into the Library's files.
  */
 
+/**
+ * The routing contract that says which URLs are Skills & Tools pages, which
+ * workspace file such a page shows, and whether a delete took that item.
+ */
+export {
+  LIBRARY_ROOT,
+  deleteTookLibraryItem,
+  isLibraryLocation,
+  libraryItemWorkspacePath,
+} from './routes/library-paths';
 /** Where "Connect your tools" lives; every in-app link to it uses this. */
 export { CONNECT_TOOLS_PATH } from './routes/library-paths';
 /**

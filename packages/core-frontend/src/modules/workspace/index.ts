@@ -1,8 +1,10 @@
 /**
- * Workspace's public surface for other modules: what it takes to mount the
- * app's own renderer for a file somewhere other than the file page. The
- * embed (a page shown inside a chat) does exactly that, and imports these
- * from here rather than reaching into workspace's components.
+ * Workspace's public surface for other modules.
+ *
+ * What it takes to mount the app's own renderer for a file somewhere other
+ * than the file page. The embed (a page shown inside a chat) does exactly
+ * that, and imports these from here rather than reaching into workspace's
+ * components.
  *
  *  - `pickFileRenderer` and `isViewOnlyFile`: the same lookup the file page
  *    runs, registered renderers included, and whether the file has an
@@ -19,6 +21,12 @@
  *  - `kbFileUrl` and `resolveKbHref`: the app's address for a file on a
  *    branch, and what a link in a page resolves to there, which a link out
  *    of such a mount has to name.
+ *
+ * Its routing contract (the Knowledge URL prefix and the segment decode),
+ * where the page lands once the file on screen has closed, the "This file
+ * was deleted" notice and the hook that says when an item on screen was
+ * deleted elsewhere, and the workspace context those pages read the checkout
+ * from.
  */
 export {
   CanDownloadContext,
@@ -30,4 +38,8 @@ export {
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
-export { kbFileUrl, resolveKbHref } from './routing/kb-routes';
+export { KB_ROUTE_PREFIX, kbFileUrl, resolveKbHref, safeDecode } from './routing/kb-routes';
+export { landingAfterClose } from './routing/landing';
+export { DeletedFileNotice } from './components/DeletedFileNotice';
+export { useItemDeletedElsewhere } from './hooks/useItemDeletedElsewhere';
+export { WorkspaceContext } from './state/workspace.context';
