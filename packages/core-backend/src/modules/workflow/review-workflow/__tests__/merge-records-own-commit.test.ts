@@ -86,7 +86,8 @@ function makeDb(
     rows = [CR_ROW],
     casWon = true,
     begunLog = true,
-  }: { rows?: Record<string, unknown>[]; casWon?: boolean; begunLog?: boolean } = {},
+    begunHeads = [],
+  }: { rows?: Record<string, unknown>[]; casWon?: boolean; begunLog?: boolean; begunHeads?: string[] } = {},
 ): Database {
   let crReads = 0;
   const thenable = (data: unknown) => {
@@ -107,7 +108,14 @@ function makeDb(
           // The merge log begun by the attempt that pushed and crashed —
           // `succeeded: false`, no error — is what makes a retry look for its
           // commit at all.
-          if (table === prMergeLog) return thenable(begunLog ? [{ id: 'merge-log-0' }] : []);
+          if (table === prMergeLog) {
+            if (!begunLog) return thenable([]);
+            return thenable(
+              begunHeads.length > 0
+                ? begunHeads.map((h, i) => ({ id: `merge-log-${i}`, headShaAtMerge: h }))
+                : [{ id: 'merge-log-0' }],
+            );
+          }
           if (table !== changeRequests) return thenable([]);
           const row = rows[Math.min(crReads, rows.length - 1)];
           crReads += 1;
@@ -169,7 +177,7 @@ function makeService(mergeResult: AppliedMergeResult) {
     svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [APPROVED], 'open', CR_ROW.title, BASE, 'ws-1');
   /** The values written to the change request row (not the merge log). */
   const crUpdate = () => captured.find((c) => c.kind === 'update' && c.table === changeRequests)?.values;
-  return { merge, crUpdate, mergeChangeRequest };
+  return { merge, crUpdate, mergeChangeRequest, captured };
 }
 
 describe('mergePr — which commit the row records', () => {
@@ -219,6 +227,57 @@ describe('mergePr — which commit the row records', () => {
     const opts = mergeChangeRequest.mock.calls[0][5] as { appliedChangeNumber?: number };
     expect(opts.appliedChangeNumber).toBe(CR_ROW.number);
   });
+
+  it('logs the head the merge actually took, which the reader checks the merge commit against', async () => {
+    // The branch can move between the gate that read HEAD_SHA and the merge's
+    // own fetch. The merge commit's second parent is then the newer head, and
+    // a log still naming HEAD_SHA would make the reader refuse the request's
+    // own commit.
+    const { merge, captured } = makeService({
+      kind: 'merged',
+      sha: 'own',
+      mergeCommit: 'own',
+      mergedHead: 'head-the-merge-took',
+    });
+
+    await merge();
+
+    const logDone = captured.find(
+      (c) => c.kind === 'update' && c.table === prMergeLog && c.values.succeeded === true,
+    )?.values;
+    expect(logDone).toMatchObject({ headShaAtMerge: 'head-the-merge-took' });
+  });
+
+  it('writes the head the merge took onto the begun log before it finalizes the row', async () => {
+    // Should the row update fail after the push, the retry's recovery looks
+    // for the pushed commit by the heads begun rows recorded — which must then
+    // already be the head that was merged, not the one the gate read.
+    const { merge, captured } = makeService({
+      kind: 'merged',
+      sha: 'own',
+      mergeCommit: 'own',
+      mergedHead: 'head-the-merge-took',
+    });
+
+    await merge();
+
+    const order = captured.map((c) =>
+      c.kind === 'insert' ? 'log-insert' : c.table === changeRequests ? 'cr' : 'log-update',
+    );
+    expect(order).toEqual(['log-insert', 'log-update', 'cr', 'log-update']);
+    expect(captured[1].values).toEqual({ headShaAtMerge: 'head-the-merge-took' });
+  });
+
+  it('writes nothing extra when the merge took the head the gate read', async () => {
+    const { merge, captured } = makeService({ kind: 'merged', sha: 'own', mergeCommit: 'own', mergedHead: HEAD_SHA });
+
+    await merge();
+
+    const order = captured.map((c) =>
+      c.kind === 'insert' ? 'log-insert' : c.table === changeRequests ? 'cr' : 'log-update',
+    );
+    expect(order).toEqual(['log-insert', 'cr', 'log-update']);
+  });
 });
 
 /**
@@ -233,7 +292,7 @@ describe('mergePr — which commit the row records', () => {
  * the ownership question itself.
  */
 function makeStuckService(
-  own: string | null,
+  own: string | null | ((head: string) => string | null),
   // The two states a merge is decided against, kept APART because the service
   // treats them apart: `gateState` is the caller's (what drove the gate it
   // clicked), `rowState` is the authoritative row's. A stale caller passing
@@ -249,12 +308,15 @@ function makeStuckService(
     // Whether an earlier attempt left a begun, never-completed merge-log row —
     // the only evidence that there may be a pushed commit to recover.
     begunLog = true,
+    // The heads those begun rows recorded.
+    begunHeads = [],
   }: {
     gateState?: string;
     rowState?: string;
     casWon?: boolean;
     stateAfterCas?: string;
     begunLog?: boolean;
+    begunHeads?: string[];
   } = {},
 ) {
   const rows = [{ ...CR_ROW, state: rowState }, { ...CR_ROW, state: stateAfterCas }];
@@ -264,12 +326,14 @@ function makeStuckService(
     sha: 'should-not-be-reached',
     mergeCommit: null,
   }));
-  const appliedMergeCommitOnTarget = vi.fn(async () => own);
+  const appliedMergeCommitOnTarget = vi.fn(async (...args: unknown[]) =>
+    typeof own === 'function' ? own(String(args[3])) : own,
+  );
   const workspace = {
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
   } as unknown as WorkspaceService;
   const svc = new ReviewWorkflowService(
-    makeDb(captured, { rows, casWon, begunLog }),
+    makeDb(captured, { rows, casWon, begunLog, begunHeads }),
     {} as unknown as IAccessControl,
     workspace,
     { mergeChangeRequest, appliedMergeCommitOnTarget } as unknown as GitService,
@@ -297,7 +361,7 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
   it('hands the stored title to the probe, so a merge commit in the old message format is recognised', async () => {
     const { merge, appliedMergeCommitOnTarget } = makeStuckService('a-commit');
     await merge();
-    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, CR_ROW.title);
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, HEAD_SHA, CR_ROW.title);
   });
 
   it('records that commit instead of refusing, and merges nothing', async () => {
@@ -312,9 +376,40 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
     });
     expect(result.sha).toBe('the-commit-the-first-attempt-pushed');
     // Asked of the TARGET branch's own workspace, for this request's number.
-    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, CR_ROW.title);
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, HEAD_SHA, CR_ROW.title);
     // Nothing was merged, committed or pushed: the merge already happened.
     expect(mergeChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('finds the commit by the head the begun attempt merged, and logs that head', async () => {
+    // The first attempt merged a head newer than the one its gate read, wrote
+    // it onto its log row, pushed, and failed to finalize. The retry's caller
+    // may hold either head; the commit's second parent is the merged one.
+    const { merge, crUpdate, captured, appliedMergeCommitOnTarget } = makeStuckService(
+      (head) => (head === 'head-the-merge-took' ? 'the-commit-the-first-attempt-pushed' : null),
+      { begunHeads: ['head-the-merge-took'] },
+    );
+
+    const result = await merge();
+
+    expect(result.sha).toBe('the-commit-the-first-attempt-pushed');
+    expect(crUpdate()).toMatchObject({ mergedSha: 'the-commit-the-first-attempt-pushed' });
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith(
+      'ws-base', BASE, CR_ROW.number, 'head-the-merge-took', CR_ROW.title,
+    );
+    // The reader checks the commit's second parent against the logged head.
+    const inserted = captured.find((c) => c.kind === 'insert');
+    expect(inserted?.values).toMatchObject({ headShaAtMerge: 'head-the-merge-took' });
+  });
+
+  it("still finds it by the caller's head when the begun rows name another", async () => {
+    const { merge, captured } = makeStuckService(
+      (head) => (head === HEAD_SHA ? 'the-commit-the-first-attempt-pushed' : null),
+      { begunHeads: ['some-older-head'] },
+    );
+
+    expect((await merge()).sha).toBe('the-commit-the-first-attempt-pushed');
+    expect(captured.find((c) => c.kind === 'insert')?.values).toMatchObject({ headShaAtMerge: HEAD_SHA });
   });
 
   it('still refuses a request that owns no merge commit', async () => {

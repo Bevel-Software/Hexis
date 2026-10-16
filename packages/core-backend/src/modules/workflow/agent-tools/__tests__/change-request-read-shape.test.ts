@@ -586,6 +586,12 @@ describe('the body a caller is handed is the author\'s, not the machine\'s', () 
     // cut — the safe direction, and the only way this can err.
     expect(authorsDescription('Lead.\n\n## Affected owners\n\nI mean the GTM ones.')).toBe('Lead.');
   });
+
+  // One rule with the app's quote: the shared cut ignores trailing whitespace on
+  // the heading line, so a body edited by hand still loses its generated block.
+  it('cuts a heading line that carries trailing spaces, as the app does', () => {
+    expect(authorsDescription('Lead.\n\n## Affected owners  \n\n- `a.md` — admin')).toBe('Lead.');
+  });
 });
 
 /**

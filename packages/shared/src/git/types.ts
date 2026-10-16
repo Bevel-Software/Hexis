@@ -330,6 +330,30 @@ export interface IGitService {
   ): Promise<PullRequestFile[]>;
 
   /**
+   * The files an applied change request PROPOSED, from the source head its
+   * own apply recorded, against the target's published tip (three dots) —
+   * for an applied request whose apply made no merge commit of its own, so
+   * nothing on the target holds its files. Network for the TARGET alone,
+   * and required: its branch is fetched first, and when that fetch fails this
+   * rejects with a plain (retryable) error rather than read the clone's
+   * last-seen tip, which may predate the head's fork and so report the
+   * target's own later work as the request's. The head is never fetched —
+   * its branch is retired — so a head this clone does not hold rejects with
+   * `WorkflowValidationError`. A head already on the target (its commits
+   * landed through another request) is read against the target as it stood
+   * before they arrived. When the head and the target last met at more
+   * than one commit, the change is read only from the request's own refresh
+   * merge (which `sourceBranch` names); otherwise it answers no files rather
+   * than guess, since the wrong starting commit lists other requests' files.
+   */
+  changedFilesOfProposalHead(
+    workspaceId: string,
+    targetBranch: string,
+    headSha: string,
+    opts?: { patchCap?: number; sourceBranch?: string },
+  ): Promise<PullRequestFile[]>;
+
+  /**
    * The same applied change as the two path views a change-request SUMMARY
    * needs, out of one `git diff` — `changedPathsAndPairsForPr` for an applied
    * request instead of a branch pair, with the same verification and the same

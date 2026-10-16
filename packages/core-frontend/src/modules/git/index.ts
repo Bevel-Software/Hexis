@@ -13,3 +13,12 @@ import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from './branch-delete-menu-item';
  * branch-delete question is off.
  */
 export const GIT_MENU_ITEMS: readonly AdminMenuItem[] = [BRANCH_DELETE_CONFIRM_MENU_ITEM];
+
+/**
+ * What a change request needs from git to call the API and explain a failed
+ * git operation: the shared response handler, its error type, the friendly
+ * wording of a git failure, and the banner a failed sync shows.
+ */
+export { GitApiError, handleApiResponse } from './services/git.api';
+export { friendlyGitError, friendlyGitMessage } from './services/error-messages';
+export { GitSyncFailedBanner } from './components/GitSyncFailedBanner';

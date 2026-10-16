@@ -38,6 +38,7 @@ const stubCreatorAccess: ICreatorAccess = {
 
 interface Harness {
   server: Server;
+  workspaceService: WorkspaceService;
   baseUrl: string;
   canRead: ReturnType<typeof vi.fn>;
   canReadBatchFull: ReturnType<typeof vi.fn>;
@@ -71,6 +72,10 @@ async function makeHarness(opts: {
     })),
     readFile: vi.fn(async () => 'CONTENT'),
     readFileBinary: vi.fn(async () => Buffer.from('BYTES')),
+    isFile: vi.fn(async (_id: string, p: string) => {
+      if (p.includes('Broken')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      return !p.includes('Gone');
+    }),
     readAllKbFiles: vi.fn(async () => opts.kbFiles ?? {}),
     listFiles: vi.fn(async (_id: string, filter?: ReadTreeFilter) => {
       captured = filter;
@@ -106,6 +111,7 @@ async function makeHarness(opts: {
   const addr = server.address() as AddressInfo;
   return {
     server,
+    workspaceService,
     baseUrl: `http://127.0.0.1:${addr.port}`,
     canRead,
     canReadBatchFull,
@@ -160,6 +166,26 @@ describe('read-permission gates on human read routes', () => {
     const res = await get(`/file?path=${encodeURIComponent(KB)}`);
     expect(res.status).not.toBe(403);
     expect(h.canRead).not.toHaveBeenCalled();
+  });
+
+  it('HEAD /file/raw is read-gated and answers from a stat, never reading the bytes', async () => {
+    h = await makeHarness();
+    const head = (p: string) =>
+      fetch(`${h!.baseUrl}/api/workspace/${WS}/file/raw?path=${encodeURIComponent(p)}`, { method: 'HEAD' });
+    expect((await head(`${KB}/Secret/x.zip`)).status).toBe(403);
+    expect((await head(`${KB}/Open/a.zip`)).status).toBe(200);
+    expect((await head(`${KB}/Open/Gone.zip`)).status).toBe(404);
+    expect(h.workspaceService.readFileBinary).not.toHaveBeenCalled();
+    expect(h.workspaceService.isFile).not.toHaveBeenCalledWith(WS, `${KB}/Secret/x.zip`);
+  });
+
+  it('HEAD /file/raw: a generic stat failure is a 500, never "deleted"', async () => {
+    h = await makeHarness();
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WS}/file/raw?path=${encodeURIComponent(`${KB}/Open/Broken.zip`)}`,
+      { method: 'HEAD' },
+    );
+    expect(res.status).toBe(500);
   });
 
   it('GET /file/raw (inline, no download) is read-gated', async () => {

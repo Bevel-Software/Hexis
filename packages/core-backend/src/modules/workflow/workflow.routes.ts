@@ -19,6 +19,7 @@
 
 import express from 'express';
 import { logger } from '../../shared/logging.js';
+import { withoutAddresses } from './git/finished-detail.js';
 
 const log = logger('workflow.routes');
 const crLog = logger('cr');
@@ -29,6 +30,7 @@ import type {
   ChangeRequestApplyFailureKind,
   IWorkflowService,
   OpenChangeRequestInput,
+  PullRequestDetail,
   PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
@@ -59,7 +61,7 @@ function toHttpError(
  * withhold on the same predicate.
  */
 export { APPLY_FAILURE_REASON_WITHHELD } from './agent-tools/change-request-read-shape.js';
-import { APPLY_FAILURE_REASON_WITHHELD } from './agent-tools/change-request-read-shape.js';
+import { APPLY_FAILURE_REASON_WITHHELD, fileIsReadable, pathsOf } from './agent-tools/change-request-read-shape.js';
 
 function parsePrNumber(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
@@ -203,6 +205,45 @@ export function createWorkflowRoutes(
       const mayRead = readable !== null && readsEveryPath(readable, c.touchedNodePaths);
       return mayRead ? c : { ...c, lastApplyFailure: { ...failure, reason: APPLY_FAILURE_REASON_WITHHELD } };
     });
+  }
+
+  /**
+   * A detail's per-file patches, kept only on the files the viewer may read.
+   * A patch IS the file's content, so it is gated by the same rule the file
+   * content routes apply — `canReadAtRef` at `origin/<base>`, both names of a
+   * moved file — in one batched lookup. The file list itself stays whole: the
+   * dialog shows an unreadable file locked, by name, as it always has. An
+   * anonymous caller, an unresolvable access tree or a failed lookup keeps no
+   * patch at all. The dialog never reads `files[].patch` (each pane fetches its
+   * content through a gated route), so this costs no reader anything.
+   */
+  async function withReadablePatches(
+    detail: PullRequestDetail,
+    workspaceId: string | undefined,
+    viewerEmail: string | undefined,
+  ): Promise<PullRequestDetail> {
+    const patched = detail.files.filter((f) => f.patch !== undefined);
+    if (patched.length === 0) return detail;
+    let verdicts: Map<string, boolean> | null = null;
+    if (workspaceId && viewerEmail) {
+      try {
+        verdicts = await accessControl.canReadBatchAtRef(workspaceId, `origin/${detail.base}`, viewerEmail, [
+          ...new Set(patched.flatMap(pathsOf)),
+        ]);
+      } catch (err) {
+        log.warn(`read verdicts for change request #${detail.number}'s patches failed; sending none:`, { err });
+      }
+    }
+    const mayRead = (p: string) => verdicts?.get(p) === true;
+    return {
+      ...detail,
+      files: detail.files.map((f) => {
+        if (f.patch === undefined || fileIsReadable(f, mayRead)) return f;
+        const rest = { ...f };
+        delete rest.patch;
+        return rest;
+      }),
+    };
   }
 
   /**
@@ -809,7 +850,10 @@ export function createWorkflowRoutes(
         }
       }
       const [scoped] = await scopeApplyFailures(req, [detail]);
-      res.json(scoped);
+      // A finished request carries no person's email address: its approvals
+      // would otherwise send the applier's (see `withoutAddresses`). No
+      // request carries the content of a file its viewer may not read.
+      res.json(withoutAddresses(await withReadablePatches(scoped, workspaceId, viewerEmail)));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
