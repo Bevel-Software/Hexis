@@ -3354,9 +3354,10 @@ export class WorkflowService implements IWorkflowService {
     user: AuthUser,
     authorIdHash: string | null,
     baseBranch: string,
-    workspaceId: string,
+    resolveWorkspaceId: () => Promise<string>,
   ): Promise<'author' | 'admin' | 'writes-every-file' | null> {
     if (authorIdHash && authorIdHash === hashEmail(user.email)) return 'author';
+    const workspaceId = await resolveWorkspaceId();
     try {
       await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true });
     } catch {
@@ -3451,21 +3452,23 @@ export class WorkflowService implements IWorkflowService {
     if (!summary) throw new WorkflowDomainError('change request not found', 404);
     assertEditable(summary.state);
 
-    // The grants beyond authorship are read in the base branch's own workspace.
-    // Any failure to read them kicks the deleted-branch sweep, as delete does.
-    let workspaceId: string;
-    try {
-      workspaceId = (await this.workspaceService.getOrCreateForBranch(summary.base)).id;
-    } catch (err) {
-      this.kickDeletedBranchSweep();
-      throw err;
-    }
+    // The grants beyond authorship are read in the base branch's own workspace,
+    // resolved only once authorship has not already decided: an author's edit
+    // touches no workspace. Any failure to resolve it kicks the deleted-branch
+    // sweep, as delete does.
     const grant = await this.changeRequestDecisionGrant(
       number,
       user,
       summary.authorId ?? null,
       summary.base,
-      workspaceId,
+      async () => {
+        try {
+          return (await this.workspaceService.getOrCreateForBranch(summary.base)).id;
+        } catch (err) {
+          this.kickDeletedBranchSweep();
+          throw err;
+        }
+      },
     );
     if (grant === null) {
       throw new WorkflowDomainError(
@@ -4048,7 +4051,13 @@ export class WorkflowService implements IWorkflowService {
     // A request that is no longer open is refused by `cancelPr` with its own
     // already-applied / already-cancelled answer; no grant is read for it.
     if (state === 'open') {
-      const grant = await this.changeRequestDecisionGrant(number, user, authorIdHash, baseBranch, workspaceId);
+      const grant = await this.changeRequestDecisionGrant(
+        number,
+        user,
+        authorIdHash,
+        baseBranch,
+        async () => workspaceId,
+      );
       if (grant !== null) {
         // Spoof so the underlying `cancelPr` authorizes via its viewer-is-
         // author branch. The spoofing is safe because no caller outside this

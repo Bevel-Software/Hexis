@@ -117,11 +117,12 @@ function harness(
 }
 
 describe('WorkflowService.updateChangeRequest — who may edit', () => {
-  it('lets the AUTHOR edit without any further grant, and reads no access tree', async () => {
+  it('lets the AUTHOR edit without any further grant, and resolves no workspace and reads no access tree', async () => {
     const h = harness({ authorEmail: AUTHOR });
     await h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'P2 - Planned\n\nNew reason.' });
     expect(h.written).toHaveLength(1);
     expect(h.access.canWriteAtRef).not.toHaveBeenCalled();
+    expect(h.workspaces.getOrCreateForBranch).not.toHaveBeenCalled();
   });
 
   it('matches the author case-insensitively, as authorship is stored', async () => {
