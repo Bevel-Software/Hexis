@@ -481,10 +481,9 @@ describe('McpService — retained heap of warm clients of one catalog', () => {
     for (let i = 1; i < 300; i++) await warm(i);
     const grown = (await settle()) - base;
     expect(grown / 299).toBeLessThan(100 * 1024);
-    // What was measured is 300 warm clients: one build each, and all still held.
+    // What was measured is 300 warm clients: one build each, and every one still held.
     expect(state.builds).toBe(300);
-    await warm(0);
-    await warm(299);
+    for (let i = 0; i < 300; i++) await warm(i);
     expect(state.builds).toBe(300);
   });
 });
