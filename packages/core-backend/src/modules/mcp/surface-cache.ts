@@ -65,12 +65,6 @@ export class SurfaceCache<V> {
     this.now = opts.now ?? Date.now;
   }
 
-  /** How many entries are held (settled or building). */
-  get size(): number {
-    this.sweep();
-    return this.entries.size;
-  }
-
   /**
    * The value for `key`, built by `build` when none is held. `hit` says
    * whether this call found one (or joined a build already running).
@@ -132,20 +126,6 @@ export class SurfaceCache<V> {
   /** Drop everything. */
   clear(): void {
     this.evictWhere(() => true);
-  }
-
-  /** The value held for `key`, if one is held and built, without building or touching it. */
-  async peek(key: string): Promise<V | undefined> {
-    this.sweep();
-    const held = this.entries.get(key);
-    if (!held?.settled) return undefined;
-    return held.value;
-  }
-
-  /** The keys held, oldest use first. */
-  keys(): string[] {
-    this.sweep();
-    return [...this.entries.keys()];
   }
 
   private drop(key: string): void {

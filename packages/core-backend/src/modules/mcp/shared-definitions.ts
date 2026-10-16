@@ -32,11 +32,6 @@ export class SharedDefinitions {
   /** `maxEntries` bounds each map; 0 shares nothing. */
   constructor(private readonly maxEntries = 1000) {}
 
-  /** How many distinct definition sets are held. */
-  get size(): number {
-    return this.byContent.size;
-  }
-
   /**
    * The first-seen copy of `value` (by its JSON), or `value` itself when it is
    * the first. Kinds share no key space: a tool list and a listing could

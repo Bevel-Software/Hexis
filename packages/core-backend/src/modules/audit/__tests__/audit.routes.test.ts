@@ -131,9 +131,15 @@ describe('audit routes — events', () => {
     expect(res.status).toBe(400);
   });
 
-  it("refuses another person's principal to a member, and serves it to an admin", async () => {
-    const asAlice = await listen(makeApp({ admin: false }));
-    expect((await fetch(`${asAlice}/api/audit/principals/agent/${AGENT_ID}/events`)).status).toBe(403);
+  it("refuses another person's principal to a member exactly as one that does not exist, and serves it to an admin", async () => {
+    const asBob = await listen(makeApp({ admin: false, as: BOB }));
+    const missingPage = pagePrincipalId('33333333-4444-4555-8666-777777777777', 'Dashboards/Nothing.html');
+    const refusals = [];
+    for (const path of [`page/${ALICE_PAGE_ID}`, `page/${missingPage}`, `key/${KEY_ID}`, 'key/00000000-0000-4000-8000-000000000000']) {
+      const res = await fetch(`${asBob}/api/audit/principals/${path}/events`);
+      refusals.push({ status: res.status, body: await res.json() });
+    }
+    expect(refusals).toEqual(Array(4).fill({ status: 404, body: { error: 'No such agent, key or page' } }));
     expect(audit.listEvents).not.toHaveBeenCalled();
     server.close();
 

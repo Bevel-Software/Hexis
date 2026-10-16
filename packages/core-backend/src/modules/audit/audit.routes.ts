@@ -50,10 +50,15 @@ export function createAuditRoutes(
     return { kind, id };
   };
 
-  /** Whether the caller may read or revoke `principal`: its owner, or an admin. Null when there is no such principal. */
-  const mayAct = async (req: express.Request, principal: AuditPrincipalRef): Promise<boolean | null> => {
+  /**
+   * Whether the caller may read `principal`'s events: its owner, or an admin.
+   * False both when there is no such principal and when it is someone else's,
+   * so the refusal does not tell a member which of another person's pages,
+   * agents or keys exist.
+   */
+  const mayRead = async (req: express.Request, principal: AuditPrincipalRef): Promise<boolean> => {
     const owner = await audit.ownerOf(principal);
-    if (owner === null) return null;
+    if (owner === null) return false;
     if (owner === req.userId) return true;
     return isAdmin(req);
   };
@@ -80,13 +85,8 @@ export function createAuditRoutes(
       return;
     }
     try {
-      const allowed = await mayAct(req, principal);
-      if (allowed === null) {
+      if (!(await mayRead(req, principal))) {
         res.status(404).json({ error: 'No such agent, key or page' });
-        return;
-      }
-      if (!allowed) {
-        res.status(403).json({ error: 'Not yours' });
         return;
       }
       const rawLimit = Number(req.query.limit);

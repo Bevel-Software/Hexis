@@ -10,6 +10,11 @@ function makeCache(opts: { idleTtlMs?: number; maxEntries?: number } = {}) {
 
 const HOUR = 60 * 60 * 1000;
 
+/** Whether `key` is held: a get that finds it is a hit, and one that does not builds (and so holds it from then on). */
+async function holds(cache: SurfaceCache<string>, key: string): Promise<boolean> {
+  return (await cache.get(key, async () => 'rebuilt')).hit;
+}
+
 describe('SurfaceCache', () => {
   it('builds once per key and answers every later get from what it built', async () => {
     const { cache } = makeCache();
@@ -66,8 +71,8 @@ describe('SurfaceCache', () => {
     advance(HOUR / 2);
     await cache.get('used', async () => 'never');
     advance(HOUR / 2);
-    expect(cache.keys()).toEqual(['used']);
     expect(await cache.get('idle', async () => 'rebuilt')).toEqual({ value: 'rebuilt', hit: false });
+    expect(await cache.get('used', async () => 'never')).toEqual({ value: 'a', hit: true });
   });
 
   it('holds at most maxEntries, dropping the least recently used first', async () => {
@@ -79,17 +84,19 @@ describe('SurfaceCache', () => {
     // `a` is used again, so `b` is now the least recently used.
     await cache.get('a', async () => 'never');
     await cache.get('d', async () => 'd');
-    expect(cache.keys().sort()).toEqual(['a', 'c', 'd']);
-    expect(cache.size).toBe(3);
+    // Checked newest first, so no check's own rebuild pushes out an entry still to be checked.
+    expect(await holds(cache, 'd')).toBe(true);
+    expect(await holds(cache, 'c')).toBe(true);
+    expect(await holds(cache, 'a')).toBe(true);
+    expect(await holds(cache, 'b')).toBe(false);
   });
 
   it('with maxEntries 0 keeps nothing: every get builds', async () => {
     const { cache } = makeCache({ maxEntries: 0 });
     const build = vi.fn(async () => 'x');
-    await cache.get('k', build);
-    await cache.get('k', build);
+    expect((await cache.get('k', build)).hit).toBe(false);
+    expect((await cache.get('k', build)).hit).toBe(false);
     expect(build).toHaveBeenCalledTimes(2);
-    expect(cache.size).toBe(0);
   });
 
   it('evicts by key, and a build in flight at the eviction answers its waiter but is not kept', async () => {
@@ -97,14 +104,16 @@ describe('SurfaceCache', () => {
     await cache.get('alice|r', async () => 'alice');
     await cache.get('bob|r', async () => 'bob');
     cache.evictWhere((k) => k.startsWith('alice|'));
-    expect(cache.keys()).toEqual(['bob|r']);
+    expect(await holds(cache, 'bob|r')).toBe(true);
+    expect(await holds(cache, 'alice|r')).toBe(false);
 
     let release!: (v: string) => void;
     const inFlight = cache.get('carol|r', () => new Promise<string>((r) => (release = r)));
     cache.clear();
     release('stale');
     expect((await inFlight).value).toBe('stale');
-    expect(cache.size).toBe(0);
+    expect(await cache.get('carol|r', async () => 'fresh')).toEqual({ value: 'fresh', hit: false });
+    expect(await holds(cache, 'bob|r')).toBe(false);
   });
 
   it('ends an entry early when its value says so, whatever its use', async () => {

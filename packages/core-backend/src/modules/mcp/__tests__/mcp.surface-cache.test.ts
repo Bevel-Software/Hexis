@@ -15,6 +15,7 @@ import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { AgentEventInput } from '../../audit/audit.contract.js';
 import type { SurfaceCacheOptions } from '../surface-cache.js';
+import { SharedDefinitions } from '../shared-definitions.js';
 
 /**
  * The hosted MCP server keeps one tool client per person, caller kind, key
@@ -408,19 +409,20 @@ describe('McpService — one tool client per person and catalog revision', () =>
 
   it('holds one copy of the tool definitions for every client of the same catalog', async () => {
     const { mcp } = await harness({ fillerTools: { count: 5, descriptionBytes: 200 } });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    type Surface = { client: any };
-    const surfaces = (mcp as unknown as { surfaces: { peek(k: string): Promise<Surface | undefined>; keys(): string[] } }).surfaces;
+    // Every build hands its client to the shared definitions: that is where the
+    // two people's clients are seen, with nothing reached inside the service.
+    const share = vi.spyOn(SharedDefinitions.prototype, 'share');
     await (await connect(mcp, { userId: 'user-A' })).listTools();
     await (await connect(mcp, { userId: 'user-B', tokenId: 'key-B' })).listTools();
-    const [a, b] = await Promise.all(surfaces.keys().map((k) => surfaces.peek(k)));
-    const toolOf = async (s: Surface | undefined) =>
-      (await s!.client.config.tool_repository.getTool('KNOWLEDGE_BASE.filler_0')) as { inputs: unknown; description: string };
-    expect(a!.client).not.toBe(b!.client);
+    expect(share).toHaveBeenCalledTimes(2);
+    const [a, b] = share.mock.calls.map(([client]) => client);
+    const toolOf = async (client: typeof a) =>
+      (await client.config.tool_repository.getTool('KNOWLEDGE_BASE.filler_0'))!;
+    expect(a).not.toBe(b);
     // Different clients, different shells — the same definition underneath.
     expect((await toolOf(a)).inputs).toBe((await toolOf(b)).inputs);
     // And no client keeps the bearer of the request that built it.
-    const templates = JSON.stringify(await a!.client.config.tool_repository.getManualCallTemplates());
+    const templates = JSON.stringify(await a.config.tool_repository.getManualCallTemplates());
     expect(templates).not.toContain('bevel_key_1');
   });
 });
@@ -460,7 +462,7 @@ describe('McpService — retained heap of warm clients of one catalog', () => {
     // large tools rather than many small ones: the bytes are what is
     // measured, and each tool costs every build a schema check, which under a
     // loaded suite is the difference between seconds and minutes.
-    const { mcp } = await harness({ fillerTools: { count: 12, descriptionBytes: 20_000 } });
+    const { state, mcp } = await harness({ fillerTools: { count: 12, descriptionBytes: 20_000 } });
     const settle = async () => {
       for (let i = 0; i < 3; i++) {
         gc();
@@ -478,9 +480,12 @@ describe('McpService — retained heap of warm clients of one catalog', () => {
     const base = await settle();
     for (let i = 1; i < 300; i++) await warm(i);
     const grown = (await settle()) - base;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((mcp as any).surfaces.size).toBe(300);
     expect(grown / 299).toBeLessThan(100 * 1024);
+    // What was measured is 300 warm clients: one build each, and all still held.
+    expect(state.builds).toBe(300);
+    await warm(0);
+    await warm(299);
+    expect(state.builds).toBe(300);
   });
 });
 
