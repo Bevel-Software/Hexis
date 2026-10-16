@@ -839,7 +839,8 @@ export class McpService {
       if (!META_TOOL_NAMES.has(toolName)) {
         const surface = await this.surfaceFor({ ...caller, tokenId: null }, loopbackBearer);
         catalogNames = surface.catalogNames;
-        utcpName = surface.tools.find((t) => t.mcpName === toolName)?.utcpName ?? toolName;
+        utcpName =
+          surface.tools.find((t) => t.mcpName === toolName)?.utcpName ?? surface.hidden.get(toolName)?.utcpName ?? toolName;
       }
       await audit.denied(utcpName, args, 'refused');
     });

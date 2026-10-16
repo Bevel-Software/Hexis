@@ -87,18 +87,28 @@ interface CallToolResult {
 }
 
 /**
+ * How long the manual's read of which tools write is trusted. A page stays
+ * open for hours; a tool retagged `write` in that time must ask again, not
+ * run on the tag the page was opened under.
+ */
+export const MANUAL_TTL_MS = 60_000;
+
+/**
  * The viewer's tools for one page: MCP calls with the session, and the read
  * of which tools write.
  */
 export class PageToolsClient {
   private seq = 0;
   private writing: Promise<Map<string, boolean> | null> | undefined;
+  private writingReadAt = 0;
   private readonly pagePath: string;
   private readonly fetchImpl: Fetch;
+  private readonly now: () => number;
 
-  constructor(pagePath: string, fetchImpl: Fetch = authFetch) {
+  constructor(pagePath: string, fetchImpl: Fetch = authFetch, now: () => number = Date.now) {
     this.pagePath = pagePath;
     this.fetchImpl = fetchImpl;
+    this.now = now;
   }
 
   /** `list_tools`' names, narrowed to those containing every word of `query`. */
@@ -166,9 +176,12 @@ export class PageToolsClient {
     }
   }
 
-  /** The deployment's UTCP manual, read once: tool name → whether it is tagged `write`. */
+  /** The deployment's UTCP manual, read at most once a `MANUAL_TTL_MS`: tool name → whether it is tagged `write`. */
   private writingTools(): Promise<Map<string, boolean> | null> {
-    this.writing ??= this.fetchImpl('/api/agent/utcp')
+    const now = this.now();
+    if (this.writing && now - this.writingReadAt < MANUAL_TTL_MS) return this.writing;
+    this.writingReadAt = now;
+    this.writing = this.fetchImpl('/api/agent/utcp')
       .then(async (res) => {
         if (!res.ok) return null;
         const manual = (await res.json()) as { tools?: Array<{ name?: unknown; tags?: unknown }> };

@@ -205,15 +205,16 @@ export function HtmlRenderer({
     open?.answer(ok);
   }, []);
 
-  // When the page's document goes (a reload, a saved edit, another file) its
-  // consent goes with it, and a card left open answers no: nothing the old
+  // When the page's document goes (a reload, a saved edit, another file, or
+  // Edit, which unmounts the frame even when the document comes back the same)
+  // its consent goes with it, and a card left open answers no: nothing the old
   // view asked for runs in the new one.
   useEffect(
     () => () => {
       consentRef.current = null;
       closeCard(null);
     },
-    [bundledSrcdoc, reloadKey, closeCard],
+    [bundledSrcdoc, reloadKey, mode, closeCard],
   );
 
   // Tool bridge: a page's `window.bevel.tools` calls and its

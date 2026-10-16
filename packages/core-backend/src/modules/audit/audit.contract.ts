@@ -26,8 +26,9 @@ export type AgentEventKind = 'capability' | 'tool' | 'skill';
 
 /**
  * How the call ended. `denied`: the caller's sign-in for the tool was
- * missing, so nothing ran. `refused`: a page asked to write and the person
- * viewing it answered Deny, so nothing ran.
+ * missing, so nothing ran. `refused`: a page made a call that needs the
+ * viewer's approval (a writing tool, a tool the manual does not list, or a
+ * chain) and the person viewing it answered Deny, so nothing ran.
  */
 export type AgentEventOutcome = 'ok' | 'error' | 'denied' | 'refused';
 
@@ -72,14 +73,15 @@ export function parsePagePrincipalId(id: string): { userId: string; path: string
  * Whether `path` can be a page principal: a non-empty knowledge-base path of
  * printable characters, bounded. A page names itself through a request
  * header, so this is the check that keeps a line break or a control character
- * out of the log and its listing.
+ * out of the log and its listing — the C1 controls (NEL among them) and the
+ * Unicode line and paragraph separators included.
  */
 export function isPagePath(path: string): boolean {
   return (
     path.length > 0 &&
     path.length <= MAX_PAGE_PATH_LENGTH &&
     // eslint-disable-next-line no-control-regex -- the point is to refuse control characters
-    !/[\u0000-\u001f\u007f]/.test(path)
+    !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(path)
   );
 }
 
@@ -199,7 +201,7 @@ export interface IAgentConnectionStatus {
 
 export class AuditPrincipalNotFoundError extends Error {
   constructor() {
-    super('No such agent or key');
+    super('No such agent, key or page');
     this.name = 'AuditPrincipalNotFoundError';
   }
 }

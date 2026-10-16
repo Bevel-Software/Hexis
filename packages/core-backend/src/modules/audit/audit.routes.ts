@@ -76,13 +76,13 @@ export function createAuditRoutes(
   router.get('/audit/principals/:kind/:id/events', async (req, res) => {
     const principal = principalOf(req);
     if (!principal) {
-      res.status(404).json({ error: 'No such agent or key' });
+      res.status(404).json({ error: 'No such agent, key or page' });
       return;
     }
     try {
       const allowed = await mayAct(req, principal);
       if (allowed === null) {
-        res.status(404).json({ error: 'No such agent or key' });
+        res.status(404).json({ error: 'No such agent, key or page' });
         return;
       }
       if (!allowed) {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DENIED,
+  MANUAL_TTL_MS,
   PageConsent,
   PageToolsClient,
   answerToolCall,
@@ -107,6 +108,26 @@ describe('PageToolsClient', () => {
     expect(await client.mayWrite('callTool', ['notion_search', {}])).toBe(true);
     expect(await client.mayWrite('callToolChain', ['return 1'])).toBe(true);
     expect(await client.mayWrite('callTool', ['call_tool_chain', { code: 'x' }])).toBe(true);
+  });
+
+  it('reads the manual again once it is a minute old, so a tool retagged write asks', async () => {
+    let tags: string[] = [];
+    let reads = 0;
+    let now = 1_000_000;
+    const fetchImpl = async (url: string) => {
+      if (url !== '/api/agent/utcp') throw new Error(`unexpected ${url}`);
+      reads += 1;
+      return Response.json({ tools: [{ name: 'publish', tags }] });
+    };
+    const client = new PageToolsClient(PAGE, fetchImpl, () => now);
+    expect(await client.mayWrite('callTool', ['publish', {}])).toBe(false);
+    tags = ['write'];
+    now += MANUAL_TTL_MS - 1;
+    expect(await client.mayWrite('callTool', ['publish', {}])).toBe(false);
+    expect(reads).toBe(1);
+    now += 1;
+    expect(await client.mayWrite('callTool', ['publish', {}])).toBe(true);
+    expect(reads).toBe(2);
   });
 
   it('counts everything but the reading meta-tools as writing when the manual cannot be read', async () => {

@@ -61,6 +61,13 @@ returning a promise:
 - `window.bevel.tools.callToolChain(code)` — what `call_tool_chain` answers
   for `code`.
 
+The two kinds of name differ. `searchTools` and `toolsInfo` use the
+namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`, `notion.search`);
+`callTool` takes the name `tools/call` takes: a knowledge-base tool bare
+(`read_file`), any other tool with its dots as underscores
+(`notion_search`). Passing a `searchTools` result straight to `callTool`
+fails as an unknown tool — convert it, or call it from `callToolChain`.
+
 `window.bevel.tools` is `null` wherever tools are not available: on the
 embed, on a skill page and in any preview that is not the app's file page.
 Check it before every use, and render the page without tools when it is

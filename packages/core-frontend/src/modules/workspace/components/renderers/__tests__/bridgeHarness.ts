@@ -1,4 +1,5 @@
 import vm from 'node:vm';
+import { onTestFinished } from 'vitest';
 import { buildSandboxedHtml } from '../htmlSandbox';
 
 /**
@@ -68,13 +69,31 @@ export function runBridge(
   const controls = new Set(page.namedControls ?? []);
   const messageHandlers: ((e: { source: unknown; data: unknown }) => void)[] = [];
   const parent = { postMessage: (msg: unknown) => posted.push(msg) };
+  // The frame's request timers, cleared when the test ends: a call a test
+  // leaves unanswered must not keep the worker alive for the runtime's
+  // fifteen minutes, nor reject long after the test that made it.
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  onTestFinished(() => {
+    for (const t of timers) clearTimeout(t);
+    timers.clear();
+  });
   const ctx: Record<string, unknown> = {
     // The frame's window: the tool bridge listens on it for the parent's answers.
     addEventListener: (type: string, fn: (e: { source: unknown; data: unknown }) => void) => {
       if (type === 'message') messageHandlers.push(fn);
     },
-    setTimeout,
-    clearTimeout,
+    setTimeout: (fn: () => void, ms?: number) => {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        fn();
+      }, ms);
+      timers.add(t);
+      return t;
+    },
+    clearTimeout: (t: ReturnType<typeof setTimeout>) => {
+      timers.delete(t);
+      clearTimeout(t);
+    },
     document: {
       addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
         if (type === 'click') handlers.push(fn);

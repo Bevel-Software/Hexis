@@ -163,10 +163,10 @@ describe('AuditLogPage', () => {
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
 
     expect(listPrincipals).toHaveBeenCalledWith('all');
-    const alice = screen.getByRole('region', { name: 'Agents and keys for alice@example.com' });
+    const alice = screen.getByRole('region', { name: 'Agents, keys and pages for alice@example.com' });
     expect(within(alice).getByText('Alice')).toBeInTheDocument();
     expect(within(alice).getByText('CI pipeline')).toBeInTheDocument();
-    const bob = screen.getByRole('region', { name: 'Agents and keys for bob@example.com' });
+    const bob = screen.getByRole('region', { name: 'Agents, keys and pages for bob@example.com' });
     expect(within(bob).getByText('Claude link')).toBeInTheDocument();
     expect(within(bob).queryByText('Old script')).not.toBeInTheDocument();
     expect(screen.getByText(/2 accounts · 3 live · 1 revoked/)).toBeInTheDocument();
@@ -211,6 +211,8 @@ describe('AuditLogPage', () => {
     renderPage();
     const row = await screen.findByRole('button', { name: /Dashboards\/Roadmap\.html/, expanded: false });
     expect(within(row).getByText('Page')).toBeInTheDocument();
+    // A page is not a live connection: counted apart from them.
+    expect(screen.getByText(/0 live · 1 page/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Revoke/ })).not.toBeInTheDocument();
     await userEvent.click(row);
     await waitFor(() => expect(screen.getByText('refused')).toBeInTheDocument());

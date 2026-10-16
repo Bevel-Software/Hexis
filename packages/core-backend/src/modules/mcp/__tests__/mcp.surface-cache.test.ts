@@ -219,8 +219,11 @@ describe('McpService — one tool client per person and catalog revision', () =>
     expect(warmList).toEqual(coldList);
     expect(state.builds).toBe(1);
     expect(cold).toBeGreaterThanOrEqual(400);
-    // No catalog fetch, no registration, no discovery: the listing alone.
-    expect(warm).toBeLessThan(200);
+    // No catalog fetch, no registration, no discovery: the listing alone. The
+    // build count above is the proof; the clock only has to tell a listing
+    // from a build, which pays the catalog's 400 ms before anything else, so
+    // the bound is that delay and not a guess at how fast CI lists.
+    expect(warm).toBeLessThan(400);
     // The surface log shows one build for the two requests.
     const surfaceLines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('request surface:'));
     expect(surfaceLines).toHaveLength(1);
@@ -230,10 +233,12 @@ describe('McpService — one tool client per person and catalog revision', () =>
   it('answers a tool call on a warm client in the tool\'s own time', async () => {
     const { state, mcp } = await harness({ catalogDelayMs: 400 });
     await (await connect(mcp)).listTools();
+    const client = await connect(mcp);
     const started = performance.now();
-    const res = await readFile(await connect(mcp), 'KnowledgeBase/Foo.md');
+    const res = await readFile(client, 'KnowledgeBase/Foo.md');
     expect(payload(res)).toMatchObject({ path: 'KnowledgeBase/Foo.md' });
-    expect(performance.now() - started).toBeLessThan(200);
+    // Only the call is timed, against the 400 ms any rebuild would pay first.
+    expect(performance.now() - started).toBeLessThan(400);
     expect(state.builds).toBe(1);
   });
 

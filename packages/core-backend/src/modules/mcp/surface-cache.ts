@@ -17,7 +17,9 @@
  * Single-flight: concurrent misses on one key share one build. A build that
  * fails is not remembered, so the next request tries again. A build that was
  * in flight when its key was evicted answers the requests waiting on it but is
- * not kept: it was built from what the eviction said is stale.
+ * not kept: it was built from what the eviction said is stale. A build still
+ * running after `buildTimeoutMs` is let go the same way, so a discovery that
+ * hangs holds up the requests already waiting on it, not every later one.
  *
  * Holds references only. A surface owns no connection (its `mcp` manuals route
  * to the downstream pool, which owns and closes those), so dropping an entry
@@ -28,15 +30,19 @@ export interface SurfaceCacheOptions {
   idleTtlMs?: number;
   /** Hold at most this many entries. Default 500; 0 keeps nothing. */
   maxEntries?: number;
+  /** Let go of a build still running after this long; the next request starts another. Default two minutes. */
+  buildTimeoutMs?: number;
   /** Clock, for tests. */
   now?: () => number;
 }
 
 export const SURFACE_IDLE_TTL_MS = 60 * 60 * 1000;
+export const SURFACE_BUILD_TIMEOUT_MS = 2 * 60 * 1000;
 export const SURFACE_MAX_ENTRIES = 500;
 
 interface Entry<V> {
   value: Promise<V>;
+  startedAt: number;
   lastUsed: number;
   /** An absolute end, for a value that must not live its full idle time (see `maxAgeMs`). */
   expiresAt: number;
@@ -49,11 +55,13 @@ export class SurfaceCache<V> {
   private readonly entries = new Map<string, Entry<V>>();
   private readonly idleTtlMs: number;
   private readonly maxEntries: number;
+  private readonly buildTimeoutMs: number;
   private readonly now: () => number;
 
   constructor(opts: SurfaceCacheOptions = {}) {
     this.idleTtlMs = opts.idleTtlMs ?? SURFACE_IDLE_TTL_MS;
     this.maxEntries = opts.maxEntries ?? SURFACE_MAX_ENTRIES;
+    this.buildTimeoutMs = opts.buildTimeoutMs ?? SURFACE_BUILD_TIMEOUT_MS;
     this.now = opts.now ?? Date.now;
   }
 
@@ -94,6 +102,7 @@ export class SurfaceCache<V> {
     }
     const entry: Entry<V> = {
       value: build(),
+      startedAt: now,
       lastUsed: now,
       expiresAt: Number.POSITIVE_INFINITY,
       live: true,
@@ -151,11 +160,14 @@ export class SurfaceCache<V> {
     if (this.entries.get(key) === entry) this.entries.delete(key);
   }
 
-  /** Drop what has been idle too long, or outlived its own end. */
+  /** Drop what has been idle too long, or outlived its own end, and let go of a build that has run too long. */
   private sweep(): void {
     const now = this.now();
     for (const [key, entry] of this.entries) {
-      if (!entry.settled) continue;
+      if (!entry.settled) {
+        if (now - entry.startedAt >= this.buildTimeoutMs) this.drop(key);
+        continue;
+      }
       if (now - entry.lastUsed >= this.idleTtlMs || now >= entry.expiresAt) this.drop(key);
     }
   }

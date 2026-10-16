@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SurfaceCache } from '../surface-cache.js';
+import { SURFACE_BUILD_TIMEOUT_MS, SurfaceCache } from '../surface-cache.js';
 
 /** A cache on a clock the test moves. */
 function makeCache(opts: { idleTtlMs?: number; maxEntries?: number } = {}) {
@@ -35,6 +35,22 @@ describe('SurfaceCache', () => {
     expect(await first).toEqual({ value: 'built', hit: false });
     expect(await second).toEqual({ value: 'built', hit: true });
     expect(build).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets go of a build that hangs: past the build timeout the next get builds again', async () => {
+    const { cache, advance } = makeCache();
+    let releaseStuck!: (v: string) => void;
+    const stuck = cache.get('k', () => new Promise<string>((r) => (releaseStuck = r)));
+    advance(SURFACE_BUILD_TIMEOUT_MS - 1);
+    const joined = cache.get('k', async () => 'unused');
+    advance(1);
+    expect(await cache.get('k', async () => 'fresh')).toEqual({ value: 'fresh', hit: false });
+    expect(await cache.get('k', async () => 'unused')).toEqual({ value: 'fresh', hit: true });
+    // The hung build still answers whoever was waiting on it, and is not kept.
+    releaseStuck('late');
+    expect(await stuck).toEqual({ value: 'late', hit: false });
+    expect(await joined).toEqual({ value: 'late', hit: true });
+    expect(await cache.get('k', async () => 'unused')).toEqual({ value: 'fresh', hit: true });
   });
 
   it('remembers no failed build: the next get tries again', async () => {

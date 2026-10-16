@@ -111,7 +111,17 @@ describe('audit routes — events', () => {
     const res = await fetch(`${base}/api/audit/principals/page/${ALICE_PAGE_ID}/events`);
     expect(res.status).toBe(200);
     expect(audit.listEvents).toHaveBeenCalledWith({ kind: 'page', id: ALICE_PAGE_ID }, { before: undefined, limit: 50 });
-    expect((await fetch(`${base}/api/audit/principals/page/not-a-page/events`)).status).toBe(404);
+    const notAPage = await fetch(`${base}/api/audit/principals/page/not-a-page/events`);
+    expect(notAPage.status).toBe(404);
+    expect(await notAPage.json()).toEqual({ error: 'No such agent, key or page' });
+  });
+
+  it('404s a page id whose path carries a line break of any kind', async () => {
+    const base = await listen(makeApp({ admin: false }));
+    for (const brk of ['\n', '\u0085', '\u2028', '\u2029']) {
+      const id = pagePrincipalId('33333333-4444-4555-8666-777777777777', `Dashboards/Road${brk}map.html`);
+      expect((await fetch(`${base}/api/audit/principals/page/${id}/events`)).status).toBe(404);
+    }
   });
 
   it('answers a cursor the service does not recognise with 400, not 500', async () => {

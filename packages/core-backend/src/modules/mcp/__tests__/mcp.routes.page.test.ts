@@ -106,5 +106,10 @@ describe('POST /mcp/page-refusals', () => {
     const baseUrl = await mountMcpRoutes({ mcpService });
     const res = await post(baseUrl, '/mcp/page-refusals', { tool: 'edit_file' }, { 'x-test-kind': 'session' });
     expect(res.status).toBe(400);
+    for (const tool of [undefined, '']) {
+      const noTool = await post(baseUrl, '/mcp/page-refusals', { page: PAGE, tool }, { 'x-test-kind': 'session' });
+      expect(noTool.status).toBe(400);
+    }
+    expect(mcpService.recordPageRefusal).not.toHaveBeenCalled();
   });
 });

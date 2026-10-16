@@ -21,13 +21,13 @@ const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknow
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 
 /** The page on the app's file page: in the app, with the file page's provider. */
-function onFilePage() {
+function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
   return render(
     <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
       <WorkspaceContext.Provider value={workspace}>
         <GitContext.Provider value={git}>
           <PageToolsContext.Provider value={{ pagePath: PAGE }}>
-            <HtmlRenderer content="<h1>Roadmap</h1>" filePath={PATH} onSave={async () => undefined} readOnly />
+            <HtmlRenderer content="<h1>Roadmap</h1>" filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
           </PageToolsContext.Provider>
         </GitContext.Provider>
       </WorkspaceContext.Provider>
@@ -183,6 +183,22 @@ describe('the consent card on the file page', () => {
       return el;
     }));
     reloaded.post({ type: 'bevel.tool.call', requestId: 'w3', fn: 'callTool', args: ['edit_file', {}] });
+    expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
+  });
+
+  it('asks again after Edit and back to Preview, though the document is the same', async () => {
+    stubServer();
+    const { container } = onFilePage({ readOnly: false });
+    const frame = frameChannel(await frameOf(container));
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await waitFor(() => expect(container.querySelector('iframe')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    const back = frameChannel(await frameOf(container));
+    back.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
     expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
   });
 

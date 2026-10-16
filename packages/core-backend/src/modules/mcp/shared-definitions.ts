@@ -29,6 +29,7 @@ export class SharedDefinitions {
   private readonly byContent = new Map<string, unknown>();
   private readonly interfaceCaches = new Map<string, Map<string, string>>();
 
+  /** `maxEntries` bounds each map; 0 shares nothing. */
   constructor(private readonly maxEntries = 1000) {}
 
   /** How many distinct definition sets are held. */
@@ -50,6 +51,7 @@ export class SharedDefinitions {
       this.byContent.set(key, held);
       return held as T;
     }
+    if (this.maxEntries <= 0) return value;
     bound(this.byContent, this.maxEntries);
     this.byContent.set(key, value);
     return value;
@@ -102,6 +104,7 @@ export class SharedDefinitions {
       this.interfaceCaches.delete(toolSet);
     } else {
       cache = new Map();
+      if (this.maxEntries <= 0) return cache;
       bound(this.interfaceCaches, this.maxEntries);
     }
     this.interfaceCaches.set(toolSet, cache);
