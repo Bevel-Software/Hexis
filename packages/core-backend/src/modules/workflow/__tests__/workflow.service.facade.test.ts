@@ -356,7 +356,7 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, workspaceService, access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
     const user = makeUser();
     await svc.rejectChangeRequest(9, user, 'open', 'someone-else', 'main', 'w1');
-    expect(workspaceService.ensureRemotesFetched).toHaveBeenCalledWith('w1', { strict: true });
+    expect(workspaceService.ensureRemotesFetched).toHaveBeenCalledWith('w1', { strict: true, force: true });
     expect(access.canWriteBatchAtRef).toHaveBeenCalledWith('w1', 'origin/main', user.email, ['a.md', 'b.md']);
     expect(reviewWorkflow.cancelPr).toHaveBeenCalledWith(9, user, 'open', hashEmail(user.email), 'main', 'w1');
   });

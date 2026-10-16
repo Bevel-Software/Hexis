@@ -3358,8 +3358,11 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<'author' | 'admin' | 'writes-every-file' | null> {
     if (authorIdHash && authorIdHash === hashEmail(user.email)) return 'author';
     const workspaceId = await resolveWorkspaceId();
+    // `force` as well as `strict`: `strict` alone trusts a fetch from
+    // within the cache window, so a right revoked inside it — with origin
+    // down for the refresh — would still pass against the older refs.
     try {
-      await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true });
+      await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true, force: true });
     } catch {
       this.kickDeletedBranchSweep();
       throw new WorkflowDomainError(

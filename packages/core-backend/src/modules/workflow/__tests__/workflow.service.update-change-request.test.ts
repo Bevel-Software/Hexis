@@ -143,7 +143,7 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     await h.svc.updateChangeRequest(9, user('owner@example.com'), { title: 'New' });
     expect(h.written).toHaveLength(1);
     // Read at the base, behind a strict fetch — never a stale local ref.
-    expect(h.workspaces.ensureRemotesFetched).toHaveBeenCalledWith('main', { strict: true });
+    expect(h.workspaces.ensureRemotesFetched).toHaveBeenCalledWith('main', { strict: true, force: true });
     expect(h.access.canWriteBatchAtRef).toHaveBeenCalledWith('main', 'origin/main', 'owner@example.com', [
       'Docs/a.md',
       'Docs/b.md',
