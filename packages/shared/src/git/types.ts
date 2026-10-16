@@ -165,7 +165,12 @@ export interface IGitService {
    * merge aborted in the same reservation, and a later call carrying a
    * resolution for every conflicted path makes the merge for real. A
    * resolution naming a path that is not conflicted is refused before
-   * anything is written. Nothing is pushed; the caller publishes the commit.
+   * anything is written. With `publish`, the merge commit is pushed inside
+   * the same reservation (a rejection replays it onto the moved branch, the
+   * merge kept); without it nothing is pushed and the caller publishes.
+   * `authorizeResolutions` is asked inside the reservation, after the fetch,
+   * with the two commits the merge is between and before any resolution is
+   * written: throwing refuses and undoes the merge.
    *
    * Refused when the workspace is not on `branch`, or holds edits not yet
    * committed (`kind: 'branch-busy'`, 409): a merge over them could lose them.
@@ -175,7 +180,13 @@ export interface IGitService {
     branch: string,
     fromBranch: string,
     user: AuthUser,
-    opts: { subject: string; body: string; resolutions?: MergeResolution[] },
+    opts: {
+      subject: string;
+      body: string;
+      resolutions?: MergeResolution[];
+      publish?: boolean;
+      authorizeResolutions?: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
+    },
   ): Promise<MergeIntoBranchOutcome>;
   /**
    * One file as `branch` has it (its local head, else `origin/<branch>`),

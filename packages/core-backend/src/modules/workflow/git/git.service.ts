@@ -29,6 +29,9 @@ import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
 import { readRefSha } from '../../kb-fs/index.js';
+import { utf8Text } from '../../../shared/utf8-text.js';
+import { lstatOrNull } from '../../../shared/rename-no-replace.js';
+import { linkedAncestor } from '../../../shared/no-link-below.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,
@@ -1557,7 +1560,13 @@ export class GitService implements IGitService {
     branch: string,
     fromBranch: string,
     user: AuthUser,
-    opts: { subject: string; body: string; resolutions?: MergeResolution[]; publish?: boolean },
+    opts: {
+      subject: string;
+      body: string;
+      resolutions?: MergeResolution[];
+      publish?: boolean;
+      authorizeResolutions?: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
+    },
   ): Promise<MergeIntoBranchOutcome> {
     assertValidBranchName(branch);
     assertValidBranchName(fromBranch);
@@ -1589,6 +1598,7 @@ export class GitService implements IGitService {
         guardCheckout: true,
         describeConflicts: true,
         publish: opts.publish === true,
+        authorizeResolutions: opts.authorizeResolutions,
       }),
     );
   }
@@ -1627,6 +1637,15 @@ export class GitService implements IGitService {
       /** Carry every conflicted file's sides in the answer; else the paths alone. */
       describeConflicts: boolean;
       publish: boolean;
+      /**
+       * Decide whether the caller may settle the conflicts the resolutions
+       * name, given the two commits the merge is actually between — asked
+       * INSIDE the reservation, after the fetch, so the rules read are those
+       * of the source commit being merged, not of a tracking ref from before
+       * it moved. Throwing refuses, and refuses before any resolution is
+       * written; the merge is undone.
+       */
+      authorizeResolutions?: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
     },
   ): Promise<MergeIntoBranchOutcome> {
     const theirsRef = `refs/remotes/origin/${fromBranch}`;
@@ -1697,6 +1716,7 @@ export class GitService implements IGitService {
           if (opts.describeConflicts) for (const p of conflicted) files.push(await this.describeConflict(cwd, p));
           return { done: false, outcome: { kind: 'conflicts', from: fromBranch, mergeBase, ours, theirs, files, unresolved } };
         }
+        if (opts.authorizeResolutions) await opts.authorizeResolutions({ ours, theirs, conflicted });
         for (const p of conflicted) await this.applyResolution(cwd, opts.resolutions.get(p)!);
         const still = await this.conflictedPaths(cwd);
         if (still.length > 0) throw new Error(`still conflicted after the resolutions were applied: ${still.join(', ')}`);
@@ -1858,31 +1878,32 @@ export class GitService implements IGitService {
     const ours = await side('ours', 2);
     const theirs = await side('theirs', 3);
     let merged: string | null = null;
-    try {
-      merged = this.carriedText(await fs.readFile(path.join(cwd, repoRelativePath)), () => truncated.push('merged'));
-    } catch (err) {
-      if (!isAbsence(err)) throw err;
+    // The working copy is read from disk, so it is read only where that
+    // stays inside the checkout: a link (the path itself, or a folder on
+    // the way to it) is never followed — the side is left out instead.
+    const file = path.join(cwd, repoRelativePath);
+    const leaf = await lstatOrNull(file);
+    if (leaf?.isSymbolicLink() || (await linkedAncestor(cwd, file)) !== null) {
+      truncated.push('merged');
+    } else {
+      try {
+        merged = this.carriedText(await fs.readFile(file), () => truncated.push('merged'));
+      } catch (err) {
+        if (!isAbsence(err)) throw err;
+      }
     }
     return { path: repoRelativePath, base, ours, theirs, merged, ...(truncated.length > 0 ? { truncated } : {}) };
   }
 
   /**
-   * `bytes` as text when they are text (`looksBinary`, the rule every diff
-   * here applies, and well-formed UTF-8 — a NUL-free file that is not UTF-8
-   * would be carried as replacement characters and written back changed)
-   * and small enough to carry; else null, and `left` is told.
+   * `bytes` as text when they are text by the one rule every reader applies
+   * (`utf8Text`: no NUL, valid UTF-8, BOM kept) and small enough to carry;
+   * else null, and `left` is told.
    */
   private carriedText(bytes: Buffer, left: () => void): string | null {
-    if (bytes.length > GitService.CONFLICT_SIDE_MAX_CHARS || looksBinary(bytes)) {
-      left();
-      return null;
-    }
-    try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch {
-      left();
-      return null;
-    }
+    const text = bytes.length > GitService.CONFLICT_SIDE_MAX_CHARS ? null : utf8Text(bytes);
+    if (text === null) left();
+    return text;
   }
 
   /**
@@ -1894,13 +1915,21 @@ export class GitService implements IGitService {
    */
   private async applyResolution(cwd: string, r: MergeResolution): Promise<void> {
     const file = path.join(cwd, r.path);
+    // Written and removed where that stays inside the checkout: a folder on
+    // the way that is a link is refused, and a path that is itself a link is
+    // replaced as a path (the link removed first), never written through.
+    if ((await linkedAncestor(cwd, file)) !== null) {
+      throw new WorkflowValidationError(`"${r.path}" is reached through a link, so it is not resolved here`);
+    }
     if (r.content !== undefined) {
+      if ((await lstatOrNull(file))?.isSymbolicLink()) await fs.unlink(file);
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, r.content, 'utf-8');
       await this.git(cwd, ['add', '--', r.path]);
       return;
     }
     if (r.choose === 'delete') {
+      // `rm` removes a link itself, never what it points at.
       await fs.rm(file, { force: true });
       await this.git(cwd, ['add', '-A', '--', r.path]);
       return;

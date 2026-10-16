@@ -187,7 +187,7 @@ export function registerWorkflowTools(
    * `readableOnBranch`, the compare route's own rule), and in batches for
    * the path lists `branch_status` shows.
    */
-  accessControl: Pick<IAccessControl, 'canRead' | 'canReadAtRef' | 'canReadBatch' | 'canReadBatchAtRef' | 'canWrite'>,
+  accessControl: Pick<IAccessControl, 'canRead' | 'canReadAtRef' | 'canReadBatch' | 'canReadBatchAtRef'>,
   /**
    * The deployment's blocking read hook, told of every file content a history
    * tool serves, as `read_file` tells it — a hook that refuses the read
@@ -1146,23 +1146,27 @@ export function registerWorkflowTools(
           (await readableOnBranch(accessControl, workspaceId, ctx.user.email, rel, source))
         );
       };
-      // A resolution writes a file on the draft. It takes what every write
-      // takes — the deployment's write hook and the caller's write permission
-      // on the path — and, since what it writes is decided from both sides
-      // of the merge, the read of both sides too. A file the caller may not
-      // read is not theirs to settle, however it would be settled.
+      // A resolution reads a file on both branches and writes it on the
+      // draft, so the deployment's hooks are asked as they are for any read
+      // and any write. The access model's own verdicts — may the caller read
+      // the file on both branches, may they change it on the draft — are the
+      // service's, asked inside the merge against the source commit as
+      // fetched (`updateBranch`), so a rule that changed with the source
+      // cannot be outrun by a check made before it was fetched.
       for (const r of resolutions ?? []) {
-        const rel = stripKbDir(r.path, kbDirName);
-        if (!(await mayReadBothSides(rel))) {
-          throw new ToolError(`You may not read "${rel}" on both branches of this merge, so it is not yours to settle.`, 403, {
-            kind: 'read-denied',
-            path: rel,
-          });
+        const wsPath = `${kbDirName}/${stripKbDir(r.path, kbDirName)}`;
+        try {
+          await notifyAgentRead(agentAccessGate, ctx, branch, wsPath);
+        } catch (err) {
+          if (isRefusal(err)) {
+            throw new ToolError(`You may not read "${stripKbDir(r.path, kbDirName)}" here, so it is not yours to settle.`, 403, {
+              kind: 'read-denied',
+              path: stripKbDir(r.path, kbDirName),
+            });
+          }
+          throw err;
         }
-        await assertAgentWriteAllowed(agentAccessGate, ctx, branch, `${kbDirName}/${rel}`);
-        if (!(await accessControl.canWrite(workspaceId, ctx.user.email, rel))) {
-          throw new ToolError(`You don't have permission to write "${rel}" on "${branch}".`, 403, { kind: 'write-denied', path: rel });
-        }
+        await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsPath);
       }
       const outcome = await ctx.workflowService.updateBranch(workspaceId, ctx.user, {
         ...(from !== undefined ? { from } : {}),

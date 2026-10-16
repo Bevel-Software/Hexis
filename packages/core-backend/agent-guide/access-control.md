@@ -252,9 +252,10 @@ File-level write access decides how a change lands on the default branch:
   `read_file` (it is the draft's own file), `theirs` with `read_file_at` at
   `from` (the branch, not a commit — its tip is not on the draft's history
   until the merge lands), and `base` with `read_file_at` at the answer's
-  `mergeBase`. A conflicted file you may not read on both branches is left
-  out and only counted (`withheldConflicts`): it is not yours to settle, so
-  ask a person who can read it to update the draft in the app. Decide each
+  `mergeBase`. A conflicted file you may not read on either of the two
+  branches is left out and only counted (`withheldConflicts`): it is not
+  yours to settle, so ask a person who can read it to update the draft in
+  the app. Decide each
   file shown (keep both sides' information unless one is clearly stale;
   `list_file_changes` says who changed what and why), then call
   `update_branch` again **with the same `from`** and `resolutions`, one per

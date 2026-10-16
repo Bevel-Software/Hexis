@@ -70,6 +70,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import { readableOnBranch, ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -4737,7 +4738,29 @@ export class WorkflowService implements IWorkflowService {
       // replay that conflicts is the stranded-commit case every pull hands
       // to recovery, and a push the host refuses answers as every refused
       // share answers — the banner noted, the typed hand-off thrown.
-      outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, { subject, body, resolutions, publish: true });
+      outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, {
+        subject,
+        body,
+        resolutions,
+        publish: true,
+        // A resolution writes a file on the draft from what both branches
+        // hold of it. It is authorized inside the merge, against the source
+        // commit actually merged: the caller must read the file on the draft
+        // and on `from` as fetched (`readableOnBranch`, the compare route's
+        // rule), and may change it on the draft by the one rule every draft
+        // write takes — the change gate `acquireLock` asks, not a write
+        // permission a draft never requires.
+        authorizeResolutions: async () => {
+          for (const r of resolutions) {
+            const rel = r.path.startsWith(`${this.kbDirName}/`) ? r.path.slice(this.kbDirName.length + 1) : r.path;
+            const readable =
+              (await this.accessControl.canRead(workspaceId, user.email, rel)) &&
+              (await readableOnBranch(this.accessControl, workspaceId, user.email, rel, from));
+            if (!readable) throw new ReadOnBranchDeniedError(rel, from);
+            await this.changeGate.assertMayChange(workspaceId, user.email, rel, 'file');
+          }
+        },
+      });
     } catch (err) {
       if (err instanceof PullRebaseConflictError) {
         const message = syncConflictMessage(branch, err.conflictedPaths);

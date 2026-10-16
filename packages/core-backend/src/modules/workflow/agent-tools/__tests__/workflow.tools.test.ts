@@ -283,7 +283,7 @@ const accessControl = {
 /**
  * The deployment's hooks: the read hook refuses `Hooked/`, fails outright on
  * `Failing/` and records every read it is told of (with the session it was
- * told for); the write hook refuses `WriteHooked/`.
+ * told for); the write hook refuses `Locked/`.
  */
 const agentHooks = new WorkflowHooks();
 agentHooks.onAgentRead(async (op) => {
@@ -1266,13 +1266,8 @@ describe('history and syncing tools', () => {
     expect(body.files).toEqual([{ path: 'KnowledgeBase/Open.md', base: 'b\n', ours: 'o\n', theirs: 't\n', merged: '<<<<<<<\n' }]);
     expect(body.withheldConflicts).toBe(1);
     expect(JSON.stringify(body)).not.toContain('Secret/Plan.md');
-    // Neither text nor a whole side settles a file the caller may not read.
-    for (const resolution of [{ path: 'Secret/Plan.md', content: 'x' }, { path: 'Secret/Plan.md', choose: 'theirs' }]) {
-      calls = [];
-      const refused = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [resolution] });
-      expect(refused.status, JSON.stringify(resolution)).toBe(403);
-      expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
-    }
+    // (Whether the caller may settle a file is the service's verdict, made
+    // inside the merge against the source as fetched — see the facade test.)
     // A readable one is settled, and the service gets exactly that.
     calls = [];
     const side = await post(tool(base, 'update_branch'), writeTok(), {
@@ -1285,18 +1280,18 @@ describe('history and syncing tools', () => {
     expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', { from: 'me/conflicting', resolutions: [{ path: 'KnowledgeBase/Open.md', choose: 'theirs' }] }]);
   });
 
-  it('update_branch takes the write every write takes for a resolution: the write hook and the write permission', async () => {
+  it("update_branch asks the deployment's hooks for a resolution as for any read and any write", async () => {
     const base = await start();
     for (const [path, status] of [
       ['Locked/A.md', 403],
-      ['ReadOnly/A.md', 403],
+      ['Hooked/A.md', 403],
       ['KnowledgeBase/Open.md', 200],
     ] as const) {
       calls = [];
       const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [{ path, content: 'x\n' }] });
       expect(res.status, path).toBe(status);
-      expect(calls, path).toContainEqual(['preWrite', DRAFT, `knowledge-base/${path}`]);
-      if (status === 200) expect(calls).toContainEqual(['canWrite', DRAFT_WS, 'e@x', path]);
+      expect(calls, path).toContainEqual(['agentRead', DRAFT, `knowledge-base/${path}`, undefined]);
+      if (status === 200) expect(calls).toContainEqual(['preWrite', DRAFT, `knowledge-base/${path}`]);
       else expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
     }
   });
@@ -1322,11 +1317,15 @@ describe('history and syncing tools', () => {
     for (const [name, body] of [
       ['read_file_at', { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'main', sessionId: 'conv-7' }],
       ['compare_file', { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'main', to: DRAFT, sessionId: 'conv-7' }],
-      ['branch_status', { branch: DRAFT, sessionId: 'conv-7' }],
     ] as const) {
+      calls = [];
       const r = await post(tool(base, name), 'bevel_key', body);
       expect(r.status, name).toBe(200);
+      expect(calls, name).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Foo.md', 'conv-7']);
     }
+    // `branch_status` reads no file content, so it tells the hook nothing; it still takes the id.
+    const status = await post(tool(base, 'branch_status'), 'bevel_key', { branch: DRAFT, sessionId: 'conv-7' });
+    expect(status.status).toBe(200);
   });
 
   it('lists the five on the external catalog too: a remote agent reads history and syncs its drafts', async () => {
