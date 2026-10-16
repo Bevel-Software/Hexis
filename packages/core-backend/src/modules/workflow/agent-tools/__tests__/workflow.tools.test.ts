@@ -1291,8 +1291,11 @@ describe('history and syncing tools', () => {
       const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [{ path, content: 'x\n' }] });
       expect(res.status, path).toBe(status);
       expect(calls, path).toContainEqual(['agentRead', DRAFT, `knowledge-base/${path}`, undefined]);
-      if (status === 200) expect(calls).toContainEqual(['preWrite', DRAFT, `knowledge-base/${path}`]);
-      else expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
+      // The write hook is asked after the read hook let the path through:
+      // it is what refuses `Locked/`, and is never reached for `Hooked/`.
+      if (path !== 'Hooked/A.md') expect(calls, path).toContainEqual(['preWrite', DRAFT, `knowledge-base/${path}`]);
+      else expect(calls.some((c) => c[0] === 'preWrite')).toBe(false);
+      if (status !== 200) expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
     }
   });
 

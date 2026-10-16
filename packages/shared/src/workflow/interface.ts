@@ -750,8 +750,9 @@ export interface IWorkflowService {
    *   - `merged` means the merge commit is PUBLISHED: the push runs inside the
    *     merge's own reservation, and a push the host rejects because the
    *     branch moved is retried with the merge replayed on top. A replay that
-   *     conflicts throws the typed pull-conflict error (recovery queued), the
-   *     merge commit kept on the branch and the checkout clean.
+   *     conflicts throws the typed pull-conflict error (recovery queued), and
+   *     a push the host refuses throws the typed push hand-off; either way the
+   *     merge commit is kept on the branch, unpublished, the checkout clean.
    *
    * Per-file read access to what a `conflicts` answer carries is the
    * CALLER's to check and withhold, as for `fileAtBranch`.

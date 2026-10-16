@@ -1084,7 +1084,7 @@ export function registerWorkflowTools(
         withheldConflicts: {
           type: 'integer',
           description:
-            '`conflicts`: how many conflicted files were left out because you may not read them on both branches. ' +
+            '`conflicts`: how many conflicted files were left out because you may not read them on one of the two branches. ' +
             'They are not yours to settle: ask a person who can read them to update the draft in the app.',
         },
         branch: { type: 'string', description: '`pending-commits`: the branch whose writes are not committed yet.' },

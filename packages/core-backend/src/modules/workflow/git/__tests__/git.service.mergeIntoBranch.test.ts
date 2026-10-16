@@ -13,12 +13,14 @@ import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-t
  * `mergeIntoBranch`: the agent's merge, over real git. A conflict is described
  * and undone in one reservation — the working tree is never left mid-merge —
  * and a second call with a resolution per path lands a merge commit with both
- * parents. Nothing is pushed by it.
+ * parents. Pushed only when `publish` is asked for.
  */
 
 const TARGET = 'target-company-state';
 const DRAFT = 'ada/draft';
 const USER = { id: 'u1', email: 'ada@x.io', name: 'Ada Lovelace' };
+/** The authorizer a resolution needs; here every resolution is the caller's to make. */
+const allow = async (): Promise<void> => {};
 
 /** Upstream with a target branch and a draft forked from it, and the draft's workspace clone. */
 async function seed(root: string): Promise<{ upstream: string; repo: string; pusher: string }> {
@@ -178,6 +180,7 @@ describe('GitService.mergeIntoBranch', () => {
         { path: 'knowledge-base/other.md', choose: 'theirs' },
         { path: 'new.md', choose: 'delete' },
       ],
+      authorizeResolutions: allow,
     });
     expect(second.kind).toBe('merged');
     if (second.kind !== 'merged') return;
@@ -206,6 +209,7 @@ describe('GitService.mergeIntoBranch', () => {
           { path: 'shared.md', content: 'resolved\n' },
           { path: 'other.md', content: 'an ordinary edit smuggled in\n' },
         ],
+        authorizeResolutions: allow,
       }),
     ).rejects.toThrow(/not conflicted.*other\.md/);
     expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
@@ -217,15 +221,30 @@ describe('GitService.mergeIntoBranch', () => {
     await seed(root);
     const svc = service();
     await expect(
-      svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', resolutions: [{ path: 'a.md' }] }),
+      svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', resolutions: [{ path: 'a.md' }], authorizeResolutions: allow }),
     ).rejects.toBeInstanceOf(WorkflowValidationError);
     await expect(
       svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
         subject: 's',
         body: 'b',
         resolutions: [{ path: 'a.md', content: 'x', choose: 'ours' }],
+        authorizeResolutions: allow,
       }),
     ).rejects.toBeInstanceOf(WorkflowValidationError);
+  });
+
+  it('refuses resolutions that nobody authorizes, before touching git', async () => {
+    const { repo } = await seed(root);
+    const head = (await gitOut(repo, ['rev-parse', 'HEAD'])).trim();
+    await expect(
+      service().mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
+        subject: 's',
+        body: 'b',
+        resolutions: [{ path: 'shared.md', content: 'x\n' }],
+      } as never),
+    ).rejects.toThrow(/authorizeResolutions/);
+    expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect((await gitOut(repo, ['status', '--porcelain'])).trim()).toBe('');
   });
 
   it('refuses while the working tree holds edits not committed yet', async () => {
@@ -249,6 +268,7 @@ describe('GitService.mergeIntoBranch', () => {
         subject: 's',
         body: 'b',
         resolutions: [{ path: 'other.md', content: 'smuggled\n' }],
+        authorizeResolutions: allow,
       }),
     ).rejects.toThrow(/nothing conflicted/);
     expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
@@ -313,6 +333,7 @@ describe('GitService.mergeIntoBranch', () => {
         { path: 'img.png', choose: 'ours' },
         { path: 'big.md', choose: 'theirs' },
       ],
+      authorizeResolutions: allow,
     });
     expect(second.kind).toBe('merged');
     expect(Buffer.compare(await fs.readFile(path.join(repo, 'img.png')), png(3))).toBe(0);
@@ -420,31 +441,47 @@ describe('GitService.mergeIntoBranch', () => {
   // Symbolic links need a privilege on Windows that a test runner does not have.
   it.skipIf(process.platform === 'win32')('never follows a link out of the checkout, reading or writing a conflicted path', async () => {
     const { repo, pusher } = await seed(root);
+    for (const dir of [repo, pusher]) await runGit(dir, ['config', 'core.symlinks', 'true']);
     const outside = path.join(root, 'outside.txt');
     await fs.writeFile(outside, 'outside the checkout\n');
-    // The draft turns `shared.md` into a link pointing outside; the target edits it as a file.
+    // Both sides turn `shared.md` into a link — the draft's pointing outside
+    // the checkout, the target's at a sibling — so git sees one conflicted
+    // path of one type (two links with different targets are not merged;
+    // the draft's own link is what the checkout holds while it is open).
     await fs.rm(path.join(repo, 'shared.md'));
     await fs.symlink(outside, path.join(repo, 'shared.md'));
     await runGit(repo, ['add', '-A']);
     await runGit(repo, ['commit', '-q', '-m', 'draft links shared.md outside']);
-    await pushOn(pusher, TARGET, { 'shared.md': 'line 1\nline 2 from target\nline 3\n' }, 'target edits line 2');
+    await runGit(pusher, ['checkout', '-q', TARGET]);
+    await fs.rm(path.join(pusher, 'shared.md'));
+    await fs.symlink('other.md', path.join(pusher, 'shared.md'));
+    await runGit(pusher, ['add', '-A']);
+    await runGit(pusher, ['commit', '-q', '-m', 'target links shared.md at other.md']);
+    await runGit(pusher, ['push', '-q', 'origin', TARGET]);
 
     const svc = service();
     const first = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b' });
     expect(first.kind).toBe('conflicts');
     if (first.kind !== 'conflicts') return;
+    expect(first.unresolved).toEqual(['shared.md']);
     const file = first.files.find((f) => f.path === 'shared.md')!;
-    // The link is never followed: the working copy is left out, and `ours`
-    // is the link's own target text as git stores it, not the file outside.
+    // The link is never followed: the working copy is left out, and each
+    // side is the link's own target text as git stores it, not the file
+    // outside.
     expect(file.truncated).toContain('merged');
     expect(file.merged).toBeNull();
-    expect(file.ours).toBe(outside);
+    // (Git stores the target with forward slashes whatever the host's separator.)
+    expect(file.ours?.replaceAll('\\', '/')).toBe(outside.replaceAll('\\', '/'));
+    expect(file.theirs).toBe('other.md');
+    expect(file.base).toBe('line 1\nline 2\nline 3\n');
     expect(await fs.readFile(outside, 'utf-8')).toBe('outside the checkout\n');
+    expect((await fs.lstat(path.join(repo, 'shared.md'))).isSymbolicLink()).toBe(true);
 
     const second = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
       subject: 's',
       body: 'b',
       resolutions: [{ path: 'shared.md', content: 'resolved as a file\n' }],
+      authorizeResolutions: allow,
     });
     expect(second.kind).toBe('merged');
     // Written as a path inside the checkout; the file outside is untouched.

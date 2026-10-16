@@ -1577,6 +1577,11 @@ export class GitService implements IGitService {
     // Every resolution names a repository path; which of them are conflicted
     // is only known inside the merge, where they are matched exactly.
     const resolutions = new Map<string, MergeResolution>();
+    // A resolution writes a file on the branch: it is somebody's to
+    // authorize, and a caller that brings none writes nothing (closed).
+    if ((opts.resolutions?.length ?? 0) > 0 && typeof opts.authorizeResolutions !== 'function') {
+      throw new Error('mergeIntoBranch: resolutions need an `authorizeResolutions` to be asked inside the merge');
+    }
     for (const r of opts.resolutions ?? []) {
       assertValidRelativePath(r.path);
       const p = this.stripRepoPrefix(r.path);
@@ -1883,7 +1888,7 @@ export class GitService implements IGitService {
     // the way to it) is never followed — the side is left out instead.
     const file = path.join(cwd, repoRelativePath);
     const leaf = await lstatOrNull(file);
-    if (leaf?.isSymbolicLink() || (await linkedAncestor(cwd, file)) !== null) {
+    if (leaf?.isSymbolicLink() || (await linkedAncestor(cwd, path.dirname(file))) !== null) {
       truncated.push('merged');
     } else {
       try {
@@ -1918,7 +1923,7 @@ export class GitService implements IGitService {
     // Written and removed where that stays inside the checkout: a folder on
     // the way that is a link is refused, and a path that is itself a link is
     // replaced as a path (the link removed first), never written through.
-    if ((await linkedAncestor(cwd, file)) !== null) {
+    if ((await linkedAncestor(cwd, path.dirname(file))) !== null) {
       throw new WorkflowValidationError(`"${r.path}" is reached through a link, so it is not resolved here`);
     }
     if (r.content !== undefined) {

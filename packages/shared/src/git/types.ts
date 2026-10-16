@@ -130,9 +130,10 @@ export interface ConflictedFile {
  * What merging one branch into another, in the receiving branch's own
  * workspace, did:
  *
- *  - `merged`           — a merge commit `sha` was made on the branch (not
- *                         pushed by this call), `resolvedPaths` naming the
- *                         conflicts the caller's resolutions settled.
+ *  - `merged`           — a merge commit `sha` was made on the branch, pushed
+ *                         when `publish` was asked for and local otherwise,
+ *                         `resolvedPaths` naming the conflicts the caller's
+ *                         resolutions settled.
  *  - `nothing-to-merge` — the branch already held everything; `sha` is its tip.
  *  - `conflicts`        — the merge was undone and the working tree left as it
  *                         was: `files` describes every conflicted path,
@@ -166,11 +167,17 @@ export interface IGitService {
    * resolution for every conflicted path makes the merge for real. A
    * resolution naming a path that is not conflicted is refused before
    * anything is written. With `publish`, the merge commit is pushed inside
-   * the same reservation (a rejection replays it onto the moved branch, the
-   * merge kept); without it nothing is pushed and the caller publishes.
-   * `authorizeResolutions` is asked inside the reservation, after the fetch,
-   * with the two commits the merge is between and before any resolution is
-   * written: throwing refuses and undoes the merge.
+   * the same reservation: a rejection replays it onto the moved branch (a
+   * replay that conflicts throws the typed pull-conflict error) and a push
+   * the host refuses throws `MergePublishRefusedError`; either way the merge
+   * commit stays on the local branch, unpublished, the checkout clean, and a
+   * later call answers `nothing-to-merge` without pushing it — it is
+   * published as any local commit is. Without `publish` nothing is pushed
+   * and the caller publishes. Resolutions come with `authorizeResolutions`
+   * (required with them, refused without): it is asked inside the
+   * reservation, after the fetch, with the two commits the merge is between
+   * and before any resolution is written; throwing refuses and undoes the
+   * merge.
    *
    * Refused when the workspace is not on `branch`, or holds edits not yet
    * committed (`kind: 'branch-busy'`, 409): a merge over them could lose them.
@@ -180,13 +187,13 @@ export interface IGitService {
     branch: string,
     fromBranch: string,
     user: AuthUser,
-    opts: {
-      subject: string;
-      body: string;
-      resolutions?: MergeResolution[];
-      publish?: boolean;
-      authorizeResolutions?: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
-    },
+    opts: { subject: string; body: string; publish?: boolean } & (
+      | { resolutions?: undefined; authorizeResolutions?: undefined }
+      | {
+          resolutions: MergeResolution[];
+          authorizeResolutions: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
+        }
+    ),
   ): Promise<MergeIntoBranchOutcome>;
   /**
    * One file as `branch` has it (its local head, else `origin/<branch>`),
