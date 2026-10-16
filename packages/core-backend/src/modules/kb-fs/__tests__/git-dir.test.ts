@@ -49,11 +49,24 @@ describe('gitDirOf', () => {
     expect(await gitDirOf(root)).toBeNull();
   });
 
-  it('reads the first line only, as git does: a gitdir line further down is no gitfile', async () => {
-    await fs.writeFile(path.join(root, '.git'), 'not a gitfile\ngitdir: ../elsewhere/wt\n');
-    expect(await readGitfile(path.join(root, '.git'))).toBeNull();
-    // What git says of the same file.
-    await expect(git(root, 'rev-parse', '--absolute-git-dir')).rejects.toThrow();
+  it('reads exactly what git reads: `gitdir: ` and a path, nothing before, after or around it', async () => {
+    const gitfile = path.join(root, '.git');
+    for (const text of [
+      'not a gitfile\ngitdir: ../elsewhere/wt\n', // a gitdir line further down
+      'gitdir: ../elsewhere/wt\njunk\n', // a second line after the path
+      'gitdir:../elsewhere/wt\n', // no space after the colon
+      'gitdir:  ../elsewhere/wt\n', // a path that starts with a space, which exists nowhere
+      '\ngitdir: ../elsewhere/wt\n', // a blank first line
+    ]) {
+      await fs.writeFile(gitfile, text);
+      const named = await readGitfile(gitfile);
+      // Git refuses each as a gitfile; what this reads of it names no folder
+      // git would open.
+      await expect(git(root, 'rev-parse', '--absolute-git-dir')).rejects.toThrow();
+      expect(named === null || named !== path.resolve(root, '../elsewhere/wt'), JSON.stringify(text)).toBe(true);
+    }
+    await fs.writeFile(gitfile, 'gitdir: ../elsewhere/wt\r\n');
+    expect(await readGitfile(gitfile)).toBe(path.resolve(root, '../elsewhere/wt'));
   });
 
   it('resolves a relative gitdir against the file’s own folder', async () => {

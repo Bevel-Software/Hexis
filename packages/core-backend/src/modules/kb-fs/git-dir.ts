@@ -24,9 +24,11 @@ export async function readGitfile(gitfile: string): Promise<string | null> {
     if (isAbsence(err) || (err as NodeJS.ErrnoException).code === 'EISDIR') return null;
     throw err;
   }
-  // Git reads a gitfile's FIRST line and nothing else: a file whose first
-  // line is not `gitdir:` is no gitfile to git, whatever a later line says.
-  const m = /^gitdir:\s*(.+?)\s*$/.exec(text.split(/\r?\n/, 1)[0] ?? '');
+  // Exactly what git reads (setup.c, `read_gitfile_gently`): the whole file
+  // is `gitdir: ` and a path, with nothing after the path but line ends. A
+  // second line, other spacing before the path, or anything after it is no
+  // gitfile to git, so it names no folder here either.
+  const m = /^gitdir: ([^\r\n]+?)[\r\n]*$/.exec(text);
   if (!m) return null;
   return path.resolve(path.dirname(gitfile), m[1]!);
 }
