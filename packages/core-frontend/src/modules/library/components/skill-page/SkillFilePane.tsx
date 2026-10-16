@@ -4,7 +4,7 @@ import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
-import { OpenPageInPlatformContext } from '../../../workspace/components/renderers/htmlToolBridge';
+import { OpenPageInPlatformContext } from '../../../workspace';
 import type { DiffLine } from '../../../change-requests/utils/diff';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
