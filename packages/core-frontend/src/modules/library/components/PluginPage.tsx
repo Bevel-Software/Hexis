@@ -374,8 +374,11 @@ export function PluginPage() {
             viewport a group that could only shrink would push its content
             straight across the manifest and action buttons instead. Clipped,
             the title truncates first, the trail goes last, and the controls
-            stay where they are and stay clickable. */}
-        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+            stay where they are and stay clickable. The ink room is on this
+            group as well as on the title: the group clips too, to exactly the
+            title's line box, so without it the tails the title's own room
+            uncovers are cut off one box further out. */}
+        <div className={`flex min-w-0 flex-1 items-center gap-2 overflow-hidden ${TITLE_INK_ROOM}`}>
           <PluginBreadcrumb />
           <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={label}>
             {label}

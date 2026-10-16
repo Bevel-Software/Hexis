@@ -40,6 +40,13 @@ export const HEADER_BAND = 'flex h-header flex-none items-center';
  * box by the overhang and the matching negative margin hands the space back,
  * so the title still occupies exactly its line box and the band, which
  * centres it, does not move.
+ *
+ * It goes on EVERY box that clips the title, not only the title: a title
+ * grouped with its breadcrumb or chips sits in an `overflow-hidden` wrapper
+ * whose height is the title's margin box, the bare line box, so the wrapper
+ * cuts off what the title's own room uncovered. The wrapper takes the same
+ * class, and since padding and margin cancel there too, nothing around it
+ * moves either.
  */
 export const TITLE_INK_ROOM = 'py-1 -my-1';
 
