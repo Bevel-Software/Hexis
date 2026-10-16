@@ -17,6 +17,8 @@ import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { KbRepository, repositoryDirFor } from '../modules/workspace/kb-repository.js';
+import type { IKbRepository } from '../modules/workspace/kb-repository.contract.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
 import type { EmbedService } from '../modules/embed/embed.service.js';
 import { composeEmbedService } from './compose-embed.js';
@@ -574,6 +576,30 @@ export async function createCoreServices(
    * Under the backups root: a persistent volume of its own, and one nothing
    * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
    */
+  // Shared mutex so git and diff operations on the same workspace serialize
+  // against each other — a backup-reseed races a concurrent commit otherwise.
+  const workspaceMutex = new WorkspaceMutex();
+  /**
+   * The knowledge base's ONE repository: every branch workspace is a worktree
+   * of it (see `kb-repository.ts`). One instance, handed to the workspace
+   * service, the startup phase and (through the workspace service) the git
+   * layer, so one fetch serves every workspace and the writes to its one
+   * config file are serialized in one place. Git operations in the worktrees
+   * are not serialized against each other beyond the workspace mutex: git's
+   * own locks cover a repository shared by worktrees.
+   *
+   * Under the backups root, like the set-aside copies: a persistent volume in
+   * every shipped compose file, so no new mount is needed, and outside the
+   * workspaces root, where the orphan sweep never sees it. The folder name
+   * starts with a dot, which no branch — and so no backup ledger's workspace
+   * id — can. On hexis-cloud every tenant has its own backups root: one
+   * repository per tenant.
+   */
+  const kbRepository: IKbRepository = new KbRepository({
+    dir: repositoryDirFor(config.workspacesRoot, kbDirName, path.join(config.backupsRoot, '.kb-repository')),
+    kbRepoUrl: () => repositorySource.url(),
+    gitRunner,
+  });
   const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
   /**
    * What must leave with a working copy that is set aside, whoever sets it
@@ -639,6 +665,7 @@ export async function createCoreServices(
             );
           });
       }),
+    kbRepository,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -676,6 +703,9 @@ export async function createCoreServices(
     // The same folder the workspace service sets aside into — see
     // `replacedWorkingCopiesRoot` above for why the two must agree.
     setAsideRoot: replacedWorkingCopiesRoot,
+    // The one repository every branch workspace is a worktree of — the same
+    // instance the workspace service holds (see `kbRepository` above).
+    repository: kbRepository,
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,
@@ -832,9 +862,6 @@ export async function createCoreServices(
   // registers its listener here, after this returns (see `AccountHooks`).
   const accountHooks = new AccountHooks();
 
-  // Shared mutex so git and diff operations on the same workspace serialize
-  // against each other — a backup-reseed races a concurrent commit otherwise.
-  const workspaceMutex = new WorkspaceMutex();
   // Workflow lifecycle hooks — the ONE registry this composition shares
   // between GitService (advisory commit validation), the agent-access gate
   // (the blocking agentRead / preWrite hooks), and the composition root,

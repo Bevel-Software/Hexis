@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -21,7 +20,6 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import {
   assertInsideRepo,
   assertRepoRootNameFree,
@@ -874,9 +872,10 @@ export interface WorkspaceToolsPorts {
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
  * methods Mastra's tools call (via `ctx.getFilesystem(a.branch as string)`), so behaviour is
  * identical and write-side ops still flow through the lock/commit pipeline.
- * `edit_file`, `grep`, and `execute_command` are tool-level (no filesystem
- * method), so they're implemented here. File ops are `both`; `execute_command`
- * is INTERNAL-only (arbitrary shell as the caller is too dangerous to expose).
+ * `edit_file` and `grep` are tool-level (no filesystem method), so they're
+ * implemented here. There is no shell tool: an agent never composes a command
+ * line, and every git operation it needs is a platform tool with fixed
+ * arguments.
  */
 export function registerWorkspaceTools(
   registry: IToolRegistry,
@@ -1598,15 +1597,6 @@ export function registerWorkspaceTools(
      * read-only key may still not make (`request_file_download`).
      */
     writeScope?: boolean;
-    /**
-     * This tool resolves `branch` ITSELF and must not be pre-checked here.
-     * Only `execute_command` sets it: for an internal session that leaves the
-     * argument off, it falls back to the caller's own focused branch (from its
-     * signed token) rather than refusing. It still answers the same
-     * `branch-required` kind when there is nothing to fall back on — see its
-     * handler. Every other tool takes the check below.
-     */
-    resolvesBranchItself?: boolean;
     /** Arguments this tool refuses by name itself, with its own wording (see `ToolDefSpec.refusesItself`). */
     refusesItself?: string[];
     handler: ToolHandler;
@@ -1665,9 +1655,9 @@ export function registerWorkspaceTools(
     redescribe();
     kb.onLayoutApplied(redescribe);
     agentAccessGate.notes.onChange(redescribe);
-    // Internal-only tools (e.g. `execute_command`) keep their route mounted —
-    // our agent calls it over the same loopback — but gate it to internal-source
-    // callers so an external connection key can't invoke it by name.
+    // Internal-only tools keep their route mounted — our agent calls them over
+    // the same loopback — but gate them to internal-source callers so an
+    // external connection key can't invoke one by name.
     router.post(
       path.slice('/api'.length),
       toolAuth,
@@ -1718,8 +1708,7 @@ export function registerWorkspaceTools(
             );
           }
         },
-        // `execute_command` resolves its own branch (see `resolvesBranchItself`).
-        { write: spec.write, writeScope: spec.writeScope, ...(spec.resolvesBranchItself ? { branch: 'own' as const } : {}) },
+        { write: spec.write, writeScope: spec.writeScope },
       ),
     );
   };
@@ -4077,194 +4066,6 @@ export function registerWorkspaceTools(
       };
     });
   }
-
-  // ── shell (internal-only) ───────────────────────────────────────────────
-  mount({
-    name: 'execute_command',
-    gated: true,
-    description:
-      'Run a shell command in the workspace directory. Returns `{ stdout, stderr, exitCode }` (output capped). Use for git status/log, grep/rg, build/test commands.',
-    internalOnly: true,
-    fileTool: false,
-    // The one tool the mount's branch check skips: the handler below resolves an
-    // omitted `branch` to the internal caller's focused branch before refusing.
-    resolvesBranchItself: true,
-    inputs: {
-      type: 'object',
-      properties: {
-        branch: BRANCH_INPUT,
-        command: str('The shell command line to run.'),
-        timeout_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Timeout in ms (default 30000).' },
-        sessionId: SESSION_ID_INPUT,
-      },
-      // `branch` stays REQUIRED here on purpose, and must not be relaxed to make
-      // the handler's focused-branch fallback "reachable". This list is the
-      // contract the model is TAUGHT — declaring it required is what makes the
-      // caller always name its branch, which is the fix for the workspace this
-      // tool used to resolve as "undefined". It is not a runtime gate: nothing in
-      // the tool route validates inputs against this schema, so a branch-less call
-      // still reaches the handler and still hits the `ctx.focusedBranch` fallback
-      // (covered by "falls back to the session focused branch when branch is
-      // omitted"). The fallback is a safety net for a model that disobeys the
-      // contract — not a sanctioned calling convention to advertise.
-      required: ['branch', 'command'],
-      additionalProperties: false,
-    },
-    outputs: {
-      type: 'object',
-      properties: {
-        stdout: str('Captured standard output (truncated to 50,000 chars).'),
-        stderr: str('Captured standard error (truncated to 50,000 chars).'),
-        exitCode: int('Process exit code; -1 if it was killed (timeout/abort) or failed to spawn.'),
-      },
-      required: ['stdout', 'stderr', 'exitCode'],
-    },
-    write: true,
-    handler: async (a, ctx: ToolContext) => {
-      // Resolve the branch FIRST — before the policy gates below — so a malformed
-      // call always gets the 400 that names what is missing, rather than a 403
-      // from a restricted session masking it. Unlike the file tools (which route
-      // through `getOrCreateForUser` and fall back to the default branch),
-      // execute_command turns `branch` straight into a workspace — so a bad value
-      // would `encodeURIComponent(undefined)` to the string "undefined", then try
-      // to CLONE a branch literally named "undefined", 500ing and leaving an
-      // `<workspaces>/undefined/` shell behind.
-      //
-      // Two distinct cases:
-      //  - branch OMITTED (`undefined`): the in-app chat agent may leave it off a
-      //    call. For an internal session we fall back to the caller's own focused
-      //    branch (`ctx.focusedBranch`, from its signed token), so the command runs
-      //    against the workspace the session is on (e.g. `main`) end to end. An
-      //    external caller carries no focused branch, so it stays absent → 400.
-      //  - branch PRESENT but invalid (the literal "undefined"/"null", empty, or
-      //    malformed): a broken value, never a real branch — fail closed, never
-      //    silently reinterpret it as the focused branch.
-      const raw = a.branch;
-      const branch = raw === undefined ? ctx.focusedBranch : raw;
-      if (typeof branch !== 'string' || branch.length === 0) {
-        throw new ToolError(
-          'execute_command requires a `branch`: pass the branch (draft) whose workspace to run the command in — the one you are currently working on.',
-          400,
-          // The same discriminator every other KB tool answers a branch-less
-          // call with, so a client switches on one kind across the surface.
-          // The MESSAGE stays this tool's own: it can name the focused-branch
-          // fallback that only applies here.
-          { kind: 'branch-required' },
-        );
-      }
-      // A stringified absent value. Both are syntactically valid git branch names,
-      // so `assertValidBranchName` below happily accepts them — and accepting one
-      // is the whole bug this tool is guarded for: `getOrCreateForBranch("undefined")`
-      // clones a branch literally named "undefined" into `<workspaces>/undefined/`
-      // and 500s. Reject them by name, ahead of the shape check.
-      if (branch === 'undefined' || branch === 'null') {
-        throw new ToolError(
-          `execute_command got the literal string "${branch}" as \`branch\` — that is a stringified absent value, not a branch. ` +
-            'Pass the real branch (draft) whose workspace to run the command in.',
-          400,
-          { kind: 'branch-required' },
-        );
-      }
-      // Then the SHAPE, via the one canonical validator every other branch path
-      // uses — no hand-maintained list of suspicious literals, which would both
-      // miss malformed refs (`..`, `-x`, `foo/.lock`) and reserve names git
-      // considers perfectly valid. Runs on the RAW string, so a whitespace-padded
-      // `" main "` is refused rather than silently trimmed into a different
-      // branch than the caller passed.
-      try {
-        assertValidBranchName(branch);
-      } catch (err) {
-        throw new ToolError(
-          `execute_command got an invalid \`branch\`: ${(err as Error).message} — ` +
-            'pass the exact branch (draft) whose workspace to run the command in.',
-          400,
-        );
-      }
-      // Shell is a write path with no single target path to check, so the
-      // write hook is asked once for the call itself, with no path — and the
-      // run must not be restricted to a file type either, since shell could
-      // write anything.
-      writePolicy.assertUnrestricted(ctx.sessionId);
-      await assertAgentWriteAllowed(agentAccessGate, ctx, branch);
-      // Canonical per-branch bootstrap entry point — it owns the workspace-id
-      // encoding and the single-flight clone, so the shell never derives a
-      // workspace path by hand.
-      const cwd = (await ctx.workspaceService.getOrCreateForBranch(branch)).absolutePath;
-      const timeoutMs = typeof a.timeout_ms === 'number' ? a.timeout_ms : 30_000;
-      // cwd is the workspace ROOT so shell paths match the workspace-relative
-      // paths every other file tool uses — but the git clone lives one level
-      // deeper, at <workspace>/<kbDirName>/.git. For a bare `git status` /
-      // `git diff` (what the agent prompt teaches) point git there explicitly so
-      // it resolves the KB clone instead of failing with "not a git repository".
-      //
-      // Because the command runs under `shell: true`, GIT_DIR/GIT_WORK_TREE
-      // apply to the WHOLE shell, so restrict the override to a *standalone* bare
-      // `git …` invocation. Otherwise the KB repo context would (a) leak into a
-      // chained step that spawns its own git — `git commit && npm ci` — and (b)
-      // override a caller's explicit `git -C …` / `--git-dir` / `--work-tree`.
-      const command = (a.command as string).trim();
-      const isStandaloneGit =
-        /^git(\s|$)/.test(command) &&
-        !/[;&|`\n]|\$\(/.test(command) &&
-        !/(?:^|\s)(?:-C|--git-dir|--work-tree)(?:[=\s]|$)/.test(command);
-      const env = isStandaloneGit
-        ? {
-            ...process.env,
-            GIT_DIR: join(cwd, kbDirName, '.git'),
-            GIT_WORK_TREE: join(cwd, kbDirName),
-          }
-        : process.env;
-      return new Promise((resolve) => {
-        // Own process group on POSIX, so a timeout or abort kills the WHOLE
-        // tree. `shell: true` puts an `sh` between us and the command; killing
-        // only that shell left whatever it had started running on — orphaned,
-        // unreaped, still holding the workspace and its memory. A self-hosted
-        // deployment leaked ~4,500 tasks that way before nothing could fork.
-        const detached = process.platform !== 'win32';
-        const child = spawn(a.command as string, { cwd, shell: true, env, detached });
-        let stdout = '';
-        let stderr = '';
-        const killTree = () => {
-          try {
-            if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
-            else child.kill('SIGKILL');
-          } catch {
-            try {
-              child.kill('SIGKILL');
-            } catch {
-              // Already gone.
-            }
-          }
-        };
-        const timer = setTimeout(killTree, timeoutMs);
-        // If the caller disconnects (request aborted), kill the tree instead of
-        // letting it run to the timeout; the resulting `close`/`error` settles
-        // the promise through `finish`.
-        const onAbort = killTree;
-        ctx.abortSignal.addEventListener('abort', onAbort, { once: true });
-        const finish = (value: unknown) => {
-          clearTimeout(timer);
-          ctx.abortSignal.removeEventListener('abort', onAbort);
-          resolve(value);
-        };
-        // Cap accumulation while streaming so a verbose command can't exhaust
-        // memory before `close`; the final slice keeps the output bound.
-        const OUTPUT_CAP = 50_000;
-        child.stdout.on('data', (d) => {
-          if (stdout.length < OUTPUT_CAP) stdout += d.toString();
-        });
-        child.stderr.on('data', (d) => {
-          if (stderr.length < OUTPUT_CAP) stderr += d.toString();
-        });
-        child.on('close', (code) => {
-          finish({ stdout: stdout.slice(0, 50_000), stderr: stderr.slice(0, 50_000), exitCode: code ?? -1 });
-        });
-        child.on('error', (err) => {
-          finish({ stdout, stderr: `${stderr}\n${String(err)}`.slice(0, 50_000), exitCode: -1 });
-        });
-      });
-    },
-  });
 
   // The one read `open_page` borrows — see `readForTool` above.
   return { readForTool };

@@ -109,6 +109,42 @@ jobs:
       # no-op rather than a build error.
       - run: pnpm ds:check
 
+  # The suites that drive real git over a knowledge base's working copies —
+  # the workspace (worktrees of one repository), the startup phase (opening
+  # and converting them), the git layer, the diff ledger and the mutex that
+  # serializes them — on Windows too. Worktrees, gitfiles, long paths and
+  # moving folders that git has open all behave differently there, and a
+  # Windows self-host is a supported deployment.
+  git-suites-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      # Bytes as committed: the suites compare checkouts byte for byte.
+      - run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+          git config --global init.defaultBranch main
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter "@bevel-software/platform-core-backend^..." run build
+
+      - run: >-
+          pnpm --filter @bevel-software/platform-core-backend exec vitest run
+          src/modules/workspace src/modules/workflow/git src/modules/diff src/modules/kb-fs
+
   # Lint ratchet. `eslint .` does not pass on the whole repo yet, so running
   # it would fail every pull request and say nothing about the one at hand.
   # This lints only the files the pull request touches and fails when any of

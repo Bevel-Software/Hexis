@@ -6,12 +6,11 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { KbStartupRunner } from '../kb-startup-runner.js';
-import { WorkspaceService } from '../../workspace.service.js';
 import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
 import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
 import { GitRunError, gitCredentials } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { newKbStartupRunner, newWorkspaceService } from '../../../../__tests__/workspace-service.js';
 
 /**
  * The token in effect for the runners these suites build, changed by the
@@ -71,7 +70,7 @@ async function populatedUpstream(): Promise<void> {
 }
 
 function makeRunner(steps: OnServerStart[], overrides: Partial<Parameters<typeof runnerOpts>[1]> = {}) {
-  return new KbStartupRunner(runnerOpts(steps, overrides));
+  return newKbStartupRunner(runnerOpts(steps, overrides));
 }
 
 function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> = {}) {
@@ -996,8 +995,11 @@ describe('KbStartupRunner — a working copy whose clone was never finished', ()
     // The clone is sound and has a commit, but git cannot read the branch it
     // is to follow: the ref the fetch updates is damaged. Not a state this
     // phase repairs, so the start stops, and says which working copy.
-    const refs = path.join(local(), '.git', 'refs', 'remotes', 'origin');
-    await fs.rm(path.join(local(), '.git', 'packed-refs'), { force: true });
+    // The refs are where git says they are: a worktree's live in the
+    // repository it shares with every other branch.
+    const gitDir = (await git(local(), ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const refs = path.join(gitDir, 'refs', 'remotes', 'origin');
+    await fs.rm(path.join(gitDir, 'packed-refs'), { force: true });
     await fs.mkdir(refs, { recursive: true });
     await fs.writeFile(path.join(refs, DEFAULT_BRANCH), 'not a commit id\n', 'utf8');
 
@@ -1129,7 +1131,7 @@ describe('KbStartupRunner credentials', () => {
     await git(repo, ['config', '--add', 'credential.helper',
       '!f() { echo "username=stale-user"; echo "password=$GITHUB_TOKEN"; }; f']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
@@ -1147,14 +1149,14 @@ describe('KbStartupRunner credentials', () => {
     const repo = await materializeDefaultBranchClone();
     await git(repo, ['config', '--add', 'credential.helper', 'cache --timeout=300']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // stamp with token
     let all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
     expect(all).toContain('password=$GITHUB_TOKEN');
 
     token = null;
-    const ws2 =new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    const ws2 =newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws2.getOrCreateForBranch(DEFAULT_BRANCH); // unset OUR helper only
     all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
@@ -1170,7 +1172,7 @@ describe('KbStartupRunner credentials', () => {
     const repo = await materializeDefaultBranchClone(); // stamped
     token = null;
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
@@ -1185,7 +1187,7 @@ describe('KbStartupRunner credentials', () => {
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone(); // no helper
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // adopt, tokenless
     token = 'ghp_late';
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // cached fast path

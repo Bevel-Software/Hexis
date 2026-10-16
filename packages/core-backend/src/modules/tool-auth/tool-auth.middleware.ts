@@ -66,8 +66,7 @@ const WWW_AUTH = 'Bearer realm="bevel-tools"';
  * Gate that admits ONLY in-process callers (those bearing an internal HMAC
  * token). Mount it AFTER `toolAuth` on every internal-only surface — the
  * internal tool catalog and the routes of tools registered with
- * `registerInternalTool` but NOT `registerExternalTool` (e.g. `execute_command`,
- * `switch_branch`, the `sharepoint_*` reads). `toolAuth` alone is not enough:
+ * `registerInternalTool` but NOT `registerExternalTool` (e.g. `switch_branch`, the `sharepoint_*` reads). `toolAuth` alone is not enough:
  * an external connection key authenticates successfully, so without this gate it
  * could invoke an internal-only route directly by guessing its name. The route
  * MUST stay mounted (our own agent reaches it over the same loopback HTTP), so

@@ -29,6 +29,7 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { WorkerPatternMatcher } from '../bounded-matcher.js';
 import { WorkspaceService } from '../workspace.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 const KB_DIR = 'knowledge-base';
@@ -131,7 +132,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
     await runGit(seed, ['commit', '--allow-empty', '-m', 'draft']);
     await runGit(seed, ['push', 'origin', 'target-company-state', 'alice/draft']);
 
-    workspaces = new WorkspaceService(
+    workspaces = newWorkspaceService(
       workspacesRoot,
       opts.repoUrl === 'unreachable' ? join(root, 'no-such-repo.git') : upstream,
       testKbContext({ kbDirName: KB_DIR }),
@@ -457,9 +458,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
     const base = await start({ source: 'internal', scope: 'write' });
     const takesBranch = internalTools
       .map((t) => ({ name: t.name, body: (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body }))
-      .filter(({ body }) => (body?.required ?? []).includes('branch'))
-      // Resolves its own branch, and validates it itself first.
-      .filter(({ name }) => name !== 'execute_command');
+      .filter(({ body }) => (body?.required ?? []).includes('branch'));
 
     for (const { name: tool, body } of takesBranch) {
       // Every other argument the tool requires, so the call matches the tool

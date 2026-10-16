@@ -33,6 +33,38 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+### Branch workspaces are worktrees of one repository (0.30+)
+
+From 0.30 a deployment holds ONE git repository per knowledge base, on the
+**backups** volume (`.kb-repository/`), and every branch's working copy on
+the **workspaces** volume is a `git worktree` of it. Opening a branch copies
+no history any more. Nothing changes in the compose files: both volumes are
+already mounted.
+
+What to expect at this upgrade:
+
+- **The first start takes longer.** The boot converts every full clone the
+  previous release left on the workspaces volume into a worktree, one at a
+  time, then compacts the repository once. Each clone's branch tip, its
+  commits not yet pushed, its stash and the files git ignores are carried
+  over before the clone is removed. The log says how many were converted. A
+  clone with uncommitted changes, or one git cannot read, is left as it is
+  and keeps working as a clone; the log names its branch, and the next start
+  tries again.
+- **Keep the backups volume.** It now holds every commit not yet pushed to
+  your remote. A redeploy that drops it while keeping the workspaces volume
+  recreates the working copies from the remote, without those commits.
+- **Rolling back** to a release before 0.30 needs the workspaces volume
+  cleared first (`docker compose down`, then `docker volume rm
+  <project>_workspaces`, then start the older release): that release does not
+  recognise a worktree. The commits not yet pushed stay in the repository on
+  the backups volume, which the rollback leaves in place. A clone the
+  conversion left as it was keeps its own unpushed commits on the workspaces
+  volume, so archive that volume before clearing it if the log reported any.
+- The in-app agent's `execute_command` tool is gone: an agent that calls it
+  by name is told the tool is unknown. Every git operation an agent needs is
+  a platform tool.
+
 ### The knowledge-base layout is no longer read from the environment
 
 `KB_KNOWLEDGE_BASE_DIR`, `KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired: the
@@ -170,18 +202,28 @@ docker compose exec db pg_dump -U bevel bevel > backup.sql
 The volumes, and what each holds:
 
 - **pgdata** — the Postgres data itself (what `backup.sql` above captures).
-- **workspaces** — per-branch working copies of the knowledge base, plus
-  scratch files. The copies re-clone from your git remote; only scratch
-  files outside the knowledge base are unique to the volume.
-- **backups** — the change-review backup ledger.
+- **workspaces** — per-branch working copies of the knowledge base (each a
+  git worktree of the repository below), plus scratch files. The copies are
+  recreated from the shared repository (which fetches from your git remote);
+  knowledge-base edits not yet committed (a write reaches disk before the
+  commit worker commits it) and scratch files live only in this volume.
+- **backups** — the change-review backup ledger, and the knowledge base's
+  one git repository (`.kb-repository/`) that every branch's working copy is
+  a worktree of. It holds commits that have not been pushed yet, so keep
+  this volume with the workspaces volume: a redeploy that loses it while
+  keeping the workspaces recreates the working copies from the remote.
 - **spills** — oversized tool results parked for re-reading; ephemeral.
 
-The database dump is the backup that matters — it is the only thing a
-restore below puts back. The other volumes are deliberately not part of it:
-workspace copies re-clone, spills expire, and the change-review ledger is a
-belt-and-braces safety copy whose history you lose on a fresh server without
-losing any reviewed content (it all lives in git). If you want the volumes
-anyway, archive them while the app is stopped:
+The database dump is the backup that matters. Everything that was pushed
+is in your git remote, so workspace copies re-clone and spills expire. What
+was NOT pushed yet — every local commit not on the remote, whether its push
+failed or is still pending — lives only in
+the repository on the **backups** volume (with the change-review ledger), so
+archive that volume too if you want those back; a restore without it starts
+from what the remote holds. (A full clone the 0.30 conversion left as it was
+keeps its own unpushed commits on the **workspaces** volume instead; archive
+that one too while the start log still names such a clone.) Archive volumes
+while the app is stopped:
 
 ```sh
 docker compose down
@@ -198,6 +240,12 @@ To restore on a fresh server:
 
 1. Start only the database: `docker compose up -d db`, then feed it the dump:
    `docker compose exec -T db psql -U bevel bevel < backup.sql`
-2. Start the rest with the same `.env` (same secrets — they decrypt what the
+2. If you archived the backups volume, put it back BEFORE the app first
+   starts, so the repository with the unpushed commits is there when the
+   working copies are made:
+   `docker run --rm -v hexis_backups:/v -v "$PWD":/in alpine tar xzf /in/backups-volume.tgz -C /v`
+   (restore the workspaces volume the same way, from its own archive, for
+   edits that were not yet committed).
+3. Start the rest with the same `.env` (same secrets — they decrypt what the
    database holds): `docker compose up -d`
-3. The knowledge base re-clones from your git remote on first use.
+4. Otherwise the knowledge base is fetched from your git remote on first use.

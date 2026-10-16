@@ -263,7 +263,6 @@ describe('every file tool opens with the guide-first sentence and carries no sha
     'move_file',
     'copy_file',
     'unzip',
-    'execute_command',
     'apply_file_upload',
   ];
 

@@ -1,5 +1,40 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+import { isAbsence } from '../../shared/fs.contract.js';
+import { readGitfile } from '../kb-fs/git-dir.js';
+import type { IKbRepository } from './kb-repository.contract.js';
+
+const log = logger('set-aside');
+
+/**
+ * `p` as the file system names it, for comparing two paths that may be
+ * spelled differently: git writes a worktree's link with forward slashes and
+ * the long folder names (`C:/Users/runneradmin/…`) where node may hold the
+ * same folder by its 8.3 short name (`C:\Users\RUNNER~1\…`). The nearest
+ * part that exists is resolved by the OS, the rest appended; on Windows the
+ * result is case-folded, as its file system is. Only an absent part is
+ * stepped over: a part that cannot be read (a permission or I/O error) throws,
+ * since "could not tell" is no reason to move someone's worktree.
+ */
+async function comparablePath(p: string): Promise<string> {
+  let existing = path.resolve(p);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      existing = await fs.realpath(existing);
+      break;
+    } catch (err) {
+      if (!isAbsence(err)) throw err;
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  const joined = path.join(existing, ...rest);
+  return process.platform === 'win32' ? joined.toLowerCase() : joined;
+}
 
 /**
  * Moving a working copy of a repository that is no longer the configured one
@@ -93,4 +128,109 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
     );
   }
   await fs.rm(repoDir, { recursive: true, force: true });
+}
+
+/**
+ * Set aside the knowledge base's repository AND EVERY WORKTREE OF IT, together,
+ * into `dest`: each worktree's folder as `dest/<workspace id>` (where a clone
+ * lands), the repository beside them under its own name.
+ *
+ * Together, because neither is any use without the other: a worktree's
+ * commits live in the repository, and a repository of another address is
+ * exactly as unusable as a clone of one. Nothing is deleted. The moved
+ * worktrees are re-linked to the moved repository, so `git log` in
+ * `dest/<workspace id>` shows the work that was never pushed.
+ *
+ * All or nothing: when a move fails part-way (the repository will not move
+ * after its worktrees did), the worktrees already moved are put back where
+ * they were, so a retry finds them with their repository and moves them
+ * together. A repository whose presence cannot be read (a permission or I/O
+ * error, not an absence) stops the call before anything moves.
+ *
+ * A worktree is found by its `.git` FILE naming a folder inside the
+ * repository — whether or not that folder is still there — so a worktree
+ * git had already lost track of goes with the rest. As the repository's one
+ * administrator (`exclusive`): no creation of a fresh repository and no
+ * config write runs while the folders move. Git operations in the worktrees
+ * are the caller's to hold off: the startup phase runs before anything is
+ * served, and the workspace service wraps the move in what surrounds a
+ * set-aside. Answers the workspace ids moved.
+ *
+ * `stillApplies`, when given, is asked again as the administrator, before
+ * anything moves: a caller decided to set the repository aside on what it
+ * read before taking the reservation, and another caller may have set it
+ * aside and made a fresh one of the configured address meanwhile. When the
+ * answer is no, nothing moves and the call answers no ids.
+ *
+ * A workspaces root, or a working copy's `.git`, that cannot be read (a
+ * permission or I/O error, not an absence) stops the call before anything
+ * moves, as an unreadable repository does: moving the repository without
+ * worktrees it could not see would leave every one of them pointing at
+ * nothing.
+ */
+export async function setAsideRepository(
+  repository: IKbRepository,
+  workspacesRoot: string,
+  kbDirName: string,
+  dest: string,
+  stillApplies?: () => Promise<boolean>,
+): Promise<string[]> {
+  return repository.exclusive(async () => {
+    if (stillApplies && !(await stillApplies())) return [];
+    const repositoryPath = await comparablePath(repository.dir);
+    const inside = async (p: string): Promise<boolean> => {
+      const at = await comparablePath(p);
+      return at === repositoryPath || at.startsWith(repositoryPath + path.sep);
+    };
+    const worktrees: Array<{ id: string; dir: string }> = [];
+    let entries: import('node:fs').Dirent[] = [];
+    try {
+      entries = await fs.readdir(workspacesRoot, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // No workspaces root: only the repository to move.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(workspacesRoot, entry.name, kbDirName);
+      // Only absence shows a folder is no worktree: a `.git` that could not be
+      // read (EACCES, EIO) stops the call, as an unreadable root does.
+      const gitdir = await readGitfile(path.join(dir, '.git'));
+      if (gitdir !== null && (await inside(gitdir))) worktrees.push({ id: entry.name, dir });
+    }
+    const repositoryThere = await fs.access(repository.dir).then(
+      () => true,
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
+        throw err;
+      },
+    );
+    if (!repositoryThere && worktrees.length === 0) return [];
+    const moved: Array<{ dir: string; to: string }> = [];
+    const movedRepository = path.join(dest, path.basename(repository.dir));
+    try {
+      for (const { id, dir } of worktrees) {
+        const to = path.join(dest, id);
+        await setAsideClone(dir, to);
+        moved.push({ dir, to });
+      }
+      if (repositoryThere) await setAsideClone(repository.dir, movedRepository);
+    } catch (err) {
+      // Back where they were, beside the repository that did not move.
+      for (const { dir, to } of moved.reverse()) {
+        await setAsideClone(to, dir).catch((backErr: unknown) => {
+          log.error(`the set-aside worktree ${to} could not be put back at ${dir}; it is kept there:`, {
+            detail: backErr instanceof Error ? backErr.message : String(backErr),
+          });
+        });
+      }
+      throw err;
+    }
+    if (repositoryThere) {
+      await repository.relinkMovedCopy(movedRepository, moved.map(({ to }) => to));
+    }
+    repository.forget();
+    return worktrees.map(({ id }) => id);
+  });
 }

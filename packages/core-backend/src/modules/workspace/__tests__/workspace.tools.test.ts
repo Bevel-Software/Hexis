@@ -31,7 +31,6 @@ import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
-import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
@@ -79,7 +78,7 @@ function denyReads(denied: Set<string>): IAccessControl {
 
 /**
  * File primitives over a REAL LocalFilesystem on a temp dir — proves read_file /
- * write_file / edit_file / list_files / grep / file_stat / execute_command
+ * write_file / edit_file / list_files / grep / file_stat
  * actually work (the handlers re-expose the same filesystem methods Mastra
  * uses). No locking pipeline (plain LocalFilesystem), so writes don't commit.
  */
@@ -90,11 +89,9 @@ let tempDir = '';
 let docCacheDir = '';
 let fs: LocalFilesystem;
 /**
- * Every branch / workspaceId `execute_command`'s handler resolves a workspace
- * for. Resolving a workspace is what triggers the lazy per-branch CLONE in
- * production, so asserting this never contains `"undefined"` proves the
- * missing-branch guard short-circuits before any clone of a branch literally
- * named "undefined" is attempted.
+ * Every branch a tool resolved a workspace for through `getOrCreateForBranch`.
+ * Resolving a workspace is what triggers the lazy per-branch worktree add in
+ * production.
  */
 let workspacePathCalls: string[] = [];
 /** Every `(archive, destination)` pair `unzip` handed the service. */
@@ -115,8 +112,7 @@ let writePolicy: RoutineWritePolicyService;
 let guideText = 'THE PLATFORM GUIDE\n';
 /**
  * The focused branch the resolved `ToolContext` carries — mirrors the branch an
- * internal token bakes for the in-process agent. A test sets it to prove a
- * branch-less `execute_command` falls back to the session's own workspace.
+ * internal token bakes for the in-process agent.
  */
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
@@ -368,25 +364,6 @@ afterEach(async () => {
   }
 });
 
-/**
- * True once `pid` has been killed: either it is gone, or it is a zombie
- * waiting on a reaper (Linux: `State:\tZ` in /proc). `kill(pid, 0)` alone
- * cannot tell a zombie from a live process.
- */
-async function isDeadOrZombie(pid: number): Promise<boolean> {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return true;
-  }
-  try {
-    const status = await readFile(`/proc/${pid}/status`, 'utf8');
-    return /^State:\s*Z/m.test(status);
-  } catch {
-    return false; // no /proc (macOS): alive as far as the signal says
-  }
-}
-
 describe('workspace file primitives', () => {
   it('read_file returns the content', async () => {
     const base = await start();
@@ -615,248 +592,15 @@ describe('workspace file primitives', () => {
     expect(empty.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
   });
 
-  it('execute_command runs in the workspace dir', async () => {
+  // An agent never composes a shell command line: there is no tool that runs
+  // one, and a call to the old one by name answers as any unknown tool.
+  it('offers no shell tool, and a call to execute_command by name finds nothing', async () => {
     const base = await start();
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
-    expect(res.stdout).toContain('hello-exec');
-    expect(res.exitCode).toBe(0);
-  });
-
-  // The command runs under `sh -c`; a timeout used to SIGKILL that shell and
-  // leave what it had started running on as an orphan. The whole process
-  // group goes now. POSIX only: Windows has no process groups to kill.
-  it.skipIf(process.platform === 'win32')('execute_command kills what the command started, not just its shell, on timeout', async () => {
-    const base = await start();
-    // Print the grandchild's pid, then block on it so the timeout fires. The
-    // timeout is the schema's minimum — inside the tool's declared contract,
-    // and long enough that a slow spawn still prints the pid before it fires.
-    const res = (await (
-      await post(`${base}/api/agent/tools/execute_command`, {
-        branch: 'main',
-        command: 'sleep 30 & echo $!; wait',
-        timeout_ms: 1000,
-      })
-    ).json()) as { stdout: string; exitCode: number };
-    expect(res.exitCode).toBe(-1);
-    const grandchild = Number(res.stdout.trim());
-    expect(grandchild).toBeGreaterThan(0);
-    // Dead means killed, not reaped: a SIGKILLed process keeps its pid — and
-    // answers `kill(pid, 0)` as alive — until whoever inherited it reaps it,
-    // and on a host with no reaper (the very thing this guards) that is
-    // never. So where /proc exists, a zombie (`State: Z`) counts as dead; a
-    // vanished pid counts everywhere. Poll to a deadline rather than trust
-    // one fixed pause. Without the fix the grandchild is still sleeping at
-    // the deadline, so what fails is the deadline — never an early check.
-    const deadline = Date.now() + 3_000;
-    let dead = false;
-    while (!dead && Date.now() < deadline) {
-      dead = await isDeadOrZombie(grandchild);
-      if (!dead) await new Promise((r) => setTimeout(r, 50));
-    }
-    expect(dead).toBe(true);
-  });
-
-  it('execute_command 400s when no branch is given AND no focused branch (external caller)', async () => {
-    const base = await start();
-    // No `branch` arg and no `ctx.focusedBranch` (an external caller carries no
-    // focused branch): the branch context is genuinely absent, so it must NOT
-    // resolve the workspace id to "undefined" and try to clone a branch literally
-    // named "undefined" — it fails closed with a clear 4xx naming the missing
-    // branch context, BEFORE any workspace resolve.
-    expect(focusedBranch).toBeUndefined();
-    // `postRaw`: the absent field IS the test here, so the body goes as written.
-    const res = await postRaw(`${base}/api/agent/tools/execute_command`, { command: 'echo should-not-run' });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/branch/i);
-    // The guard runs before `getOrCreateForBranch`, so no workspace (least of all
-    // the "undefined" one) is ever resolved — proving no clone is attempted.
+    expect((await toolRegistry.listInternal()).map((t) => t.name)).not.toContain('execute_command');
+    expect((await toolRegistry.listExternal()).map((t) => t.name)).not.toContain('execute_command');
+    const res = await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo should-not-run' });
+    expect(res.status).toBe(404);
     expect(workspacePathCalls).toEqual([]);
-  });
-
-  it('execute_command falls back to the session focused branch when branch is omitted', async () => {
-    const base = await start();
-    // The in-app chat agent, focused on `main`, may leave `branch` off a call.
-    // For an internal session that carries a focused branch, the shell runs
-    // against that branch's workspace and returns output end to end (AC2) —
-    // rather than failing closed the way a context-less external call does.
-    focusedBranch = 'main';
-    const res = (await (await postRaw(`${base}/api/agent/tools/execute_command`, { command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout).toContain('hello-exec');
-    // Resolved against the focused branch — never an "undefined" workspace.
-    expect(workspacePathCalls).toEqual(['main']);
-  });
-
-  it('execute_command does NOT fall back to the focused branch for an invalid value', async () => {
-    const base = await start();
-    // A present-but-broken branch ("undefined") must fail closed even when a
-    // focused branch is available — a broken value is never silently reinterpreted
-    // as the session's branch.
-    focusedBranch = 'main';
-    const res = await post(`${base}/api/agent/tools/execute_command`, { branch: 'undefined', command: 'echo should-not-run' });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/branch/i);
-    expect(workspacePathCalls).toEqual([]);
-  });
-
-  // Every branch value that must fail closed without resolving a workspace.
-  // `''` (like the missing field above) is refused a layer earlier by the input
-  // schema's `minLength: 1`; the rest satisfy the schema and reach the handler,
-  // so they exercise the guard itself. Both layers must produce the same 400.
-  // The malformed refs below are rejected by the shared `assertValidBranchName`
-  // shape check; the literal "undefined"/"null" — which that validator ACCEPTS
-  // as ordinary git refs — are rejected by an explicit by-name check ahead of it
-  // (AC3 requires them to fail closed; see the dedicated test below).
-  const invalidBranches: Array<[label: string, branch: string]> = [
-    ['empty', ''],
-    ['whitespace-only', '   '],
-    // Malformed refs — caught by the canonical `assertValidBranchName` shape
-    // check, not by any hand-maintained list of literals.
-    ['whitespace-padded (never silently trimmed)', ' main '],
-    ['containing a space', 'alice/my draft'],
-    ['a ".." ref', 'foo..bar'],
-    ['containing ".."', 'alice/../../etc'],
-    ['a leading dash (git would read it as a flag)', '-x'],
-    ['starting with "--" (flag injection)', '--upload-pack=touch'],
-    ['containing "//"', 'alice//draft'],
-    ['ending with "/"', 'alice/'],
-    ['a segment starting with "."', 'alice/.hidden'],
-    ['a segment ending with ".lock"', 'alice/draft.lock'],
-    ['containing "@{"', 'alice/draft@{0}'],
-    ['containing a shell metacharacter', 'alice/draft;rm -rf /'],
-  ];
-  for (const [label, branch] of invalidBranches) {
-    it(`execute_command 400s when branch is ${label}`, async () => {
-      const base = await start();
-      const res = await post(`${base}/api/agent/tools/execute_command`, { branch, command: 'echo should-not-run' });
-      expect(res.status).toBe(400);
-      expect((await res.json()).error).toMatch(/branch/i);
-      // No workspace is resolved for the bad value — proving no clone is attempted.
-      expect(workspacePathCalls).toEqual([]);
-    });
-  }
-
-  /**
-   * The production regression this ticket bounced on: the guard's hand-written
-   * `"undefined"`/`"null"` rejection was replaced by the canonical
-   * `assertValidBranchName` alone. Both literals are *syntactically valid* git
-   * branch names, so the validator accepts them — a branch-less call then reached
-   * `getOrCreateForBranch("undefined")`, cloned a branch literally named
-   * `undefined` into `/app/workspaces/undefined/`, and 500'd in production.
-   *
-   * AC3 requires these literals to fail closed. Pinning the validator's own
-   * behaviour here is the point: it documents WHY the literal check cannot be
-   * folded into the shape check, so the next person who "simplifies" the guard
-   * down to `assertValidBranchName` gets a red test naming the reason rather than
-   * a fresh production 500.
-   */
-  it('rejects "undefined"/"null" even though the canonical validator accepts them', async () => {
-    for (const literal of ['undefined', 'null']) {
-      expect(() => assertValidBranchName(literal), `${literal} is a valid git ref`).not.toThrow();
-    }
-    const base = await start();
-    for (const literal of ['undefined', 'null']) {
-      const res = await post(`${base}/api/agent/tools/execute_command`, { branch: literal, command: 'echo should-not-run' });
-      expect(res.status, `branch "${literal}" must 400`).toBe(400);
-      // The message names the literal, so the agent can see what it actually sent.
-      expect((await res.json()).error).toContain(literal);
-    }
-    expect(workspacePathCalls).toEqual([]);
-  });
-
-  it('answers a branch-less call with the same kind every other KB tool uses', async () => {
-    const base = await start();
-    // The MESSAGE here is this tool's own — only `execute_command` has a
-    // focused-branch fallback to explain. The DISCRIMINATOR is shared, so a
-    // client switches on one kind across the whole surface instead of matching
-    // prose per tool.
-    for (const body of [{ command: 'x' }, { branch: '', command: 'x' }, { branch: 'undefined', command: 'x' }]) {
-      const res = await postRaw(`${base}/api/agent/tools/execute_command`, body);
-      expect(res.status).toBe(400);
-      expect((await res.json()).kind).toBe('branch-required');
-    }
-    expect(workspacePathCalls).toEqual([]);
-  });
-
-  it('execute_command validates the branch BEFORE the write-policy gate', async () => {
-    const base = await start();
-    // A routine-restricted session is refused by `assertUnrestricted` with 403.
-    // The branch guard must still run first, so a malformed call gets the 400
-    // that names the bad context instead of a 403 masking it.
-    writePolicy.restrictToExtensions('restricted-run', ['.html']);
-    const res = await post(`${base}/api/agent/tools/execute_command`, {
-      branch: 'alice/../../etc',
-      command: 'echo should-not-run',
-      sessionId: 'restricted-run',
-    });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/branch/i);
-    expect(workspacePathCalls).toEqual([]);
-    // …and the restriction really is live for that session (so the 400 above is
-    // the guard winning the race, not an inert policy).
-    const gated = await post(`${base}/api/agent/tools/execute_command`, {
-      branch: 'main',
-      command: 'echo should-not-run',
-      sessionId: 'restricted-run',
-    });
-    expect(gated.status).toBe(403);
-  });
-
-  it('execute_command bootstraps the workspace through getOrCreateForBranch', async () => {
-    const base = await start();
-    // Per-branch bootstrap is the service's job: the shell passes the branch
-    // itself rather than hand-encoding a workspace id.
-    await post(`${base}/api/agent/tools/execute_command`, { branch: 'alice/draft', command: 'echo hi' });
-    expect(workspacePathCalls).toEqual(['alice/draft']);
-  });
-
-  it('execute_command runs plain git against the nested KB clone', async () => {
-    const base = await start();
-    // Production layout: the repo lives one level BELOW the shell's cwd, at
-    // <workspace>/<kbDirName>/.git. A bare `git …` (what the agent prompt
-    // teaches) must still target that clone instead of failing with
-    // "not a git repository".
-    const execFileAsync = promisify(execFile);
-    const repoDir = join(tempDir, KB_DIR);
-    await mkdir(repoDir, { recursive: true });
-    await execFileAsync('git', ['init'], { cwd: repoDir });
-    await execFileAsync(
-      'git',
-      ['-c', 'user.email=t@test', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'kb-seed'],
-      { cwd: repoDir },
-    );
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'git log -1 --format=%s' })).json()) as { stdout: string; stderr: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toBe('kb-seed');
-  });
-
-  // POSIX-only probes: `$GIT_DIR` expansion and `>/dev/null` are `sh`
-  // semantics, and `shell: true` on Windows runs cmd.exe, where the probe
-  // itself (not the scoping under test) is meaningless. CI runs Linux.
-  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into non-git commands', async () => {
-    const base = await start();
-    // The KB-clone GIT_DIR/GIT_WORK_TREE override is scoped to bare `git …`
-    // only; a non-git command (e.g. npm/pip that shells git internally) must
-    // NOT inherit it, or the nested git child would target the KB clone.
-    // Probe via `node -e` rather than shell expansion — the override lives in
-    // the spawn env, and `$GIT_DIR` syntax doesn't expand under cmd.exe.
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: `node -e "console.log('GIT_DIR=['+(process.env.GIT_DIR||'')+']')"` })).json()) as { stdout: string; stderr: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toBe('GIT_DIR=[]');
-  });
-
-  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into a chained step after git', async () => {
-    const base = await start();
-    // Runs under `shell: true`, so a command that merely STARTS with git but
-    // chains another step must not export the KB git env to the whole shell —
-    // otherwise `git … && npm ci` would leak the KB repo context into the npm/pip
-    // git subprocess. `git --version` needs no repo, so exit stays 0. The
-    // version line lands on stdout (`>/dev/null` isn't portable to cmd.exe),
-    // so the leak probe is asserted on the LAST line.
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: `git --version && node -e "console.log('leak=['+(process.env.GIT_DIR||'')+']')"` })).json()) as { stdout: string; stderr: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    const lines = res.stdout.trim().split(/\r?\n/);
-    expect(lines[lines.length - 1].trim()).toBe('leak=[]');
   });
 
   it('read scope refuses write tools (403) but allows reads', async () => {
@@ -2063,9 +1807,7 @@ describe('office documents and PDFs', () => {
   it('every mounted tool opens with the one sentence sending the agent to the guide, and repeats none of the rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    // The shell is in the list too: it carried the agent-guide reminder before,
-    // and that reminder is one of the rules that moved.
-    const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip', 'execute_command'];
+    const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip'];
     for (const name of mounted) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
@@ -2781,19 +2523,6 @@ describe('branch is a required parameter in the tool contract', () => {
     const inputs = tool?.inputs as { properties?: { body?: { required?: string[] } } } | undefined;
     return inputs?.properties?.body?.required ?? [];
   }
-
-  it('execute_command declares branch required on the INTERNAL manual', async () => {
-    const internal = await buildRegistry().listInternal();
-    const exec = internal.find((t) => t.name === 'execute_command');
-    expect(exec).toBeDefined();
-    expect(bodyRequired(exec)).toContain('branch');
-    expect(bodyRequired(exec)).toContain('command');
-  });
-
-  it('execute_command is internal-only — never advertised on the external manual', async () => {
-    const external = await buildRegistry().listExternal();
-    expect(external.find((t) => t.name === 'execute_command')).toBeUndefined();
-  });
 
   it('every workspace file tool requires branch on BOTH manuals (one convention everywhere)', async () => {
     const registry = buildRegistry();
@@ -4862,16 +4591,6 @@ describe('agent read/write hooks', () => {
     expect(writes.map((w) => w.wsPath)).toEqual([`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`]);
   });
 
-  it('execute_command calls the write hook once, with no path', async () => {
-    const base = await start();
-    record();
-    await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hi', sessionId: 's1' });
-    expect(writes).toHaveLength(1);
-    expect(writes[0].wsPath).toBeUndefined();
-    expect(writes[0]).toMatchObject({ sessionId: 's1', branch: 'main', source: 'internal' });
-    expect(reads).toEqual([]);
-  });
-
   it('a write hook that throws refuses the write with its own message and status, and the file is unchanged', async () => {
     const base = await start();
     record();
@@ -5067,9 +4786,6 @@ describe('tool descriptions and the deployment note', () => {
       expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
       expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
     }
-    // `execute_command` is internal-only, so it is checked on that surface.
-    const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
-    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
   });
 
   it('a tool that is not gated carries no note', async () => {
