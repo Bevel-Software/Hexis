@@ -1123,10 +1123,23 @@ export function registerWorkflowTools(
       }
       const workspaceId = await workspaceOf(ctx, branch);
       const source = from ?? branch;
-      /** Whether the caller may read `rel` on both sides of this merge: the workspace's own branch, and `source` as published. */
-      const mayReadBothSides = async (rel: string): Promise<boolean> =>
-        (await accessControl.canRead(workspaceId, ctx.user.email, rel)) &&
-        (await readableOnBranch(accessControl, workspaceId, ctx.user.email, rel, source));
+      /**
+       * Whether the caller may read `rel` on both sides of this merge — the
+       * workspace's own branch and `source` as published — with the
+       * deployment's read hook told of the read, as every history read tells
+       * it: a hook that refuses makes the file one the caller may not read.
+       */
+      const mayReadBothSides = async (rel: string): Promise<boolean> => {
+        try {
+          await notifyAgentRead(agentAccessGate, ctx, branch, `${kbDirName}/${rel}`);
+        } catch {
+          return false;
+        }
+        return (
+          (await accessControl.canRead(workspaceId, ctx.user.email, rel)) &&
+          (await readableOnBranch(accessControl, workspaceId, ctx.user.email, rel, source))
+        );
+      };
       // A resolution's text is written into a file the caller may not be
       // able to read on one side: only a whole side may settle such a file.
       for (const r of resolutions ?? []) {

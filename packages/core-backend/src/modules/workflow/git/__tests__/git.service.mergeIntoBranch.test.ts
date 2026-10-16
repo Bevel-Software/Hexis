@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { GitService } from '../git.service.js';
-import { WorkflowDomainError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
+import { PullRebaseConflictError, WorkflowDomainError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -341,6 +341,27 @@ describe('GitService.mergeIntoBranch', () => {
     expect((await gitOut(repo, ['log', '-1', '--format=%P', again.sha])).trim().split(' ')).toHaveLength(2);
     expect(await fs.readFile(path.join(repo, 'elsewhere.md'), 'utf-8')).toBe('pushed elsewhere\n');
     expect(await fs.readFile(path.join(repo, 'other.md'), 'utf-8')).toBe('other, changed again\n');
+  });
+
+  it('throws the typed pull-conflict error when the replay after a rejected push conflicts, the merge kept and the checkout clean', async () => {
+    const { repo, pusher } = await seed(root);
+    await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target moves');
+    // The draft moves on the host with a change the merge will clash with.
+    await pushOn(pusher, DRAFT, { 'other.md': 'other, changed on the draft elsewhere\n' }, 'draft moves on origin');
+    await commitLocally(repo, { 'mine.md': 'mine\n' }, 'draft work');
+
+    const err = await service()
+      .mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PullRebaseConflictError);
+    expect((err as PullRebaseConflictError).conflictedPaths).toEqual(['other.md']);
+    // The merge commit is on the branch locally, nothing is published, and
+    // no rebase is in progress: the replay undid itself.
+    const head = (await gitOut(repo, ['rev-parse', 'HEAD'])).trim();
+    expect((await gitOut(repo, ['log', '-1', '--format=%P', head])).trim().split(' ')).toHaveLength(2);
+    expect((await gitOut(pusher, ['ls-remote', 'origin', `refs/heads/${DRAFT}`])).trim()).not.toContain(head);
+    expect((await gitOut(repo, ['status', '--porcelain'])).trim()).toBe('');
+    await expect(gitOut(repo, ['rev-parse', '-q', '--verify', 'REBASE_HEAD'])).rejects.toThrow();
   });
 
   it('brings the branch\'s own shared state in when it moved while the workspace held commits (from = branch)', async () => {

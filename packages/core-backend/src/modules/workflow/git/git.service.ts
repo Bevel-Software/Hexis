@@ -40,6 +40,7 @@ import {
   AppliedChangeMismatchError,
   BranchAuthorshipError,
   BranchDeleteRefusedError,
+  MergePublishRefusedError,
   WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
@@ -1801,9 +1802,15 @@ export class GitService implements IGitService {
         await this.pushUnlocked(workspaceId, cwd, user);
         return;
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        // A refusal of the push itself (a protected-branch gate, a ToolError)
+        // keeps its own words and status; only git's rejection is handled.
+        if (err instanceof WorkflowDomainError) throw err;
+        const detail = redactGitToken(err instanceof Error ? err.message : String(err), this.credentials.token());
         const moved = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
-        if (!moved || attempt >= MAX_ATTEMPTS) throw err;
+        if (!moved || attempt >= MAX_ATTEMPTS) {
+          const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+          throw new MergePublishRefusedError(branch, sha, detail, moved);
+        }
         const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
         await this.rebaseOntoRemote(cwd, branch, remoteRef, { preserveMerges: true });
       }

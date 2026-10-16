@@ -174,6 +174,34 @@ export class BranchDeleteRefusedError extends WorkflowDomainError {
  * credential-redacted by `GitService.git`) is kept OFF the payload; it's for
  * server logs and the recovery pipeline, not the client.
  */
+/**
+ * A merge commit was made in the workspace but its publish, run inside the
+ * merge's own reservation, did not land: the host refused the push, or the
+ * branch kept moving under the replays. The commit is on the branch locally,
+ * for the next push of the branch to carry. The workflow layer turns this
+ * into the same hand-off every refused share answers with.
+ */
+export class MergePublishRefusedError extends WorkflowDomainError {
+  readonly kind = 'merge-publish-refused' as const;
+  constructor(
+    readonly branch: string,
+    /** The merge commit, on the branch locally. */
+    readonly sha: string,
+    /** The push's own words, redacted. */
+    readonly detail: string,
+    /** Whether the branch had moved on the host (a rejection) rather than the host refusing for another reason. */
+    readonly diverged: boolean,
+  ) {
+    super(`The merge is committed on "${branch}" but could not be published: ${detail}`, 409, {
+      kind: 'merge-publish-refused',
+      branch,
+      sha,
+      diverged,
+    });
+    this.name = 'MergePublishRefusedError';
+  }
+}
+
 export class PullRebaseConflictError extends WorkflowDomainError {
   readonly kind = 'pull-rebase-conflict' as const;
   constructor(

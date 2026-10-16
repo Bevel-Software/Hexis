@@ -222,8 +222,11 @@ const workflowService = {
     calls.push(['changedPathsBetweenBranches', ws, base, branch]);
     return ['KnowledgeBase/Changed.md'];
   },
-  updateBranch: async (ws: string, user: { id: string }, opts: { from?: string }) => {
+  updateBranch: async (ws: string, user: { id: string }, opts: { from?: string; resolutions?: { path: string }[] }) => {
     calls.push(['updateBranch', ws, user.id, opts]);
+    if (opts.from === 'me/conflicting' && opts.resolutions?.length) {
+      return { kind: 'merged', sha: 'resolved-sha', from: 'me/conflicting', resolvedPaths: opts.resolutions.map((r) => r.path) };
+    }
     if (opts.from === 'me/conflicting') {
       return {
         kind: 'conflicts',
@@ -1266,6 +1269,17 @@ describe('history and syncing tools', () => {
       resolutions: [{ path: 'Secret/Plan.md', choose: 'theirs' }],
     });
     expect(side.status).toBe(200);
+    expect(await side.json()).toEqual({ kind: 'merged', sha: 'resolved-sha', from: 'me/conflicting', resolvedPaths: ['Secret/Plan.md'] });
+    expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', { from: 'me/conflicting', resolutions: [{ path: 'Secret/Plan.md', choose: 'theirs' }] }]);
+  });
+
+  it("update_branch tells the deployment's read hook of each conflicted file it shows, and withholds one the hook refuses", async () => {
+    const base = await start();
+    calls = [];
+    const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting' });
+    expect(res.status).toBe(200);
+    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Open.md']);
+    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/Secret/Plan.md']);
   });
 
   it('lists the five on the external catalog too: a remote agent reads history and syncs its drafts', async () => {

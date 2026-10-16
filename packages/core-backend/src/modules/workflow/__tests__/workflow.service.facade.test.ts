@@ -16,6 +16,7 @@ import { PendingCommitsWorker } from '../pending-commits.worker.js';
 import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
 import {
+  MergePublishRefusedError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowDomainError,
@@ -319,12 +320,30 @@ describe('WorkflowService.updateBranch', () => {
     const git = gitThatMerges(null);
     (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi
       .fn()
-      .mockRejectedValue(new PullRebaseConflictError('ada/draft', ['A.md'], 'replay conflicted'));
+      .mockRejectedValue(new PullRebaseConflictError('ada/draft', ['B.md', 'A.md'], 'replay conflicted'));
     const pending = makePendingCommits();
     await expect(build(git, pending).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' })).rejects.toBeInstanceOf(
       PullRebaseConflictError,
     );
-    expect(pending.enqueueIfAbsent).toHaveBeenCalled();
+    // The recovery row every pull conflict queues: this workspace, this
+    // branch, the first conflicted path, attributed to the user who asked.
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledWith({
+      workspaceId: 'ada%2Fdraft',
+      branch: 'ada/draft',
+      path: 'A.md',
+      authorEmail: 'ada@x.io',
+      authorName: 'Ada',
+    });
+  });
+
+  it('answers a publish the host refused as every refused share is answered: the typed hand-off', async () => {
+    const git = gitThatMerges(null);
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi
+      .fn()
+      .mockRejectedValue(new MergePublishRefusedError('ada/draft', 'merge-1', 'remote: permission denied', false));
+    const err = await build(git).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(err as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: '(update)', cause: 'refused', originalDetail: 'remote: permission denied' });
   });
 
   it('takes the draft\'s own shared state when no source is named, and publishes nothing on conflicts', async () => {

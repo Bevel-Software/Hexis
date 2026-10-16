@@ -97,6 +97,7 @@ import {
   BranchNotFoundError,
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
+  MergePublishRefusedError,
   OpenChangeRequestBlocksMergeError,
   ProtectedBranchError,
   RolesYamlPreservationError,
@@ -4734,12 +4735,29 @@ export class WorkflowService implements IWorkflowService {
       // lands between the merge commit and its push. A push the host
       // rejects is retried with the merge replayed on the moved branch; a
       // replay that conflicts is the stranded-commit case every pull hands
-      // to recovery.
+      // to recovery, and a push the host refuses answers as every refused
+      // share answers — the banner noted, the typed hand-off thrown.
       outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, { subject, body, resolutions, publish: true });
     } catch (err) {
       if (err instanceof PullRebaseConflictError) {
-        this.noteGitSyncFailed(workspaceId, branch, err, { paths: err.conflictedPaths, message: err.message });
+        const message = syncConflictMessage(branch, err.conflictedPaths);
+        this.noteGitSyncFailed(workspaceId, branch, err, { paths: err.conflictedPaths, message });
         await this.queuePullConflictRecovery(workspaceId, err, user);
+        throw err;
+      }
+      if (err instanceof MergePublishRefusedError) {
+        this.noteGitSyncFailed(workspaceId, branch, err, undefined, 'push');
+        log.warn(
+          `publish of the merge on workspace=${workspaceId} user=${user.id} failed; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
+          { detail: err.detail },
+        );
+        throw new PushNeedsAgentResolutionError(
+          branch,
+          '(update)',
+          err.detail,
+          err.diverged ? 'replayed onto the moved branch inside the merge, still rejected' : '(cooperative path not attempted)',
+          err.diverged ? 'diverged' : 'refused',
+        );
       }
       throw err;
     }
