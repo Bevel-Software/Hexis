@@ -45,7 +45,8 @@ What to expect at this upgrade:
 
 - **The first start takes longer.** The boot converts every full clone the
   previous release left on the workspaces volume into a worktree, one at a
-  time, then compacts the repository once. Each clone's branch tip, its
+  time, then runs git's automatic garbage collection on the repository once
+  (which packs it when git finds enough to pack). Each clone's branch tip, its
   commits not yet pushed, its stash and the files git ignores are carried
   over before the clone is removed. The log says how many were converted. A
   clone with uncommitted changes, or one git cannot read, is left as it is
