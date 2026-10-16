@@ -6,9 +6,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../workspace.service.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { gitCredentials } from '../../../shared/git.contract.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,7 +87,7 @@ async function anOldCloneWithNoHelper(branch: string): Promise<string> {
 }
 
 function service(token: string | null) {
-  return new WorkspaceService(
+  return newWorkspaceService(
     workspacesRoot,
     () => upstream,
     testKbContext({ kbDirName: KB_DIR, branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),

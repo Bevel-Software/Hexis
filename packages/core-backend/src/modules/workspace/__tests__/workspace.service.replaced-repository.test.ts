@@ -8,6 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { WorkspaceService } from '../workspace.service.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -77,7 +78,7 @@ function service(
   aroundSetAside?: (workspaceId: string, move: () => Promise<void>) => Promise<void>,
   gitRunner: NodeGitRunner = new NodeGitRunner(),
 ) {
-  return new WorkspaceService(
+  return newWorkspaceService(
     workspacesRoot,
     kbRepoUrl,
     testKbContext({ branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),
