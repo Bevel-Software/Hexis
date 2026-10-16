@@ -33,6 +33,38 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+### Branch workspaces are worktrees of one repository (0.30+)
+
+From 0.30 a deployment holds ONE git repository per knowledge base, on the
+**backups** volume (`.kb-repository/`), and every branch's working copy on
+the **workspaces** volume is a `git worktree` of it. Opening a branch copies
+no history any more. Nothing changes in the compose files: both volumes are
+already mounted.
+
+What to expect at this upgrade:
+
+- **The first start takes longer.** The boot converts every full clone the
+  previous release left on the workspaces volume into a worktree, one at a
+  time, then compacts the repository once. Each clone's branch tip, its
+  commits not yet pushed, its stash and the files git ignores are carried
+  over before the clone is removed. The log says how many were converted. A
+  clone with uncommitted changes, or one git cannot read, is left as it is
+  and keeps working as a clone; the log names its branch, and the next start
+  tries again.
+- **Keep the backups volume.** It now holds every commit not yet pushed to
+  your remote. A redeploy that drops it while keeping the workspaces volume
+  recreates the working copies from the remote, without those commits.
+- **Rolling back** to a release before 0.30 needs the workspaces volume
+  cleared first (`docker compose down`, then `docker volume rm
+  <project>_workspaces`, then start the older release): that release does not
+  recognise a worktree. The commits not yet pushed stay in the repository on
+  the backups volume, which the rollback leaves in place. A clone the
+  conversion left as it was keeps its own unpushed commits on the workspaces
+  volume, so archive that volume before clearing it if the log reported any.
+- The in-app agent's `execute_command` tool is gone: an agent that calls it
+  by name is told the tool is unknown. Every git operation an agent needs is
+  a platform tool.
+
 ### The knowledge-base layout is no longer read from the environment
 
 `KB_KNOWLEDGE_BASE_DIR`, `KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired: the
@@ -188,7 +220,10 @@ was NOT pushed yet — every local commit not on the remote, whether its push
 failed or is still pending — lives only in
 the repository on the **backups** volume (with the change-review ledger), so
 archive that volume too if you want those back; a restore without it starts
-from what the remote holds. Archive volumes while the app is stopped:
+from what the remote holds. (A full clone the 0.30 conversion left as it was
+keeps its own unpushed commits on the **workspaces** volume instead; archive
+that one too while the start log still names such a clone.) Archive volumes
+while the app is stopped:
 
 ```sh
 docker compose down
