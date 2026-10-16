@@ -563,10 +563,13 @@ export class KbReferenceScanner {
     const writes: ReferenceRewrite[] = [];
     const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
     // A folder we cannot list might hold references to the old token — same
-    // fail-closed rule as an unreadable file below.
+    // fail-closed rule as an unreadable file below, and counted, never named,
+    // for the same reason: its own access.md may be just as unreadable, so
+    // `visible` could not see the rules that close it.
     if (holes.length > 0) {
+      log.warn(`reference rewrite: cannot list ${holes.map((h) => printable(h || '.')).join(', ')}`);
       throw makeError(
-        `Cannot list ${await disclosablePaths(holes, visible)} while rewriting references; rename aborted with no changes`,
+        `Cannot list ${holes.length} folder${holes.length === 1 ? '' : 's'} that may reference the old principal while rewriting references; rename aborted with no changes`,
       );
     }
     const texts = await Promise.all(
@@ -580,9 +583,13 @@ export class KbReferenceScanner {
     );
     for (const t of texts) {
       if (!t.ok) {
+        // Never named, not even to a reader: `visible` decides from the
+        // file's own rules, and a file we cannot read has none it can see —
+        // an inherited grant would then disclose a path its own rules may
+        // close. The fs cause carries the path too, so it stays in the log.
+        log.warn(`reference rewrite: cannot read ${printable(t.repoRel)}`, { cause: t.cause });
         throw makeError(
-          `Cannot read ${await disclosablePaths([t.repoRel], visible)} while rewriting references; rename aborted with no changes`,
-          t.cause,
+          'Cannot read a file that may reference the old principal while rewriting references; rename aborted with no changes',
         );
       }
     }

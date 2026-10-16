@@ -309,7 +309,7 @@ export function DirectoryGroupsPage() {
                   ))}
                   {deleteHiddenCount > 0 && (
                     <li className="truncate">
-                      {deleteHiddenCount} in {deleteHiddenCount === 1 ? 'a file' : 'files'} you cannot read
+                      {deleteHiddenCount} more rule{deleteHiddenCount === 1 ? '' : 's'} in content you cannot read
                     </li>
                   )}
                 </ul>

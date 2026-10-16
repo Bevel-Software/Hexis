@@ -277,7 +277,8 @@ describe('DirectoryGroupsPage', () => {
     const dialog = within(screen.getByRole('dialog'));
     expect(dialog.getByText(/3 access rules/)).toBeInTheDocument();
     expect(dialog.getByText(/docs\/roadmap\.md/)).toBeInTheDocument();
-    expect(dialog.getByText('2 in files you cannot read')).toBeInTheDocument();
+    // A count of RULES, not files: two may sit in one file.
+    expect(dialog.getByText('2 more rules in content you cannot read')).toBeInTheDocument();
   });
 
   it('idp mode: read-only roster, no mutation controls, membership note shown', async () => {

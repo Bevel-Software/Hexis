@@ -325,22 +325,24 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
       await expect(
         scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE),
-      ).rejects.toThrow(/Cannot list Locked .*rename aborted with no changes/);
+      ).rejects.toThrow(/Cannot list 1 folder .*rename aborted with no changes/);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  it('the refusal counts a folder the renaming person cannot read, never names it', async () => {
+  // The folder's own access.md may be as unreadable as its listing, so the
+  // visibility check cannot see the rules that close it: never named.
+  it('the refusal counts the folder and never names it, even to someone who could read every path', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-hidden-'));
     try {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
       const err = await scanner
-        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), NONE_VISIBLE)
+        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE)
         .catch((e: Error) => e);
       expect((err as Error).message).toBe(
-        'Cannot list 1 location you cannot read while rewriting references; rename aborted with no changes',
+        'Cannot list 1 folder that may reference the old principal while rewriting references; rename aborted with no changes',
       );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -356,7 +358,46 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
         .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE)
         .catch((e: Error) => e);
       expect((err as Error).message).not.toContain('\n');
-      expect((err as Error).message).toContain('Lo\\nFAKE: line');
+      expect((err as Error).message).not.toContain('FAKE');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a file the rewrite cannot read is counted, never named, and its fs cause stays out of the error', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-unreadable-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      // The walk lists team/Ghost.md, but there is no file to read.
+      const disk = new NodeFs();
+      const walker: ITreeWalker = {
+        walk: (r, o, l) => disk.walk(r, o, l),
+        walkFiles: (r, m, o) => disk.walkFiles(r, m, o),
+        walkKb: async (r, l, o) => {
+          const result = await disk.walkKb(r, l, o);
+          for (const listener of l) listener.onFile?.('team', 'Ghost.md');
+          return result;
+        },
+      };
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
+      const causes: (string | undefined)[] = [];
+      const err = await scanner
+        .rewriteReferences(
+          'ws-1',
+          'sales',
+          'Revenue',
+          (m, cause) => {
+            causes.push(cause);
+            return new Error(m);
+          },
+          ALL_VISIBLE,
+        )
+        .catch((e: Error) => e);
+      expect((err as Error).message).toBe(
+        'Cannot read a file that may reference the old principal while rewriting references; rename aborted with no changes',
+      );
+      expect(causes).toEqual([undefined]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
