@@ -44,6 +44,7 @@ import {
   TITLE_INK_ROOM,
 } from '../../../shared/theme/header';
 import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
+import { declarationsOf } from '../../../__tests__/tailwindDeclarations';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** `src/`, three levels up from `modules/layout/__tests__`. */
@@ -157,8 +158,6 @@ function tokenHeightIn(css: string): string {
 }
 
 let headerHeight: string;
-/** The compiled stylesheet, kept for the rules the title's ink room is made of. */
-let appCss: string;
 
 /** The ticket's three desktop widths. */
 const WIDTHS = [1280, 1440, 1920];
@@ -183,11 +182,9 @@ beforeAll(async () => {
   // renders — `flex h-header flex-none items-center` today, whatever it says
   // tomorrow — plus every class a real `SidebarFrame` puts on the row, which
   // is where `empty:hidden` comes from. `HEADER_COLUMN_TOP` rides along
-  // because the column's offset is the other half of the seam, and
-  // `TITLE_INK_ROOM` with `truncate` because the title the band centres is
-  // the last part of it (see "a page title keeps its ink" below).
+  // because the column's offset is the other half of the seam.
   const css = await compileAppStylesheet([
-    ...`${HEADER_BAND} ${HEADER_COLUMN_TOP} ${TITLE_INK_ROOM} truncate`.split(/\s+/),
+    ...`${HEADER_BAND} ${HEADER_COLUMN_TOP}`.split(/\s+/),
     ...classesRendered(
       <SidebarFrame label="File explorer" header={<div>Connect your agent</div>}>
         <nav>tree</nav>
@@ -205,7 +202,6 @@ beforeAll(async () => {
   // and call the band gone on the strength of a default.
   expect(css).toMatch(/:empty\s*\{[^}]*display:\s*none/);
   headerHeight = tokenHeightIn(css);
-  appCss = css;
 
   stylesheet = document.createElement('style');
   stylesheet.textContent = flattenCascadeLayers(css);
@@ -523,31 +519,29 @@ describe('the two bands open at the same offset', () => {
  * and still ends a long title with an ellipsis. The shape of the markup —
  * the room on the title and on every wrapper that clips it — is checked by
  * `expectTitleKeepsItsInk`, here on the knowledge page's header and in each
- * Library page's own test.
+ * Library page's own test. The declarations are read through
+ * `declarationsOf`, the one resolver of a utility class to the CSS the build
+ * gives it.
  */
 describe('a page title keeps its ink', () => {
-  /** The one declaration a rule for `cls` makes for `property`, out of the compiled stylesheet. */
-  function declared(cls: string, property: string): string {
-    const escaped = cls.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-    const rule = new RegExp(`\\.${escaped}\\s*\\{([^}]*)\\}`).exec(appCss);
-    expect(rule, `the compiled stylesheet has a rule for .${cls}`).not.toBeNull();
-    const value = new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`).exec(rule![1]!);
-    expect(value, `.${cls} sets ${property}`).not.toBeNull();
-    return value![1]!.trim();
-  }
+  /** What the build gives an element wearing exactly these classes. */
+  const declarationsOfClasses = (className: string) =>
+    declarationsOf(Object.assign(document.createElement('div'), { className }));
 
-  it('hands back as margin exactly the padding it adds, so the band does not move', () => {
-    const [padding, margin] = TITLE_INK_ROOM.split(/\s+/) as [string, string];
-    const room = declared(padding, 'padding-block');
+  it('hands back as margin exactly the padding it adds, so the band does not move', async () => {
+    const room = await declarationsOfClasses(TITLE_INK_ROOM);
     // Tailwind spells the negative utility as the positive one times -1, so the
     // two cannot drift apart by a token change: this reads the sign, not a number.
-    expect(declared(margin, 'margin-block')).toBe(`calc(${room} * -1)`);
+    expect(room['padding-block']).toBeDefined();
+    expect(room['margin-block']).toBe(`calc(${room['padding-block']} * -1)`);
   });
 
-  it('still truncates with an ellipsis — the clipping the room exists for', () => {
-    expect(declared('truncate', 'overflow')).toBe('hidden');
-    expect(declared('truncate', 'text-overflow')).toBe('ellipsis');
-    expect(declared('truncate', 'white-space')).toBe('nowrap');
+  it('still truncates with an ellipsis — the clipping the room exists for', async () => {
+    expect(await declarationsOfClasses('truncate')).toMatchObject({
+      overflow: 'hidden',
+      'text-overflow': 'ellipsis',
+      'white-space': 'nowrap',
+    });
   });
 
   it("the knowledge page's title has the room, and so does the group that clips it", () => {
