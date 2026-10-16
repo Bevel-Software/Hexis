@@ -248,18 +248,22 @@ File-level write access decides how a change lands on the default branch:
   conflicted path it carries the file at the merge base, on your side and on
   theirs, and the working copy with git's markers — and it has left the draft
   exactly as it was. A side is null when that side has no file, or when
-  `truncated` names it (too large, or not text): read that side with
-  `read_file_at` at the answer's `ours`, `theirs` or `mergeBase` commit. A
-  file marked `readDenied` is one you may not read on one of the branches:
-  its sides are withheld, and only `choose` may settle it. Decide each file
-  (keep both sides' information unless one is clearly stale;
+  `truncated` names it (too large, or not text): then read `ours` with
+  `read_file` (it is the draft's own file), `theirs` with `read_file_at` at
+  `from` (the branch, not a commit — its tip is not on the draft's history
+  until the merge lands), and `base` with `read_file_at` at the answer's
+  `mergeBase`. A conflicted file you may not read on both branches is left
+  out and only counted (`withheldConflicts`): it is not yours to settle, so
+  ask a person who can read it to update the draft in the app. Decide each
+  file shown (keep both sides' information unless one is clearly stale;
   `list_file_changes` says who changed what and why), then call
   `update_branch` again **with the same `from`** and `resolutions`, one per
   conflicted path: `content`, the resolved text, or `choose` (`ours`,
-  `theirs`, `delete`). It merges, commits as you and publishes. Nothing else
-  is written that way: an ordinary edit goes through the file tools. You
-  have no git command; there is never a half-done merge on disk for you to
-  finish.
+  `theirs`, `delete`). A resolution is a write: it takes your write
+  permission on the path, as `write_file` does. It merges, commits as you
+  and publishes. Nothing else is written that way: an ordinary edit goes
+  through the file tools. You have no git command; there is never a
+  half-done merge on disk for you to finish.
 - `merge_branch` refuses to merge a draft into the branch its open change
   request targets — it names the request; ask the user to review it in the
   app. Into a protected branch it merges only what you could commit there

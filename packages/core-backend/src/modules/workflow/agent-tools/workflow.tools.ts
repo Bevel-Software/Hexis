@@ -5,8 +5,8 @@ import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { notifyAgentRead, type AgentAccessGate } from '../../workspace/agent-access.gate.js';
-import { readableOnBranch, assertReadableOnBranch } from '../read-on-branch.js';
+import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/agent-access.gate.js';
+import { readableOnBranch, readablePathsAt, assertReadableOnBranch } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
@@ -187,7 +187,7 @@ export function registerWorkflowTools(
    * `readableOnBranch`, the compare route's own rule), and in batches for
    * the path lists `branch_status` shows.
    */
-  accessControl: Pick<IAccessControl, 'canRead' | 'canReadAtRef' | 'canReadBatch' | 'canReadBatchAtRef'>,
+  accessControl: Pick<IAccessControl, 'canRead' | 'canReadAtRef' | 'canReadBatch' | 'canReadBatchAtRef' | 'canWrite'>,
   /**
    * The deployment's blocking read hook, told of every file content a history
    * tool serves, as `read_file` tells it — a hook that refuses the read
@@ -798,17 +798,9 @@ export function registerWorkflowTools(
   const requireReadAtBranch = (ctx: ToolContext, workspaceId: string, rel: string, branch: string): Promise<void> =>
     assertReadableOnBranch(accessControl, workspaceId, ctx.user.email, rel, branch);
 
-  /**
-   * Which of `paths` the caller may read at `origin/<base>`, as the
-   * change-request reads decide it: a null verdict (the ref or its rules do
-   * not resolve) withholds every one.
-   */
-  const readableAt = async (ctx: ToolContext, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> => {
-    if (paths.length === 0) return new Set();
-    const verdicts = await accessControl.canReadBatchAtRef(workspaceId, `origin/${base}`, ctx.user.email, [...new Set(paths)]);
-    if (!verdicts) return new Set();
-    return new Set([...verdicts].filter(([, allowed]) => allowed).map(([p]) => p));
-  };
+  /** Which of `paths` the caller may read at `origin/<base>` — the change-request reads' rule, `readablePathsAt`. */
+  const readableAt = (ctx: ToolContext, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> =>
+    readablePathsAt(accessControl, workspaceId, ctx.user.email, base, paths);
 
   /** A full object id, as the ref access gate takes one: anything shorter or mixed-case is a name. */
   const isCommitSha = (s: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s);
@@ -825,6 +817,7 @@ export function registerWorkflowTools(
       properties: {
         path: { type: 'string', minLength: 1, description: 'The file, workspace-relative (as `read_file` takes it).' },
         limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many commits at most (default 20).' },
+        sessionId: SESSION_ID_INPUT,
       },
       required: ['path'],
       additionalProperties: false,
@@ -863,6 +856,7 @@ export function registerWorkflowTools(
       properties: {
         path: { type: 'string', minLength: 1, description: 'The file, workspace-relative.' },
         at: { type: 'string', minLength: 1, description: 'A commit sha, or a branch name.' },
+        sessionId: SESSION_ID_INPUT,
       },
       required: ['path', 'at'],
       additionalProperties: false,
@@ -913,6 +907,7 @@ export function registerWorkflowTools(
         from: { type: 'string', minLength: 1, description: 'A branch: the diff\'s left side.' },
         to: { type: 'string', minLength: 1, description: 'A branch: the diff\'s right side.' },
         at: { type: 'string', minLength: 1, description: 'A commit sha on `branch`: the diff that commit made in the file.' },
+        sessionId: SESSION_ID_INPUT,
       },
       required: ['path'],
       additionalProperties: false,
@@ -961,6 +956,7 @@ export function registerWorkflowTools(
       type: 'object',
       properties: {
         base: { type: 'string', minLength: 1, description: 'The branch to compare against (default: the fork base).' },
+        sessionId: SESSION_ID_INPUT,
       },
       additionalProperties: false,
     },
@@ -1036,6 +1032,7 @@ export function registerWorkflowTools(
       type: 'object',
       properties: {
         from: { type: 'string', minLength: 1, description: 'The branch to bring in (default: this branch\'s own shared state).' },
+        sessionId: SESSION_ID_INPUT,
         resolutions: {
           type: 'array',
           description: 'One per conflicted path, from a previous `conflicts` answer.',
@@ -1066,10 +1063,10 @@ export function registerWorkflowTools(
         files: {
           type: 'array',
           description:
-            '`conflicts`: every conflicted path, with the file at the base, on each side, and the marked-up working copy. ' +
-            'A side is null when that side has no file — or when `truncated` names it (too large or not text: read it ' +
-            'with `read_file_at` at `ours`/`theirs`/`mergeBase`), or when `readDenied` (you may not read this file on one ' +
-            'of the branches: only `choose` may settle it).',
+            '`conflicts`: every conflicted path you may read, with the file at the base, on each side, and the marked-up ' +
+            'working copy. A side is null when that side has no file — or when `truncated` names it (too large or not ' +
+            'text): then read `ours` with `read_file`, `theirs` with `read_file_at` at `from`, `base` with `read_file_at` ' +
+            'at `mergeBase`.',
           items: {
             type: 'object',
             properties: {
@@ -1079,12 +1076,17 @@ export function registerWorkflowTools(
               theirs: { type: ['string', 'null'] },
               merged: { type: ['string', 'null'] },
               truncated: { type: 'array', items: { type: 'string', enum: ['base', 'ours', 'theirs', 'merged'] } },
-              readDenied: { type: 'boolean' },
             },
             required: ['path', 'base', 'ours', 'theirs', 'merged'],
           },
         },
-        unresolved: { type: 'array', items: { type: 'string' }, description: '`conflicts`: the paths no resolution covered.' },
+        unresolved: { type: 'array', items: { type: 'string' }, description: '`conflicts`: the paths you may read that no resolution covered.' },
+        withheldConflicts: {
+          type: 'integer',
+          description:
+            '`conflicts`: how many conflicted files were left out because you may not read them on both branches. ' +
+            'They are not yours to settle: ask a person who can read them to update the draft in the app.',
+        },
         branch: { type: 'string', description: '`pending-commits`: the branch whose writes are not committed yet.' },
         pending: { type: 'integer', description: '`pending-commits`: how many.' },
         needsAttention: { type: 'string', description: '`pending-commits`: a queued commit failed; the worker\'s message. Tell the user.' },
@@ -1123,32 +1125,43 @@ export function registerWorkflowTools(
       }
       const workspaceId = await workspaceOf(ctx, branch);
       const source = from ?? branch;
+      /** A hook's own refusal (it carries a status); anything else is a failure of the hook, not an answer. */
+      const isRefusal = (err: unknown): boolean => typeof (err as { status?: unknown })?.status === 'number';
       /**
        * Whether the caller may read `rel` on both sides of this merge — the
        * workspace's own branch and `source` as published — with the
        * deployment's read hook told of the read, as every history read tells
-       * it: a hook that refuses makes the file one the caller may not read.
+       * it: a hook that refuses makes the file one the caller may not read; a
+       * hook that fails is not an answer and propagates.
        */
       const mayReadBothSides = async (rel: string): Promise<boolean> => {
         try {
           await notifyAgentRead(agentAccessGate, ctx, branch, `${kbDirName}/${rel}`);
-        } catch {
-          return false;
+        } catch (err) {
+          if (isRefusal(err)) return false;
+          throw err;
         }
         return (
           (await accessControl.canRead(workspaceId, ctx.user.email, rel)) &&
           (await readableOnBranch(accessControl, workspaceId, ctx.user.email, rel, source))
         );
       };
-      // A resolution's text is written into a file the caller may not be
-      // able to read on one side: only a whole side may settle such a file.
+      // A resolution writes a file on the draft. It takes what every write
+      // takes — the deployment's write hook and the caller's write permission
+      // on the path — and, since what it writes is decided from both sides
+      // of the merge, the read of both sides too. A file the caller may not
+      // read is not theirs to settle, however it would be settled.
       for (const r of resolutions ?? []) {
-        if (r.content !== undefined && !(await mayReadBothSides(stripKbDir(r.path, kbDirName)))) {
-          throw new ToolError(
-            `You may not read "${stripKbDir(r.path, kbDirName)}" on both sides of this merge, so it can only be settled with \`choose\`.`,
-            403,
-            { kind: 'read-denied', path: stripKbDir(r.path, kbDirName) },
-          );
+        const rel = stripKbDir(r.path, kbDirName);
+        if (!(await mayReadBothSides(rel))) {
+          throw new ToolError(`You may not read "${rel}" on both branches of this merge, so it is not yours to settle.`, 403, {
+            kind: 'read-denied',
+            path: rel,
+          });
+        }
+        await assertAgentWriteAllowed(agentAccessGate, ctx, branch, `${kbDirName}/${rel}`);
+        if (!(await accessControl.canWrite(workspaceId, ctx.user.email, rel))) {
+          throw new ToolError(`You don't have permission to write "${rel}" on "${branch}".`, 403, { kind: 'write-denied', path: rel });
         }
       }
       const outcome = await ctx.workflowService.updateBranch(workspaceId, ctx.user, {
@@ -1156,15 +1169,18 @@ export function registerWorkflowTools(
         ...(resolutions !== undefined ? { resolutions } : {}),
       });
       if (outcome.kind !== 'conflicts') return outcome;
-      // What a conflict answer carries is the file on both branches: withheld
-      // where the caller may not read it on either, the path kept (it is
-      // theirs to settle, with `choose`).
+      // A conflict answer carries the file on both branches, and a path's
+      // name is information too: a file the caller may not read on both is
+      // left out of `files` and `unresolved` alike and only counted.
       const files = [];
-      for (const f of outcome.files) {
-        if (await mayReadBothSides(f.path)) files.push(f);
-        else files.push({ path: f.path, base: null, ours: null, theirs: null, merged: null, readDenied: true });
-      }
-      return { ...outcome, files };
+      for (const f of outcome.files) if (await mayReadBothSides(f.path)) files.push(f);
+      const shown = new Set(files.map((f) => f.path));
+      return {
+        ...outcome,
+        files,
+        unresolved: outcome.unresolved.filter((p) => shown.has(p)),
+        withheldConflicts: outcome.files.length - files.length,
+      };
     },
   });
 }

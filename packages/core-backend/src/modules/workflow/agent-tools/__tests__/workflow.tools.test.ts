@@ -275,12 +275,25 @@ const accessControl = {
     if (ref.endsWith('me/unknown')) return null;
     return new Map(rels.map((r) => [r, !r.startsWith('Secret/')]));
   },
+  canWrite: async (ws: string, email: string, rel: string) => {
+    calls.push(['canWrite', ws, email, rel]);
+    return !rel.startsWith('ReadOnly/');
+  },
 } as never;
-/** The deployment's read hook: refuses `Hooked/` and records every read it is told of. */
+/**
+ * The deployment's hooks: the read hook refuses `Hooked/`, fails outright on
+ * `Failing/` and records every read it is told of (with the session it was
+ * told for); the write hook refuses `WriteHooked/`.
+ */
 const agentHooks = new WorkflowHooks();
 agentHooks.onAgentRead(async (op) => {
-  calls.push(['agentRead', op.branch, op.wsPath]);
+  calls.push(['agentRead', op.branch, op.wsPath, op.sessionId]);
   if (op.wsPath?.includes('Hooked/')) throw new ToolError('Not in this conversation.', 403);
+  if (op.wsPath?.includes('Failing/')) throw new Error('hook store down');
+});
+agentHooks.onPreWrite(async (op) => {
+  calls.push(['preWrite', op.branch, op.wsPath]);
+  if (op.wsPath?.includes('Locked/')) throw new ToolError('Not yours to write here.', 403);
 });
 const agentAccessGate: AgentAccessGate = { recoveryBotEmail: 'recovery@x', hooks: agentHooks, notes: new ToolDescriptionNotes() };
 
@@ -1196,7 +1209,7 @@ describe('history and syncing tools', () => {
     const base = await start();
     const res = await post(tool(base, 'list_file_changes'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md' });
     expect(res.status).toBe(200);
-    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Foo.md']);
+    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Foo.md', undefined]);
     const hooked = { branch: DRAFT, path: 'Hooked/Foo.md' };
     for (const [name, body] of [
       ['list_file_changes', hooked],
@@ -1243,43 +1256,77 @@ describe('history and syncing tools', () => {
     expect(await unknown.json()).toMatchObject({ changedPaths: [], withheldPaths: 1 });
   });
 
-  it('update_branch withholds a conflicted file the caller may not read on both sides, and lets only a whole side settle it', async () => {
+  it('update_branch leaves a conflicted file the caller may not read on both sides out by name, and refuses to let them settle it', async () => {
     const base = await start();
     const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting' });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.kind).toBe('conflicts');
-    expect(body.unresolved).toEqual(['KnowledgeBase/Open.md', 'Secret/Plan.md']);
-    expect(body.files).toEqual([
-      { path: 'KnowledgeBase/Open.md', base: 'b\n', ours: 'o\n', theirs: 't\n', merged: '<<<<<<<\n' },
-      { path: 'Secret/Plan.md', base: null, ours: null, theirs: null, merged: null, readDenied: true },
-    ]);
-    // Text for the withheld file is refused before the service is asked; a whole side is not.
+    expect(body.unresolved).toEqual(['KnowledgeBase/Open.md']);
+    expect(body.files).toEqual([{ path: 'KnowledgeBase/Open.md', base: 'b\n', ours: 'o\n', theirs: 't\n', merged: '<<<<<<<\n' }]);
+    expect(body.withheldConflicts).toBe(1);
+    expect(JSON.stringify(body)).not.toContain('Secret/Plan.md');
+    // Neither text nor a whole side settles a file the caller may not read.
+    for (const resolution of [{ path: 'Secret/Plan.md', content: 'x' }, { path: 'Secret/Plan.md', choose: 'theirs' }]) {
+      calls = [];
+      const refused = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [resolution] });
+      expect(refused.status, JSON.stringify(resolution)).toBe(403);
+      expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
+    }
+    // A readable one is settled, and the service gets exactly that.
     calls = [];
-    const text = await post(tool(base, 'update_branch'), writeTok(), {
-      branch: DRAFT,
-      from: 'me/conflicting',
-      resolutions: [{ path: 'Secret/Plan.md', content: 'x' }],
-    });
-    expect(text.status).toBe(403);
-    expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
     const side = await post(tool(base, 'update_branch'), writeTok(), {
       branch: DRAFT,
       from: 'me/conflicting',
-      resolutions: [{ path: 'Secret/Plan.md', choose: 'theirs' }],
+      resolutions: [{ path: 'KnowledgeBase/Open.md', choose: 'theirs' }],
     });
     expect(side.status).toBe(200);
-    expect(await side.json()).toEqual({ kind: 'merged', sha: 'resolved-sha', from: 'me/conflicting', resolvedPaths: ['Secret/Plan.md'] });
-    expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', { from: 'me/conflicting', resolutions: [{ path: 'Secret/Plan.md', choose: 'theirs' }] }]);
+    expect(await side.json()).toEqual({ kind: 'merged', sha: 'resolved-sha', from: 'me/conflicting', resolvedPaths: ['KnowledgeBase/Open.md'] });
+    expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', { from: 'me/conflicting', resolutions: [{ path: 'KnowledgeBase/Open.md', choose: 'theirs' }] }]);
   });
 
-  it("update_branch tells the deployment's read hook of each conflicted file it shows, and withholds one the hook refuses", async () => {
+  it('update_branch takes the write every write takes for a resolution: the write hook and the write permission', async () => {
+    const base = await start();
+    for (const [path, status] of [
+      ['Locked/A.md', 403],
+      ['ReadOnly/A.md', 403],
+      ['KnowledgeBase/Open.md', 200],
+    ] as const) {
+      calls = [];
+      const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [{ path, content: 'x\n' }] });
+      expect(res.status, path).toBe(status);
+      expect(calls, path).toContainEqual(['preWrite', DRAFT, `knowledge-base/${path}`]);
+      if (status === 200) expect(calls).toContainEqual(['canWrite', DRAFT_WS, 'e@x', path]);
+      else expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
+    }
+  });
+
+  it("update_branch tells the deployment's read hook of each conflicted file before showing it; a hook that fails is not an answer", async () => {
     const base = await start();
     calls = [];
     const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting' });
     expect(res.status).toBe(200);
-    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Open.md']);
-    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/Secret/Plan.md']);
+    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Open.md', undefined]);
+    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/Secret/Plan.md', undefined]);
+    // A failing hook propagates as a failure (500), not as a withheld file.
+    const failing = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [{ path: 'Failing/A.md', content: 'x' }] });
+    expect(failing.status).toBe(500);
+  });
+
+  it('carries the conversation id of an external caller to the read hook, as every file tool does', async () => {
+    const base = await start();
+    calls = [];
+    const res = await post(tool(base, 'list_file_changes'), 'bevel_key', { branch: DRAFT, path: 'KnowledgeBase/Foo.md', sessionId: 'conv-7' });
+    expect(res.status).toBe(200);
+    expect(calls).toContainEqual(['agentRead', DRAFT, 'knowledge-base/KnowledgeBase/Foo.md', 'conv-7']);
+    for (const [name, body] of [
+      ['read_file_at', { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'main', sessionId: 'conv-7' }],
+      ['compare_file', { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'main', to: DRAFT, sessionId: 'conv-7' }],
+      ['branch_status', { branch: DRAFT, sessionId: 'conv-7' }],
+    ] as const) {
+      const r = await post(tool(base, name), 'bevel_key', body);
+      expect(r.status, name).toBe(200);
+    }
   });
 
   it('lists the five on the external catalog too: a remote agent reads history and syncs its drafts', async () => {

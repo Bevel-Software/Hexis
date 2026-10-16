@@ -1677,9 +1677,11 @@ export class GitService implements IGitService {
         if (stray.length > 0) {
           // Only a conflicted path is written by a resolution: anything else
           // is an ordinary write, which goes through the file tools and their
-          // locks. Refused whole, before any resolution is applied.
+          // locks. Refused whole, before any resolution is applied — naming
+          // the caller's own paths only, never the conflicted set (which the
+          // caller is told of, cut to what they may read, by the answer).
           throw new WorkflowValidationError(
-            `not conflicted, so not resolved here: ${stray.join(', ')}. The conflicted paths are ${conflicted.join(', ')}.`,
+            `not conflicted, so not resolved here: ${stray.join(', ')}.`,
             { kind: 'not-conflicted', paths: stray },
           );
         }
@@ -1809,6 +1811,16 @@ export class GitService implements IGitService {
         const moved = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
         if (!moved || attempt >= MAX_ATTEMPTS) {
           const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+          // The push itself may well have landed: what failed after it is the
+          // tracking-config stamp `pushUnlocked` writes next, which is
+          // maintenance. Ask the host before calling the merge unpublished.
+          const remoteTip = await this.git(cwd, ['ls-remote', '--exit-code', 'origin', `refs/heads/${branch}`])
+            .then((r) => r.stdout.trim().split(/\s+/)[0] ?? '')
+            .catch(() => '');
+          if (remoteTip === sha) {
+            log.warn(`the merge on "${branch}" is published; the tracking config could not be stamped after it:`, { detail });
+            return;
+          }
           throw new MergePublishRefusedError(branch, sha, detail, moved);
         }
         const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
@@ -1854,13 +1866,23 @@ export class GitService implements IGitService {
     return { path: repoRelativePath, base, ours, theirs, merged, ...(truncated.length > 0 ? { truncated } : {}) };
   }
 
-  /** `bytes` as text when they are text and small enough to carry; else null, and `left` is told. */
+  /**
+   * `bytes` as text when they are text (`looksBinary`, the rule every diff
+   * here applies, and well-formed UTF-8 — a NUL-free file that is not UTF-8
+   * would be carried as replacement characters and written back changed)
+   * and small enough to carry; else null, and `left` is told.
+   */
   private carriedText(bytes: Buffer, left: () => void): string | null {
-    if (bytes.length > GitService.CONFLICT_SIDE_MAX_CHARS || bytes.includes(0)) {
+    if (bytes.length > GitService.CONFLICT_SIDE_MAX_CHARS || looksBinary(bytes)) {
       left();
       return null;
     }
-    return bytes.toString('utf-8');
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      left();
+      return null;
+    }
   }
 
   /**

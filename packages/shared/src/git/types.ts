@@ -117,16 +117,13 @@ export interface ConflictedFile {
   merged: string | null;
   /**
    * The sides that were too large or not text and were left out — a null
-   * side named here is omitted, not deleted. Read it at the commit
-   * (`ours`/`theirs`/`mergeBase`) with the file-at tools instead; a whole
-   * side can still be kept with `choose`.
+   * side named here is omitted, not deleted. Read it instead: `ours` is the
+   * branch's own file (`read_file`), `theirs` the merged-in branch's
+   * (`read_file_at` at that branch), `base` the file at `mergeBase`
+   * (`read_file_at` at that commit, which is on the branch's own history); a
+   * whole side can still be kept with `choose`.
    */
   truncated?: Array<'base' | 'ours' | 'theirs' | 'merged'>;
-  /**
-   * True when the caller may not read this file on one of the branches: its
-   * sides are withheld (null), and only a whole side (`choose`) may settle it.
-   */
-  readDenied?: boolean;
 }
 
 /**

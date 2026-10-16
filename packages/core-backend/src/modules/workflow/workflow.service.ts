@@ -4751,9 +4751,11 @@ export class WorkflowService implements IWorkflowService {
           `publish of the merge on workspace=${workspaceId} user=${user.id} failed; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           { detail: err.detail },
         );
+        // No single file is at issue: the whole branch is. Its name takes the
+        // path's place in the sentence, which reads as "diverged on <branch>".
         throw new PushNeedsAgentResolutionError(
           branch,
-          '(update)',
+          branch,
           err.detail,
           err.diverged ? 'replayed onto the moved branch inside the merge, still rejected' : '(cooperative path not attempted)',
           err.diverged ? 'diverged' : 'refused',

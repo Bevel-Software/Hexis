@@ -317,6 +317,50 @@ describe('GitService.mergeIntoBranch', () => {
     expect(await fs.readFile(path.join(repo, 'big.md'), 'utf-8')).toBe(big);
   });
 
+  it('leaves a side that is not well-formed UTF-8 out, NUL or no NUL, so it is never written back changed', async () => {
+    const { repo, pusher } = await seed(root);
+    // Latin-1 bytes: no NUL anywhere, not UTF-8 either.
+    const latin1 = (s: string) => Buffer.from(s, 'latin1');
+    await fs.writeFile(path.join(repo, 'legacy.txt'), latin1('caf\xe9 base\n'));
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-q', '-m', 'legacy encoding']);
+    await runGit(repo, ['push', '-q', 'origin', DRAFT]);
+    await runGit(pusher, ['fetch', '-q', 'origin']);
+    await runGit(pusher, ['checkout', '-q', TARGET]);
+    await runGit(pusher, ['merge', '-q', `origin/${DRAFT}`]);
+    await fs.writeFile(path.join(pusher, 'legacy.txt'), latin1('caf\xe9 target\n'));
+    await runGit(pusher, ['add', '-A']);
+    await runGit(pusher, ['commit', '-q', '-m', 'target edits legacy']);
+    await runGit(pusher, ['push', '-q', 'origin', TARGET]);
+    await fs.writeFile(path.join(repo, 'legacy.txt'), latin1('caf\xe9 draft\n'));
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-q', '-m', 'draft edits legacy']);
+
+    const outcome = await service().mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b' });
+    expect(outcome.kind).toBe('conflicts');
+    if (outcome.kind !== 'conflicts') return;
+    const legacy = outcome.files.find((f) => f.path === 'legacy.txt')!;
+    expect(legacy.truncated?.sort()).toEqual(['base', 'merged', 'ours', 'theirs']);
+    expect([legacy.base, legacy.ours, legacy.theirs, legacy.merged]).toEqual([null, null, null, null]);
+  });
+
+  it('lets the merged-in side be read at its branch while the merge is unresolved, though its tip is not on the draft\'s history', async () => {
+    const { repo, pusher } = await seed(root);
+    const theirs = await pushOn(pusher, TARGET, { 'shared.md': 'line 1\nline 2 from target\nline 3\n' }, 'target edits line 2');
+    await commitLocally(repo, { 'shared.md': 'line 1\nline 2 from draft\nline 3\n' }, 'draft edits line 2');
+    const svc = service();
+    const outcome = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b' });
+    expect(outcome.kind).toBe('conflicts');
+    // The target's tip is not an ancestor of the draft: a commit read would
+    // refuse it, a branch read serves it.
+    await expect(gitOut(repo, ['merge-base', '--is-ancestor', theirs, 'HEAD'])).rejects.toThrow();
+    expect(await svc.readFileAtBranch(workspaceId, 'shared.md', TARGET)).toEqual({
+      sha: theirs,
+      ref: `refs/remotes/origin/${TARGET}`,
+      content: 'line 1\nline 2 from target\nline 3\n',
+    });
+  });
+
   it('publishes the merge inside the same reservation, and after a rejected push replays it onto the moved branch', async () => {
     const { repo, pusher } = await seed(root);
     await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target moves');

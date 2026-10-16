@@ -343,7 +343,7 @@ describe('WorkflowService.updateBranch', () => {
       .mockRejectedValue(new MergePublishRefusedError('ada/draft', 'merge-1', 'remote: permission denied', false));
     const err = await build(git).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
-    expect(err as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: '(update)', cause: 'refused', originalDetail: 'remote: permission denied' });
+    expect(err as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: 'ada/draft', cause: 'refused', originalDetail: 'remote: permission denied' });
   });
 
   it('takes the draft\'s own shared state when no source is named, and publishes nothing on conflicts', async () => {

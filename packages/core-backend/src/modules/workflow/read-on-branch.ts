@@ -28,6 +28,27 @@ export async function readableOnBranch(
   return !verdicts.some((v) => v === false) && !verdicts.every((v) => v === null);
 }
 
+/**
+ * Which of `paths` `userEmail` may read at `origin/<base>`, as a membership
+ * set — ONE rule for the change-request reads (their file lists, judged at
+ * the request's base) and for `branch_status` (the paths a request would
+ * carry). A null answer (the ref, or its `roles.yaml`, does not resolve)
+ * withholds everything, which is the same reading the app's fork-point
+ * route gives it.
+ */
+export async function readablePathsAt(
+  accessControl: Pick<IAccessControl, 'canReadBatchAtRef'>,
+  workspaceId: string,
+  userEmail: string,
+  base: string,
+  paths: string[],
+): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  const verdicts = await accessControl.canReadBatchAtRef(workspaceId, `origin/${base}`, userEmail, [...new Set(paths)]);
+  if (!verdicts) return new Set();
+  return new Set([...verdicts].filter(([, allowed]) => allowed).map(([p]) => p));
+}
+
 /** The refusal `readableOnBranch` answers false with, as both callers word it. */
 export class ReadOnBranchDeniedError extends WorkflowDomainError {
   constructor(displayPath: string, branch: string) {

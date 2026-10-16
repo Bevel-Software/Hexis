@@ -156,25 +156,6 @@ export class BranchDeleteRefusedError extends WorkflowDomainError {
 }
 
 /**
- * Refreshing a workspace from origin (`GitService.pull`) hit a rebase
- * conflict: the workspace carries local commits origin doesn't have, origin
- * moved ahead with changes that touch the same files, and replaying the
- * local commits conflicts. The rebase has already been aborted — the
- * workspace is back in its pre-pull state (diverged, clean tree).
- *
- * This state does NOT resolve itself: every subsequent pull hits the same
- * conflict, and the local commits (someone's saved content, under
- * save=share) stay unshared until the divergence is reconciled. The service
- * layer therefore reacts by queueing a background recovery run (see
- * `WorkflowService.updateFromRemote`); this error tells the caller what
- * happened and which paths are contested.
- *
- * 409 like the other conflict errors — the operation needs the divergence
- * cleared before it can succeed. `detail` (the raw git failure, already
- * credential-redacted by `GitService.git`) is kept OFF the payload; it's for
- * server logs and the recovery pipeline, not the client.
- */
-/**
  * A merge commit was made in the workspace but its publish, run inside the
  * merge's own reservation, did not land: the host refused the push, or the
  * branch kept moving under the replays. The commit is on the branch locally,
@@ -202,6 +183,25 @@ export class MergePublishRefusedError extends WorkflowDomainError {
   }
 }
 
+/**
+ * Refreshing a workspace from origin (`GitService.pull`) hit a rebase
+ * conflict: the workspace carries local commits origin doesn't have, origin
+ * moved ahead with changes that touch the same files, and replaying the
+ * local commits conflicts. The rebase has already been aborted — the
+ * workspace is back in its pre-pull state (diverged, clean tree).
+ *
+ * This state does NOT resolve itself: every subsequent pull hits the same
+ * conflict, and the local commits (someone's saved content, under
+ * save=share) stay unshared until the divergence is reconciled. The service
+ * layer therefore reacts by queueing a background recovery run (see
+ * `WorkflowService.updateFromRemote`); this error tells the caller what
+ * happened and which paths are contested.
+ *
+ * 409 like the other conflict errors — the operation needs the divergence
+ * cleared before it can succeed. `detail` (the raw git failure, already
+ * credential-redacted by `GitService.git`) is kept OFF the payload; it's for
+ * server logs and the recovery pipeline, not the client.
+ */
 export class PullRebaseConflictError extends WorkflowDomainError {
   readonly kind = 'pull-rebase-conflict' as const;
   constructor(
