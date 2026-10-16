@@ -130,6 +130,8 @@ vi.mock('../state/library-data', () => ({
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { LibraryToastProvider } from '../state/toast';
 import { expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
 
 const workspace = {
   workspaceId: 'target-company-state',
@@ -470,6 +472,12 @@ describe('SkillPage', () => {
     renderPage(false);
     await screen.findByRole('heading', { name: 'newsletter' });
     expectTitleRowSpansTheDocumentColumn();
+  });
+
+  it('keeps the tails of its title: it truncates, with room for its ink', async () => {
+    renderPage(false);
+    await screen.findByRole('heading', { name: 'newsletter' });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
   });
 
   it('marks the open tab selected and loads a bundled file on click', async () => {
