@@ -211,7 +211,8 @@ describe('groupsOfUser', () => {
   });
 
   describe('visibleGroups: the one answer the Groups tab, the share dialog and a grant use', () => {
-    const listed = ['Marketing', 'Design', 'Sales Team'];
+    // The active source's groups, in the order a caller happens to hold them.
+    const listed = ['Sales Team', 'Design'];
 
     it('is every group, as given, for an admin', async () => {
       const svc = await makeService();
@@ -220,8 +221,9 @@ describe('groupsOfUser', () => {
 
     it('is only the groups a person is in, in the order given, for anyone else', async () => {
       const svc = await makeService();
-      expect(await svc.visibleGroups(workspaceId, 'sue@x.io', listed)).toEqual(['Design', 'Sales Team']);
+      expect(await svc.visibleGroups(workspaceId, 'sue@x.io', listed)).toEqual(['Sales Team', 'Design']);
       expect(await svc.visibleGroups(workspaceId, 'sam@x.io', listed)).toEqual(['Sales Team']);
+      expect(await svc.visibleGroups(workspaceId, 'dee@x.io', listed)).toEqual(['Design']);
     });
 
     it('is empty for someone in no group, a role that names a group included', async () => {
