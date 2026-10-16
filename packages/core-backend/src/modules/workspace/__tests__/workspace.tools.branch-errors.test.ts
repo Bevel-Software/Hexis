@@ -514,16 +514,19 @@ describe('workspace tools — a branch that cannot be opened', () => {
           headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
         }),
       );
-      const started = Date.now();
       const { result } = await client.callToolChain(
         `const grep = (pattern) => bevel.grep({ body: { branch: 'alice/draft', pattern, path: 'knowledge-base/redos.md' } });
          let expensive;
+         const started = Date.now();
          try { expensive = { ok: grep('^(a+)+$') }; } catch (err) { expensive = { failed: err.message }; }
-         return { expensive, control: grep('^a+!$') };`,
+         const took = Date.now() - started;
+         return { expensive, took, control: grep('^a+!$') };`,
         30_000,
       );
-      // The ticket's 5 s budget, plus the chain's own overhead.
-      expect(Date.now() - started).toBeLessThan(5_000 + 3_000);
+      // The search is stopped at the ticket's 5 s budget: timed around the call
+      // itself, inside the chain, so the chain runtime's own start-up (which
+      // varies by machine) is not what this measures.
+      expect(result.took).toBeLessThan(5_000 + 2_000);
       expect(result.expensive.ok).toBeUndefined();
       expect(result.expensive.failed).toContain('HTTP 400');
       expect(result.expensive.failed).toContain('Pattern too expensive');
