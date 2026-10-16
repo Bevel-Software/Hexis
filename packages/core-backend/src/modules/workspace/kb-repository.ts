@@ -716,11 +716,23 @@ export class KbRepository implements IKbRepository {
     }
     if (stashTop !== null) {
       // Every entry, not only the latest: the older ones are the stash's log.
-      // A failed read throws, the clone kept: an empty answer here would keep
-      // only the latest entry. A stash with no log reads as empty.
+      // Git reads a log it cannot open (EACCES, EIO) as an empty one and
+      // exits 0, so the log is read here first: only an absent one means the
+      // stash is its tip alone, and any other failure throws, the clone kept.
+      const logFile = path.resolve(cloneDir, (await inClone(['rev-parse', '--git-path', 'logs/refs/stash'])).trim());
+      let logged: number;
+      try {
+        logged = (await fs.readFile(logFile, 'utf8')).split('\n').filter((l) => l.trim() !== '').length;
+      } catch (err) {
+        if (!isAbsence(err)) throw err;
+        logged = 0;
+      }
       const entries = (await inClone(['reflog', 'show', '--format=%H', 'refs/stash']))
         .split('\n').map((l) => l.trim()).filter(Boolean);
-      (entries.length > 0 ? entries : [stashTop]).forEach((sha, i) => wanted.push({ sha, dest: `${namespace}/stash/${i}` }));
+      if (entries.length !== logged || (logged > 0 && entries[0] !== stashTop)) {
+        throw new Error(`the stash log of ${cloneDir} holds ${logged} entries, git read ${entries.length} with ${entries[0] ?? 'nothing'} the latest, not ${stashTop}`);
+      }
+      (logged > 0 ? entries : [stashTop]).forEach((sha, i) => wanted.push({ sha, dest: `${namespace}/stash/${i}` }));
     }
     if (wanted.length === 0) return [];
     await this.gitRunner.run(cloneDir, ['push', '--quiet', '--no-verify', this.dir,

@@ -348,4 +348,55 @@ describe('KbRepository.importLocalRefs', () => {
       .rejects.toThrow();
     expect((await git(clone, ['stash', 'list'])).trim().split('\n')).toHaveLength(2);
   });
+
+  /** A clone of alice/a with two stash entries, and the repository to import it into. */
+  async function cloneWithTwoStashes(): Promise<{ repository: KbRepository; clone: string; stashes: string[] }> {
+    const repository = new KbRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner: new NodeGitRunner(),
+    });
+    const clone = path.join(root, 'clone');
+    await git(root, ['clone', '-q', '-b', 'alice/a', upstream, clone]);
+    for (const text of ['first', 'second']) {
+      await fs.writeFile(path.join(clone, 'draft.md'), text);
+      await git(clone, ['stash', 'push', '-q', '-u', '-m', text]);
+    }
+    const stashes = (await git(clone, ['reflog', 'show', '--format=%H', 'refs/stash'])).trim().split('\n');
+    return { repository, clone, stashes };
+  }
+
+  // Git reads a log it cannot open as an empty one and exits 0. Not on
+  // Windows (no POSIX modes) or as root (who reads it anyway).
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'throws when the stash log is unreadable, which git itself reads as empty',
+    async () => {
+      const { repository, clone } = await cloneWithTwoStashes();
+      const logFile = path.join(clone, '.git', 'logs', 'refs', 'stash');
+      await fs.chmod(logFile, 0o000);
+      try {
+        expect((await git(clone, ['reflog', 'show', '--format=%H', 'refs/stash'])).trim()).toBe('');
+        await expect(repository.importLocalRefs(clone, 'alice/a', 'alice%2Fa')).rejects.toThrow(/EACCES/);
+      } finally {
+        await fs.chmod(logFile, 0o644);
+      }
+      await expect(git(repository.dir, ['rev-parse', '--verify', '--quiet', 'refs/kb-converted/alice%2Fa/stash/0']))
+        .rejects.toThrow();
+      expect((await git(clone, ['stash', 'list'])).trim().split('\n')).toHaveLength(2);
+    },
+  );
+
+  it('keeps every stash entry, and only the tip of a stash with no log', async () => {
+    const { repository, clone, stashes } = await cloneWithTwoStashes();
+    const held = (ref: string) => git(repository.dir, ['rev-parse', ref]).then((o) => o.trim());
+
+    await repository.importLocalRefs(clone, 'alice/a', 'alice%2Fa');
+    expect(await held('refs/kb-converted/alice%2Fa/stash/0')).toBe(stashes[0]);
+    expect(await held('refs/kb-converted/alice%2Fa/stash/1')).toBe(stashes[1]);
+
+    await fs.rm(path.join(clone, '.git', 'logs', 'refs', 'stash'));
+    await repository.importLocalRefs(clone, 'alice/a', 'bob%2Fb');
+    expect(await held('refs/kb-converted/bob%2Fb/stash/0')).toBe(stashes[0]);
+    await expect(held('refs/kb-converted/bob%2Fb/stash/1')).rejects.toThrow();
+  });
 });
