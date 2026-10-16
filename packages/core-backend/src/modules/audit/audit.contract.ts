@@ -201,7 +201,7 @@ export interface IAgentConnectionStatus {
 
 export class AuditPrincipalNotFoundError extends Error {
   constructor() {
-    super('No such agent, key or page');
+    super('No such agent');
     this.name = 'AuditPrincipalNotFoundError';
   }
 }

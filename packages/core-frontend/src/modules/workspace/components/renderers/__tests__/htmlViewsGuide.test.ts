@@ -165,10 +165,13 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain('Deny runs nothing and rejects the call with `denied`');
     expect(flat).toContain('"<page name> uses tools that are only available in the platform", with Continue without tools and Open in the platform');
 
-    // requireTools exists on both, and asks the app.
-    for (const bridge of [runBridge(), onFilePage]) {
-      void (bridge.bevel.requireTools as () => Promise<boolean>)();
-      expect((bridge.posted.at(-1) as { type: string }).type).toBe('bevel.tools.require');
+    // requireTools exists on both, asks the app, and resolves with its answer.
+    for (const [bridge, answer] of [[runBridge(), false], [onFilePage, true]] as const) {
+      const required = (bridge.bevel.requireTools as () => Promise<boolean>)();
+      const ask = bridge.posted.at(-1) as { type: string; requestId: string };
+      expect(ask.type).toBe('bevel.tools.require');
+      await bridge.deliver({ type: 'bevel.tools.require.response', requestId: ask.requestId, ok: true, result: answer });
+      await expect(required).resolves.toBe(answer);
     }
   });
 });

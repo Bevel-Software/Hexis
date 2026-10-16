@@ -118,7 +118,7 @@ describe('audit routes — events', () => {
 
   it('404s a page id whose path carries a line break of any kind', async () => {
     const base = await listen(makeApp({ admin: false }));
-    for (const brk of ['\n', '\u0085', '\u2028', '\u2029']) {
+    for (const brk of ['\n', '\r', '\u0085', '\u2028', '\u2029']) {
       const id = pagePrincipalId('33333333-4444-4555-8666-777777777777', `Dashboards/Road${brk}map.html`);
       expect((await fetch(`${base}/api/audit/principals/page/${id}/events`)).status).toBe(404);
     }
@@ -187,7 +187,10 @@ describe('audit routes — revoke an agent', () => {
   it('404s when the connection vanished between the ownership check and the revoke', async () => {
     const base = await listen(makeApp({ admin: false, as: BOB }));
     audit.revokeConnection.mockRejectedValueOnce(new AuditPrincipalNotFoundError());
-    expect((await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' })).status).toBe(404);
+    const res = await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' });
+    expect(res.status).toBe(404);
+    // Only an agent revoke throws it, so it names an agent, as the route's other 404s do.
+    expect(await res.json()).toEqual({ error: 'No such agent' });
   });
 });
 
