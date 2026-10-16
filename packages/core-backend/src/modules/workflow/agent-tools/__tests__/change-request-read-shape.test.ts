@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  ChangeRequest,
-  ChangeRequestDetail,
-  FileApproval,
-} from '@bevel-software/platform-shared';
-import { hashEmail } from '../../../../shared/email-identity.js';
 import {
   authorsDescription,
   replaceAuthorsDescription,
+  type ChangeRequest,
+  type ChangeRequestDetail,
+  type FileApproval,
+} from '@bevel-software/platform-shared';
+import { hashEmail } from '../../../../shared/email-identity.js';
+import {
   fileIsReadable,
   isAuthor,
   loginFor,

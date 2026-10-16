@@ -20,21 +20,3 @@ export async function updateChangeRequest(
     }),
   );
 }
-
-/**
- * What the Edit control offers as the description: the author's part of the
- * body exactly as the server cuts it when it replaces it — everything before
- * the LAST `## Affected owners` line, Hexis's own hidden markers dropped (the
- * server keeps those). Not the dialog's one-line reason, which stops at the
- * first heading of any kind: offering that would drop an author's own `##`
- * sections from the text they then save.
- */
-export function editableDescription(body: string | undefined): string {
-  if (!body) return '';
-  const lines = body.split('\n');
-  const at = lines.lastIndexOf('## Affected owners');
-  return (at === -1 ? lines : lines.slice(0, at))
-    .join('\n')
-    .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
-    .trim();
-}

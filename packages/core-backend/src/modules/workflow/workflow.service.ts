@@ -66,6 +66,10 @@ import {
   folderPlaceholderPath,
   isPlatformRestoreShape,
   CHANGE_REQUEST_TITLE_MAX,
+  AFFECTED_OWNERS_HEADING,
+  authorsDescription,
+  holdsAffectedOwnersHeading,
+  replaceAuthorsDescription,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
@@ -84,7 +88,6 @@ import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
-import { authorsDescription, replaceAuthorsDescription } from './agent-tools/change-request-read-shape.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
@@ -252,7 +255,7 @@ export function formatAffectedOwnersBlock(
   }
   if (eligible === 0) return '';
 
-  const out = ['## Affected owners', '', ...listed];
+  const out = [AFFECTED_OWNERS_HEADING, '', ...listed];
   if (eligible > listed.length) {
     const summary = [
       allRoles.size > 0 ? [...allRoles].sort().join(', ') : '',
@@ -3365,7 +3368,7 @@ export class WorkflowService implements IWorkflowService {
     // The body's LAST `## Affected owners` line is where the generated block
     // starts (`authorsDescription`), so the author's text may not carry one:
     // it would cut the description short the next time it is read.
-    if ([description, appended].some((d) => d !== undefined && d.split('\n').includes('## Affected owners'))) {
+    if ([description, appended].some((d) => d !== undefined && holdsAffectedOwnersHeading(d))) {
       throw new WorkflowValidationError(
         'A description cannot contain a line reading exactly "## Affected owners" — that heading marks the generated owners block. Reword the heading.',
       );

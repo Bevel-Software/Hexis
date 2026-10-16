@@ -50,12 +50,13 @@
  * tools file does the IO and calls in here for every decision.
  */
 
-import type {
-  ChangeRequest,
-  ChangeRequestDetail,
-  ChangeRequestState,
-  ChangedFile,
-  FileApproval,
+import {
+  authorsDescription,
+  type ChangeRequest,
+  type ChangeRequestDetail,
+  type ChangeRequestState,
+  type ChangedFile,
+  type FileApproval,
 } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeKindOf, type ChangeKind } from './change-request-summary.js';
@@ -370,76 +371,6 @@ export function toCrDetail(
     withheldMergeBlockedReasons: blockers.withheld,
     viewer,
   };
-}
-
-/**
- * The part of a change-request body its AUTHOR wrote.
- *
- * A Hexis body is part human and part machine: `openChangeRequest` appends an
- * `## Affected owners` block — one line per changed path, naming that path and
- * its eligible approvers — to whatever the author typed. Returning the body
- * verbatim NAMED every file of the request, including the ones this caller may
- * not read: Local Testing caught a GTM-team reader being handed
- * `- \`KnowledgeBase/Engineering/…\` — Admin` out of a request whose file list
- * had correctly withheld that very path.
- *
- * So the generated block goes, and NOTHING ELSE does. The first cut at this
- * copied the app's dialog, which drops everything from the first `##` heading
- * on; Razvan's review (2026-10-02) asked for the narrower cut, because an
- * author who writes their description in sections loses it from that heading
- * onwards and is never told. The generated block is appended LAST and begins
- * with a line that is exactly `## Affected owners`, so cutting at the LAST such
- * line removes the machinery and keeps every heading a person wrote. (An author
- * who writes that exact heading themselves loses their text from there — the
- * safe direction, and the only way this can err.)
- *
- * Hexis's OWN hidden markers go too — the `<!--hexis:…-->` / `<!--bevel:…-->`
- * comments older bodies carry identity in — and no other comment: an HTML
- * comment the author wrote is the author's prose, like the rest.
- *
- * Who must approve each file is NOT lost by this — it is what
- * `list_change_request_files` answers under `requiredApprovers`, per file and
- * access-filtered, which is where a caller should read it from anyway.
- *
- * Two things this deliberately does not do. It does not vary by caller: one
- * body for everyone is a body nobody has to reason about. And it does not touch
- * the author's own prose, which may mention any path they chose to write about —
- * that is a person's sentence, shown to every viewer in the app, not Hexis
- * naming a file it was asked to withhold.
- */
-export function authorsDescription(body: string): string {
-  return splitBody(body).authors.replace(HEXIS_MARKER, '').trim();
-}
-
-/** Hexis's own hidden markers in a request body — see {@link authorsDescription}. */
-const HEXIS_MARKER = /<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g;
-
-/** The author's part of a body, and the generated block after it ('' when none). */
-function splitBody(body: string): { authors: string; generated: string } {
-  const lines = body.split('\n');
-  const at = lines.lastIndexOf('## Affected owners');
-  return at === -1
-    ? { authors: body, generated: '' }
-    : { authors: lines.slice(0, at).join('\n'), generated: lines.slice(at).join('\n') };
-}
-
-/**
- * The body with the author's part replaced by `description` — the inverse of
- * {@link authorsDescription}, so an edit changes exactly the text a reader is
- * shown as the description and nothing else.
- *
- * Kept: the generated `## Affected owners` block, and Hexis's own hidden
- * markers, which the platform reads back out of the body (an access request's
- * level). They are carried on one line ahead of the new text, where every
- * surface that renders a description hides them. A marker that opened a fenced
- * passage of the old text (an access request's note) is carried with nothing
- * fenced after it, which reads back as no note — the text it fenced is what the
- * edit replaced.
- */
-export function replaceAuthorsDescription(body: string, description: string): string {
-  const { authors, generated } = splitBody(body);
-  const markers = (authors.match(HEXIS_MARKER) ?? []).join('');
-  return [markers, description.trim(), generated.trim()].filter((s) => s.length > 0).join('\n\n');
 }
 
 /**

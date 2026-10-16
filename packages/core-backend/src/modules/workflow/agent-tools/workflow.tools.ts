@@ -145,7 +145,9 @@ export function registerWorkflowTools(
   /**
    * Whether the caller may see change request `number` — `get_change_request`'s
    * own gate (`changeRequestScope(...).maySee`). `delete_branch` neither names
-   * nor links a request it answers no for.
+   * nor links a request it answers no for, and `update_change_request` answers
+   * such a request exactly as `get_change_request` does (404) before reading its
+   * state or who may edit it.
    */
   maySeeChangeRequest: (ctx: ToolContext, number: number) => Promise<boolean>,
 ): void {
@@ -461,7 +463,7 @@ export function registerWorkflowTools(
       'Edit control; anyone else is refused (403), and so is a merged or closed request (409), in words. ' +
       '`description` replaces what the author wrote — the text `get_change_request` answers as `body`; the ' +
       'generated owners block stays. Give at least one of the two; an absent one keeps its text. ' +
-      '`get_change_request` answers the new text at once.',
+      '`get_change_request` answers the new text at once. A request you may not see answers 404, as `get_change_request` does.',
     inputs: {
       type: 'object',
       properties: {
@@ -492,7 +494,13 @@ export function registerWorkflowTools(
       if (title === undefined && description === undefined) {
         throw new ToolError('Give a new `title`, a new `description`, or both.', 400);
       }
-      const updated = await ctx.workflowService.updateChangeRequest(args.number as number, ctx.user, {
+      // A request the caller may not read is not found — never a 403 or a
+      // state-specific 409, which would tell a probe that it exists.
+      const number = args.number as number;
+      if (!(await maySeeChangeRequest(ctx, number))) {
+        throw new ToolError(`Change request #${number} not found.`, 404);
+      }
+      const updated = await ctx.workflowService.updateChangeRequest(number, ctx.user, {
         title,
         description,
       });

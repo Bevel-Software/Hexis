@@ -1,5 +1,6 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  authorsDescription,
   DEFAULT_BRANCH,
   type FileDiffPayload,
   type PullRequestDetail,
@@ -16,7 +17,7 @@ import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useEventBus } from '../../workflow/state/event-bus.context';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
-import { editableDescription, updateChangeRequest } from '../../pr/services/pr-edit.api';
+import { updateChangeRequest } from '../../pr/services/pr-edit.api';
 import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
 import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
@@ -893,10 +894,12 @@ export function ChangeRequestDialog({
   // The text the form opened with. A save sends only the fields the reader
   // changed FROM it — not from `detail`, which a remote edit may refresh
   // while the form is open — so the untouched field is never written back
-  // with a stale draft.
+  // with a stale draft. The description offered is the author's part of the
+  // body cut by the server's own `authorsDescription` (shared), not the
+  // dialog's one-line reason, which stops at the first heading of any kind.
   const editBaseline = useRef({ title: '', description: '' });
   function startEditing() {
-    const baseline = { title: shownTitle, description: editableDescription(detail?.body) };
+    const baseline = { title: shownTitle, description: authorsDescription(detail?.body ?? '') };
     editBaseline.current = baseline;
     setDraftTitle(baseline.title);
     setDraftDescription(baseline.description);

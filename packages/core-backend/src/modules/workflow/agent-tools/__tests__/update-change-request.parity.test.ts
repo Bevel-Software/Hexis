@@ -23,6 +23,11 @@ import { registerWorkflowTools } from '../workflow.tools.js';
  * both callers with the same status and the same words. The rule itself is
  * pinned in `workflow.service.update-change-request.test.ts`; this pins that
  * neither surface narrows, widens or rewords it.
+ *
+ * One answer differs, and on purpose: a request the caller may not READ is
+ * not found to the agent (404, as `get_change_request` answers it), before
+ * its state or the edit rule is consulted. The app serves every request's
+ * detail to any signed-in viewer, so its route has nothing to hide.
  */
 
 const CALLER = { id: 'user-A', email: 'alice@example.com', name: 'Alice' };
@@ -30,6 +35,8 @@ const CALLER = { id: 'user-A', email: 'alice@example.com', name: 'Alice' };
 let calls: unknown[][] = [];
 /** What the shared service does next: answer the request, or refuse. */
 let outcome: () => unknown;
+/** `get_change_request`'s visibility gate, as the tool is handed it. */
+let maySee: (number: number) => Promise<boolean>;
 
 const updated = {
   number: 9,
@@ -94,7 +101,9 @@ async function start(): Promise<string> {
     kbDirName: 'knowledge-base',
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
   } as never);
-  registerWorkflowTools(registry, toolRouter, toolAuth, createToolHandlerFactory(resolve), testKbContext(), async () => true);
+  registerWorkflowTools(registry, toolRouter, toolAuth, createToolHandlerFactory(resolve), testKbContext(), async (_ctx, number) =>
+    maySee(number),
+  );
 
   app.use('/api', toolRouter);
   app.use('/api', appRouter);
@@ -125,6 +134,7 @@ async function viaTool(base: string, body: Record<string, unknown>) {
 beforeEach(() => {
   calls = [];
   outcome = () => updated;
+  maySee = async () => true;
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -195,6 +205,17 @@ describe('update_change_request ⇔ PATCH /workflow/change-requests/:number', ()
       expect((route.body.error as string).length).toBeGreaterThan(20);
     });
   }
+
+  it('the tool answers a request the caller may not see as not found, whatever its state or the rule would say', async () => {
+    const base = await start();
+    maySee = async () => false;
+    for (const [, refuse] of refusals) {
+      outcome = refuse;
+      const tool = await viaTool(base, { title: 'New title' });
+      expect(tool).toEqual({ status: 404, body: { error: 'Change request #9 not found.' } });
+    }
+    expect(calls).toEqual([]);
+  });
 
   it('the tool answers the request’s link and its title; the route the request', async () => {
     const base = await start();
