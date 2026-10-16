@@ -540,12 +540,11 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
 
       const asReviewer = await opsFor('rev@x.io');
       expect(asReviewer.referencedBy.map((r) => r.path).sort()).toEqual(['secret/Plan.md', 'team/access.md']);
-      expect(asReviewer.referencesHidden).toBe(0);
-      // The Admin cannot read secret/Plan.md: its rule still stops granting on
-      // delete, so it is counted, but its path is not shown.
+      // The Admin cannot read secret/Plan.md: its rule is left out entirely —
+      // not named, and not counted either (Admin status does not grant read).
       const asAdmin = await opsFor('admin@x.io');
       expect(asAdmin.referencedBy).toEqual([{ path: 'team/access.md', verb: 'write' }]);
-      expect(asAdmin.referencesHidden).toBe(1);
+      expect(asAdmin).not.toHaveProperty('referencesHidden');
     } finally {
       await fs.rm(root2, { recursive: true, force: true });
     }

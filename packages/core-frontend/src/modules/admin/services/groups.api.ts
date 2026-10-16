@@ -24,11 +24,6 @@ export interface GroupRosterEntry {
    */
   referencedBy: { path: string; verb: string }[];
   /**
-   * How many more rules reference this group in files the viewer cannot read
-   * (counted, never named). Optional defensively, like `assignedToRoles`.
-   */
-  referencesHidden?: number;
-  /**
    * Canonical names of roles carrying an assignment to this group — deleting
    * the group also unassigns it from these roles (they lose the members they
    * inherit through it), which the delete confirm must say. Optional

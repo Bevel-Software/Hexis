@@ -54,7 +54,7 @@ import {
   type GroupsEditResult,
 } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
-import { KbReferenceScanner, partitionReadable } from './reference-scan.js';
+import { KbReferenceScanner, readableReferences } from './reference-scan.js';
 
 /** Where role→group assignments live (`group:<canonical>` member entries). */
 const ROLES_YAML = 'roles.yaml';
@@ -79,8 +79,6 @@ export interface GroupRosterEntry {
    * in a file the roster's viewer can read (see `getRoster`).
    */
   referencedBy: { path: string; verb: string }[];
-  /** How many more rules reference this group in files the viewer cannot read. */
-  referencesHidden: number;
   /**
    * The access rules that name this group's name BARE while a ROLE of the same
    * name exists. A bare name is the role, so these rules grant the role, not
@@ -225,7 +223,6 @@ export class GroupsAdminService {
           ...(referencesByToken.get(`${GROUP_TOKEN_PREFIX}${canonical}`) ?? []),
           ...(roles.has(canonical) ? [] : referencesByToken.get(canonical) ?? []),
         ],
-        referencesHidden: 0,
         bareNameResolvesToRole: roles.has(canonical) ? referencesByToken.get(canonical) ?? [] : [],
         assignedToRoles: assignedByGroup.get(canonical) ?? [],
       });
@@ -236,8 +233,8 @@ export class GroupsAdminService {
 
   /**
    * Drop every `referencedBy` and `bareNameResolvesToRole` row whose file the
-   * viewer cannot read. The dropped `referencedBy` rows stay as a count, so the
-   * delete confirmation still says how many rules stop granting.
+   * viewer cannot read. Dropped, not counted: Admin status does not grant
+   * read, so a count of rules in unreadable content would be a disclosure.
    */
   private async keepReadableReferences(
     workspaceId: string,
@@ -250,10 +247,8 @@ export class GroupsAdminService {
     if (paths.length === 0) return;
     const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
     for (const g of groups) {
-      const refs = partitionReadable(g.referencedBy, readable);
-      g.referencedBy = refs.shown;
-      g.referencesHidden = refs.hidden;
-      g.bareNameResolvesToRole = partitionReadable(g.bareNameResolvesToRole, readable).shown;
+      g.referencedBy = readableReferences(g.referencedBy, readable);
+      g.bareNameResolvesToRole = readableReferences(g.bareNameResolvesToRole, readable);
     }
   }
 

@@ -61,10 +61,9 @@ export function DirectoryGroupsPage() {
   const [working, setWorking] = useState(false);
   // Group pending delete confirmation (manual mode).
   const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
-  // Rules in files the admin cannot read are counted, never named — they still
-  // stop granting on delete, so the warning's total includes them.
-  const deleteHiddenCount = deleteTarget?.referencesHidden ?? 0;
-  const deleteRuleCount = (deleteTarget?.referencedBy.length ?? 0) + deleteHiddenCount;
+  // Only rules in files the admin can read: the roster leaves the rest out
+  // entirely (Admin status does not grant read, not even a count).
+  const deleteRuleCount = deleteTarget?.referencedBy.length ?? 0;
   // The overlay panel's "a directory connection exists" signal — true between
   // connecting and the first push, when the roster still reads 'manual' but
   // manual edits would go dormant. See GroupsDirectoryPanelProps.
@@ -307,11 +306,6 @@ export function DirectoryGroupsPage() {
                       {ref.verb} · {ref.path}
                     </li>
                   ))}
-                  {deleteHiddenCount > 0 && (
-                    <li className="truncate">
-                      {deleteHiddenCount} more rule{deleteHiddenCount === 1 ? '' : 's'} in content you cannot read
-                    </li>
-                  )}
                 </ul>
               </>
             ) : (deleteTarget.assignedToRoles?.length ?? 0) === 0 ? (

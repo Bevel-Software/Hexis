@@ -284,16 +284,15 @@ describe('RolesAdminService', () => {
     expect((await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'admin')!.referencedBy).toEqual([]);
   });
 
-  it("getRoster names only files the viewer can read and counts the rest — an Admin can't read Sales's files", async () => {
+  it("getRoster names only files the viewer can read and leaves the rest out, uncounted — an Admin can't read Sales's files", async () => {
     await write(repo, 'team/access.md', '---\nread:\n  - deny everyone\n  - Sales\n---\n');
     await write(repo, 'team/deal.md', '---\nowner: Sales\n---\n# Deal\n');
 
     const asAdmin = (await svc.getRoster(ADMIN.email)).find((r) => r.canonical === 'sales')!;
     expect(asAdmin.referencedBy).toEqual([]);
-    expect(asAdmin.referencesHidden).toBe(2);
+    expect(asAdmin).not.toHaveProperty('referencesHidden');
     const asMember = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
     expect(asMember.referencedBy).toHaveLength(2);
-    expect(asMember.referencesHidden).toBe(0);
   });
 
   it('addMember persists + is idempotent', async () => {

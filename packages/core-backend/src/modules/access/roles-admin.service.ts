@@ -71,7 +71,7 @@ import {
 import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
 import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from '../access-model/access-grammar.js';
 import { AdminLockedCommits } from './admin-locked-commit.js';
-import { KbReferenceScanner, partitionReadable } from './reference-scan.js';
+import { KbReferenceScanner, readableReferences } from './reference-scan.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
 export class RolesAdminError extends WorkflowDomainError {
@@ -129,8 +129,6 @@ export interface RoleRosterEntry {
    * are listed (see `getRoster`).
    */
   referencedBy: { path: string; verb: string }[];
-  /** How many more rules reference this role in files the viewer cannot read. */
-  referencesHidden: number;
 }
 
 const ROLES_YAML = 'roles.yaml';
@@ -353,16 +351,13 @@ export class RolesAdminService {
           ...(referencesByToken.get(canonical) ?? []),
           ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${canonical}`) ?? []),
         ],
-        referencesHidden: 0,
       });
     }
     const paths = [...new Set(out.flatMap((r) => r.referencedBy.map((ref) => ref.path)))];
     if (paths.length > 0) {
       const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
       for (const r of out) {
-        const refs = partitionReadable(r.referencedBy, readable);
-        r.referencedBy = refs.shown;
-        r.referencesHidden = refs.hidden;
+        r.referencedBy = readableReferences(r.referencedBy, readable);
       }
     }
     return out;

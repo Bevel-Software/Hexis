@@ -266,19 +266,14 @@ describe('DirectoryGroupsPage', () => {
     await waitFor(() => expect(deleteGroup).toHaveBeenCalledWith('product'));
   });
 
-  it('the delete confirm counts rules in files the admin cannot read, without naming them', async () => {
-    vi.mocked(getGroupsRoster).mockResolvedValue({
-      ...MANUAL_ROSTER,
-      groups: MANUAL_ROSTER.groups.map((g) => (g.canonical === 'product' ? { ...g, referencesHidden: 2 } : g)),
-    });
+  it('the delete confirm counts and names only the rules the roster lists, with no hidden-content line', async () => {
     renderPage();
     await userEvent.click(await screen.findByRole('button', { name: 'Delete Product' }));
 
     const dialog = within(screen.getByRole('dialog'));
-    expect(dialog.getByText(/3 access rules/)).toBeInTheDocument();
+    expect(dialog.getByText(/1 access rule\b/)).toBeInTheDocument();
     expect(dialog.getByText(/docs\/roadmap\.md/)).toBeInTheDocument();
-    // A count of RULES, not files: two may sit in one file.
-    expect(dialog.getByText('2 more rules in content you cannot read')).toBeInTheDocument();
+    expect(dialog.queryByText(/cannot read/)).not.toBeInTheDocument();
   });
 
   it('idp mode: read-only roster, no mutation controls, membership note shown', async () => {

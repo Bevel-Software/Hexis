@@ -364,13 +364,16 @@ async function disclosablePaths(paths: string[], visible: PathVisibility): Promi
   return shown.join(', ');
 }
 
-/** `refs` split into the rows whose file `readable` allows, and a count of the rest. */
-export function partitionReadable(
+/**
+ * The rows of `refs` whose file `readable` allows. The rest are dropped
+ * outright, not counted: Admin status does not grant read, so even a count of
+ * rules in content the viewer cannot read is a disclosure.
+ */
+export function readableReferences(
   refs: readonly ReferenceHit[],
   readable: ReadonlyMap<string, boolean>,
-): { shown: ReferenceHit[]; hidden: number } {
-  const shown = refs.filter((r) => readable.get(r.path) === true);
-  return { shown, hidden: refs.length - shown.length };
+): ReferenceHit[] {
+  return refs.filter((r) => readable.get(r.path) === true);
 }
 
 /** How long a cached reference scan may serve after its load. Backstop only —

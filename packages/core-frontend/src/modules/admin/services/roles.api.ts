@@ -40,8 +40,6 @@ export interface RoleRosterEntry {
    */
   capability: { description: string; groupAssignable: boolean } | null;
   referencedBy: { path: string; verb: string }[];
-  /** Rules referencing this role in files the viewer cannot read (counted, never named). */
-  referencesHidden?: number;
 }
 
 /**
