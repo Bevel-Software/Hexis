@@ -25,6 +25,7 @@ export * from './git/pr.types.js';
 export * from './git/protected.js';
 export * from './git/branchAuthor.js';
 export * from './git/review.types.js';
+export * from './git/change-request-body.js';
 
 // Workflow — abstraction layer over git/PR/review-workflow. See PLAN.md.
 export * from './workflow/types.js';

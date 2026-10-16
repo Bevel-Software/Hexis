@@ -1,12 +1,14 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  authorsDescription,
   DEFAULT_BRANCH,
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
+  type UpdateChangeRequestInput,
 } from '@bevel-software/platform-shared';
 import '../change-requests.css';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, Surface, TextAreaField, TextField } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
@@ -15,6 +17,7 @@ import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useEventBus } from '../../workflow/state/event-bus.context';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
+import { updateChangeRequest } from '../../pr/services/pr-edit.api';
 import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
 import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
@@ -233,6 +236,8 @@ export function ChangeRequestDialog({
     const offs = [
       bus.subscribe('change-request-apply-failed', reread),
       bus.subscribe('change-request-merged', reread),
+      // Somebody changed the title or description: show the new text.
+      bus.subscribe('change-request-edited', reread),
     ];
     return () => {
       cancelled = true;
@@ -874,6 +879,71 @@ export function ChangeRequestDialog({
   }
 
   /**
+   * Editing the title and description — the author's, or anyone's who may
+   * merge the request (`viewerCanEdit`, the server's verdict; the PATCH route
+   * re-checks it). The description field holds what the author wrote, the
+   * same part the server replaces; the generated owners block is not offered
+   * and is kept.
+   */
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const shownTitle = detail?.title ?? cr.title;
+  // The text the form opened with. A save sends only the fields the reader
+  // changed FROM it — not from `detail`, which a remote edit may refresh
+  // while the form is open — so the untouched field is never written back
+  // with a stale draft. The description offered is the author's part of the
+  // body cut by the server's own `authorsDescription` (shared), not the
+  // dialog's one-line reason, which stops at the first heading of any kind.
+  const editBaseline = useRef({ title: '', description: '' });
+  function startEditing() {
+    const baseline = { title: shownTitle, description: authorsDescription(detail?.body ?? '') };
+    editBaseline.current = baseline;
+    setDraftTitle(baseline.title);
+    setDraftDescription(baseline.description);
+    setEditError(null);
+    setEditing(true);
+  }
+  async function saveEdit() {
+    if (saving || !detail) return;
+    const title = draftTitle.trim();
+    const description = draftDescription.trim();
+    const titleChanged = title !== editBaseline.current.title;
+    const descriptionChanged = description !== editBaseline.current.description;
+    let changes: UpdateChangeRequestInput;
+    if (titleChanged) changes = descriptionChanged ? { title, description } : { title };
+    else if (descriptionChanged) changes = { description };
+    else {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setEditError(null);
+    try {
+      await updateChangeRequest(cr.number, changes);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "Couldn't save the change request.");
+      setSaving(false);
+      return;
+    }
+    // Saved. Every list on the page re-reads — this tab does not wait on its
+    // own broadcast — and the dialog shows the new text from a fresh read; a
+    // failed read leaves the saved edit saved and shows the last text known.
+    window.dispatchEvent(new Event(PR_STALE_EVENT));
+    setEditing(false);
+    setSaving(false);
+    const seq = ++detailSeq.current;
+    try {
+      const fresh = await fetchPrDetail(cr.number, { fresh: true });
+      if (seq === detailSeq.current) setDetail(fresh);
+    } catch {
+      // The server's `change-request-edited` broadcast re-reads it again.
+    }
+  }
+
+  /**
    * Apply = record the approvals the gate requires, then merge, then wait for
    * the merge to land. The POST only acks — see `useApplyChangeRequest` for
    * why awaiting it is not an answer.
@@ -1029,7 +1099,7 @@ export function ChangeRequestDialog({
       className="fixed inset-0 z-[60] flex flex-col"
       role="dialog"
       aria-modal="true"
-      aria-label={`Change request: ${cr.title}`}
+      aria-label={`Change request: ${shownTitle}`}
     >
       <div className="absolute inset-0 bg-scrim" onClick={onClose} />
 
@@ -1042,13 +1112,29 @@ export function ChangeRequestDialog({
         <div className="flex items-start gap-4 px-8 pt-7">
           <div className="min-w-0 flex-1">
             <p className="text-label font-semibold uppercase text-ink-faint">Change request</p>
-            <h1 className="mt-1 text-title font-medium text-ink">{cr.title}</h1>
+            {editing ? (
+              <TextField
+                className="mt-1 text-title font-medium"
+                aria-label="Title"
+                value={draftTitle}
+                maxLength={256}
+                disabled={saving}
+                onChange={(e) => setDraftTitle(e.target.value)}
+              />
+            ) : (
+              <h1 className="mt-1 text-title font-medium text-ink">{shownTitle}</h1>
+            )}
             <p className="mt-2 flex flex-wrap items-center gap-2 text-detail text-ink-muted">
               <span>{author}</span>
               <span aria-hidden="true" className="text-ink-faint">·</span>
               <span className="font-mono">{cr.branch}</span>
             </p>
           </div>
+          {detail?.viewerCanEdit && !editing && (
+            <Button variant="quiet" size="sm" onClick={startEditing}>
+              Edit
+            </Button>
+          )}
           <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close change request">
             ✕
           </Button>
@@ -1064,7 +1150,38 @@ export function ChangeRequestDialog({
             more opens the whole thing (self-scrolling past half the surface,
             so even an essay never pushes the files off screen); Hide folds it
             back to the line. */}
-        {why && (
+        {editing && (
+          <div className="mx-8 mt-5 shrink-0">
+            <TextAreaField
+              className="max-h-[40vh] min-h-32"
+              aria-label="Description"
+              placeholder="Why this change, in your words"
+              value={draftDescription}
+              disabled={saving}
+              onChange={(e) => setDraftDescription(e.target.value)}
+            />
+            {editError && (
+              <Banner tone="danger" role="alert" className="mt-3">
+                {editError}
+              </Banner>
+            )}
+            <div className="mt-3 flex items-center gap-3">
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={saving || draftTitle.trim().length === 0}
+                onClick={() => void saveEdit()}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </Button>
+              <Button variant="quiet" size="sm" disabled={saving} onClick={() => setEditing(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!editing && why && (
           <blockquote
             className={cn(
               'mx-8 mt-5 shrink-0 border-l-2 border-line-strong pl-4 text-body text-ink',

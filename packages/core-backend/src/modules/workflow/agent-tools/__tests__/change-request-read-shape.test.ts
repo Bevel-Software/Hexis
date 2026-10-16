@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  ChangeRequest,
-  ChangeRequestDetail,
-  FileApproval,
+import {
+  authorsDescription,
+  replaceAuthorsDescription,
+  type ChangeRequest,
+  type ChangeRequestDetail,
+  type FileApproval,
 } from '@bevel-software/platform-shared';
 import { hashEmail } from '../../../../shared/email-identity.js';
 import {
-  authorsDescription,
   fileIsReadable,
   isAuthor,
   loginFor,
@@ -19,8 +20,6 @@ import {
   toCrViewer,
   toCrSummary,
   APPLY_FAILURE_REASON_WITHHELD,
-  visibleComments,
-  toCrComment,
   toCrFile,
   toCrReviews,
   visibleBlockers,
@@ -373,56 +372,6 @@ describe('reviews, gathered out of the per-file approvals', () => {
   });
 });
 
-describe('comments', () => {
-  // Scenario: WHEN a reviewer left an inline comment and a reply followed THEN
-  // `list_change_request_comments` returns both, the reply with `parentId`.
-  it('maps an inline comment and a reply, the reply carrying `parentId`', () => {
-    const inline = toCrComment({
-      id: 'c-1',
-      author: { email: 'mia@bevel.software', name: 'Mia' },
-      body: 'This line is out of date.',
-      path: 'Knowledge/A.md',
-      line: 14,
-      headSha: 'head-1',
-      createdAt: '2026-09-29T08:00:00.000Z',
-    });
-    expect(inline).toEqual({
-      id: 'c-1',
-      author: { login: loginFor('mia@bevel.software'), name: 'Mia', email: 'mia@bevel.software' },
-      body: 'This line is out of date.',
-      path: 'Knowledge/A.md',
-      line: 14,
-      headSha: 'head-1',
-      createdAt: '2026-09-29T08:00:00.000Z',
-    });
-    const reply = toCrComment({
-      id: 'c-2',
-      author: { email: AUTHOR, name: 'Juan' },
-      body: 'Fixed.',
-      path: 'Knowledge/A.md',
-      line: 14,
-      headSha: 'head-1',
-      parentId: 'c-1',
-      createdAt: '2026-09-29T09:00:00.000Z',
-      updatedAt: '2026-09-29T09:05:00.000Z',
-    });
-    expect(reply).toMatchObject({ parentId: 'c-1', updatedAt: '2026-09-29T09:05:00.000Z' });
-  });
-
-  it('leaves `path`, `line` and `parentId` off a general comment', () => {
-    const general = toCrComment({
-      id: 'c-3',
-      author: { email: AUTHOR, name: 'Juan' },
-      body: 'Ready for review.',
-      headSha: 'head-1',
-      createdAt: '2026-09-29T07:00:00.000Z',
-    });
-    expect(general.path).toBeUndefined();
-    expect(general.line).toBeUndefined();
-    expect(general.parentId).toBeUndefined();
-  });
-});
-
 describe('the viewer block — what this caller may do', () => {
   const detail = (over: Partial<ChangeRequestDetail> = {}) =>
     ({
@@ -552,6 +501,19 @@ describe('the body a caller is handed is the author\'s, not the machine\'s', () 
     );
   });
 
+  it("strips both ends of a fenced Hexis passage — the closer is Hexis's too — and keeps the fenced prose", () => {
+    const body = [
+      '<!--hexis:access-request-level:write-->',
+      'Note from Ana:',
+      '',
+      '<!--hexis:access-request-note-->',
+      '> Please.',
+      '<!--/hexis:access-request-note-->',
+      '<!-- my own aside -->',
+    ].join('\n');
+    expect(authorsDescription(body)).toBe('Note from Ana:\n\n\n> Please.\n\n<!-- my own aside -->');
+  });
+
   it('leaves a body that is only the author\'s prose alone', () => {
     expect(authorsDescription('  A multi-line\nreason.  ')).toBe('A multi-line\nreason.');
     expect(authorsDescription('')).toBe('');
@@ -617,89 +579,43 @@ describe('a renamed file is judged on both of its names', () => {
 });
 
 /**
- * A reply is shown only when the comment it replies to is (Razvan's review,
- * 2026-10-02, finding 3). A reply posted without a path of its own — which
- * `post_change_request_comment` accepts, taking `parentId` without `path` — read
- * as a general comment when judged on itself, so a reply to a comment on a
- * withheld file came back with its body and a `parentId` naming a comment the
- * caller cannot see.
+ * An edit of the description replaces exactly what `get_change_request`
+ * answers as `body`, and nothing else — so what the agent (or the app) writes
+ * is what the next read hands back, and the machine's parts stay.
  */
-describe('a reply takes its parent\'s verdict, up the chain', () => {
-  const c = (id: string, over: { path?: string; parentId?: string } = {}) => ({ id, ...over });
-  const mayShow = (path: string) => path.startsWith('Open/');
+describe('an edited description replaces the author\'s part, and only that', () => {
+  const GENERATED = '## Affected owners\n\n- `KnowledgeBase/GTM/Notes.md` — GTM Team';
 
-  it('withholds a pathless reply to a comment on a file the caller may not read', () => {
-    const { visible, withheld } = visibleComments(
-      [c('c-1', { path: 'Secret/Pay.md' }), c('c-2', { parentId: 'c-1' })],
-      mayShow,
+  it('reads back as written, with the generated block still there', () => {
+    const body = replaceAuthorsDescription(`Old reason.\n\n${GENERATED}`, 'P2 - Planned\n\nNew reason.');
+    expect(body).toBe(`P2 - Planned\n\nNew reason.\n\n${GENERATED}`);
+    expect(authorsDescription(body)).toBe('P2 - Planned\n\nNew reason.');
+  });
+
+  it("keeps the author's own headings and replaces from the top, not from the first heading", () => {
+    const body = replaceAuthorsDescription(`Lead.\n\n## Why now\n\nBecause.\n\n${GENERATED}`, 'Shorter.');
+    expect(body).toBe(`Shorter.\n\n${GENERATED}`);
+  });
+
+  it("carries Hexis's markers, so an access request's level survives", () => {
+    const body = replaceAuthorsDescription('<!--hexis:access-request-level:owner-->\nAsked for Owner.', 'Edited.');
+    expect(body).toContain('<!--hexis:access-request-level:owner-->');
+    expect(authorsDescription(body)).toBe('Edited.');
+  });
+
+  it("carries a fenced note's opener and closer together, fencing nothing, and shows neither", () => {
+    const body = replaceAuthorsDescription(
+      '<!--hexis:access-request-level:write-->\n<!--hexis:access-request-note-->\n> Please.\n<!--/hexis:access-request-note-->',
+      'Edited.',
     );
-    expect(visible).toEqual([]);
-    expect(withheld).toBe(2);
-  });
-
-  it('withholds a reply to that reply, however deep the thread goes', () => {
-    const { visible, withheld } = visibleComments(
-      [
-        c('c-1', { path: 'Secret/Pay.md' }),
-        c('c-2', { parentId: 'c-1' }),
-        c('c-3', { parentId: 'c-2' }),
-        c('c-4', { parentId: 'c-3' }),
-      ],
-      mayShow,
+    expect(body).toBe(
+      '<!--hexis:access-request-level:write--><!--hexis:access-request-note--><!--/hexis:access-request-note-->\n\nEdited.',
     );
-    expect(visible).toEqual([]);
-    expect(withheld).toBe(4);
+    expect(authorsDescription(body)).toBe('Edited.');
   });
 
-  it('keeps a reply whose whole chain is readable', () => {
-    const { visible, withheld } = visibleComments(
-      [c('c-1', { path: 'Open/A.md' }), c('c-2', { parentId: 'c-1' }), c('c-3', { parentId: 'c-2' })],
-      mayShow,
-    );
-    expect(visible.map((v) => v.id)).toEqual(['c-1', 'c-2', 'c-3']);
-    expect(withheld).toBe(0);
-  });
-
-  // Both halves of the rule are needed, and this is the half the inheritance
-  // alone would miss: the reply names a withheld file itself.
-  it('withholds a reply that names a withheld file under a readable parent', () => {
-    const { visible } = visibleComments(
-      [c('c-1', { path: 'Open/A.md' }), c('c-2', { path: 'Secret/Pay.md', parentId: 'c-1' })],
-      mayShow,
-    );
-    expect(visible.map((v) => v.id)).toEqual(['c-1']);
-  });
-
-  it('keeps a general comment and a reply to one — neither is about a file', () => {
-    const { visible, withheld } = visibleComments([c('c-1'), c('c-2', { parentId: 'c-1' })], mayShow);
-    expect(visible.map((v) => v.id)).toEqual(['c-1', 'c-2']);
-    expect(withheld).toBe(0);
-  });
-
-  it('withholds a reply whose parent is not in the list at all', () => {
-    // Not provably pathless, so it goes: the parent may have been anchored to
-    // anything, including a file this caller was refused.
-    const { visible, withheld } = visibleComments([c('c-2', { parentId: 'gone' })], mayShow);
-    expect(visible).toEqual([]);
-    expect(withheld).toBe(1);
-  });
-
-  it('withholds a cycle rather than looping on it', () => {
-    const { visible, withheld } = visibleComments(
-      [c('c-1', { parentId: 'c-2' }), c('c-2', { parentId: 'c-1' })],
-      mayShow,
-    );
-    expect(visible).toEqual([]);
-    expect(withheld).toBe(2);
-  });
-
-  it('resolves a long thread without re-walking it per reply', () => {
-    // 500 replies in one chain: memoised, this is linear; unmemoised it is
-    // quadratic and the suite would feel it.
-    const chain = [c('c-0', { path: 'Open/A.md' })];
-    for (let i = 1; i <= 500; i++) chain.push(c(`c-${i}`, { parentId: `c-${i - 1}` }));
-    const { visible, withheld } = visibleComments(chain, mayShow);
-    expect(visible).toHaveLength(501);
-    expect(withheld).toBe(0);
+  it('an empty description leaves just the generated block', () => {
+    expect(replaceAuthorsDescription(`Old.\n\n${GENERATED}`, '  ')).toBe(GENERATED);
+    expect(replaceAuthorsDescription('Old.', '')).toBe('');
   });
 });

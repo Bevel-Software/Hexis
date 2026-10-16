@@ -10,7 +10,7 @@
  * `externalApiKeys`) from here. `schema.ts` re-exports both, so existing
  * imports keep working unchanged.
  *
- * PII columns (emails, display names, change-request/comment text) are
+ * PII columns (emails, display names, change-request text) are
  * `encryptedText` — AES-256-GCM ciphertext in the database, transparently
  * decrypted on read (see `shared/column-crypto.ts`). Because the ciphertext is
  * randomized, equality lookups and unique constraints on those columns go
@@ -129,47 +129,13 @@ export const prMergeLog = pgTable('pr_merge_log', {
 }));
 
 /**
- * In-app PR comments. GitHub is authoritative for the diff + PR metadata;
- * Bevel owns the review conversation. Comments never round-trip to GitHub.
- *
- * Shape encodes three comment kinds:
- *   • General PR comment        — path null, line null
- *   • File-level comment        — path set,  line null
- *   • Inline (line-anchored)    — path set,  line set
- *
- * Threading: replies point at their root via `parentId`. Root comments have
- * `parentId = null`. We use a self-FK-less column (no DB-side constraint) to
- * keep the parent row independently deletable — the service layer tolerates
- * orphan replies rather than cascading deletes and losing discussion context.
- */
-export const prComments = pgTable('pr_comments', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  prNumber: integer('pr_number').notNull(),
-  authorEmail: encryptedText('author_email').notNull(),
-  /** Blind index of `author_email` — GDPR-erasure lookup. */
-  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
-  authorName: encryptedText('author_name').notNull(),
-  path: text('path'),
-  line: integer('line'),
-  headSha: text('head_sha').notNull(),
-  // Encrypted: review conversation exists only in this DB (never on GitHub).
-  body: encryptedText('body').notNull(),
-  parentId: uuid('parent_id'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at'),
-}, (t) => ({
-  byPr: index('pr_comments_by_pr').on(t.prNumber),
-  byThread: index('pr_comments_by_thread').on(t.prNumber, t.path, t.line),
-}));
-
-/**
  * Change requests (the app's own "pull request" model). The app used to lean on
  * GitHub PRs via the `gh` CLI; now a change request is a plain DB row plus git
  * branches, so ANY git host (GitHub, GitLab, Bitbucket, Azure DevOps, self-
  * hosted) works — the remote only stores commits/branches.
  *
  * `number` is the human-facing id and the join key the sibling tables
- * (`pr_file_approvals`, `pr_comments`, `pr_merge_log`) reference in their
+ * (`pr_file_approvals`, `pr_merge_log`) reference in their
  * `pr_number` column — those columns now hold THIS number, not a GitHub PR
  * number. It's a DB-assigned identity so allocation is race-free.
  *

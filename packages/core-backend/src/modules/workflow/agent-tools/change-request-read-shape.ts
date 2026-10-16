@@ -22,8 +22,8 @@
  *     and an agent reading `state` should not have to read a second field to
  *     learn whether the change landed.
  *   - **One name per path.** GitHub names a pull-request file's path `filename`
- *     and a review comment's `path`; mirroring that inconsistency was the point
- *     while these tools wore GitHub's names, and is now just a trap. Every path
+ *     and elsewhere `path`; mirroring that inconsistency was the point while
+ *     these tools wore GitHub's names, and is now just a trap. Every path
  *     in every answer is `path`, and a moved file's old name is `previousPath`,
  *     as `open_change_request` names them.
  *   - **A file's kind of change** is `change` — `added` / `changed` / `deleted`
@@ -37,9 +37,6 @@
  *   - **`stale`, not `DISMISSED`.** Hexis's word for an approval a later push
  *     invalidated is `isStale`; a review entry reports `stale: true` rather
  *     than borrowing GitHub's review state.
- *   - **A reply names its parent `parentId`**, which is the argument
- *     `post_change_request_comment` takes to create one. Reading a comment and
- *     replying to it use the same word for the same thing.
  *
  * The tools' INPUTS are untouched and stay GitHub's (`state`, `head`, `base`,
  * `author`, `per_page`, `page`, `include`): the ticket pins them by name, and
@@ -53,27 +50,27 @@
  * tools file does the IO and calls in here for every decision.
  */
 
-import type {
-  ChangeRequest,
-  ChangeRequestComment,
-  ChangeRequestDetail,
-  ChangeRequestState,
-  ChangedFile,
-  FileApproval,
+import {
+  authorsDescription,
+  type ChangeRequest,
+  type ChangeRequestDetail,
+  type ChangeRequestState,
+  type ChangedFile,
+  type FileApproval,
 } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeKindOf, type ChangeKind } from './change-request-summary.js';
 
-/** A person on a change request, a review or a comment. */
+/** A person on a change request or a review. */
 export interface CrUser {
   /** Hexis's author login — `user-<first 12 of the email hash>`, no raw email. */
   login: string;
   /** Display name, when Hexis knows one. */
   name?: string;
   /**
-   * The person's address, for a comment author and an approver — the two
-   * places the app's own change-request surfaces already show it, and what an
-   * agent needs to address a reply to a reviewer. Never set on a change
+   * The person's address, for an approver — where the app's own
+   * change-request surfaces already show it, and what an agent needs to
+   * reach a reviewer. Never set on a change
    * request's `author`, which carries a hash-derived login only.
    */
   email?: string;
@@ -200,26 +197,6 @@ export interface CrReview {
   files: string[];
   /** How many further files of this review the caller may not read. */
   withheldFiles: number;
-}
-
-export interface CrComment {
-  id: string;
-  author: CrUser;
-  body: string;
-  /** Set on a file-level or inline comment. */
-  path?: string;
-  /** Set on an inline comment. */
-  line?: number;
-  /**
-   * The comment this one replies to — the same `parentId`
-   * `post_change_request_comment` takes to post the reply.
-   */
-  parentId?: string;
-  /** The head the comment was anchored to. */
-  headSha: string;
-  createdAt: string;
-  /** Present once edited. */
-  updatedAt?: string;
 }
 
 /** One page of a list, and whether there is another. */
@@ -397,50 +374,6 @@ export function toCrDetail(
 }
 
 /**
- * The part of a change-request body its AUTHOR wrote.
- *
- * A Hexis body is part human and part machine: `openChangeRequest` appends an
- * `## Affected owners` block — one line per changed path, naming that path and
- * its eligible approvers — to whatever the author typed. Returning the body
- * verbatim NAMED every file of the request, including the ones this caller may
- * not read: Local Testing caught a GTM-team reader being handed
- * `- \`KnowledgeBase/Engineering/…\` — Admin` out of a request whose file list
- * had correctly withheld that very path.
- *
- * So the generated block goes, and NOTHING ELSE does. The first cut at this
- * copied the app's dialog, which drops everything from the first `##` heading
- * on; Razvan's review (2026-10-02) asked for the narrower cut, because an
- * author who writes their description in sections loses it from that heading
- * onwards and is never told. The generated block is appended LAST and begins
- * with a line that is exactly `## Affected owners`, so cutting at the LAST such
- * line removes the machinery and keeps every heading a person wrote. (An author
- * who writes that exact heading themselves loses their text from there — the
- * safe direction, and the only way this can err.)
- *
- * Hexis's OWN hidden markers go too — the `<!--hexis:…-->` / `<!--bevel:…-->`
- * comments older bodies carry identity in — and no other comment: an HTML
- * comment the author wrote is the author's prose, like the rest.
- *
- * Who must approve each file is NOT lost by this — it is what
- * `list_change_request_files` answers under `requiredApprovers`, per file and
- * access-filtered, which is where a caller should read it from anyway.
- *
- * Two things this deliberately does not do. It does not vary by caller: one
- * body for everyone is a body nobody has to reason about. And it does not touch
- * the author's own prose, which may mention any path they chose to write about —
- * that is a person's sentence, shown to every viewer in the app, not Hexis
- * naming a file it was asked to withhold.
- */
-export function authorsDescription(body: string): string {
-  const lines = body.split('\n');
-  const generated = lines.lastIndexOf('## Affected owners');
-  return (generated === -1 ? lines : lines.slice(0, generated))
-    .join('\n')
-    .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
-    .trim();
-}
-
-/**
  * What this caller may do with the request.
  *
  * `mayMerge` reproduces what `mergePr` would accept, from the detail's own
@@ -599,8 +532,7 @@ export function loginFor(email: string): string {
  * readable approvals alone, for the same reason.
  *
  * Hexis records nothing about who DECLINED a request — a rejection closes it
- * and stores no reviewer — so no review entry can report one. A reviewer's
- * objection lives in a comment, which `list_change_request_comments` returns.
+ * and stores no reviewer — so no review entry can report one.
  */
 export function toCrReviews(
   approvals: FileApproval[],
@@ -640,73 +572,4 @@ export function toCrReviews(
     ),
     withheldReviews: all.length - reviews.length,
   };
-}
-
-/** A comment. Covers the file-anchored and the general ones — Hexis has one table. */
-export function toCrComment(comment: ChangeRequestComment): CrComment {
-  return {
-    id: comment.id,
-    author: {
-      login: loginFor(comment.author.email),
-      name: comment.author.name,
-      email: comment.author.email,
-    },
-    body: comment.body,
-    ...(comment.path ? { path: comment.path } : {}),
-    ...(comment.line !== undefined ? { line: comment.line } : {}),
-    ...(comment.parentId ? { parentId: comment.parentId } : {}),
-    headSha: comment.headSha,
-    createdAt: comment.createdAt,
-    ...(comment.updatedAt ? { updatedAt: comment.updatedAt } : {}),
-  };
-}
-
-/**
- * The comments the caller may read, replies included in the answer only when
- * the comment they reply to is.
- *
- * A comment with no path is about the request as a whole, and a comment with
- * one is as readable as that path is NAMEABLE here (`mayShow`, so a comment
- * anchored to the new name of a file withheld for its old one goes with the
- * file rather than announcing it). A REPLY is neither, quite: it carries no
- * path of its own when it was posted without one, so judged on itself it is a
- * general comment — and `post_change_request_comment` takes `parentId` without
- * requiring `path`, so a reply to a comment on a withheld file was returned
- * with its body and a `parentId` naming a comment the caller cannot see.
- * Razvan's review (2026-10-02) asked for the rule the ticket states: a reply is
- * shown only when its parent is.
- *
- * So a comment is visible when its OWN path may be shown (if it has one) AND
- * its parent is visible, all the way up the chain. Both halves are needed:
- * inheriting only would show a reply naming a withheld file under a readable
- * parent, and checking only its own path would show it under a withheld one.
- *
- * Fail-closed at the edges. A `parentId` naming a comment that is not in this
- * request's list (deleted, or from somewhere this answer cannot see) is not
- * provably pathless, so the reply goes. A cycle — which the schema does not
- * permit and a corrupted row could still hold — is unresolvable, so it goes
- * too. Both are counted in the withheld total, never named.
- */
-export function visibleComments<T extends { id: string; path?: string; parentId?: string }>(
-  comments: T[],
-  mayShow: (path: string) => boolean,
-): { visible: T[]; withheld: number } {
-  const byId = new Map(comments.map((c) => [c.id, c]));
-  /** Memoised per id, so a long thread costs one walk and not one per reply. */
-  const verdicts = new Map<string, boolean>();
-  const mayShowComment = (comment: T, seen: Set<string>): boolean => {
-    const cached = verdicts.get(comment.id);
-    if (cached !== undefined) return cached;
-    if (seen.has(comment.id)) return false;
-    seen.add(comment.id);
-    let verdict = !comment.path || mayShow(comment.path);
-    if (verdict && comment.parentId) {
-      const parent = byId.get(comment.parentId);
-      verdict = parent !== undefined && mayShowComment(parent, seen);
-    }
-    verdicts.set(comment.id, verdict);
-    return verdict;
-  };
-  const visible = comments.filter((c) => mayShowComment(c, new Set()));
-  return { visible, withheld: comments.length - visible.length };
 }

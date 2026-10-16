@@ -27,8 +27,6 @@ import type {
   PullRequestDetail,
   PullRequestState,
   PullRequestSummary,
-  PostPrCommentInput,
-  PrReviewComment,
   PullRequestFile,
 } from '../git/pr.types.js';
 
@@ -146,8 +144,6 @@ export type ChangedFile = PullRequestFile;
 export type FileApproval = FileApprovalState;
 export type MergeChangeRequestResult = MergePrResult;
 export type CancelChangeRequestResult = CancelPrResult;
-export type ChangeRequestComment = PrReviewComment;
-export type PostChangeRequestCommentInput = PostPrCommentInput;
 
 /**
  * One open change request proposing files under a folder, as a folder delete

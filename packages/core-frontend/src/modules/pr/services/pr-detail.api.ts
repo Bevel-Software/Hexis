@@ -5,7 +5,7 @@ import { handleApiResponse } from '../../git/services/git.api';
 /**
  * Fetch the full PR detail (metadata + file diffs). `fresh` bypasses the
  * backend's 30s detail cache — use from event-driven refreshes (post-merge,
- * post-comment, post-open-change-request) but leave off for user-triggered
+ * post-edit, post-open-change-request) but leave off for user-triggered
  * navigation.
  */
 export async function fetchPrDetail(

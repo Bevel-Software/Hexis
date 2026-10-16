@@ -42,7 +42,7 @@ const FORK = 'c'.repeat(40);
  * both refs), so the file list must be pinned to those same commits rather
  * than fetch and resolve again. The SHAs and the file list are read on every
  * call (a new head must show); what the detail cache saves is the DB
- * enrichment (comments, approvals), so that is where "cached" is observed.
+ * enrichment (approvals), so that is where "cached" is observed.
  */
 describe('PullRequestService.getPrDetail — git work per read', () => {
   function harness() {
@@ -62,10 +62,8 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
     } as unknown as WorkspaceService;
     const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
     const svc = new PullRequestService(makeDb(), workspace, access, git);
-    const listComments = vi.fn(async () => []);
     const getApprovalStates = vi.fn(async () => []);
     svc.setDetailEnricher({
-      listComments,
       getApprovalStates,
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });
@@ -164,7 +162,6 @@ describe('PullRequestService — change request link', () => {
     const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
     const svc = new PullRequestService(makeDb(), workspace, access, git, publicFrontendUrl);
     svc.setDetailEnricher({
-      listComments: async () => [],
       getApprovalStates: async () => [],
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });
@@ -244,7 +241,6 @@ describe('PullRequestService.getPrDetail — needsUpdate', () => {
     } as unknown as Database;
     const svc = new PullRequestService(db, workspace, access, git);
     svc.setDetailEnricher({
-      listComments: async () => [],
       getApprovalStates: async () => [],
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });

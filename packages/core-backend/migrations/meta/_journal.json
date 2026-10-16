@@ -127,6 +127,13 @@
       "when": 1791359019161,
       "tag": "0017_atlassian_account_links",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792080843851,
+      "tag": "0018_change_request_comments_removed",
+      "breakpoints": true
     }
   ]
 }
