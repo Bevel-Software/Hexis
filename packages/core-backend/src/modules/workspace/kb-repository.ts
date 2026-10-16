@@ -6,7 +6,7 @@ import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
 import { fetchInstant } from './fetch-instant.js';
-import { readGitfile } from '../kb-fs/git-dir.js';
+import { readGitfile } from '../kb-fs/index.js';
 import {
   cloneCredentialConfigArgs,
   cloneTrackingConfigArgs,

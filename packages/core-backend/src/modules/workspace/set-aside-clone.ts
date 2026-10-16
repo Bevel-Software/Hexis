@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { readGitfile } from '../kb-fs/git-dir.js';
+import { readGitfile } from '../kb-fs/index.js';
 import type { IKbRepository } from './kb-repository.contract.js';
 
 const log = logger('set-aside');
