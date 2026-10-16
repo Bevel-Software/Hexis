@@ -24,7 +24,9 @@ export async function readGitfile(gitfile: string): Promise<string | null> {
     if (isAbsence(err) || (err as NodeJS.ErrnoException).code === 'EISDIR') return null;
     throw err;
   }
-  const m = /^gitdir:\s*(.+?)\s*$/m.exec(text);
+  // Git reads a gitfile's FIRST line and nothing else: a file whose first
+  // line is not `gitdir:` is no gitfile to git, whatever a later line says.
+  const m = /^gitdir:\s*(.+?)\s*$/.exec(text.split(/\r?\n/, 1)[0] ?? '');
   if (!m) return null;
   return path.resolve(path.dirname(gitfile), m[1]!);
 }

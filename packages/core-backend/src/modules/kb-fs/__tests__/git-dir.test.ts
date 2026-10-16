@@ -49,6 +49,13 @@ describe('gitDirOf', () => {
     expect(await gitDirOf(root)).toBeNull();
   });
 
+  it('reads the first line only, as git does: a gitdir line further down is no gitfile', async () => {
+    await fs.writeFile(path.join(root, '.git'), 'not a gitfile\ngitdir: ../elsewhere/wt\n');
+    expect(await readGitfile(path.join(root, '.git'))).toBeNull();
+    // What git says of the same file.
+    await expect(git(root, 'rev-parse', '--absolute-git-dir')).rejects.toThrow();
+  });
+
   it('resolves a relative gitdir against the file’s own folder', async () => {
     await fs.writeFile(path.join(root, '.git'), 'gitdir: ../elsewhere/wt\n');
     expect(await readGitfile(path.join(root, '.git'))).toBe(path.resolve(root, '../elsewhere/wt'));
