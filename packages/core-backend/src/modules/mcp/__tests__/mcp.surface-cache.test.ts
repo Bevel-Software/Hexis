@@ -404,11 +404,12 @@ describe('McpService — one tool client per person and catalog revision', () =>
   it('holds one copy of the tool definitions for every client of the same catalog', async () => {
     const { mcp } = await harness({ fillerTools: { count: 5, descriptionBytes: 200 } });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const surfaces = (mcp as any).surfaces as { peek(k: string): Promise<{ client: any } | undefined>; keys(): string[] };
+    type Surface = { client: any };
+    const surfaces = (mcp as unknown as { surfaces: { peek(k: string): Promise<Surface | undefined>; keys(): string[] } }).surfaces;
     await (await connect(mcp, { userId: 'user-A' })).listTools();
     await (await connect(mcp, { userId: 'user-B', tokenId: 'key-B' })).listTools();
     const [a, b] = await Promise.all(surfaces.keys().map((k) => surfaces.peek(k)));
-    const toolOf = async (s: { client: any } | undefined) =>
+    const toolOf = async (s: Surface | undefined) =>
       (await s!.client.config.tool_repository.getTool('KNOWLEDGE_BASE.filler_0')) as { inputs: unknown; description: string };
     expect(a!.client).not.toBe(b!.client);
     // Different clients, different shells — the same definition underneath.
