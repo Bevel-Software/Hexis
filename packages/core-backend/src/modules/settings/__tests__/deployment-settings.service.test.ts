@@ -10,6 +10,9 @@ import {
   retireMergedBranchesOn,
 } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
+import { ToolReadOnlyHints } from '../../tool-registry/read-only-hints.js';
+import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { toolDef } from '../../tool-helpers/tool-def.js';
 
 const ENC_KEY = randomBytes(32).toString('base64');
 
@@ -22,7 +25,16 @@ const ENC_KEY = randomBytes(32).toString('base64');
 function makeDb() {
   const rows: { key: string; value: string; encrypted: boolean }[] = [];
   const db = {
-    select: () => ({ from: () => Promise.resolve(rows.map((r) => ({ ...r }))) }),
+    // `select … from` is every row; `… where key = ?` (a `reload`) is that key's.
+    select: () => ({
+      from: () =>
+        Object.assign(Promise.resolve(rows.map((r) => ({ ...r }))), {
+          where: (predicate: unknown) => {
+            const [key] = boundParams(predicate);
+            return Promise.resolve(rows.filter((r) => r.key === key).map((r) => ({ ...r })));
+          },
+        }),
+    }),
     insert: () => ({
       values: (v: { key: string; value: string; encrypted: boolean }) => ({
         onConflictDoUpdate: () => {
@@ -675,5 +687,65 @@ describe('DeploymentSettingsService — recordIfAbsent', () => {
     expect(await settings.swapIfValue('starterPackClaim', 'u-b 2', null, null)).toBe(true);
     expect(rows.find((r) => r.key === 'starterPackClaim')).toBeUndefined();
     expect(settings.resolve('starterPackClaim')).toBe('');
+  });
+});
+
+describe('DeploymentSettingsService — the read-only overrides', () => {
+  /** A registry with one reader and one writer, as the Tools page would show them. */
+  function registry(): ToolRegistry {
+    const r = new ToolRegistry();
+    const inputs = { type: 'object', properties: {} } as const;
+    r.registerExternalTool(toolDef({ name: 'read_file', description: 'r', path: '/api/agent/tools/read_file', inputs }));
+    r.registerExternalTool(
+      toolDef({ name: 'write_file', description: 'w', path: '/api/agent/tools/write_file', inputs, tags: ['write'] }),
+    );
+    return r;
+  }
+
+  it('survives a restart: a new process over the same table reads the override back', async () => {
+    const { db, rows } = makeDb();
+    const before = new DeploymentSettingsService(db, ENC_KEY);
+    await before.load();
+    await new ToolReadOnlyHints(registry(), before).set('write_file', true, '00000000-0000-4000-8000-00000000000a');
+    expect(rows.find((r) => r.key === 'toolReadOnlyOverrides')?.value).toBe('{"write_file":true}');
+
+    const after = new DeploymentSettingsService(db, ENC_KEY);
+    await after.load();
+    const hints = new ToolReadOnlyHints(registry(), after);
+    expect((await hints.describe()).find((e) => e.name === 'write_file')).toMatchObject({ override: true, readOnly: true });
+
+    // And the reset removes the row, every tool back on its built-in value.
+    await hints.set('write_file', null, '00000000-0000-4000-8000-00000000000a');
+    expect(rows.find((r) => r.key === 'toolReadOnlyOverrides')).toBeUndefined();
+  });
+
+  it('is read per use, so a change written by another replica is in the next answer', async () => {
+    const { db } = makeDb();
+    const one = new DeploymentSettingsService(db, ENC_KEY);
+    const two = new DeploymentSettingsService(db, ENC_KEY);
+    await one.load();
+    await two.load();
+    await new ToolReadOnlyHints(registry(), one).set('read_file', false, null);
+    expect(await new ToolReadOnlyHints(registry(), two).overrides()).toEqual({ read_file: false });
+  });
+
+  it('is not a field of the setup screen: a save naming it is refused, and the screen is not told of it', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    await expect(settings.save({ toolReadOnlyOverrides: '{"write_file":true}' }, null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+    expect(rows).toEqual([]);
+    expect(settings.describe().some((s) => s.key === 'toolReadOnlyOverrides')).toBe(false);
+  });
+
+  it('refuses a stored value that is not a map of tool names to booleans', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    await expect(settings.recordIfAbsent('toolReadOnlyOverrides', '{"write_file":"yes"}', null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
   });
 });

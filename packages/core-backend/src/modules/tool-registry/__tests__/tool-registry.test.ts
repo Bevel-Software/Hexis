@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../tool-registry.js';
-import type { UtcpTool } from '../tool.contract.js';
+import { declaresWrite, type UtcpTool } from '../tool.contract.js';
 
 function fakeTool(name: string): UtcpTool {
   return {
@@ -60,5 +60,13 @@ describe('ToolRegistry', () => {
     r.registerExternalTool(fakeTool('ask'));
     expect(() => r.registerExternalTool(fakeTool('ask'))).toThrow(/Duplicate external/);
     expect(() => r.registerInternalTool(fakeTool('ask'))).not.toThrow();
+  });
+});
+
+describe('declaresWrite', () => {
+  it('is the `write` tag, and nothing else', () => {
+    expect(declaresWrite({ tags: ['write'] })).toBe(true);
+    expect(declaresWrite({ tags: ['read-only', 'files'] })).toBe(false);
+    expect(declaresWrite({ tags: [] })).toBe(false);
   });
 });

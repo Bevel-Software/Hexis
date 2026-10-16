@@ -116,6 +116,14 @@ export interface McpProxyOptions {
    * knowledge base's.
    */
   secretsScope?: string;
+  /**
+   * The deployment's read-only overrides, by tool name, read per listing so an
+   * admin's change on the Tools page is in the next `tools/list`. Only the
+   * code-mode meta-tools' are read from here — the KB tools' arrive as the
+   * `read-only` tag on the manual. Absent, the meta-tools list their built-in
+   * hints.
+   */
+  readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -463,7 +471,15 @@ export class McpService {
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const [{ tools, catalogNames }, { toolPrefix }] = await Promise.all([requestSurface(), agentInstructions()]);
+      const [{ tools, catalogNames }, { toolPrefix }, readOnly] = await Promise.all([
+        requestSurface(),
+        agentInstructions(),
+        // A failed read lists the built-in hints rather than no listing at all.
+        this.opts.readOnlyOverrides?.().catch((err: unknown) => {
+          log.warn('tools/list: could not read the read-only overrides; listing built-in hints.', { err });
+          return undefined;
+        }),
+      ]);
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
@@ -551,6 +567,7 @@ export class McpService {
       // built here, so here it is.
       const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
         sharedRulesPointer: '',
+        ...(readOnly ? { readOnly } : {}),
       }).map((tool) => ({ ...tool, description: guideFirstDescription(tool.description) }));
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
