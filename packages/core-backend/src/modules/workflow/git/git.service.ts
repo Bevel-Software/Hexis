@@ -12,6 +12,7 @@ import type {
   IGitService,
   MergeIntoBranchOutcome,
   MergeResolution,
+  ReservedPushOps,
   RemoteSyncPullResult,
   PrFileStatus,
   PullRequestFile,
@@ -43,7 +44,6 @@ import {
   AppliedChangeMismatchError,
   BranchAuthorshipError,
   BranchDeleteRefusedError,
-  MergePublishRefusedError,
   WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
@@ -1482,8 +1482,19 @@ export class GitService implements IGitService {
       // stamped after the push instead, as one short write made as the
       // repository's administrator (see `git`).
       await this.git(cwd, ['push', 'origin', branch]);
-      await this.git(cwd, ['config', '--replace-all', `branch.${branch}.remote`, 'origin']);
-      await this.git(cwd, ['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`]);
+      // The stamp is maintenance after a push that LANDED: a config the
+      // repository's administrator could not write just now (a lock held by
+      // another worktree's stamp) does not make the branch unpublished, and
+      // reporting it as a refused push would hand a published commit to
+      // recovery. Logged; the next push stamps it.
+      try {
+        await this.git(cwd, ['config', '--replace-all', `branch.${branch}.remote`, 'origin']);
+        await this.git(cwd, ['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`]);
+      } catch (err) {
+        log.warn(`"${branch}" is pushed; its tracking config could not be stamped after the push:`, {
+          detail: redactGitToken(err instanceof Error ? err.message : String(err), this.credentials.token()),
+        });
+      }
     }
   }
 
@@ -1545,7 +1556,6 @@ export class GitService implements IGitService {
         resolutions: new Map(),
         guardCheckout: false,
         describeConflicts: false,
-        publish: false,
       });
       if (outcome.kind === 'conflicts') return { kind: 'conflicts' as const, paths: outcome.unresolved };
       return { kind: 'clean' as const, alreadyUpToDate: outcome.kind === 'nothing-to-merge' };
@@ -1564,7 +1574,7 @@ export class GitService implements IGitService {
       subject: string;
       body: string;
       resolutions?: MergeResolution[];
-      publish?: boolean;
+      publish?: (ops: ReservedPushOps) => Promise<void>;
       authorizeResolutions?: (merge: { ours: string; theirs: string }) => Promise<void>;
     },
   ): Promise<MergeIntoBranchOutcome> {
@@ -1602,7 +1612,7 @@ export class GitService implements IGitService {
         resolutions,
         guardCheckout: true,
         describeConflicts: true,
-        publish: opts.publish === true,
+        publish: opts.publish,
         authorizeResolutions: opts.authorizeResolutions,
       }),
     );
@@ -1641,7 +1651,8 @@ export class GitService implements IGitService {
       guardCheckout: boolean;
       /** Carry every conflicted file's sides in the answer; else the paths alone. */
       describeConflicts: boolean;
-      publish: boolean;
+      /** Run over the merge commit inside the reservation, with the pushes it may make. */
+      publish?: (ops: ReservedPushOps) => Promise<void>;
       /**
        * Decide whether the caller may settle the paths the resolutions name,
        * given the two commits the merge is actually between — asked INSIDE
@@ -1806,57 +1817,27 @@ export class GitService implements IGitService {
     branch: string,
     fromBranch: string,
     user: AuthUser,
-    opts: { subject: string; body: string; publish: boolean },
+    opts: { subject: string; body: string; publish?: (ops: ReservedPushOps) => Promise<void> },
     resolvedPaths: string[],
   ): Promise<MergeIntoBranchOutcome> {
     await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
     this.accessControl?.invalidate(workspaceId);
-    if (opts.publish) await this.publishMergeUnlocked(workspaceId, cwd, branch, user);
+    // The publish runs here, inside the reservation the merge was made in,
+    // over this checkout's own push and pull-rebase (the merge kept as a
+    // merge) — the caller's policy, the git layer's moves. Whatever it
+    // throws leaves the merge commit on the branch locally; a replay that
+    // conflicts aborts itself (`rebaseOntoRemote`), so the checkout is clean.
+    if (opts.publish) {
+      await opts.publish({
+        push: () => this.pushUnlocked(workspaceId, cwd, user),
+        pullRebase: () => this.pullUnlocked(workspaceId, cwd, { preserveMerges: true }),
+      });
+    }
     // Read AFTER the publish: a push the host rejected is retried with the
     // local commits replayed onto the moved branch, which gives the merge
     // commit a new id — the one that is now the published tip.
     const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
     return { kind: 'merged', sha, from: fromBranch, resolvedPaths };
-  }
-
-  /**
-   * Push the branch from inside the reservation the merge was made in. A
-   * rejection because the branch moved on the host is answered the way every
-   * push's cooperative recovery answers it — the local commits replayed onto
-   * the moved branch with the merge kept — and pushed again; a conflict in
-   * that replay throws the typed pull-conflict error with the merge commit
-   * kept locally and the checkout clean (the replay aborts itself).
-   */
-  private async publishMergeUnlocked(workspaceId: string, cwd: string, branch: string, user: AuthUser): Promise<void> {
-    const MAX_ATTEMPTS = 3;
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        await this.pushUnlocked(workspaceId, cwd, user);
-        return;
-      } catch (err) {
-        // A refusal of the push itself (a protected-branch gate, a ToolError)
-        // keeps its own words and status; only git's rejection is handled.
-        if (err instanceof WorkflowDomainError) throw err;
-        const detail = redactGitToken(err instanceof Error ? err.message : String(err), this.credentials.token());
-        const moved = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
-        if (!moved || attempt >= MAX_ATTEMPTS) {
-          const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
-          // The push itself may well have landed: what failed after it is the
-          // tracking-config stamp `pushUnlocked` writes next, which is
-          // maintenance. Ask the host before calling the merge unpublished.
-          const remoteTip = await this.git(cwd, ['ls-remote', '--exit-code', 'origin', `refs/heads/${branch}`])
-            .then((r) => r.stdout.trim().split(/\s+/)[0] ?? '')
-            .catch(() => '');
-          if (remoteTip === sha) {
-            log.warn(`the merge on "${branch}" is published; the tracking config could not be stamped after it:`, { detail });
-            return;
-          }
-          throw new MergePublishRefusedError(branch, sha, detail, moved);
-        }
-        const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
-        await this.rebaseOntoRemote(cwd, branch, remoteRef, { preserveMerges: true });
-      }
-    }
   }
 
   /**
@@ -2660,23 +2641,29 @@ export class GitService implements IGitService {
     workspaceId: string,
     opts: { preserveMerges?: boolean } = {},
   ): Promise<{ treeChanged: boolean }> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const branch = await this.checkedOutBranch(cwd);
-      // For `treeChanged` (see IGitService.pull): TREE ids, not commit ids —
-      // a pull that lands only content-identical commits (an empty commit)
-      // must not read as a content change. Tolerant of an unborn HEAD (a
-      // clone of an empty upstream): "" before + a tree after correctly
-      // reads as changed, "" both sides as not.
-      const treeBefore = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
-      // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
-      // `refreshRemoteBranchRef` for why both halves are load-bearing.
-      const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
-      await this.rebaseOntoRemote(cwd, branch, remoteRef, opts);
-      this.accessControl?.invalidate(workspaceId);
-      const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
-      return { treeChanged: treeAfter !== treeBefore };
-    });
+    return this.mutex.run(workspaceId, async () => this.pullUnlocked(workspaceId, await this.repoDir(workspaceId), opts));
+  }
+
+  /** `pull`'s body, for a caller that already holds the workspace's reservation. */
+  private async pullUnlocked(
+    workspaceId: string,
+    cwd: string,
+    opts: { preserveMerges?: boolean } = {},
+  ): Promise<{ treeChanged: boolean }> {
+    const branch = await this.checkedOutBranch(cwd);
+    // For `treeChanged` (see IGitService.pull): TREE ids, not commit ids —
+    // a pull that lands only content-identical commits (an empty commit)
+    // must not read as a content change. Tolerant of an unborn HEAD (a
+    // clone of an empty upstream): "" before + a tree after correctly
+    // reads as changed, "" both sides as not.
+    const treeBefore = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
+    // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
+    // `refreshRemoteBranchRef` for why both halves are load-bearing.
+    const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
+    await this.rebaseOntoRemote(cwd, branch, remoteRef, opts);
+    this.accessControl?.invalidate(workspaceId);
+    const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
+    return { treeChanged: treeAfter !== treeBefore };
   }
 
   /**

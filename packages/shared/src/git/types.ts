@@ -130,10 +130,10 @@ export interface ConflictedFile {
  * What merging one branch into another, in the receiving branch's own
  * workspace, did:
  *
- *  - `merged`           — a merge commit `sha` was made on the branch, pushed
- *                         when `publish` was asked for and local otherwise,
- *                         `resolvedPaths` naming the conflicts the caller's
- *                         resolutions settled.
+ *  - `merged`           — a merge commit `sha` was made on the branch, and
+ *                         `publish` (when given) has run over it; `sha` is the
+ *                         commit as it stands after that, `resolvedPaths` the
+ *                         conflicts the caller's resolutions settled.
  *  - `nothing-to-merge` — the branch already held everything; `sha` is its tip.
  *  - `conflicts`        — the merge was undone and the working tree left as it
  *                         was: `files` describes every conflicted path,
@@ -156,6 +156,17 @@ export type MergeIntoBranchOutcome =
       unresolved: string[];
     };
 
+/**
+ * What a merge's `publish` may do while the merge still holds its workspace:
+ * `push` the branch, and `pullRebase` it onto its moved remote with the merge
+ * kept as a merge — the two moves every workflow push's cooperative recovery
+ * is made of, so that recovery can run inside the reservation unchanged.
+ */
+export interface ReservedPushOps {
+  push(): Promise<void>;
+  pullRebase(): Promise<{ treeChanged: boolean }>;
+}
+
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
   /**
@@ -166,14 +177,14 @@ export interface IGitService {
    * merge aborted in the same reservation, and a later call carrying a
    * resolution for every conflicted path makes the merge for real. A
    * resolution naming a path that is not conflicted is refused before
-   * anything is written. With `publish`, the merge commit is pushed inside
-   * the same reservation: a rejection replays it onto the moved branch (a
-   * replay that conflicts throws the typed pull-conflict error) and a push
-   * the host refuses throws `MergePublishRefusedError`; either way the merge
-   * commit stays on the local branch, unpublished, the checkout clean, and a
-   * later call answers `nothing-to-merge` without pushing it — it is
-   * published as any local commit is. Without `publish` nothing is pushed
-   * and the caller publishes. Resolutions come with `authorizeResolutions`
+   * anything is written. `publish`, when given, runs right after the merge
+   * commit, inside the same reservation, over the pushes it may make
+   * (`ReservedPushOps`): the caller brings the one push policy every
+   * workflow push takes, and whatever it throws leaves the merge commit on
+   * the local branch, unpublished, the checkout clean (a replay that
+   * conflicts undoes itself), a later call answering `nothing-to-merge`
+   * without pushing — the commit is published as any local commit is.
+   * Without `publish` nothing is pushed. Resolutions come with `authorizeResolutions`
    * (required with them, refused without): it is asked inside the
    * reservation, after the fetch and before the merge touches the checkout,
    * with the two commits the merge is between — the checkout clean at
@@ -188,7 +199,7 @@ export interface IGitService {
     branch: string,
     fromBranch: string,
     user: AuthUser,
-    opts: { subject: string; body: string; publish?: boolean } & (
+    opts: { subject: string; body: string; publish?: (ops: ReservedPushOps) => Promise<void> } & (
       | { resolutions?: undefined; authorizeResolutions?: undefined }
       | {
           resolutions: MergeResolution[];

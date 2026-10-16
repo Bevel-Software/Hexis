@@ -6,6 +6,7 @@ import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { GitService } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
 import type { IGitRunner } from '../../../../shared/git.contract.js';
+import type { ReservedPushOps } from '@bevel-software/platform-shared';
 import { PullRebaseConflictError, WorkflowDomainError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
 
@@ -21,6 +22,20 @@ const DRAFT = 'ada/draft';
 const USER = { id: 'u1', email: 'ada@x.io', name: 'Ada Lovelace' };
 /** The authorizer a resolution needs; here every resolution is the caller's to make. */
 const allow = async (): Promise<void> => {};
+/**
+ * The smallest publish a caller can bring: push, and on a rejection replay
+ * onto the moved branch (the merge kept) and push once more. The workflow
+ * facade brings its `pushWithRecovery` here; this stands in for it to show
+ * the moves work inside the merge's reservation.
+ */
+const replay = async (ops: ReservedPushOps): Promise<void> => {
+  try {
+    await ops.push();
+  } catch {
+    await ops.pullRebase();
+    await ops.push();
+  }
+};
 
 /** Upstream with a target branch and a draft forked from it, and the draft's workspace clone. */
 async function seed(root: string): Promise<{ upstream: string; repo: string; pusher: string }> {
@@ -440,7 +455,7 @@ describe('GitService.mergeIntoBranch', () => {
       null,
       gitRunner,
     );
-    const outcome = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: true });
+    const outcome = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: (ops) => ops.push() });
     expect(outcome.kind).toBe('merged');
     if (outcome.kind !== 'merged') return;
     expect((await gitOut(pusher, ['ls-remote', 'origin', `refs/heads/${DRAFT}`])).trim()).toContain(outcome.sha);
@@ -504,15 +519,29 @@ describe('GitService.mergeIntoBranch', () => {
     await commitLocally(repo, { 'mine.md': 'mine\n' }, 'draft work');
     const svc = service();
 
-    const published = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: true });
+    // What the checkout holds when the publish is asked: the merge commit,
+    // committed, the tree clean — the publish runs over a finished merge.
+    let seen: { parents: number; dirty: string } | null = null;
+    const published = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
+      subject: 's',
+      body: 'b',
+      publish: async (ops) => {
+        seen = {
+          parents: (await gitOut(repo, ['log', '-1', '--format=%P', 'HEAD'])).trim().split(' ').length,
+          dirty: (await gitOut(repo, ['status', '--porcelain'])).trim(),
+        };
+        await replay(ops);
+      },
+    });
     expect(published.kind).toBe('merged');
     if (published.kind !== 'merged') return;
+    expect(seen).toEqual({ parents: 2, dirty: '' });
     expect((await gitOut(pusher, ['ls-remote', 'origin', `refs/heads/${DRAFT}`])).trim()).toContain(published.sha);
 
     // The draft moves on the host while this workspace holds its next merge.
     const moved = await pushOn(pusher, DRAFT, { 'elsewhere.md': 'pushed elsewhere\n' }, 'draft moves on origin');
     await pushOn(pusher, TARGET, { 'other.md': 'other, changed again\n' }, 'target moves again');
-    const again = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 'again', body: 'b', publish: true });
+    const again = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 'again', body: 'b', publish: replay });
     expect(again.kind).toBe('merged');
     if (again.kind !== 'merged') return;
     // Published, on top of the moved branch, still a merge.
@@ -524,7 +553,7 @@ describe('GitService.mergeIntoBranch', () => {
     expect(await fs.readFile(path.join(repo, 'other.md'), 'utf-8')).toBe('other, changed again\n');
   });
 
-  it('throws the typed pull-conflict error when the replay after a rejected push conflicts, the merge kept and the checkout clean', async () => {
+  it('lets a replay that conflicts throw out of the publish as the typed pull-conflict error, the merge kept and the checkout clean', async () => {
     const { repo, pusher } = await seed(root);
     await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target moves');
     // The draft moves on the host with a change the merge will clash with.
@@ -532,7 +561,7 @@ describe('GitService.mergeIntoBranch', () => {
     await commitLocally(repo, { 'mine.md': 'mine\n' }, 'draft work');
 
     const err = await service()
-      .mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: true })
+      .mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: replay })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PullRebaseConflictError);
     expect((err as PullRebaseConflictError).conflictedPaths).toEqual(['other.md']);

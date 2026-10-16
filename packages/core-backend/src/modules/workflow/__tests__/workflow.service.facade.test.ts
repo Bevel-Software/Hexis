@@ -16,7 +16,6 @@ import { PendingCommitsWorker } from '../pending-commits.worker.js';
 import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
 import {
-  MergePublishRefusedError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowDomainError,
@@ -310,31 +309,51 @@ describe('WorkflowService.updateBranch', () => {
       'ada/draft',
       'target-company-state',
       user,
-      expect.objectContaining({ subject: 'Merge target-company-state into ada/draft', resolutions, publish: true }),
+      expect.objectContaining({ subject: 'Merge target-company-state into ada/draft', resolutions, publish: expect.any(Function) }),
     );
     expect((merge.mock.calls[0] as unknown[])[4]).toMatchObject({ body: expect.stringContaining('A.md') });
     // The git layer publishes while it still holds the workspace; no second push from here.
     expect(git.push).not.toHaveBeenCalled();
   });
 
-  it('hands a replay that conflicted during the publish to recovery, as every pull does', async () => {
-    const git = gitThatMerges(null);
-    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi
-      .fn()
-      .mockRejectedValue(new PullRebaseConflictError('ada/draft', ['B.md', 'A.md'], 'replay conflicted'));
-    const pending = makePendingCommits();
-    await expect(build(git, pending).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' })).rejects.toBeInstanceOf(
-      PullRebaseConflictError,
+  it("publishes through the one push policy every workflow push takes, over the merge's own moves", async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
+    await build(git).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    type Ops = { push: () => Promise<void>; pullRebase: () => Promise<{ treeChanged: boolean }> };
+    const { publish } = (merge.mock.calls[0] as unknown[])[4] as { publish: (ops: Ops) => Promise<void> };
+
+    // A rejection: replayed onto the moved branch (the merge kept) and pushed again.
+    const push = vi.fn().mockRejectedValueOnce(new Error('! [rejected] non-fast-forward')).mockResolvedValue(undefined);
+    const pullRebase = vi.fn().mockResolvedValue({ treeChanged: true });
+    await publish({ push, pullRebase });
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(pullRebase).toHaveBeenCalledTimes(1);
+    // The workspace's own reserved moves are never taken from here: the merge holds the workspace.
+    expect(git.push).not.toHaveBeenCalled();
+    expect(git.pull).not.toHaveBeenCalled();
+
+    // A replay that conflicts: the hand-off every refused share answers with,
+    // naming the branch — no single file is at issue — and never a conflicted
+    // path, which the caller may not be allowed to see.
+    const conflict = new PullRebaseConflictError('ada/draft', ['Secret/Plan.md'], 'replay conflicted');
+    const diverged = await publish({
+      push: vi.fn().mockRejectedValue(new Error('! [rejected] non-fast-forward')),
+      pullRebase: vi.fn().mockRejectedValue(conflict),
+    }).catch((e: unknown) => e);
+    expect(diverged).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(diverged as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: 'ada/draft', cause: 'diverged' });
+    expect((diverged as Error).message).not.toContain('Secret/Plan.md');
+    expect(JSON.stringify((diverged as WorkflowDomainError).payload)).not.toContain('Secret/Plan.md');
+
+    // A host that refuses: the same hand-off, `refused`, no replay attempted.
+    const untouched = vi.fn();
+    const refused = await publish({ push: vi.fn().mockRejectedValue(new Error('remote: permission denied')), pullRebase: untouched }).catch(
+      (e: unknown) => e,
     );
-    // The recovery row every pull conflict queues: this workspace, this
-    // branch, the first conflicted path, attributed to the user who asked.
-    expect(pending.enqueueIfAbsent).toHaveBeenCalledWith({
-      workspaceId: 'ada%2Fdraft',
-      branch: 'ada/draft',
-      path: 'A.md',
-      authorEmail: 'ada@x.io',
-      authorName: 'Ada',
-    });
+    expect(refused).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(refused as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: 'ada/draft', cause: 'refused' });
+    expect(untouched).not.toHaveBeenCalled();
   });
 
   it('authorizes each resolution inside the merge: readable on both branches as fetched, and the draft write rule every save takes', async () => {
@@ -361,16 +380,6 @@ describe('WorkflowService.updateBranch', () => {
     asked.length = 0;
     await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
     expect(asked).toEqual([]);
-  });
-
-  it('answers a publish the host refused as every refused share is answered: the typed hand-off', async () => {
-    const git = gitThatMerges(null);
-    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi
-      .fn()
-      .mockRejectedValue(new MergePublishRefusedError('ada/draft', 'merge-1', 'remote: permission denied', false));
-    const err = await build(git).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
-    expect(err as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: 'ada/draft', cause: 'refused', originalDetail: 'remote: permission denied' });
   });
 
   it('takes the draft\'s own shared state when no source is named, and publishes nothing on conflicts', async () => {

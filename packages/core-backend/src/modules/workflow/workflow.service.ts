@@ -98,7 +98,6 @@ import {
   BranchNotFoundError,
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
-  MergePublishRefusedError,
   OpenChangeRequestBlocksMergeError,
   ProtectedBranchError,
   RolesYamlPreservationError,
@@ -972,7 +971,17 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     opts: { preserveMerges?: boolean } = {},
   ): Promise<boolean> {
-    const { treeChanged } = await this.git.pull(workspaceId, opts);
+    return this.pullWorkspaceVia(() => this.git.pull(workspaceId, opts), workspaceId);
+  }
+
+  /**
+   * `pullWorkspace` over the pull it is given: the workspace's own
+   * (`git.pull`, which takes the workspace's reservation) or one a caller
+   * already holding that reservation hands in (a merge's publish). The
+   * announcement is the same either way.
+   */
+  private async pullWorkspaceVia(pull: () => Promise<{ treeChanged: boolean }>, workspaceId: string): Promise<boolean> {
+    const { treeChanged } = await pull();
     const defaultBranch = this.kb.defaultBranch;
     if (treeChanged && branchForWorkspaceId(workspaceId) === defaultBranch) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: defaultBranch });
@@ -1897,8 +1906,33 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<void> {
     // No explicit `undefined` third argument when there are no options: the
     // call shape stays the bare `push(workspaceId, user)` every caller made.
-    const push = () =>
-      opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user);
+    return this.pushWithRecoveryVia(
+      {
+        push: () => (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user)),
+        pull: () => this.pullWorkspace(workspaceId, { preserveMerges: true }),
+      },
+      workspaceId,
+      branch,
+      targetPath,
+      user,
+    );
+  }
+
+  /**
+   * `pushWithRecovery`'s policy over the two moves it is made of — the push,
+   * and the pull-rebase that keeps a stranded merge a merge — so that a
+   * caller already holding the workspace's reservation (a merge publishing
+   * itself, `updateBranch`) runs the SAME policy over its own unlocked moves,
+   * and a push the host refuses answers one way there too.
+   */
+  private async pushWithRecoveryVia(
+    ops: { push: () => Promise<void>; pull: () => Promise<unknown> },
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+  ): Promise<void> {
+    const push = ops.push;
     try {
       await push();
       this.noteGitSyncOk(workspaceId, branch);
@@ -1919,7 +1953,7 @@ export class WorkflowService implements IWorkflowService {
           // with whatever push of the branch comes next — a save, a share —
           // and a plain rebase would flatten it into cherry-picks. With no
           // merge among the local commits the two spellings replay the same.
-          await this.pullWorkspace(workspaceId, { preserveMerges: true });
+          await ops.pull();
           try {
             await push();
           } catch (retryErr) {
@@ -4730,19 +4764,27 @@ export class WorkflowService implements IWorkflowService {
       (resolutions.length > 0
         ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
         : '');
-    let outcome: UpdateBranchOutcome;
-    try {
-      // Published inside the merge's own reservation (`publish`): nothing
-      // lands between the merge commit and its push. A push the host
-      // rejects is retried with the merge replayed on the moved branch; a
-      // replay that conflicts is the stranded-commit case every pull hands
-      // to recovery, and a push the host refuses answers as every refused
-      // share answers — the banner noted, the typed hand-off thrown.
-      outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, {
+    // Published inside the merge's own reservation: nothing lands between
+    // the merge commit and its push, and the push is EVERY workflow push's
+    // `pushWithRecovery`, run over the merge's own unlocked moves — a
+    // rejection replays the merge (kept as a merge) onto the moved branch
+    // and pushes again; a replay that conflicts or a host that refuses
+    // answers as every refused share answers, the banner noted and the
+    // typed hand-off thrown, naming the branch (no single file is at issue)
+    // and never a conflicted path. The merge commit stays local for the
+    // next push of the branch to carry.
+    return this.git.mergeIntoBranch(workspaceId, branch, from, user, {
         subject,
         body,
         resolutions,
-        publish: true,
+        publish: (ops) =>
+          this.pushWithRecoveryVia(
+            { push: ops.push, pull: () => this.pullWorkspaceVia(ops.pullRebase, workspaceId) },
+            workspaceId,
+            branch,
+            branch,
+            user,
+          ),
         // A resolution writes a file on the draft from what both branches
         // hold of it. It is authorized inside the merge's reservation, after
         // the fetch and before the merge touches the checkout — the draft's
@@ -4763,33 +4805,6 @@ export class WorkflowService implements IWorkflowService {
           }
         },
       });
-    } catch (err) {
-      if (err instanceof PullRebaseConflictError) {
-        const message = syncConflictMessage(branch, err.conflictedPaths);
-        this.noteGitSyncFailed(workspaceId, branch, err, { paths: err.conflictedPaths, message });
-        await this.queuePullConflictRecovery(workspaceId, err, user);
-        throw err;
-      }
-      if (err instanceof MergePublishRefusedError) {
-        this.noteGitSyncFailed(workspaceId, branch, err, undefined, 'push');
-        log.warn(
-          `publish of the merge on workspace=${workspaceId} user=${user.id} failed; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
-          { detail: err.detail },
-        );
-        // No single file is at issue: the whole branch is. Its name takes the
-        // path's place in the sentence, which reads as "diverged on <branch>".
-        throw new PushNeedsAgentResolutionError(
-          branch,
-          branch,
-          err.detail,
-          err.diverged ? 'replayed onto the moved branch inside the merge, still rejected' : '(cooperative path not attempted)',
-          err.diverged ? 'diverged' : 'refused',
-        );
-      }
-      throw err;
-    }
-    if (outcome.kind === 'merged') this.noteGitSyncOk(workspaceId, branch);
-    return outcome;
   }
 
   fileAtBranch(

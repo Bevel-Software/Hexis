@@ -748,11 +748,13 @@ export interface IWorkflowService {
    *   - `pending-commits` when writes on either branch are still being
    *     committed (waited for, up to 20 seconds); nothing merged.
    *   - `merged` means the merge commit is PUBLISHED: the push runs inside the
-   *     merge's own reservation, and a push the host rejects because the
-   *     branch moved is retried with the merge replayed on top. A replay that
-   *     conflicts throws the typed pull-conflict error (recovery queued), and
-   *     a push the host refuses throws the typed push hand-off; either way the
-   *     merge commit is kept on the branch, unpublished, the checkout clean.
+   *     merge's own reservation, through the cooperative recovery every
+   *     workflow push takes — a push the host rejects because the branch
+   *     moved is retried with the merge replayed on top. A replay that
+   *     conflicts, or a host that refuses, throws the saved-locally hand-off
+   *     (`PushNeedsAgentResolutionError`, its `path` the branch: no single
+   *     file is at issue, and no conflicted path is named), the merge commit
+   *     kept on the branch, unpublished, the checkout clean.
    *
    * Per-file read access to what a `conflicts` answer carries is the
    * CALLER's to check and withhold, as for `fileAtBranch`.
