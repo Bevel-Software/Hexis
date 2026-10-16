@@ -853,9 +853,15 @@ export function SkillPage({
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
-          // A page of the skill opens on the Knowledge file page, where its tools are.
+          // A page of the skill opens on the Knowledge file page, where its
+          // tools are. The URL alone would route straight back here (every
+          // file under a skill's folder IS the skill page); `rawFile` asks the
+          // item route for the file route itself, as the plugin page's file
+          // links do.
           onOpenInPlatform={
-            fileWorkspacePath ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath)) : undefined
+            fileWorkspacePath
+              ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath), { state: { rawFile: true } })
+              : undefined
           }
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
