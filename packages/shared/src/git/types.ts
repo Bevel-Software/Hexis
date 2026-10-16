@@ -103,19 +103,30 @@ export interface MergeResolution {
  */
 export interface ConflictedFile {
   path: string;
-  /** The file at the merge base; null when it did not exist there. */
+  /** The file at the merge base; null when it did not exist there, or when `truncated` names `base`. */
   base: string | null;
-  /** The file on the branch being updated; null when that side deleted it. */
+  /** The file on the branch being updated; null when that side deleted it, or when `truncated` names `ours`. */
   ours: string | null;
-  /** The file on the branch merged in; null when that side deleted it. */
+  /** The file on the branch merged in; null when that side deleted it, or when `truncated` names `theirs`. */
   theirs: string | null;
-  /** The working copy with git's conflict markers; null when a side deleted the file. */
+  /**
+   * The working copy with git's conflict markers; null when a side deleted
+   * the file (git leaves no marked-up copy then), or when `truncated` names
+   * `merged`.
+   */
   merged: string | null;
   /**
-   * True when a side was too large or not text and was left out: read it at
-   * `ours`/`theirs`/`base` with the file-at tools instead.
+   * The sides that were too large or not text and were left out — a null
+   * side named here is omitted, not deleted. Read it at the commit
+   * (`ours`/`theirs`/`mergeBase`) with the file-at tools instead; a whole
+   * side can still be kept with `choose`.
    */
-  truncated?: boolean;
+  truncated?: Array<'base' | 'ours' | 'theirs' | 'merged'>;
+  /**
+   * True when the caller may not read this file on one of the branches: its
+   * sides are withheld (null), and only a whole side (`choose`) may settle it.
+   */
+  readDenied?: boolean;
 }
 
 /**

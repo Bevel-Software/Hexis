@@ -1524,73 +1524,27 @@ export class GitService implements IGitService {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
     assertValidAuthor(user);
+    // The one merge protocol (`mergeRefIntoCheckout`), asked for what the
+    // auto-merge needs: no resolutions, the conflicted paths alone, no
+    // publish. Under the per-branch workspace model the workspace IS the
+    // source branch, so the checked-out guard is not asked for; nor is the
+    // dirty-tree one — save=share keeps the tree clean before an auto-merge,
+    // and a dirty one is an upstream bug `statusInternal` already logs.
     return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      // Under the per-branch workspace model, the workspace's identity is
-      // the source branch — the legacy "current branch must equal sourceBranch"
-      // guard was an artifact of the single-workspace-many-branches model and
-      // is no longer needed. The legacy dirty-tree refusal is also gone:
-      // save=share guarantees the tree is clean before any auto-merge runs,
-      // and the only way it could be dirty now is an upstream bug, which
-      // `statusInternal` already logs server-side.
-      // Refresh the target ref so we merge against the latest published
-      // state. Failing the fetch here is non-recoverable for this
-      // operation: a stale `origin/<target>` would let us silently miss
-      // conflicts the next push would surface, and the whole point of
-      // `mergeFromOrigin` is to surface those conflicts now. Propagate
-      // the error so the auto-merge aborts cleanly instead of producing
-      // a merge based on a stale ref. Explicit destination refspec for the
-      // same reason as `mergeChangeRequest`: a bare `fetch origin <branch>`
-      // updates `origin/<branch>` only as far as `remote.origin.fetch` allows,
-      // and a drifted refspec would hand this merge the stale ref it is
-      // explicitly trying to avoid.
-      await this.git(cwd, [
-        'fetch', '--no-write-fetch-head', 'origin',
-        `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
-      ]);
-
-      // `--no-commit --no-ff` so we control the commit (need to override
-      // author) and so we never sneak a fast-forward past the merge-commit
-      // explanation gate.
-      let mergeStdout = '';
-      try {
-        const r = await this.git(cwd, [
-          'merge', '--no-commit', '--no-ff', `origin/${targetBranch}`,
-        ]);
-        mergeStdout = r.stdout;
-      } catch (err) {
-        // Conflict or other failure. Disambiguate via the shared porcelain parse.
-        const conflictPaths = await this.conflictedPaths(cwd);
-        // Always attempt to abort so a partial merge doesn't poison the tree.
-        try {
-          await this.git(cwd, ['merge', '--abort']);
-        } catch {
-          // Already aborted (no MERGE_HEAD) — fine.
-        }
-        if (conflictPaths.length === 0) throw err;
-        return { kind: 'conflicts' as const, paths: conflictPaths };
-      }
-
-      // No conflicts. Detect "already up to date" — git prints that exact
-      // phrase and stages nothing. Otherwise the merge is staged and waiting
-      // for the commit we now author as `user`.
-      if (/Already up to date/i.test(mergeStdout)) {
-        return { kind: 'clean' as const, alreadyUpToDate: true };
-      }
-      const subject = `Refresh ${sourceBranch} from ${targetBranch}`;
-      const body =
-        `Workflow auto-merge: incorporates the latest ${targetBranch} into ${sourceBranch} ` +
-        `as part of opening or refreshing a change request. ` +
-        `Conflicts (if any) would have been surfaced to the caller before this commit landed; ` +
-        `none were detected, so the merge applied cleanly.`;
-      await this.git(cwd, [
-        'commit',
-        `--author=${user.name} <${user.email}>`,
-        '-m', subject,
-        '-m', body,
-      ]);
-      this.accessControl?.invalidate(workspaceId);
-      return { kind: 'clean' as const, alreadyUpToDate: false };
+      const outcome = await this.mergeRefIntoCheckout(workspaceId, await this.repoDir(workspaceId), sourceBranch, targetBranch, user, {
+        subject: `Refresh ${sourceBranch} from ${targetBranch}`,
+        body:
+          `Workflow auto-merge: incorporates the latest ${targetBranch} into ${sourceBranch} ` +
+          `as part of opening or refreshing a change request. ` +
+          `Conflicts (if any) would have been surfaced to the caller before this commit landed; ` +
+          `none were detected, so the merge applied cleanly.`,
+        resolutions: new Map(),
+        guardCheckout: false,
+        describeConflicts: false,
+        publish: false,
+      });
+      if (outcome.kind === 'conflicts') return { kind: 'conflicts' as const, paths: outcome.unresolved };
+      return { kind: 'clean' as const, alreadyUpToDate: outcome.kind === 'nothing-to-merge' };
     });
   }
 
@@ -1602,7 +1556,7 @@ export class GitService implements IGitService {
     branch: string,
     fromBranch: string,
     user: AuthUser,
-    opts: { subject: string; body: string; resolutions?: MergeResolution[] },
+    opts: { subject: string; body: string; resolutions?: MergeResolution[]; publish?: boolean },
   ): Promise<MergeIntoBranchOutcome> {
     assertValidBranchName(branch);
     assertValidBranchName(fromBranch);
@@ -1626,9 +1580,56 @@ export class GitService implements IGitService {
       if (resolutions.has(p)) throw new WorkflowValidationError(`"${p}" is resolved twice`);
       resolutions.set(p, { ...r, path: p });
     }
+    return this.mutex.run(workspaceId, async () =>
+      this.mergeRefIntoCheckout(workspaceId, await this.repoDir(workspaceId), branch, fromBranch, user, {
+        subject: opts.subject,
+        body: opts.body,
+        resolutions,
+        guardCheckout: true,
+        describeConflicts: true,
+        publish: opts.publish === true,
+      }),
+    );
+  }
+
+  /**
+   * THE merge of `origin/<fromBranch>` into the checkout at `cwd` — what
+   * `mergeFromOrigin` (the change-request auto-merge) and `mergeIntoBranch`
+   * (the agent's update) both run. The caller holds the workspace's
+   * reservation. `--no-commit --no-ff`, so the commit is authored as `user`
+   * and the record of what was merged is never fast-forwarded past.
+   *
+   * The checkout is never left mid-merge, whatever happens: every exit after
+   * `git merge` has started — a conflict described, a resolution refused or
+   * failed, a commit or a publish that failed — runs `merge --abort` first,
+   * and an abort that itself fails is reported, never swallowed, because a
+   * checkout stuck in a merge is what breaks the commit worker and every
+   * later operation on the branch.
+   *
+   * `publish` pushes the merge commit inside this same reservation, so no
+   * save or sync can land between the commit and its push; a push the host
+   * rejects because the branch moved is retried after replaying onto the
+   * moved branch with the merge kept (`--rebase-merges`), up to three times.
+   */
+  private async mergeRefIntoCheckout(
+    workspaceId: string,
+    cwd: string,
+    branch: string,
+    fromBranch: string,
+    user: AuthUser,
+    opts: {
+      subject: string;
+      body: string;
+      resolutions: Map<string, MergeResolution>;
+      /** Refuse a checkout that is not on `branch`, or holds uncommitted edits. */
+      guardCheckout: boolean;
+      /** Carry every conflicted file's sides in the answer; else the paths alone. */
+      describeConflicts: boolean;
+      publish: boolean;
+    },
+  ): Promise<MergeIntoBranchOutcome> {
     const theirsRef = `refs/remotes/origin/${fromBranch}`;
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    if (opts.guardCheckout) {
       const checkedOut = await this.currentBranch(cwd);
       if (checkedOut !== branch) {
         throw new WorkflowValidationError(`the workspace is on "${checkedOut}", not on "${branch}"`);
@@ -1644,29 +1645,26 @@ export class GitService implements IGitService {
           { kind: 'branch-busy', branch },
         );
       }
-      // `git merge`/`git commit` need a committer identity (see `mergeChangeRequest`).
-      await this.git(cwd, ['config', 'user.name', BOT_NAME]);
-      await this.git(cwd, ['config', 'user.email', BOT_EMAIL]);
-      // The published tip, explicitly: a bare `fetch origin <branch>` updates
-      // the tracking ref only as far as `remote.origin.fetch` allows.
-      await this.git(cwd, [
-        'fetch', '--no-write-fetch-head', 'origin',
-        `+refs/heads/${fromBranch}:${theirsRef}`,
-      ]);
-      const ours = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
-      const theirs = (await this.git(cwd, ['rev-parse', theirsRef])).stdout.trim();
-      const abort = () => this.git(cwd, ['merge', '--abort']).catch(() => undefined);
+    }
+    // `git merge`/`git commit` need a committer identity (see `mergeChangeRequest`).
+    await this.git(cwd, ['config', 'user.name', BOT_NAME]);
+    await this.git(cwd, ['config', 'user.email', BOT_EMAIL]);
+    // The published tip, explicitly: a bare `fetch origin <branch>` updates
+    // the tracking ref only as far as `remote.origin.fetch` allows, and a
+    // stale ref would hide exactly the conflicts this merge exists to surface.
+    await this.git(cwd, ['fetch', '--no-write-fetch-head', 'origin', `+refs/heads/${fromBranch}:${theirsRef}`]);
+    const ours = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+    const theirs = (await this.git(cwd, ['rev-parse', theirsRef])).stdout.trim();
 
-      let resolvedPaths: string[] = [];
-      let mergeStdout = '';
-      try {
-        // `--no-commit --no-ff`: the commit is authored below, as the user, and
-        // never fast-forwarded past the record of what was merged.
-        mergeStdout = (await this.git(cwd, ['merge', '--no-commit', '--no-ff', theirsRef])).stdout;
-      } catch (err) {
+    let mergeStdout = '';
+    try {
+      mergeStdout = (await this.git(cwd, ['merge', '--no-commit', '--no-ff', theirsRef])).stdout;
+    } catch (err) {
+      // A conflict, or another failure: either way the merge may be on disk
+      // from here on, and every exit below undoes it.
+      return this.settleMerge(cwd, async () => {
         const conflicted = await this.conflictedPaths(cwd);
         if (conflicted.length === 0) {
-          await abort();
           throw new Error(
             `git merge failed without detectable conflicts: ${redactGitToken(
               err instanceof Error ? err.message : String(err),
@@ -1674,59 +1672,142 @@ export class GitService implements IGitService {
             )}`,
           );
         }
-        const stray = [...resolutions.keys()].filter((p) => !conflicted.includes(p));
+        const stray = [...opts.resolutions.keys()].filter((p) => !conflicted.includes(p));
         if (stray.length > 0) {
           // Only a conflicted path is written by a resolution: anything else
           // is an ordinary write, which goes through the file tools and their
           // locks. Refused whole, before any resolution is applied.
-          await abort();
           throw new WorkflowValidationError(
             `not conflicted, so not resolved here: ${stray.join(', ')}. The conflicted paths are ${conflicted.join(', ')}.`,
             { kind: 'not-conflicted', paths: stray },
           );
         }
-        const unresolved = conflicted.filter((p) => !resolutions.has(p));
+        const unresolved = conflicted.filter((p) => !opts.resolutions.has(p));
         if (unresolved.length > 0) {
-          // Described while the merge is still on disk — the three stages and
-          // the marked-up working copy exist only then — and undone before the
-          // answer leaves the reservation.
+          // Described while the merge is on disk — the three stages and the
+          // marked-up working copy exist only then — and undone (by
+          // `settleMerge`) before the answer leaves the reservation.
           const mergeBase = await this.git(cwd, ['merge-base', 'HEAD', theirsRef])
             .then((r) => r.stdout.trim() || null)
             .catch(() => null);
           const files: ConflictedFile[] = [];
-          for (const p of conflicted) files.push(await this.describeConflict(cwd, p));
-          await abort();
-          return { kind: 'conflicts', from: fromBranch, mergeBase, ours, theirs, files, unresolved };
+          if (opts.describeConflicts) for (const p of conflicted) files.push(await this.describeConflict(cwd, p));
+          return { done: false, outcome: { kind: 'conflicts', from: fromBranch, mergeBase, ours, theirs, files, unresolved } };
         }
-        try {
-          for (const p of conflicted) await this.applyResolution(cwd, resolutions.get(p)!);
-          const still = await this.conflictedPaths(cwd);
-          if (still.length > 0) throw new Error(`still conflicted after the resolutions were applied: ${still.join(', ')}`);
-        } catch (err) {
-          await abort();
-          throw err;
-        }
-        resolvedPaths = conflicted;
-      }
-
-      if (resolvedPaths.length === 0 && /Already up to date/i.test(mergeStdout)) {
-        return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
-      }
+        for (const p of conflicted) await this.applyResolution(cwd, opts.resolutions.get(p)!);
+        const still = await this.conflictedPaths(cwd);
+        if (still.length > 0) throw new Error(`still conflicted after the resolutions were applied: ${still.join(', ')}`);
+        return {
+          done: true,
+          outcome: await this.commitMerge(workspaceId, cwd, branch, fromBranch, user, opts, conflicted),
+        };
+      });
+    }
+    // A merge with nothing to settle leaves no resolution a place to go: one
+    // supplied anyway names a path that is not conflicted, and is refused as
+    // such rather than dropped on the floor behind a published merge.
+    const noConflictsFor = (): WorkflowValidationError =>
+      new WorkflowValidationError(
+        `nothing conflicted, so nothing is resolved here: ${[...opts.resolutions.keys()].join(', ')}.`,
+        { kind: 'not-conflicted', paths: [...opts.resolutions.keys()] },
+      );
+    if (/Already up to date/i.test(mergeStdout)) {
+      if (opts.resolutions.size > 0) throw noConflictsFor();
+      return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
+    }
+    return this.settleMerge(cwd, async () => {
+      if (opts.resolutions.size > 0) throw noConflictsFor();
       const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
-      if (staged.trim() === '' && resolvedPaths.length === 0) {
-        await abort();
-        return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
-      }
-      await this.git(cwd, [
-        'commit',
-        `--author=${user.name} <${user.email}>`,
-        '-m', opts.subject,
-        '-m', opts.body,
-      ]);
-      const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
-      this.accessControl?.invalidate(workspaceId);
-      return { kind: 'merged', sha, from: fromBranch, resolvedPaths };
+      if (staged.trim() === '') return { done: false, outcome: { kind: 'nothing-to-merge', sha: ours, from: fromBranch } };
+      return { done: true, outcome: await this.commitMerge(workspaceId, cwd, branch, fromBranch, user, opts, []) };
     });
+  }
+
+  /**
+   * Run `work` while a merge may be on disk, and leave none: an answer with
+   * `done: false` (a conflict described, nothing to merge) is aborted before
+   * it is returned, and a failure anywhere in `work` is aborted before it is
+   * rethrown. A commit that landed (`done: true`) needs no abort. An abort
+   * that fails while a merge is still in progress is the one thing never
+   * swallowed: it is reported with the failure it followed.
+   */
+  private async settleMerge(
+    cwd: string,
+    work: () => Promise<{ done: boolean; outcome: MergeIntoBranchOutcome }>,
+  ): Promise<MergeIntoBranchOutcome> {
+    let result: { done: boolean; outcome: MergeIntoBranchOutcome };
+    try {
+      result = await work();
+    } catch (err) {
+      await this.abortMerge(cwd, err);
+      throw err;
+    }
+    if (!result.done) await this.abortMerge(cwd);
+    return result.outcome;
+  }
+
+  /**
+   * `git merge --abort`, and proof that nothing is left: a failed abort with
+   * no `MERGE_HEAD` is the benign "no merge to abort"; one that leaves
+   * `MERGE_HEAD` behind is thrown (wrapping `after`, the failure that led
+   * here, when there is one), because the checkout is now stuck.
+   */
+  private async abortMerge(cwd: string, after?: unknown): Promise<void> {
+    try {
+      await this.git(cwd, ['merge', '--abort']);
+      return;
+    } catch (abortErr) {
+      const merging = await this.refExists(cwd, 'MERGE_HEAD').catch(() => true);
+      if (!merging) return;
+      const detail = redactGitToken(abortErr instanceof Error ? abortErr.message : String(abortErr), this.credentials.token());
+      log.error(`a merge in ${cwd} could not be undone; the checkout is left mid-merge:`, { detail });
+      const lead = after === undefined ? 'the merge could not be undone' : `${after instanceof Error ? after.message : String(after)}; and the merge could not be undone`;
+      throw new Error(`${lead}: ${detail}`, { cause: after ?? abortErr });
+    }
+  }
+
+  /** The merge commit, as `user`, and its publish when asked for. The caller settles a failure. */
+  private async commitMerge(
+    workspaceId: string,
+    cwd: string,
+    branch: string,
+    fromBranch: string,
+    user: AuthUser,
+    opts: { subject: string; body: string; publish: boolean },
+    resolvedPaths: string[],
+  ): Promise<MergeIntoBranchOutcome> {
+    await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
+    this.accessControl?.invalidate(workspaceId);
+    if (opts.publish) await this.publishMergeUnlocked(workspaceId, cwd, branch, user);
+    // Read AFTER the publish: a push the host rejected is retried with the
+    // local commits replayed onto the moved branch, which gives the merge
+    // commit a new id — the one that is now the published tip.
+    const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+    return { kind: 'merged', sha, from: fromBranch, resolvedPaths };
+  }
+
+  /**
+   * Push the branch from inside the reservation the merge was made in. A
+   * rejection because the branch moved on the host is answered the way every
+   * push's cooperative recovery answers it — the local commits replayed onto
+   * the moved branch with the merge kept — and pushed again; a conflict in
+   * that replay throws the typed pull-conflict error with the merge commit
+   * kept locally and the checkout clean (the replay aborts itself).
+   */
+  private async publishMergeUnlocked(workspaceId: string, cwd: string, branch: string, user: AuthUser): Promise<void> {
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.pushUnlocked(workspaceId, cwd, user);
+        return;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const moved = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
+        if (!moved || attempt >= MAX_ATTEMPTS) throw err;
+        const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
+        await this.rebaseOntoRemote(cwd, branch, remoteRef, { preserveMerges: true });
+      }
+    }
   }
 
   /**
@@ -1738,41 +1819,49 @@ export class GitService implements IGitService {
    * then.
    */
   private async describeConflict(cwd: string, repoRelativePath: string): Promise<ConflictedFile> {
-    let truncated = false;
-    const side = async (spec: string): Promise<string | null> => {
-      let text: string;
+    const truncated: NonNullable<ConflictedFile['truncated']> = [];
+    const side = async (name: 'base' | 'ours' | 'theirs', stage: 1 | 2 | 3): Promise<string | null> => {
+      let bytes: Buffer;
       try {
-        text = (await this.git(cwd, ['show', spec])).stdout;
-      } catch {
-        // No such stage: that side deleted the file (or, for the base, never
-        // had it). The merge itself proved the path conflicted, so a failure
-        // here is about the stage, not the repository.
-        return null;
+        bytes = (await this.gitRunner.run(cwd, ['show', `:${stage}:${repoRelativePath}`], { encoding: 'buffer' })).stdout;
+      } catch (err) {
+        // ONLY a stage git says is not there is a side that has no file (that
+        // side deleted it; the base never had it). Anything else — a deadline,
+        // a repository failure — is not "deleted", and reporting it as such
+        // would have a resolver drop a file over a hiccup.
+        const msg = (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/is in the index, but not at stage|does not exist in|exists on disk, but not in|invalid object name/i.test(msg)) return null;
+        throw err;
       }
-      if (text.includes('\0') || text.length > GitService.CONFLICT_SIDE_MAX_CHARS) {
-        truncated = true;
-        return null;
-      }
-      return text;
+      return this.carriedText(bytes, () => truncated.push(name));
     };
-    const base = await side(`:1:${repoRelativePath}`);
-    const ours = await side(`:2:${repoRelativePath}`);
-    const theirs = await side(`:3:${repoRelativePath}`);
+    const base = await side('base', 1);
+    const ours = await side('ours', 2);
+    const theirs = await side('theirs', 3);
     let merged: string | null = null;
     try {
-      const text = await fs.readFile(path.join(cwd, repoRelativePath), 'utf-8');
-      if (text.includes('\0') || text.length > GitService.CONFLICT_SIDE_MAX_CHARS) truncated = true;
-      else merged = text;
+      merged = this.carriedText(await fs.readFile(path.join(cwd, repoRelativePath)), () => truncated.push('merged'));
     } catch (err) {
       if (!isAbsence(err)) throw err;
     }
-    return { path: repoRelativePath, base, ours, theirs, merged, ...(truncated ? { truncated } : {}) };
+    return { path: repoRelativePath, base, ours, theirs, merged, ...(truncated.length > 0 ? { truncated } : {}) };
+  }
+
+  /** `bytes` as text when they are text and small enough to carry; else null, and `left` is told. */
+  private carriedText(bytes: Buffer, left: () => void): string | null {
+    if (bytes.length > GitService.CONFLICT_SIDE_MAX_CHARS || bytes.includes(0)) {
+      left();
+      return null;
+    }
+    return bytes.toString('utf-8');
   }
 
   /**
    * Settle one conflicted path on disk and in the index, as the resolution
    * says. `r.path` is one the merge itself listed as conflicted (matched
    * exactly by the caller), so it is a path git owns inside the checkout.
+   * A side kept whole is restored by git from its index stage, byte for
+   * byte — never through a text decoding — so a binary file survives it.
    */
   private async applyResolution(cwd: string, r: MergeResolution): Promise<void> {
     const file = path.join(cwd, r.path);
@@ -1787,19 +1876,15 @@ export class GitService implements IGitService {
       await this.git(cwd, ['add', '-A', '--', r.path]);
       return;
     }
-    // `ours`/`theirs`: that side's stage, or the file gone when that side has none.
-    const stage = r.choose === 'ours' ? ':2:' : ':3:';
-    let text: string | null;
+    // `ours`/`theirs`: git checks that side's stage out as it is. A side with
+    // no stage (deleted there) is "does not have our/their version": the
+    // file goes.
     try {
-      text = (await this.git(cwd, ['show', `${stage}${r.path}`])).stdout;
-    } catch {
-      text = null;
-    }
-    if (text === null) {
+      await this.git(cwd, ['checkout', r.choose === 'ours' ? '--ours' : '--theirs', '--', r.path]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/does not have (our|their) version/i.test(msg)) throw err;
       await fs.rm(file, { force: true });
-    } else {
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, text, 'utf-8');
     }
     await this.git(cwd, ['add', '-A', '--', r.path]);
   }
@@ -1814,8 +1899,10 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
-      const ref = await this.resolveBranchRef(cwd, branch);
-      const sha = (await this.git(cwd, ['rev-parse', ref])).stdout.trim();
+      // The PUBLISHED tip: what the branch's own workspace holds and has not
+      // shared is nobody else's to read, so `origin/<branch>` comes first and
+      // the local head serves only a branch origin does not have.
+      const { ref, sha } = await this.resolvePublishedBranch(cwd, branch);
       // Per file, as every history read: a folder's content at a commit is
       // every child's, which the per-file gate never checked.
       await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);

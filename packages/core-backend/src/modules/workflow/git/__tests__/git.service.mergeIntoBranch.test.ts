@@ -238,6 +238,111 @@ describe('GitService.mergeIntoBranch', () => {
     expect(await fs.readFile(path.join(repo, 'shared.md'), 'utf-8')).toBe('unsaved edit\n');
   });
 
+  it('refuses resolutions when nothing conflicts, so none is dropped behind a clean merge', async () => {
+    const { repo, pusher } = await seed(root);
+    await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target moves');
+    const head = await commitLocally(repo, { 'mine.md': 'mine\n' }, 'draft work');
+    await expect(
+      service().mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
+        subject: 's',
+        body: 'b',
+        resolutions: [{ path: 'other.md', content: 'smuggled\n' }],
+      }),
+    ).rejects.toThrow(/nothing conflicted/);
+    expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect((await gitOut(repo, ['status', '--porcelain'])).trim()).toBe('');
+    await expect(gitOut(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).rejects.toThrow();
+  });
+
+  it('undoes the merge when the commit itself fails, and reports the failure', async () => {
+    const { repo, pusher } = await seed(root);
+    await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target moves');
+    const head = await commitLocally(repo, { 'mine.md': 'mine\n' }, 'draft work');
+    // A hook that refuses every commit: the merge is staged, the commit fails.
+    const hooks = path.join(repo, '.git', 'hooks');
+    await fs.mkdir(hooks, { recursive: true });
+    await fs.writeFile(path.join(hooks, 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+    await expect(service().mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b' })).rejects.toThrow();
+    await expect(gitOut(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).rejects.toThrow();
+    expect((await gitOut(repo, ['status', '--porcelain'])).trim()).toBe('');
+    expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(repo, 'other.md'), 'utf-8')).toBe('other\n');
+  });
+
+  it('leaves a binary or oversized side out, named per side, and keeps a chosen side byte for byte', async () => {
+    const { repo, pusher } = await seed(root);
+    const png = (seed: number) => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, seed, 0xff, 0, 1]);
+    const big = 'x'.repeat(250_000) + '\n';
+    await fs.writeFile(path.join(repo, 'img.png'), png(1));
+    await fs.writeFile(path.join(repo, 'big.md'), 'small\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-q', '-m', 'binary and big']);
+    await runGit(repo, ['push', '-q', 'origin', DRAFT]);
+    await runGit(pusher, ['fetch', '-q', 'origin']);
+    await runGit(pusher, ['checkout', '-q', TARGET]);
+    await runGit(pusher, ['merge', '-q', `origin/${DRAFT}`]);
+    await fs.writeFile(path.join(pusher, 'img.png'), png(2));
+    await fs.writeFile(path.join(pusher, 'big.md'), big);
+    await runGit(pusher, ['add', '-A']);
+    await runGit(pusher, ['commit', '-q', '-m', 'target changes both']);
+    await runGit(pusher, ['push', '-q', 'origin', TARGET]);
+    await fs.writeFile(path.join(repo, 'img.png'), png(3));
+    await fs.writeFile(path.join(repo, 'big.md'), 'draft small\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-q', '-m', 'draft changes both']);
+
+    const svc = service();
+    const first = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b' });
+    expect(first.kind).toBe('conflicts');
+    if (first.kind !== 'conflicts') return;
+    const img = first.files.find((f) => f.path === 'img.png')!;
+    expect(img.truncated?.sort()).toEqual(['base', 'merged', 'ours', 'theirs']);
+    expect([img.base, img.ours, img.theirs, img.merged]).toEqual([null, null, null, null]);
+    const bigFile = first.files.find((f) => f.path === 'big.md')!;
+    expect(bigFile.truncated).toEqual(['theirs', 'merged']);
+    expect(bigFile.ours).toBe('draft small\n');
+    expect(bigFile.base).toBe('small\n');
+
+    const second = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
+      subject: 's',
+      body: 'b',
+      resolutions: [
+        { path: 'img.png', choose: 'ours' },
+        { path: 'big.md', choose: 'theirs' },
+      ],
+    });
+    expect(second.kind).toBe('merged');
+    expect(Buffer.compare(await fs.readFile(path.join(repo, 'img.png')), png(3))).toBe(0);
+    expect(await fs.readFile(path.join(repo, 'big.md'), 'utf-8')).toBe(big);
+  });
+
+  it('publishes the merge inside the same reservation, and after a rejected push replays it onto the moved branch', async () => {
+    const { repo, pusher } = await seed(root);
+    await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target moves');
+    await commitLocally(repo, { 'mine.md': 'mine\n' }, 'draft work');
+    const svc = service();
+
+    const published = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b', publish: true });
+    expect(published.kind).toBe('merged');
+    if (published.kind !== 'merged') return;
+    expect((await gitOut(pusher, ['ls-remote', 'origin', `refs/heads/${DRAFT}`])).trim()).toContain(published.sha);
+
+    // The draft moves on the host while this workspace holds its next merge.
+    const moved = await pushOn(pusher, DRAFT, { 'elsewhere.md': 'pushed elsewhere\n' }, 'draft moves on origin');
+    await pushOn(pusher, TARGET, { 'other.md': 'other, changed again\n' }, 'target moves again');
+    const again = await svc.mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 'again', body: 'b', publish: true });
+    expect(again.kind).toBe('merged');
+    if (again.kind !== 'merged') return;
+    // Published, on top of the moved branch, still a merge.
+    expect((await gitOut(pusher, ['ls-remote', 'origin', `refs/heads/${DRAFT}`])).trim()).toContain(again.sha);
+    expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(again.sha);
+    await gitOut(repo, ['merge-base', '--is-ancestor', moved, again.sha]);
+    expect((await gitOut(repo, ['log', '-1', '--format=%P', again.sha])).trim().split(' ')).toHaveLength(2);
+    expect(await fs.readFile(path.join(repo, 'elsewhere.md'), 'utf-8')).toBe('pushed elsewhere\n');
+    expect(await fs.readFile(path.join(repo, 'other.md'), 'utf-8')).toBe('other, changed again\n');
+  });
+
   it('brings the branch\'s own shared state in when it moved while the workspace held commits (from = branch)', async () => {
     const { repo, pusher } = await seed(root);
     const theirs = await pushOn(pusher, DRAFT, { 'other.md': 'pushed from elsewhere\n' }, 'draft moves on origin');
@@ -279,5 +384,14 @@ describe('GitService.readFileAtBranch', () => {
     expect((await svc.readFileAtBranch(workspaceId, 'missing.md', TARGET)).content).toBeNull();
     await expect(svc.readFileAtBranch(workspaceId, 'docs', TARGET)).rejects.toThrow(/directory/);
     await expect(svc.readFileAtBranch(workspaceId, 'other.md', 'no/such/branch')).rejects.toThrow(/unknown branch/);
+  });
+
+  it('reads the PUBLISHED tip, not a local head that has moved past it', async () => {
+    const { repo } = await seed(root);
+    const svc = new GitService(stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }), stubWorkflowHooks(), testKbContext());
+    const published = (await gitOut(repo, ['rev-parse', `origin/${DRAFT}`])).trim();
+    await commitLocally(repo, { 'other.md': 'not shared yet\n' }, 'local only');
+    const read = await svc.readFileAtBranch(workspaceId, 'other.md', DRAFT);
+    expect(read).toEqual({ sha: published, ref: `refs/remotes/origin/${DRAFT}`, content: 'other\n' });
   });
 });
