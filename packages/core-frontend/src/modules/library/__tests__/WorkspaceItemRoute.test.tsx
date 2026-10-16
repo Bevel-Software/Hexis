@@ -226,6 +226,12 @@ describe('WorkspaceItemRoute', () => {
     expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
   });
 
+  it("a skill's HTML page opens as the file it is at `?as=file` — the embed's Open in the platform, a new tab with no router state", async () => {
+    renderAt(`${itemUrl('Skills/qa-bridge/view.html')}?as=file`);
+    await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
+    expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+  });
+
   it('router state `rawFile` renders the file itself at a URL that would otherwise be a page — still inside the library', async () => {
     // The tool page's "Edit the tool file" and the plugin page's manifest
     // button ask for the raw editor by state; the app on screen does not

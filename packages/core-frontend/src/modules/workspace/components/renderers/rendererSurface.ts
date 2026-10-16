@@ -46,6 +46,12 @@ export interface RendererSurface {
    * verbatim: no anchor split, no repair, `#` is part of the name.
    */
   openWorkspacePath(workspacePath: string): void;
+  /**
+   * Open `workspacePath` on its FILE PAGE, even where its path alone would
+   * open a skill's page — where an HTML page's tools are. The embed opens it
+   * in a new tab through its host, so the ask rides in the URL.
+   */
+  openFilePage(workspacePath: string): void;
   /** Follow a node-id link (`<id>` or `<id#heading>`), the copy-link form. */
   openNodeId(idOrLink: string): void;
   /** The absolute, shareable address of `workspacePath` — what a copy-link yields. */

@@ -65,7 +65,7 @@ export function HtmlRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  const { openLink, openWorkspacePath } = useFileNav();
+  const { openLink, openFilePage } = useFileNav();
   const surface = useRendererSurface();
   // Whether the surface's host grows with the page (an issue panel) rather
   // than giving it a pane to scroll in (the app, the MCP App's pane).
@@ -264,11 +264,13 @@ export function HtmlRenderer({
   const openInPlatform = useCallback(() => {
     closeCard(false);
     // The host's own way when it has one (a skill page, whose filePath is
-    // relative to the skill); otherwise, in the app this opens the file page,
-    // and on the embed the surface opens it through the host, in a new tab.
+    // relative to the skill); otherwise the file page, by an address that
+    // asks for it outright: on the embed the surface opens it through the
+    // host in a new tab, which carries no router state, and a page inside a
+    // skill's folder would otherwise open as that skill's page again.
     if (openPageInPlatform) openPageInPlatform();
-    else openWorkspacePath(filePath);
-  }, [closeCard, openPageInPlatform, openWorkspacePath, filePath]);
+    else openFilePage(filePath);
+  }, [closeCard, openPageInPlatform, openFilePage, filePath]);
 
   useEffect(() => {
     frameHeightRef.current = frameHeight;

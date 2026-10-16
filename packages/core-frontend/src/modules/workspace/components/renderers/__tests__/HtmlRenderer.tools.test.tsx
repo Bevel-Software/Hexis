@@ -49,11 +49,12 @@ function inAppElsewhere() {
 }
 
 /** The page on the embed — a surface, even with a page-tools provider somewhere above. */
-function onEmbed(openWorkspacePath: (path: string) => void) {
+function onEmbed(openFilePage: (path: string) => void, openWorkspacePath: (path: string) => void = () => undefined) {
   const surface: RendererSurface = {
     kbDirName: 'knowledge-base',
     openLink: () => undefined,
     openWorkspacePath,
+    openFilePage,
     openNodeId: () => undefined,
     canonicalUrlFor: () => null,
     rawUrl: (path) => `/raw/${path}`,
@@ -213,20 +214,24 @@ describe('the consent card on the file page', () => {
 
 describe('the platform card where there are no tools', () => {
   it('on the embed offers Continue without tools (false) and Open in the platform (opens the page, false)', async () => {
+    const openFilePage = vi.fn();
     const openWorkspacePath = vi.fn();
-    const { container } = onEmbed(openWorkspacePath);
+    const { container } = onEmbed(openFilePage, openWorkspacePath);
     const frame = frameChannel(await frameOf(container));
 
     frame.post({ type: 'bevel.tools.require', requestId: 'q1' });
     expect(await screen.findByText('Roadmap uses tools that are only available in the platform')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Continue without tools' }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tools.require.response', requestId: 'q1', ok: true, result: false }));
-    expect(openWorkspacePath).not.toHaveBeenCalled();
+    expect(openFilePage).not.toHaveBeenCalled();
 
     frame.post({ type: 'bevel.tools.require', requestId: 'q2' });
     fireEvent.click(await screen.findByRole('button', { name: 'Open in the platform' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'q2', result: false }));
-    expect(openWorkspacePath).toHaveBeenCalledWith(PATH);
+    // The FILE PAGE verb, not the plain path: the embed opens a new tab, and
+    // a page in a skill's folder would otherwise open as the skill page.
+    expect(openFilePage).toHaveBeenCalledWith(PATH);
+    expect(openWorkspacePath).not.toHaveBeenCalled();
   });
 
   it("on a skill page opens the page the host's way, not the skill-relative name", async () => {
