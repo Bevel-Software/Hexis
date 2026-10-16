@@ -214,6 +214,85 @@ describe('KbRepository.fetch, an instant in the same millisecond', () => {
   });
 });
 
+describe('KbRepository.exists', () => {
+  it('is false only for an absent marker: a repository that was never made, or a making cut short', async () => {
+    const repository = new KbRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner: new NodeGitRunner(),
+    });
+    expect(await repository.exists()).toBe(false);
+    await repository.ensure();
+    expect(await repository.exists()).toBe(true);
+    await fs.rm(path.join(repository.dir, 'hexis-repository-ready'));
+    expect(await repository.exists()).toBe(false);
+  });
+
+  // A marker that cannot be read is not an absent one. Not on Windows (no
+  // POSIX modes) or as root (who reads it anyway).
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'throws when the marker cannot be read, and ensure() then leaves the repository and its worktrees alone',
+    async () => {
+      const repository = new KbRepository({
+        dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+        kbRepoUrl: () => upstream,
+        gitRunner: new NodeGitRunner(),
+      });
+      const checkoutDir = path.join(workspacesRoot, encodeURIComponent('alice/a'), 'knowledge-base');
+      await repository.addWorktree('alice/a', checkoutDir);
+      const tip = (await git(repository.dir, ['rev-parse', 'refs/heads/alice/a'])).trim();
+      await fs.chmod(repository.dir, 0o000);
+      try {
+        await expect(repository.exists()).rejects.toThrow(/EACCES/);
+        await expect(repository.ensure()).rejects.toThrow(/EACCES/);
+        await expect(repository.fetch({ maxAgeMs: 0, force: true })).resolves.toBe(false);
+      } finally {
+        await fs.chmod(repository.dir, 0o755);
+      }
+      // Whole: nothing was cleared and made again.
+      expect(await repository.exists()).toBe(true);
+      expect((await git(repository.dir, ['rev-parse', 'refs/heads/alice/a'])).trim()).toBe(tip);
+      expect((await git(checkoutDir, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('alice/a');
+    },
+  );
+});
+
+describe('KbRepository.ensure', () => {
+  it('does not record the credential helper as stamped when its write failed, so refreshCredentials() writes it', async () => {
+    const inner = new NodeGitRunner();
+    let failHelper = true;
+    const helperWrites: string[][] = [];
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: { username: () => 'bevel', token: () => 'a-token' },
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (args[0] === 'config' && args.includes('credential.helper')) {
+          helperWrites.push(args);
+          if (failHelper) throw new Error('could not lock config file config: File exists');
+        }
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const repository = new KbRepository({
+      dir: repositoryDirFor(workspacesRoot, 'knowledge-base'),
+      kbRepoUrl: () => upstream,
+      gitRunner,
+    });
+
+    await repository.ensure();
+    expect(helperWrites).toHaveLength(1);
+    expect(await repository.exists()).toBe(true);
+
+    failHelper = false;
+    await repository.refreshCredentials();
+    expect(helperWrites).toHaveLength(2);
+    // Stamped now: the next refresh costs no git.
+    await repository.refreshCredentials();
+    expect(helperWrites).toHaveLength(2);
+    expect((await git(repository.dir, ['config', '--get-all', 'credential.helper'])).trim()).toContain('GITHUB_TOKEN');
+  });
+});
+
 describe('KbRepository.forgetWorktrees', () => {
   it('prunes and deletes the branches as the administrator, and keeps the objects', async () => {
     const inner = new NodeGitRunner();

@@ -212,7 +212,17 @@ export class KbRepository implements IKbRepository {
    * making was cut short (a crash, a full disk) is not taken for one.
    */
   async exists(): Promise<boolean> {
-    return fs.access(path.join(this.dir, READY_MARKER)).then(() => true, () => false);
+    try {
+      await fs.access(path.join(this.dir, READY_MARKER));
+      return true;
+    } catch (err) {
+      // Only absence is "not there". A marker that could not be read (EACCES,
+      // EIO, a process out of file descriptors) has shown nothing, and a false
+      // answer would have `ensureHeld` clear a repository that is whole, with
+      // every worktree's unpushed commits in it.
+      if (isAbsence(err)) return false;
+      throw err;
+    }
   }
 
   /**
@@ -238,11 +248,17 @@ export class KbRepository implements IKbRepository {
     await fs.rm(this.dir, { recursive: true, force: true });
     await fs.mkdir(this.dir, { recursive: true });
     let fetchedAt = fetchInstant();
+    let credentialsStamped = true;
     try {
       await this.gitRunner.run(this.dir, ['init', '--bare', '--quiet', this.dir]);
       for (const args of this.configArgs(url)) await this.gitRunner.run(this.dir, args);
+      // The helper's write is not what makes the repository: one that failed
+      // is tried again by `refreshCredentials`, which is why it is not
+      // recorded as stamped below.
       for (const args of cloneCredentialConfigArgs(this.gitRunner.credentials)) {
-        await this.gitRunner.run(this.dir, args).catch(() => undefined);
+        await this.gitRunner.run(this.dir, args).catch((err: unknown) => {
+          if (!(args.includes('--unset-all') && (err as GitRunError).exitCode === 5)) credentialsStamped = false;
+        });
       }
       fetchedAt = fetchInstant();
       await this.gitRunner.run(this.dir, ['fetch', '--prune', '--no-write-fetch-head', '--quiet', 'origin'], {
@@ -257,7 +273,7 @@ export class KbRepository implements IKbRepository {
       throw err;
     }
     this.configStamped = true;
-    this.stampedCredentials = this.credentialFingerprint();
+    this.stampedCredentials = credentialsStamped ? this.credentialFingerprint() : null;
     this.noteFetched(true, fetchedAt);
     log.info(`created the knowledge-base repository at ${this.dir}`);
   }
@@ -355,8 +371,8 @@ export class KbRepository implements IKbRepository {
 
   /** See the contract. `gc --auto` decides for itself whether there is enough loose to pack. */
   async maintain(): Promise<void> {
-    if (!(await this.exists())) return;
     try {
+      if (!(await this.exists())) return;
       await this.git(['-c', 'gc.auto=6700', 'gc', '--auto', '--quiet'], Math.max(this.gitRunner.defaultTimeoutMs, FIRST_FETCH_TIMEOUT_MS));
     } catch (err) {
       log.warn('garbage collection of the knowledge-base repository failed; it is tried again at the next start:', {

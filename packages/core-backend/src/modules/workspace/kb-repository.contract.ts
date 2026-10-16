@@ -63,8 +63,9 @@ export interface IKbRepository {
    * caller that moves the repository's folders holds those off itself (the
    * startup phase runs before anything is served; the workspace service
    * wraps a set-aside in what surrounds one). Never nested: `fn` must not
-   * call `exclusive` again, nor a method that does (`ensure`, `addWorktree`,
-   * `removeWorktree`, `prune`, the config writes).
+   * call `exclusive` again, nor a method that does (`ensure`,
+   * `refreshCredentials`, `writeConfig`, `addWorktree`, `removeWorktree`,
+   * `forgetWorktrees`, `prune`, `setOriginUrl`).
    */
   exclusive<T>(fn: () => Promise<T>): Promise<T>;
 
