@@ -1,0 +1,7 @@
+---
+'@bevel-software/platform-core-backend': minor
+---
+
+Agents read history and sync their drafts with tools, not a shell. Five tools join the workflow tools, on the internal and the external catalog alike: `list_file_changes` (a file's commits — who, when, subject — as the History tab shows them), `read_file_at` (the file at a commit on the branch's own history, with the version just before it, or at another branch's published tip), `compare_file` (the diff of one commit, or of a file between two branches), `branch_status` (ahead/behind, whether the shared branch moved, files written but not committed, the fork base and the paths a change request would carry) and `update_branch` (bring the draft's target, or the draft's own shared state, into the draft as a merge commit by the caller, and publish it). Every read takes the per-file read the file itself takes, decided at the refs actually served.
+
+`update_branch` is how an agent resolves conflicts. A conflicted merge is never left on disk: the first call describes every conflicted path — the file at the merge base, on each side, and the working copy with git's markers — and undoes the merge in the same reservation; a second call with a resolution per conflicted path (the resolved text, or one side whole, or the file deleted) lands the merge for real. A resolution naming a path that is not conflicted is refused before anything is written, so the only edits that bypass the file tools' locks are the conflicts themselves. A protected branch is never updated this way.
