@@ -501,6 +501,19 @@ describe('the body a caller is handed is the author\'s, not the machine\'s', () 
     );
   });
 
+  it("strips both ends of a fenced Hexis passage — the closer is Hexis's too — and keeps the fenced prose", () => {
+    const body = [
+      '<!--hexis:access-request-level:write-->',
+      'Note from Ana:',
+      '',
+      '<!--hexis:access-request-note-->',
+      '> Please.',
+      '<!--/hexis:access-request-note-->',
+      '<!-- my own aside -->',
+    ].join('\n');
+    expect(authorsDescription(body)).toBe('Note from Ana:\n\n\n> Please.\n\n<!-- my own aside -->');
+  });
+
   it('leaves a body that is only the author\'s prose alone', () => {
     expect(authorsDescription('  A multi-line\nreason.  ')).toBe('A multi-line\nreason.');
     expect(authorsDescription('')).toBe('');
@@ -587,6 +600,17 @@ describe('an edited description replaces the author\'s part, and only that', () 
   it("carries Hexis's markers, so an access request's level survives", () => {
     const body = replaceAuthorsDescription('<!--hexis:access-request-level:owner-->\nAsked for Owner.', 'Edited.');
     expect(body).toContain('<!--hexis:access-request-level:owner-->');
+    expect(authorsDescription(body)).toBe('Edited.');
+  });
+
+  it("carries a fenced note's opener and closer together, fencing nothing, and shows neither", () => {
+    const body = replaceAuthorsDescription(
+      '<!--hexis:access-request-level:write-->\n<!--hexis:access-request-note-->\n> Please.\n<!--/hexis:access-request-note-->',
+      'Edited.',
+    );
+    expect(body).toBe(
+      '<!--hexis:access-request-level:write--><!--hexis:access-request-note--><!--/hexis:access-request-note-->\n\nEdited.',
+    );
     expect(authorsDescription(body)).toBe('Edited.');
   });
 

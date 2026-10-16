@@ -44,7 +44,8 @@ export function holdsAffectedOwnersHeading(text: string): boolean {
  * safe direction, and the only way this can err.)
  *
  * Hexis's OWN hidden markers go too — the `<!--hexis:…-->` / `<!--bevel:…-->`
- * comments older bodies carry identity in — and no other comment: an HTML
+ * comments older bodies carry identity in, and the `<!--/hexis:…-->` that
+ * closes a fenced passage (an access request's note) — and no other comment: an HTML
  * comment the author wrote is the author's prose, like the rest.
  *
  * Who must approve each file is NOT lost by this — it is what
@@ -61,8 +62,12 @@ export function authorsDescription(body: string): string {
   return splitBody(body).authors.replace(HEXIS_MARKER, '').trim();
 }
 
-/** Hexis's own hidden markers in a request body — see {@link authorsDescription}. */
-const HEXIS_MARKER = /<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g;
+/**
+ * Hexis's own hidden markers in a request body — see {@link authorsDescription}.
+ * A fenced passage's CLOSING marker (`<!--/hexis:…-->`, as an access request's
+ * note ends) is Hexis's too, so the optional `/` is matched as well.
+ */
+const HEXIS_MARKER = /<!--\s*\/?(?:hexis|bevel)[:/][\s\S]*?-->/g;
 
 /** The author's part of a body, and the generated block after it ('' when none). */
 function splitBody(body: string): { authors: string; generated: string } {
@@ -81,10 +86,10 @@ function splitBody(body: string): { authors: string; generated: string } {
  * Kept: the generated `## Affected owners` block, and Hexis's own hidden
  * markers, which the platform reads back out of the body (an access request's
  * level). They are carried on one line ahead of the new text, where every
- * surface that renders a description hides them. A marker that opened a fenced
- * passage of the old text (an access request's note) is carried with nothing
- * fenced after it, which reads back as no note — the text it fenced is what the
- * edit replaced.
+ * surface that renders a description hides them. The markers that fenced a
+ * passage of the old text (an access request's note, opener and closer) are
+ * carried side by side with nothing between them, which reads back as no note —
+ * the text they fenced is what the edit replaced.
  */
 export function replaceAuthorsDescription(body: string, description: string): string {
   const { authors, generated } = splitBody(body);
