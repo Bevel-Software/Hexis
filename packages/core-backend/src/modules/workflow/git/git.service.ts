@@ -8,7 +8,10 @@ import type {
   BranchInfo,
   ChangedPathPair,
   CommitAttribution,
+  ConflictedFile,
   IGitService,
+  MergeIntoBranchOutcome,
+  MergeResolution,
   RemoteSyncPullResult,
   PrFileStatus,
   PullRequestFile,
@@ -1588,6 +1591,235 @@ export class GitService implements IGitService {
       ]);
       this.accessControl?.invalidate(workspaceId);
       return { kind: 'clean' as const, alreadyUpToDate: false };
+    });
+  }
+
+  /** The most of one side of a conflicted file that travels in an answer; past it the side is read by the caller instead. */
+  private static readonly CONFLICT_SIDE_MAX_CHARS = 200_000;
+
+  async mergeIntoBranch(
+    workspaceId: string,
+    branch: string,
+    fromBranch: string,
+    user: AuthUser,
+    opts: { subject: string; body: string; resolutions?: MergeResolution[] },
+  ): Promise<MergeIntoBranchOutcome> {
+    assertValidBranchName(branch);
+    assertValidBranchName(fromBranch);
+    assertValidAuthor(user);
+    if (/\n\s*\n/.test(opts.subject)) {
+      throw new WorkflowValidationError('merge commit subject must be a single paragraph');
+    }
+    // Every resolution names a repository path; which of them are conflicted
+    // is only known inside the merge, where they are matched exactly.
+    const resolutions = new Map<string, MergeResolution>();
+    for (const r of opts.resolutions ?? []) {
+      assertValidRelativePath(r.path);
+      const p = this.stripRepoPrefix(r.path);
+      const ways = [r.content !== undefined, r.choose !== undefined].filter(Boolean).length;
+      if (ways !== 1) {
+        throw new WorkflowValidationError(`resolution for "${p}": give either \`content\` or \`choose\`, not ${ways === 0 ? 'neither' : 'both'}`);
+      }
+      if (r.choose !== undefined && !['ours', 'theirs', 'delete'].includes(r.choose)) {
+        throw new WorkflowValidationError(`resolution for "${p}": \`choose\` is \`ours\`, \`theirs\` or \`delete\``);
+      }
+      if (resolutions.has(p)) throw new WorkflowValidationError(`"${p}" is resolved twice`);
+      resolutions.set(p, { ...r, path: p });
+    }
+    const theirsRef = `refs/remotes/origin/${fromBranch}`;
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const checkedOut = await this.currentBranch(cwd);
+      if (checkedOut !== branch) {
+        throw new WorkflowValidationError(`the workspace is on "${checkedOut}", not on "${branch}"`);
+      }
+      // A merge rewrites tracked files. Edits still on their way to a commit
+      // (a save the worker has not landed) would be swept into the merge
+      // commit under this user's name, or lost under the merge's version.
+      const { stdout: dirty } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
+      if (parsePorcelainZ(dirty).length > 0) {
+        throw new WorkflowDomainError(
+          `"${branch}" has edits that are not committed yet. Try again once they are saved.`,
+          409,
+          { kind: 'branch-busy', branch },
+        );
+      }
+      // `git merge`/`git commit` need a committer identity (see `mergeChangeRequest`).
+      await this.git(cwd, ['config', 'user.name', BOT_NAME]);
+      await this.git(cwd, ['config', 'user.email', BOT_EMAIL]);
+      // The published tip, explicitly: a bare `fetch origin <branch>` updates
+      // the tracking ref only as far as `remote.origin.fetch` allows.
+      await this.git(cwd, [
+        'fetch', '--no-write-fetch-head', 'origin',
+        `+refs/heads/${fromBranch}:${theirsRef}`,
+      ]);
+      const ours = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+      const theirs = (await this.git(cwd, ['rev-parse', theirsRef])).stdout.trim();
+      const abort = () => this.git(cwd, ['merge', '--abort']).catch(() => undefined);
+
+      let resolvedPaths: string[] = [];
+      let mergeStdout = '';
+      try {
+        // `--no-commit --no-ff`: the commit is authored below, as the user, and
+        // never fast-forwarded past the record of what was merged.
+        mergeStdout = (await this.git(cwd, ['merge', '--no-commit', '--no-ff', theirsRef])).stdout;
+      } catch (err) {
+        const conflicted = await this.conflictedPaths(cwd);
+        if (conflicted.length === 0) {
+          await abort();
+          throw new Error(
+            `git merge failed without detectable conflicts: ${redactGitToken(
+              err instanceof Error ? err.message : String(err),
+              this.credentials.token(),
+            )}`,
+          );
+        }
+        const stray = [...resolutions.keys()].filter((p) => !conflicted.includes(p));
+        if (stray.length > 0) {
+          // Only a conflicted path is written by a resolution: anything else
+          // is an ordinary write, which goes through the file tools and their
+          // locks. Refused whole, before any resolution is applied.
+          await abort();
+          throw new WorkflowValidationError(
+            `not conflicted, so not resolved here: ${stray.join(', ')}. The conflicted paths are ${conflicted.join(', ')}.`,
+            { kind: 'not-conflicted', paths: stray },
+          );
+        }
+        const unresolved = conflicted.filter((p) => !resolutions.has(p));
+        if (unresolved.length > 0) {
+          // Described while the merge is still on disk — the three stages and
+          // the marked-up working copy exist only then — and undone before the
+          // answer leaves the reservation.
+          const mergeBase = await this.git(cwd, ['merge-base', 'HEAD', theirsRef])
+            .then((r) => r.stdout.trim() || null)
+            .catch(() => null);
+          const files: ConflictedFile[] = [];
+          for (const p of conflicted) files.push(await this.describeConflict(cwd, p));
+          await abort();
+          return { kind: 'conflicts', from: fromBranch, mergeBase, ours, theirs, files, unresolved };
+        }
+        try {
+          for (const p of conflicted) await this.applyResolution(cwd, resolutions.get(p)!);
+          const still = await this.conflictedPaths(cwd);
+          if (still.length > 0) throw new Error(`still conflicted after the resolutions were applied: ${still.join(', ')}`);
+        } catch (err) {
+          await abort();
+          throw err;
+        }
+        resolvedPaths = conflicted;
+      }
+
+      if (resolvedPaths.length === 0 && /Already up to date/i.test(mergeStdout)) {
+        return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
+      }
+      const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
+      if (staged.trim() === '' && resolvedPaths.length === 0) {
+        await abort();
+        return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
+      }
+      await this.git(cwd, [
+        'commit',
+        `--author=${user.name} <${user.email}>`,
+        '-m', opts.subject,
+        '-m', opts.body,
+      ]);
+      const sha = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+      this.accessControl?.invalidate(workspaceId);
+      return { kind: 'merged', sha, from: fromBranch, resolvedPaths };
+    });
+  }
+
+  /**
+   * One conflicted path as the merge on disk has it: the three index stages
+   * (base, ours, theirs) and the working copy with git's markers. A side that
+   * is not there (a delete on that side) is null; one that is not text or too
+   * large to carry is left out and marked, for the caller to read at the
+   * commit instead. Read while the merge is on disk — the stages exist only
+   * then.
+   */
+  private async describeConflict(cwd: string, repoRelativePath: string): Promise<ConflictedFile> {
+    let truncated = false;
+    const side = async (spec: string): Promise<string | null> => {
+      let text: string;
+      try {
+        text = (await this.git(cwd, ['show', spec])).stdout;
+      } catch {
+        // No such stage: that side deleted the file (or, for the base, never
+        // had it). The merge itself proved the path conflicted, so a failure
+        // here is about the stage, not the repository.
+        return null;
+      }
+      if (text.includes('\0') || text.length > GitService.CONFLICT_SIDE_MAX_CHARS) {
+        truncated = true;
+        return null;
+      }
+      return text;
+    };
+    const base = await side(`:1:${repoRelativePath}`);
+    const ours = await side(`:2:${repoRelativePath}`);
+    const theirs = await side(`:3:${repoRelativePath}`);
+    let merged: string | null = null;
+    try {
+      const text = await fs.readFile(path.join(cwd, repoRelativePath), 'utf-8');
+      if (text.includes('\0') || text.length > GitService.CONFLICT_SIDE_MAX_CHARS) truncated = true;
+      else merged = text;
+    } catch (err) {
+      if (!isAbsence(err)) throw err;
+    }
+    return { path: repoRelativePath, base, ours, theirs, merged, ...(truncated ? { truncated } : {}) };
+  }
+
+  /**
+   * Settle one conflicted path on disk and in the index, as the resolution
+   * says. `r.path` is one the merge itself listed as conflicted (matched
+   * exactly by the caller), so it is a path git owns inside the checkout.
+   */
+  private async applyResolution(cwd: string, r: MergeResolution): Promise<void> {
+    const file = path.join(cwd, r.path);
+    if (r.content !== undefined) {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, r.content, 'utf-8');
+      await this.git(cwd, ['add', '--', r.path]);
+      return;
+    }
+    if (r.choose === 'delete') {
+      await fs.rm(file, { force: true });
+      await this.git(cwd, ['add', '-A', '--', r.path]);
+      return;
+    }
+    // `ours`/`theirs`: that side's stage, or the file gone when that side has none.
+    const stage = r.choose === 'ours' ? ':2:' : ':3:';
+    let text: string | null;
+    try {
+      text = (await this.git(cwd, ['show', `${stage}${r.path}`])).stdout;
+    } catch {
+      text = null;
+    }
+    if (text === null) {
+      await fs.rm(file, { force: true });
+    } else {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, text, 'utf-8');
+    }
+    await this.git(cwd, ['add', '-A', '--', r.path]);
+  }
+
+  async readFileAtBranch(
+    workspaceId: string,
+    relativePath: string,
+    branch: string,
+  ): Promise<{ sha: string; ref: string; content: string | null }> {
+    assertValidRelativePath(relativePath);
+    assertValidBranchName(branch);
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const ref = await this.resolveBranchRef(cwd, branch);
+      const sha = (await this.git(cwd, ['rev-parse', ref])).stdout.trim();
+      // Per file, as every history read: a folder's content at a commit is
+      // every child's, which the per-file gate never checked.
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      return { sha, ref, content: await this.readFileAtRef(workspaceId, sha, repoRelativePath) };
     });
   }
 

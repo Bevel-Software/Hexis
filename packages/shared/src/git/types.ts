@@ -80,8 +80,107 @@ export interface RemoteSyncPullResult {
   changedPaths: string[];
 }
 
+/**
+ * How one conflicted path is settled when a branch is updated from another:
+ * the text to keep, or one side whole, or the file gone.
+ */
+export interface MergeResolution {
+  /** The conflicted path, exactly as the conflict named it (repository-relative or workspace-relative). */
+  path: string;
+  /** The resolved text of the file. */
+  content?: string;
+  /**
+   * Keep one side as it is — `ours` is the branch being updated, `theirs` the
+   * branch merged in — or `delete` the file.
+   */
+  choose?: 'ours' | 'theirs' | 'delete';
+}
+
+/**
+ * One path a merge could not settle by itself, with everything a resolver
+ * needs to settle it: the file at the merge base, on each side, and the
+ * working copy as git left it with its conflict markers.
+ */
+export interface ConflictedFile {
+  path: string;
+  /** The file at the merge base; null when it did not exist there. */
+  base: string | null;
+  /** The file on the branch being updated; null when that side deleted it. */
+  ours: string | null;
+  /** The file on the branch merged in; null when that side deleted it. */
+  theirs: string | null;
+  /** The working copy with git's conflict markers; null when a side deleted the file. */
+  merged: string | null;
+  /**
+   * True when a side was too large or not text and was left out: read it at
+   * `ours`/`theirs`/`base` with the file-at tools instead.
+   */
+  truncated?: boolean;
+}
+
+/**
+ * What merging one branch into another, in the receiving branch's own
+ * workspace, did:
+ *
+ *  - `merged`           — a merge commit `sha` was made on the branch (not
+ *                         pushed by this call), `resolvedPaths` naming the
+ *                         conflicts the caller's resolutions settled.
+ *  - `nothing-to-merge` — the branch already held everything; `sha` is its tip.
+ *  - `conflicts`        — the merge was undone and the working tree left as it
+ *                         was: `files` describes every conflicted path,
+ *                         `unresolved` the ones no resolution covered. Call
+ *                         again with a resolution per path.
+ */
+export type MergeIntoBranchOutcome =
+  | { kind: 'merged'; sha: string; from: string; resolvedPaths: string[] }
+  | { kind: 'nothing-to-merge'; sha: string; from: string }
+  | {
+      kind: 'conflicts';
+      from: string;
+      /** The common ancestor the merge was computed from; null when the histories are unrelated. */
+      mergeBase: string | null;
+      /** The branch's own tip, what `ours` means in every file. */
+      ours: string;
+      /** The merged-in branch's tip, what `theirs` means in every file. */
+      theirs: string;
+      files: ConflictedFile[];
+      unresolved: string[];
+    };
+
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
+  /**
+   * Merge `origin/<fromBranch>` into `branch`, in `branch`'s own workspace,
+   * as a merge commit authored by `user` — or report what conflicts and undo
+   * everything. The working tree is never left mid-merge: a conflict is
+   * described (both sides, the base, the marked-up working copy) and the
+   * merge aborted in the same reservation, and a later call carrying a
+   * resolution for every conflicted path makes the merge for real. A
+   * resolution naming a path that is not conflicted is refused before
+   * anything is written. Nothing is pushed; the caller publishes the commit.
+   *
+   * Refused when the workspace is not on `branch`, or holds edits not yet
+   * committed (`kind: 'branch-busy'`, 409): a merge over them could lose them.
+   */
+  mergeIntoBranch(
+    workspaceId: string,
+    branch: string,
+    fromBranch: string,
+    user: AuthUser,
+    opts: { subject: string; body: string; resolutions?: MergeResolution[] },
+  ): Promise<MergeIntoBranchOutcome>;
+  /**
+   * One file as `branch` has it (its local head, else `origin/<branch>`),
+   * with the commit it was read at. `content` is null when the file is not
+   * there; a path that is a folder at that commit is refused, as every
+   * per-file history read refuses it. Access to the file at that commit is
+   * the caller's to check.
+   */
+  readFileAtBranch(
+    workspaceId: string,
+    relativePath: string,
+    branch: string,
+  ): Promise<{ sha: string; ref: string; content: string | null }>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
   createBranch(
     workspaceId: string,
