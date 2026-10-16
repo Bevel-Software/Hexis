@@ -59,7 +59,7 @@ const CORE_SERVER_SOURCE = new URL('../../../core/create-core-server.ts', import
 const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) => void }> = [
   {
     name: 'registerWorkflowTools',
-    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext(), async () => true),
+    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext(), async () => true, { canRead: async () => true, canReadAtRef: async () => true } as never),
   },
   {
     name: 'registerChangeRequestReadTools',

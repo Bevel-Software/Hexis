@@ -43,7 +43,9 @@ import type {
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
+  UpdateBranchOutcome,
 } from './types.js';
+import type { MergeResolution } from '../git/types.js';
 
 export interface IWorkflowService {
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -725,4 +727,44 @@ export interface IWorkflowService {
    * `merged` means a merge commit was made.
    */
   mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
+
+  /**
+   * Bring another branch's published state into the branch this workspace is
+   * on — `from` (a target the draft was forked from, say), or, left out, the
+   * branch's own published state when it diverged from the local one — as a
+   * merge commit authored by `user`, and publish it. The agent's way of
+   * refreshing a draft and of resolving conflicts: a conflict comes back
+   * described (`conflicts`: both sides, the base, the working copy with
+   * markers), the working tree untouched; a second call with a resolution
+   * per conflicted path lands the merge. See `IGitService.mergeIntoBranch`.
+   *
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-update-target'`,
+   *     403) for a protected branch: those are updated through change requests.
+   *   - refused (`WorkflowValidationError`) when `from` is not on the shared
+   *     repository.
+   *   - `pending-commits` when writes on either branch are still being
+   *     committed (waited for, up to 20 seconds); nothing merged.
+   *   - a merge that lands but cannot be published answers the push's own
+   *     refusal, the merge commit kept on the branch for the next share.
+   */
+  updateBranch(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: { from?: string; resolutions?: MergeResolution[] },
+  ): Promise<UpdateBranchOutcome>;
+  /**
+   * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).
+   * Access to the file at that commit is the caller's to check.
+   */
+  fileAtBranch(
+    workspaceId: string,
+    path: string,
+    branch: string,
+  ): Promise<{ sha: string; ref: string; content: string | null }>;
+  /**
+   * The repository-relative paths `branch` changes against `base` — a
+   * three-dot diff of their published tips, rename-aware — the list a change
+   * request from `branch` into `base` would carry.
+   */
+  changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]>;
 }

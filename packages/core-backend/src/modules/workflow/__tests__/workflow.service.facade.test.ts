@@ -274,6 +274,79 @@ describe('WorkflowService — branch delegation', () => {
   });
 });
 
+describe('WorkflowService.updateBranch', () => {
+  const user = { id: 'u1', email: 'ada@x.io', name: 'Ada' };
+  /** A git double whose merge answers `outcome`, with the source on the remote. */
+  const gitThatMerges = (outcome: unknown) => {
+    const git = makeGit();
+    (git as unknown as { remoteBranchExists: unknown }).remoteBranchExists = vi.fn().mockResolvedValue(true);
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn().mockResolvedValue(outcome);
+    return git;
+  };
+  const build = (git: GitService, pending = makePendingCommits()) =>
+    new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), pending, testKbContext(), openChangeGate());
+
+  it('refuses a protected branch before asking git anything', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    const err = await build(git).updateBranch('target-company-state', user).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowDomainError);
+    expect((err as WorkflowDomainError).status).toBe(403);
+    expect((err as WorkflowDomainError).payload).toMatchObject({ kind: 'protected-update-target' });
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it('merges the named branch into the draft as the user, then publishes the draft', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
+    const svc = build(git);
+    const resolutions = [{ path: 'A.md', content: 'resolved\n' }];
+    const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions });
+    expect(outcome).toEqual({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    expect(merge).toHaveBeenCalledWith(
+      'ada%2Fdraft',
+      'ada/draft',
+      'target-company-state',
+      user,
+      expect.objectContaining({ subject: 'Merge target-company-state into ada/draft', resolutions }),
+    );
+    expect((merge.mock.calls[0] as unknown[])[4]).toMatchObject({ body: expect.stringContaining('A.md') });
+    expect(git.push).toHaveBeenCalledWith('ada%2Fdraft', user);
+    // Merged first, published after.
+    expect(merge.mock.invocationCallOrder[0]).toBeLessThan((git.push as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+  });
+
+  it('takes the draft\'s own shared state when no source is named, and publishes nothing on conflicts', async () => {
+    const conflicts = { kind: 'conflicts', from: 'ada/draft', mergeBase: 'b', ours: 'o', theirs: 't', files: [], unresolved: ['A.md'] };
+    const git = gitThatMerges(conflicts);
+    const outcome = await build(git).updateBranch('ada%2Fdraft', user);
+    expect(outcome).toBe(conflicts);
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    expect(merge).toHaveBeenCalledWith('ada%2Fdraft', 'ada/draft', 'ada/draft', user, expect.objectContaining({ resolutions: [] }));
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it('answers pending-commits, merging nothing, while writes on the source are still being committed', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    const pending = makePendingCommits();
+    (pending.queuedOnBranch as ReturnType<typeof vi.fn>).mockImplementation(async (branch: string) =>
+      branch === 'target-company-state' ? { queued: 2, stuck: 0, needsAttention: null } : { queued: 0, stuck: 0, needsAttention: null },
+    );
+    const svc = build(git, pending);
+    svc.mergeWaitForPendingCommits = { timeoutMs: 30, pollMs: 5 };
+    const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    expect(outcome).toMatchObject({ kind: 'pending-commits', branch: 'target-company-state', pending: 2 });
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+
+  it('refuses a source the shared repository does not have', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    (git as unknown as { remoteBranchExists: unknown }).remoteBranchExists = vi.fn().mockResolvedValue(false);
+    await expect(build(git).updateBranch('ada%2Fdraft', user, { from: 'nobody/such' })).rejects.toThrow(/No branch named "nobody\/such"/);
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+});
+
 describe('WorkflowService — change delegation', () => {
   it('commitChange delegates to git.commit', async () => {
     const git = makeGit();

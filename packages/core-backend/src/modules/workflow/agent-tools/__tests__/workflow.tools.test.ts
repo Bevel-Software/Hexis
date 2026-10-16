@@ -182,11 +182,69 @@ const workflowService = {
     calls.push(['postComment', number, input.path]);
     return { id: 'c-1' };
   },
+  // The history and syncing reads, answered from a fixed script.
+  listChangesForFile: async (ws: string, path: string, limit?: number) => {
+    calls.push(['listChangesForFile', ws, path, limit]);
+    return [{ sha: 'abc1234', authorName: 'Ada', authorEmail: 'ada@x.io', subject: 'edit', committedAt: '2026-10-16T00:00:00Z' }];
+  },
+  fileAtChange: async (ws: string, path: string, sha: string) => {
+    calls.push(['fileAtChange', ws, path, sha]);
+    return { baseline: 'before\n', current: 'after\n' };
+  },
+  fileAtBranch: async (ws: string, path: string, branch: string) => {
+    calls.push(['fileAtBranch', ws, path, branch]);
+    return { sha: 'tip-of-' + branch, ref: `refs/remotes/origin/${branch}`, content: `on ${branch}\n` };
+  },
+  showFileAtChange: async (ws: string, path: string, sha: string) => {
+    calls.push(['showFileAtChange', ws, path, sha]);
+    return '@@ patch of ' + sha;
+  },
+  compareFile: async (ws: string, path: string, from: string, to: string) => {
+    calls.push(['compareFile', ws, path, from, to]);
+    return `@@ ${from}..${to}`;
+  },
+  branchStatus: async (ws: string) => {
+    calls.push(['branchStatus', ws]);
+    return { branch: ws, hasUpstream: true, unmergedFromUpstream: true };
+  },
+  listPendingChangePaths: async (ws: string) => {
+    calls.push(['listPendingChangePaths', ws]);
+    return ['knowledge-base/KnowledgeBase/Pending.md'];
+  },
+  resolveForkBase: async (ws: string, branch: string) => {
+    calls.push(['resolveForkBase', ws, branch]);
+    return 'main';
+  },
+  changedPathsBetweenBranches: async (ws: string, base: string, branch: string) => {
+    calls.push(['changedPathsBetweenBranches', ws, base, branch]);
+    return ['KnowledgeBase/Changed.md'];
+  },
+  updateBranch: async (ws: string, user: { id: string }, opts: unknown) => {
+    calls.push(['updateBranch', ws, user.id, opts]);
+    return { kind: 'merged', sha: 'merge-sha', from: 'main', resolvedPaths: [] };
+  },
 } as never;
 const events = {
   emit: (p: unknown) => {
     calls.push(['emit', p]);
     return {};
+  },
+} as never;
+/**
+ * The per-file read gate the history tools take. `Secret/` is readable by
+ * nobody on any branch; `me/hidden` is a branch whose refs grant nothing;
+ * `me/unknown` a branch none of whose refs resolve.
+ */
+const accessControl = {
+  canRead: async (ws: string, email: string, rel: string) => {
+    calls.push(['canRead', ws, email, rel]);
+    return !rel.startsWith('Secret/');
+  },
+  canReadAtRef: async (ws: string, ref: string, email: string, rel: string) => {
+    calls.push(['canReadAtRef', ws, ref, email, rel]);
+    if (ref.endsWith('me/unknown')) return null;
+    if (ref.endsWith('me/hidden')) return false;
+    return !rel.startsWith('Secret/');
   },
 } as never;
 
@@ -204,10 +262,18 @@ async function start(): Promise<string> {
 
   const router = express.Router();
   // Request #13 is one the caller may not see.
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, testKbContext(), async (ctx, number) => {
-    calls.push(['maySeeAs', ctx.user.id, number]);
-    return number !== 13;
-  });
+  registerWorkflowTools(
+    registry,
+    router,
+    toolAuth,
+    toolHandler,
+    testKbContext(),
+    async (ctx, number) => {
+      calls.push(['maySeeAs', ctx.user.id, number]);
+      return number !== 13;
+    },
+    accessControl,
+  );
   router.use(createManualRoutes(registry, toolAuth));
 
   const app = express();
@@ -943,5 +1009,155 @@ describe('save_file and the repository folder', () => {
     const body = (def!.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
     expect(body.properties.path.description).toContain('`knowledge-base/`');
     expect(body.properties.path.description).toContain('with or without a leading slash');
+  });
+});
+
+/**
+ * The history and syncing tools: what the app's History tab, compare view and
+ * "update from target" do, each taking the per-file read the file itself
+ * takes, and the branch update handing the service exactly what it was given.
+ */
+describe('history and syncing tools', () => {
+  const DRAFT = 'me/draft';
+  const DRAFT_WS = 'me%2Fdraft';
+  const tool = (base: string, name: string) => `${base}/api/agent/tools/${name}`;
+
+  it('list_file_changes answers the file\'s commits after the read gate, repository-relative', async () => {
+    const base = await start();
+    const res = await post(tool(base, 'list_file_changes'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', limit: 5 });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      path: 'KnowledgeBase/Foo.md',
+      changes: [{ sha: 'abc1234', authorName: 'Ada', authorEmail: 'ada@x.io', subject: 'edit', committedAt: '2026-10-16T00:00:00Z' }],
+    });
+    expect(calls).toContainEqual(['canRead', DRAFT_WS, 'e@x', 'KnowledgeBase/Foo.md']);
+    expect(calls).toContainEqual(['listChangesForFile', DRAFT_WS, 'knowledge-base/KnowledgeBase/Foo.md', 5]);
+  });
+
+  it('list_file_changes refuses a file the caller may not read, without reading its history', async () => {
+    const base = await start();
+    const res = await post(tool(base, 'list_file_changes'), writeTok(), { branch: DRAFT, path: 'Secret/Plan.md' });
+    expect(res.status).toBe(403);
+    expect(calls.some((c) => c[0] === 'listChangesForFile')).toBe(false);
+  });
+
+  it('read_file_at reads a commit on the branch\'s own history, with the version before it', async () => {
+    const base = await start();
+    const res = await post(tool(base, 'read_file_at'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'abc1234' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ path: 'KnowledgeBase/Foo.md', at: 'abc1234', kind: 'commit', sha: 'abc1234', content: 'after\n', before: 'before\n' });
+    expect(calls).toContainEqual(['canRead', DRAFT_WS, 'e@x', 'KnowledgeBase/Foo.md']);
+    expect(calls).toContainEqual(['fileAtChange', DRAFT_WS, 'knowledge-base/KnowledgeBase/Foo.md', 'abc1234']);
+  });
+
+  it('read_file_at reads another branch at the refs that serve it, every resolving one granting', async () => {
+    const base = await start();
+    const res = await post(tool(base, 'read_file_at'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'main' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ path: 'KnowledgeBase/Foo.md', at: 'main', kind: 'branch', sha: 'tip-of-main', content: 'on main\n' });
+    expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, 'origin/main', 'e@x', 'KnowledgeBase/Foo.md']);
+    expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, 'main', 'e@x', 'KnowledgeBase/Foo.md']);
+    expect(calls).toContainEqual(['fileAtBranch', DRAFT_WS, 'knowledge-base/KnowledgeBase/Foo.md', 'main']);
+  });
+
+  it('read_file_at refuses a branch whose refs deny the read, and one none of whose refs resolve', async () => {
+    const base = await start();
+    for (const at of ['me/hidden', 'me/unknown']) {
+      const res = await post(tool(base, 'read_file_at'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at });
+      expect(res.status, at).toBe(403);
+    }
+    expect(calls.some((c) => c[0] === 'fileAtBranch')).toBe(false);
+  });
+
+  it('compare_file diffs one commit, or two branches after gating both', async () => {
+    const base = await start();
+    const atCommit = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'abc1234' });
+    expect(atCommit.status).toBe(200);
+    expect(await atCommit.json()).toEqual({ path: 'KnowledgeBase/Foo.md', diff: '@@ patch of abc1234' });
+
+    const between = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'main', to: DRAFT });
+    expect(between.status).toBe(200);
+    expect(await between.json()).toEqual({ path: 'KnowledgeBase/Foo.md', diff: '@@ main..me/draft' });
+    for (const b of ['main', DRAFT]) {
+      expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, `origin/${b}`, 'e@x', 'KnowledgeBase/Foo.md']);
+    }
+
+    const neither = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md' });
+    expect(neither.status).toBe(400);
+    const hidden = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'me/hidden', to: DRAFT });
+    expect(hidden.status).toBe(403);
+  });
+
+  it('branch_status composes the branch\'s standing, against the fork base unless a base is named', async () => {
+    const base = await start();
+    const res = await post(tool(base, 'branch_status'), writeTok(), { branch: DRAFT });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      branch: DRAFT,
+      // The listing double names only `main`, so the draft's own entry is unknown.
+      isProtected: false,
+      hasRemote: true,
+      ahead: null,
+      behind: null,
+      behindRemote: true,
+      uncommittedPaths: ['KnowledgeBase/Pending.md'],
+      forkBase: 'main',
+      base: 'main',
+      changedPaths: ['KnowledgeBase/Changed.md'],
+    });
+    expect(calls).toContainEqual(['changedPathsBetweenBranches', DRAFT_WS, 'main', DRAFT]);
+
+    calls = [];
+    const named = await post(tool(base, 'branch_status'), writeTok(), { branch: DRAFT, base: 'release' });
+    expect(named.status).toBe(200);
+    expect(await named.json()).toMatchObject({ base: 'release' });
+    expect(calls).toContainEqual(['changedPathsBetweenBranches', DRAFT_WS, 'release', DRAFT]);
+  });
+
+  it('update_branch hands the service the branch, the source and the resolutions as given', async () => {
+    const base = await start();
+    const res = await post(tool(base, 'update_branch'), writeTok(), {
+      branch: DRAFT,
+      from: 'main',
+      resolutions: [
+        { path: 'KnowledgeBase/Foo.md', content: 'resolved\n' },
+        { path: 'KnowledgeBase/Bar.md', choose: 'theirs' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ kind: 'merged', sha: 'merge-sha', from: 'main', resolvedPaths: [] });
+    expect(calls).toContainEqual([
+      'updateBranch',
+      DRAFT_WS,
+      'user-A',
+      { from: 'main', resolutions: [{ path: 'KnowledgeBase/Foo.md', content: 'resolved\n' }, { path: 'KnowledgeBase/Bar.md', choose: 'theirs' }] },
+    ]);
+
+    calls = [];
+    const own = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT });
+    expect(own.status).toBe(200);
+    expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', {}]);
+  });
+
+  it('update_branch refuses a malformed resolution before the service is asked', async () => {
+    const base = await start();
+    for (const resolutions of [
+      'not a list',
+      [{ content: 'no path' }],
+      [{ path: 'A.md', choose: 'mine' }],
+      [{ path: 'A.md', content: 42 }],
+    ]) {
+      const res = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, resolutions });
+      expect(res.status, JSON.stringify(resolutions)).toBe(400);
+    }
+    expect(calls.some((c) => c[0] === 'updateBranch')).toBe(false);
+  });
+
+  it('lists the five on the external catalog too: a remote agent reads history and syncs its drafts', async () => {
+    await start();
+    const external = await registryRef!.listExternal();
+    for (const name of ['list_file_changes', 'read_file_at', 'compare_file', 'branch_status', 'update_branch']) {
+      expect(external.some((t) => t.name === name), name).toBe(true);
+    }
   });
 });

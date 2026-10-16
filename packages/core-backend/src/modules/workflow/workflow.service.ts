@@ -58,9 +58,11 @@ import type {
   IWorkflowService,
   MergeBranchOutcome,
   MergeChangeRequestOutcome,
+  MergeResolution,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
+  UpdateBranchOutcome,
 } from '@bevel-software/platform-shared';
 import {
   isFolderPlaceholder,
@@ -4681,4 +4683,70 @@ export class WorkflowService implements IWorkflowService {
     return formatAffectedOwnersBlock(paths, resolved);
   }
 
+  async updateBranch(
+    workspaceId: string,
+    user: AuthUser,
+    opts: { from?: string; resolutions?: MergeResolution[] } = {},
+  ): Promise<UpdateBranchOutcome> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const from = opts.from ?? branch;
+    if (this.kb.isProtectedBranch(branch)) {
+      throw new WorkflowDomainError(
+        `"${branch}" is protected: it is changed through change requests, never merged into directly.`,
+        403,
+        { kind: 'protected-update-target', branch },
+      );
+    }
+    // The merge takes what the REMOTE holds of `from`, and the push publishes
+    // the branch: writes still being committed on either would be missed by
+    // the first or swept up by the second. Waited for, as `mergeBranch` waits.
+    for (const b of from === branch ? [branch] : [from, branch]) {
+      const settled = await this.awaitPendingCommits(b);
+      if (!settled.ok) {
+        const message = settled.needsAttention
+          ? `A commit queued on "${b}" failed and needs a person: ${settled.needsAttention} ` +
+            'Nothing was merged. Tell the user; update again once it has been resolved.'
+          : `${settled.pending} write(s) on "${b}" are still being committed. Nothing was merged. Retry shortly.`;
+        return {
+          kind: 'pending-commits',
+          branch: b,
+          pending: settled.pending,
+          ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
+          message,
+        };
+      }
+    }
+    if (!(await this.git.remoteBranchExists(workspaceId, from))) {
+      throw new WorkflowValidationError(`No branch named "${from}" on the shared repository.`);
+    }
+    const resolutions = opts.resolutions ?? [];
+    const subject = from === branch ? `Merge the shared ${branch} into the local one` : `Merge ${from} into ${branch}`;
+    const body =
+      (from === branch
+        ? `The branch had moved on the shared repository while this workspace held commits of its own; both are kept.`
+        : `Brings the latest ${from} into ${branch}.`) +
+      (resolutions.length > 0
+        ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
+        : '');
+    const outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, { subject, body, resolutions });
+    if (outcome.kind === 'merged') {
+      // The same push every save and share makes: a rejection runs the
+      // cooperative recovery (pull with the merge preserved, push again), and
+      // a refusal answers as a refused share does, the commit kept locally.
+      await this.pushWithRecovery(workspaceId, branch, '(update)', user);
+    }
+    return outcome;
+  }
+
+  fileAtBranch(
+    workspaceId: string,
+    path: string,
+    branch: string,
+  ): Promise<{ sha: string; ref: string; content: string | null }> {
+    return this.git.readFileAtBranch(workspaceId, path, branch);
+  }
+
+  changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]> {
+    return this.git.changedPathsForPr(workspaceId, base, branch);
+  }
 }

@@ -4,6 +4,7 @@ import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helper
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
@@ -176,6 +177,14 @@ export function registerWorkflowTools(
    * nor links a request it answers no for.
    */
   maySeeChangeRequest: (ctx: ToolContext, number: number) => Promise<boolean>,
+  /**
+   * The per-file read gate the history tools apply: a file's past is the
+   * file, so a history read takes the read the file itself takes — on the
+   * workspace for its own branch's history, and at the ref actually served
+   * when another branch's content is read (`canReadAtRef`, every resolving
+   * candidate must grant, as the app's compare route decides).
+   */
+  accessControl: Pick<IAccessControl, 'canRead' | 'canReadAtRef'>,
 ): void {
   const { kbDirName } = kb;
   const mount = (spec: {
@@ -746,6 +755,348 @@ export function registerWorkflowTools(
         workspaceId: targetWorkspaceId,
         note: "Switch takes effect next turn. This turn's remaining writes still land on the original draft.",
       };
+    },
+  });
+
+  // ── History and syncing ────────────────────────────────────────────────────
+  //
+  // What the app's History tab, compare view and "update from target" do,
+  // as tools: the agent never runs git itself. Each reads through the
+  // workflow service's gated methods and takes the per-file read the file
+  // itself takes.
+
+  /** The branch's workspace, made when it is not on disk yet, and its id. */
+  const workspaceOf = async (ctx: ToolContext, branch: string): Promise<string> => {
+    await ctx.workspaceService.getOrCreateForBranch(branch);
+    return workspaceIdForBranch(branch);
+  };
+
+  /** The per-file read gate on the workspace's own branch; answers the repository-relative path. */
+  const requireRead = async (ctx: ToolContext, workspaceId: string, path: string): Promise<string> => {
+    const rel = stripKbDir(path, kbDirName);
+    if (!(await accessControl.canRead(workspaceId, ctx.user.email, rel))) {
+      throw new ToolError(`You don't have permission to read "${rel}".`, 403, { kind: 'read-denied', path: rel });
+    }
+    return rel;
+  };
+
+  /**
+   * The per-file read gate for content served from ANOTHER branch: decided
+   * at the refs that could serve it (`origin/<branch>`, then the local head),
+   * every one that resolves must grant, and a branch none of whose refs
+   * resolve is refused — never serve a ref that cannot be authorized.
+   */
+  const requireReadAtBranch = async (ctx: ToolContext, workspaceId: string, rel: string, branch: string): Promise<void> => {
+    const verdicts: (boolean | null)[] = [];
+    for (const ref of [`origin/${branch}`, branch]) {
+      verdicts.push(await accessControl.canReadAtRef(workspaceId, ref, ctx.user.email, rel));
+    }
+    if (verdicts.some((v) => v === false) || verdicts.every((v) => v === null)) {
+      throw new ToolError(`You don't have permission to read "${rel}" on "${branch}".`, 403, {
+        kind: 'read-denied',
+        path: rel,
+        branch,
+      });
+    }
+  };
+
+  const isCommitSha = (s: string): boolean => /^[0-9a-f]{7,64}$/i.test(s);
+
+  mount({
+    name: 'list_file_changes',
+    description:
+      'The history of one file on `branch`: its commits, newest first — who made each, when, and its ' +
+      'subject — as the app\'s History tab shows them. `limit` caps the list (default 20, at most 100). ' +
+      'Read a version with `read_file_at` and its diff with `compare_file`. Takes the read the file itself ' +
+      'takes; a folder has no history of its own (ask per file).',
+    inputs: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', minLength: 1, description: 'The file, workspace-relative (as `read_file` takes it).' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many commits at most (default 20).' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'The file, repository-relative.' },
+        changes: { type: 'array', items: commitSchema, description: 'Newest first.' },
+      },
+      required: ['path', 'changes'],
+    },
+    write: false,
+    handler: async (args, ctx: ToolContext) => {
+      const branch = args.branch as string;
+      const path = args.path;
+      if (typeof path !== 'string' || path.length === 0) throw new ToolError('`path` is required.', 400);
+      const workspaceId = await workspaceOf(ctx, branch);
+      const rel = await requireRead(ctx, workspaceId, path);
+      const limit = typeof args.limit === 'number' ? args.limit : undefined;
+      const changes = await ctx.workflowService.listChangesForFile(workspaceId, path, limit);
+      return { path: rel, changes };
+    },
+  });
+
+  mount({
+    name: 'read_file_at',
+    description:
+      'One file as it was at a point in history: `at` is a commit (from `list_file_changes`, on `branch`\'s ' +
+      'own history) or the name of another branch (its published tip). Answers `content` (null when the ' +
+      'file was not there) and `sha`, the commit it was read at; for a commit, also `before`, the file ' +
+      'just before that commit. To put an earlier version back, write it with `write_file`. Takes the read ' +
+      'the file takes at that point.',
+    inputs: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', minLength: 1, description: 'The file, workspace-relative.' },
+        at: { type: 'string', minLength: 1, description: 'A commit sha, or a branch name.' },
+      },
+      required: ['path', 'at'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'The file, repository-relative.' },
+        at: { type: 'string', description: 'What was asked for.' },
+        kind: { type: 'string', enum: ['commit', 'branch'] },
+        sha: { type: 'string', description: 'The commit the content was read at.' },
+        content: { type: ['string', 'null'], description: 'The file at that commit; null when it was not there.' },
+        before: { type: ['string', 'null'], description: 'For a commit: the file just before it; null when it was not there (or the commit is the first).' },
+      },
+      required: ['path', 'at', 'kind', 'sha', 'content'],
+    },
+    write: false,
+    handler: async (args, ctx: ToolContext) => {
+      const branch = args.branch as string;
+      const path = args.path;
+      const at = args.at;
+      if (typeof path !== 'string' || path.length === 0) throw new ToolError('`path` is required.', 400);
+      if (typeof at !== 'string' || at.length === 0) throw new ToolError('`at` is required: a commit sha or a branch name.', 400);
+      const workspaceId = await workspaceOf(ctx, branch);
+      const rel = stripKbDir(path, kbDirName);
+      if (isCommitSha(at)) {
+        await requireRead(ctx, workspaceId, path);
+        const { baseline, current } = await ctx.workflowService.fileAtChange(workspaceId, path, at);
+        return { path: rel, at, kind: 'commit', sha: at, content: current, before: baseline };
+      }
+      await requireReadAtBranch(ctx, workspaceId, rel, at);
+      const read = await ctx.workflowService.fileAtBranch(workspaceId, path, at);
+      return { path: rel, at, kind: 'branch', sha: read.sha, content: read.content };
+    },
+  });
+
+  mount({
+    name: 'compare_file',
+    description:
+      'The unified diff of one file: between two branches (`from`, `to`; either may be `branch` itself), ' +
+      'or of one commit on `branch` (`at`: what that commit changed in the file). Empty when identical. ' +
+      'Takes the read the file takes on each side.',
+    inputs: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', minLength: 1, description: 'The file, workspace-relative.' },
+        from: { type: 'string', minLength: 1, description: 'A branch: the diff\'s left side.' },
+        to: { type: 'string', minLength: 1, description: 'A branch: the diff\'s right side.' },
+        at: { type: 'string', minLength: 1, description: 'A commit sha on `branch`: the diff that commit made in the file.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'The file, repository-relative.' },
+        diff: { type: 'string', description: 'A unified diff; empty when the two sides are identical.' },
+      },
+      required: ['path', 'diff'],
+    },
+    write: false,
+    handler: async (args, ctx: ToolContext) => {
+      const branch = args.branch as string;
+      const path = args.path;
+      if (typeof path !== 'string' || path.length === 0) throw new ToolError('`path` is required.', 400);
+      const workspaceId = await workspaceOf(ctx, branch);
+      const rel = stripKbDir(path, kbDirName);
+      if (typeof args.at === 'string' && args.at.length > 0) {
+        if (!isCommitSha(args.at)) throw new ToolError('`at` must be a commit sha.', 400);
+        await requireRead(ctx, workspaceId, path);
+        return { path: rel, diff: await ctx.workflowService.showFileAtChange(workspaceId, path, args.at) };
+      }
+      const from = args.from;
+      const to = args.to;
+      if (typeof from !== 'string' || from.length === 0 || typeof to !== 'string' || to.length === 0) {
+        throw new ToolError('Give `from` and `to` (two branches), or `at` (one commit).', 400);
+      }
+      for (const b of [from, to]) await requireReadAtBranch(ctx, workspaceId, rel, b);
+      return { path: rel, diff: await ctx.workflowService.compareFile(workspaceId, path, from, to) };
+    },
+  });
+
+  mount({
+    name: 'branch_status',
+    description:
+      'Where `branch` stands, before proposing or syncing a draft. Answers whether it is on the shared ' +
+      'repository, how far ahead of and behind its upstream it is, whether the shared branch has commits this ' +
+      'workspace lacks (`behindRemote`: `update_branch` brings them in), the files written but not committed ' +
+      'yet, the protected branch it was forked from (`forkBase`), and `changedPaths`: what it changes against ' +
+      '`base` (default: the fork base) — the files a change request into it would carry.',
+    inputs: {
+      type: 'object',
+      properties: {
+        base: { type: 'string', minLength: 1, description: 'The branch to compare against (default: the fork base).' },
+      },
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        branch: { type: 'string' },
+        isProtected: { type: 'boolean' },
+        hasRemote: { type: 'boolean', description: 'True when the shared repository has the branch.' },
+        ahead: { type: ['integer', 'null'], description: 'Commits ahead of the upstream (or the fork base); null when unresolved.' },
+        behind: { type: ['integer', 'null'], description: 'Commits behind; null when unresolved.' },
+        behindRemote: { type: 'boolean', description: 'The shared branch has commits this workspace has not merged yet.' },
+        uncommittedPaths: { type: 'array', items: { type: 'string' }, description: 'Written but not committed yet (saves still landing).' },
+        forkBase: { type: ['string', 'null'], description: 'The protected branch this one was forked from; null when none can be reached.' },
+        base: { type: ['string', 'null'], description: 'What `changedPaths` is against.' },
+        changedPaths: { type: 'array', items: { type: 'string' }, description: 'Repository-relative; rename-aware. Empty when `base` is null.' },
+      },
+      required: ['branch', 'isProtected', 'hasRemote', 'ahead', 'behind', 'behindRemote', 'uncommittedPaths', 'forkBase', 'base', 'changedPaths'],
+    },
+    write: false,
+    handler: async (args, ctx: ToolContext) => {
+      const branch = args.branch as string;
+      const workspaceId = await workspaceOf(ctx, branch);
+      const [status, branches, uncommittedPaths, forkBase] = await Promise.all([
+        ctx.workflowService.branchStatus(workspaceId),
+        ctx.workflowService.listBranches(workspaceId),
+        ctx.workflowService.listPendingChangePaths(workspaceId),
+        ctx.workflowService.resolveForkBase(workspaceId, branch),
+      ]);
+      const info = branches.find((b) => b.name === branch);
+      const base = typeof args.base === 'string' && args.base.length > 0 ? args.base : forkBase;
+      const changedPaths =
+        base && base !== branch ? await ctx.workflowService.changedPathsBetweenBranches(workspaceId, base, branch) : [];
+      return {
+        branch,
+        isProtected: info?.isProtected ?? kb.protectedBranches.has(branch),
+        hasRemote: info?.hasRemote ?? status.hasUpstream,
+        ahead: info?.ahead ?? null,
+        behind: info?.behind ?? null,
+        behindRemote: status.unmergedFromUpstream,
+        uncommittedPaths: uncommittedPaths.map((p) => stripKbDir(p, kbDirName)),
+        forkBase,
+        base: base && base !== branch ? base : null,
+        changedPaths,
+      };
+    },
+  });
+
+  mount({
+    name: 'update_branch',
+    description:
+      'Bring another branch into `branch` as a merge commit by you, and publish it: `from` (a draft\'s ' +
+      'target, to refresh the draft), or left out, the branch\'s own shared state when it moved while this ' +
+      'workspace held commits (`branch_status` says `behindRemote`). Never a protected branch. CONFLICTS: ' +
+      'the first call answers `conflicts` naming every conflicted path with the file at the merge base, on ' +
+      'each side (`ours` = `branch`, `theirs` = `from`) and the working copy with git\'s markers, and leaves ' +
+      'the branch as it was. Decide each file (keep both sides\' information unless one is clearly stale; ' +
+      '`list_file_changes` shows intent), then call again with `resolutions`, one per conflicted path: ' +
+      '`content` (the resolved text) or `choose` (`ours`, `theirs`, `delete`). Only conflicted paths are ' +
+      'written here; other edits go through the file tools. Answers `merged`, `nothing-to-merge`, ' +
+      '`conflicts` again (something changed meanwhile), or `pending-commits` (writes still landing: retry).',
+    inputs: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', minLength: 1, description: 'The branch to bring in (default: this branch\'s own shared state).' },
+        resolutions: {
+          type: 'array',
+          description: 'One per conflicted path, from a previous `conflicts` answer.',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', minLength: 1, description: 'The conflicted path, as the answer named it.' },
+              content: { type: 'string', description: 'The resolved text of the file.' },
+              choose: { type: 'string', enum: ['ours', 'theirs', 'delete'], description: 'Keep one side whole, or drop the file.' },
+            },
+            required: ['path'],
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['merged', 'nothing-to-merge', 'conflicts', 'pending-commits'] },
+        from: { type: 'string', description: 'The branch brought in.' },
+        sha: { type: 'string', description: '`merged`: the merge commit, now the tip of `branch`, published; `nothing-to-merge`: the unchanged tip.' },
+        resolvedPaths: { type: 'array', items: { type: 'string' }, description: '`merged`: the conflicts the resolutions settled.' },
+        mergeBase: { type: ['string', 'null'], description: '`conflicts`: the common ancestor; null when the histories are unrelated.' },
+        ours: { type: 'string', description: '`conflicts`: the tip of `branch`.' },
+        theirs: { type: 'string', description: '`conflicts`: the tip of `from`.' },
+        files: {
+          type: 'array',
+          description: '`conflicts`: every conflicted path, with the file at the base, on each side, and the marked-up working copy (null where a side has no file; `truncated` when a side was too large or not text — read it with `read_file_at`).',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              base: { type: ['string', 'null'] },
+              ours: { type: ['string', 'null'] },
+              theirs: { type: ['string', 'null'] },
+              merged: { type: ['string', 'null'] },
+              truncated: { type: 'boolean' },
+            },
+            required: ['path', 'base', 'ours', 'theirs', 'merged'],
+          },
+        },
+        unresolved: { type: 'array', items: { type: 'string' }, description: '`conflicts`: the paths no resolution covered.' },
+        branch: { type: 'string', description: '`pending-commits`: the branch whose writes are not committed yet.' },
+        pending: { type: 'integer', description: '`pending-commits`: how many.' },
+        needsAttention: { type: 'string', description: '`pending-commits`: a queued commit failed; the worker\'s message. Tell the user.' },
+        message: { type: 'string', description: '`pending-commits`: what to do next.' },
+      },
+      required: ['kind'],
+    },
+    write: true,
+    handler: async (args, ctx: ToolContext) => {
+      const branch = args.branch as string;
+      const from = args.from;
+      if (from !== undefined && (typeof from !== 'string' || from.length === 0)) {
+        throw new ToolError('`from` must be a branch name.', 400);
+      }
+      let resolutions: { path: string; content?: string; choose?: 'ours' | 'theirs' | 'delete' }[] | undefined;
+      if (args.resolutions !== undefined) {
+        if (!Array.isArray(args.resolutions)) throw new ToolError('`resolutions` must be a list.', 400);
+        resolutions = args.resolutions.map((r: unknown, i: number) => {
+          const entry = r as Record<string, unknown>;
+          if (!entry || typeof entry.path !== 'string' || entry.path.length === 0) {
+            throw new ToolError(`resolutions[${i}]: \`path\` is required.`, 400);
+          }
+          const out: { path: string; content?: string; choose?: 'ours' | 'theirs' | 'delete' } = { path: entry.path };
+          if (entry.content !== undefined) {
+            if (typeof entry.content !== 'string') throw new ToolError(`resolutions[${i}]: \`content\` must be text.`, 400);
+            out.content = entry.content;
+          }
+          if (entry.choose !== undefined) {
+            if (entry.choose !== 'ours' && entry.choose !== 'theirs' && entry.choose !== 'delete') {
+              throw new ToolError(`resolutions[${i}]: \`choose\` is \`ours\`, \`theirs\` or \`delete\`.`, 400);
+            }
+            out.choose = entry.choose;
+          }
+          return out;
+        });
+      }
+      const workspaceId = await workspaceOf(ctx, branch);
+      return ctx.workflowService.updateBranch(workspaceId, ctx.user, {
+        ...(from !== undefined ? { from } : {}),
+        ...(resolutions !== undefined ? { resolutions } : {}),
+      });
     },
   });
 }

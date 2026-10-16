@@ -117,7 +117,7 @@ async function hexisTools(skills: Parameters<typeof registerSkillsTools>[4] = em
     undefined,
     new WorkerPatternMatcher(),
   );
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true);
+  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true } as never);
   registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, skills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
