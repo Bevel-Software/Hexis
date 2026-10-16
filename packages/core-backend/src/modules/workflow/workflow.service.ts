@@ -3333,11 +3333,84 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * The one rule for who may DECIDE an open change request — close it
+   * (`rejectChangeRequest`) or rewrite what it asks (`updateChangeRequest`):
+   *   - its author (the stored author hash, never anything the caller sends),
+   *   - an admin (write on `roles.yaml` at `origin/<base>`), or
+   *   - the holder of write on every file it changes at `origin/<base>`,
+   *     i.e. anyone who may merge it.
+   * Returns which grant the caller holds, or `null` for none.
+   *
+   * The grants beyond authorship are read at `origin/<base>`, never a local
+   * ref, behind a STRICT fetch: a right revoked a moment ago must not still
+   * pass against a stale tree, so an unreachable origin is a worded 409, not
+   * a refusal. The path list comes from a fresh detail read, so the rule
+   * applies to the current head. A base that cannot be read, or a detail read
+   * that fails (one of the request's branches is gone), kicks the
+   * deleted-branch sweep; see `kickDeletedBranchSweep`.
+   */
+  private async changeRequestDecisionGrant(
+    number: number,
+    user: AuthUser,
+    authorIdHash: string | null,
+    baseBranch: string,
+    workspaceId: string,
+  ): Promise<'author' | 'admin' | 'writes-every-file' | null> {
+    if (authorIdHash && authorIdHash === hashEmail(user.email)) return 'author';
+    try {
+      await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true });
+    } catch {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `Could not verify the base branch "${baseBranch}" — origin was unreachable. Retry in a moment.`,
+        409,
+      );
+    }
+    const isAdmin = await this.accessControl.canWriteAtRef(
+      workspaceId,
+      `origin/${baseBranch}`,
+      user.email,
+      'roles.yaml',
+    );
+    if (isAdmin === true) return 'admin';
+    let detail;
+    try {
+      detail = await this.prs.getPrDetail(number, {
+        fresh: true,
+        workspaceId,
+        viewerEmail: user.email,
+        // Only `files[].path` is read below; a patch per file would be one
+        // git subprocess each, generated for nothing.
+        patches: false,
+      });
+    } catch (err) {
+      this.kickDeletedBranchSweep();
+      throw err;
+    }
+    const paths = detail?.files.map((f) => f.path) ?? [];
+    if (paths.length > 0) {
+      const writeMap = await this.accessControl.canWriteBatchAtRef(
+        workspaceId,
+        `origin/${baseBranch}`,
+        user.email,
+        paths,
+      );
+      if (writeMap && paths.every((p) => writeMap.get(p) === true)) return 'writes-every-file';
+    }
+    if (isAdmin === null) {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `The base branch "${baseBranch}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
+        409,
+      );
+    }
+    return null;
+  }
+
+  /**
    * Change an OPEN request's title and/or description. Who may: the people
-   * who may close it (`rejectChangeRequest`) — its author, an admin (write on
-   * `roles.yaml` at `origin/<base>`), or the holder of write on every file it
-   * changes at `origin/<base>`, i.e. anyone who may merge it. What a request
-   * asks belongs to the same people who may decide it.
+   * who may close it — `changeRequestDecisionGrant`, the one rule both verbs
+   * share. What a request asks belongs to the same people who may decide it.
    *
    * `description` replaces the author's part of the body only; the generated
    * `## Affected owners` block and Hexis's own markers stay (see
@@ -3378,66 +3451,27 @@ export class WorkflowService implements IWorkflowService {
     if (!summary) throw new WorkflowDomainError('change request not found', 404);
     assertEditable(summary.state);
 
-    const callerIsAuthor = !!(summary.authorId && summary.authorId === hashEmail(user.email));
-    if (!callerIsAuthor) {
-      // The grants beyond authorship are read at `origin/<base>`, never a local
-      // ref, behind a STRICT fetch: a right revoked a moment ago must not still
-      // pass against a stale tree. A base that cannot be read kicks the
-      // deleted-branch sweep, as delete and reject do.
-      let workspaceId: string;
-      let isAdmin: boolean | null;
-      let writesAll = false;
-      try {
-        workspaceId = (await this.workspaceService.getOrCreateForBranch(summary.base)).id;
-        try {
-          await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true });
-        } catch {
-          throw new WorkflowDomainError(
-            `Could not verify the base branch "${summary.base}" — origin was unreachable. Retry in a moment.`,
-            409,
-          );
-        }
-        isAdmin = await this.accessControl.canWriteAtRef(
-          workspaceId,
-          `origin/${summary.base}`,
-          user.email,
-          'roles.yaml',
-        );
-        if (isAdmin !== true) {
-          const detail = await this.prs.getPrDetail(number, {
-            fresh: true,
-            workspaceId,
-            viewerEmail: user.email,
-            patches: false,
-          });
-          const paths = detail?.files.map((f) => f.path) ?? [];
-          if (paths.length > 0) {
-            const writeMap = await this.accessControl.canWriteBatchAtRef(
-              workspaceId,
-              `origin/${summary.base}`,
-              user.email,
-              paths,
-            );
-            writesAll = !!writeMap && paths.every((p) => writeMap.get(p) === true);
-          }
-        }
-      } catch (err) {
-        this.kickDeletedBranchSweep();
-        throw err;
-      }
-      if (isAdmin !== true && !writesAll) {
-        if (isAdmin === null) {
-          this.kickDeletedBranchSweep();
-          throw new WorkflowDomainError(
-            `The base branch "${summary.base}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
-            409,
-          );
-        }
-        throw new WorkflowDomainError(
-          "Only the request's author, an admin, or someone who may approve every file it changes can edit its title and description.",
-          403,
-        );
-      }
+    // The grants beyond authorship are read in the base branch's own workspace.
+    // Any failure to read them kicks the deleted-branch sweep, as delete does.
+    let workspaceId: string;
+    try {
+      workspaceId = (await this.workspaceService.getOrCreateForBranch(summary.base)).id;
+    } catch (err) {
+      this.kickDeletedBranchSweep();
+      throw err;
+    }
+    const grant = await this.changeRequestDecisionGrant(
+      number,
+      user,
+      summary.authorId ?? null,
+      summary.base,
+      workspaceId,
+    );
+    if (grant === null) {
+      throw new WorkflowDomainError(
+        "Only the request's author, an admin, or someone who may approve every file it changes can edit its title and description.",
+        403,
+      );
     }
 
     // The body is rewritten from the row as stored, not from the summary read
@@ -3994,20 +4028,13 @@ export class WorkflowService implements IWorkflowService {
 
 
   /**
-   * Reject (close-without-merging) a change request. Per PLAN.md spec, the
-   * authorized set is:
-   *   - the CR author (hash-matched against the body marker), OR
-   *   - any user with write permission to *every* changed file on the
-   *     target branch, OR
-   *   - an admin (write on `roles.yaml` at `origin/<target>`).
+   * Reject (close-without-merging) a change request. Who may: the people
+   * `changeRequestDecisionGrant` names — its author, an admin, or the holder
+   * of write on every file it changes at `origin/<target>`.
    *
-   * The first and third are enforced by the underlying `cancelPr`. The
-   * second is the workflow's broader rule; we check it here and, on
-   * success, spoof `authorIdHash` to `hashEmail(user.email)` so `cancelPr`
-   * accepts the call via its existing "viewer is author" branch. The
-   * spoofing is safe because no caller outside this method can construct
-   * an `authorIdHash` that matches its own email's hash — `cancelPr`
-   * receives the hash via this internal call only.
+   * A caller holding a grant reaches the underlying `cancelPr` as the author
+   * (its `authorIdHash` is set to the caller's own hash); one holding none is
+   * passed through unchanged, and `cancelPr` refuses it.
    */
   async rejectChangeRequest(
     number: number,
@@ -4018,49 +4045,16 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
   ): Promise<CancelChangeRequestResult> {
     let effectiveAuthorIdHash = authorIdHash;
-    const callerHash = hashEmail(user.email);
-    const callerIsAuthor = !!(authorIdHash && authorIdHash === callerHash);
-
-    if (!callerIsAuthor) {
-      // Broader rule: write perm on every changed file at origin/<target>.
-      // The path list comes from the PR detail — fetch fresh so the rule
-      // applies against the current head (a stale list would let a user
-      // reject a CR whose files they no longer all own).
-      let detail;
-      try {
-        detail = await this.prs.getPrDetail(number, {
-          fresh: true,
-          workspaceId,
-          viewerEmail: user.email,
-          // Only `files[].path` is read below; a patch per file would be one
-          // git subprocess each, generated for nothing, on every reject by a
-          // non-author.
-          patches: false,
-        });
-      } catch (err) {
-        // The detail read resolves both branch tips (`resolvePrShas`), so a
-        // request one of whose branches is gone fails HERE, on the verb that
-        // exists to get rid of it. Kick the sweep (which proves the absence
-        // and closes the stranded rows) and surface the failure; see
-        // `kickDeletedBranchSweep`.
-        this.kickDeletedBranchSweep();
-        throw err;
-      }
-      const paths = detail?.files.map((f) => f.path) ?? [];
-      if (paths.length > 0) {
-        const writeMap = await this.accessControl.canWriteBatchAtRef(
-          workspaceId,
-          `origin/${baseBranch}`,
-          user.email,
-          paths,
-        );
-        const writesAll = !!writeMap && paths.every((p) => writeMap.get(p) === true);
-        if (writesAll) {
-          // Spoof so the underlying `cancelPr` authorizes via its viewer-
-          // is-author branch. The admin branch (write on roles.yaml) still
-          // works alongside — `cancelPr` checks both.
-          effectiveAuthorIdHash = callerHash;
-        }
+    // A request that is no longer open is refused by `cancelPr` with its own
+    // already-applied / already-cancelled answer; no grant is read for it.
+    if (state === 'open') {
+      const grant = await this.changeRequestDecisionGrant(number, user, authorIdHash, baseBranch, workspaceId);
+      if (grant !== null) {
+        // Spoof so the underlying `cancelPr` authorizes via its viewer-is-
+        // author branch. The spoofing is safe because no caller outside this
+        // method can construct an `authorIdHash` that matches its own email's
+        // hash — `cancelPr` receives the hash via this internal call only.
+        effectiveAuthorIdHash = hashEmail(user.email);
       }
     }
 

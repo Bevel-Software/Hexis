@@ -327,12 +327,63 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     const prs = makePrs();
     const reviewWorkflow = makeReviewWorkflow();
     (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockResolvedValue({ prNumber: 9, cancelledAt: 't' });
+    // A caller holding no grant: not the author, not an admin, no files to own.
+    const access = makeAccessControl();
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
-    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
     const user = makeUser();
     await svc.rejectChangeRequest(9, user, 'open', null, 'main', 'w1');
+    // Passed through unchanged: `cancelPr` is the one that refuses it.
     expect(reviewWorkflow.cancelPr).toHaveBeenCalledWith(9, user, 'open', null, 'main', 'w1');
     expect(prs.invalidateDetailCache).toHaveBeenCalledWith(9);
+  });
+
+  // Reject and the title/description edit share ONE rule for who may decide a
+  // request (`changeRequestDecisionGrant`); these pin reject's side of it.
+  it('rejectChangeRequest lets the holder of write on every changed file close it as the author would', async () => {
+    const prs = makePrs();
+    (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ files: [{ path: 'a.md' }, { path: 'b.md' }] });
+    const reviewWorkflow = makeReviewWorkflow();
+    (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockResolvedValue({ prNumber: 9, cancelledAt: 't' });
+    const access = makeAccessControl();
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    (access.canWriteBatchAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([['a.md', true], ['b.md', true]]),
+    );
+    const workspaceService = makeWorkspaceService();
+
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, workspaceService, access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    const user = makeUser();
+    await svc.rejectChangeRequest(9, user, 'open', 'someone-else', 'main', 'w1');
+    expect(workspaceService.ensureRemotesFetched).toHaveBeenCalledWith('w1', { strict: true });
+    expect(access.canWriteBatchAtRef).toHaveBeenCalledWith('w1', 'origin/main', user.email, ['a.md', 'b.md']);
+    expect(reviewWorkflow.cancelPr).toHaveBeenCalledWith(9, user, 'open', hashEmail(user.email), 'main', 'w1');
+  });
+
+  it('rejectChangeRequest refuses with a worded 409 when origin cannot be fetched, never against a stale tree', async () => {
+    const reviewWorkflow = makeReviewWorkflow();
+    const workspaceService = makeWorkspaceService();
+    (workspaceService.ensureRemotesFetched as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'));
+    const access = makeAccessControl();
+
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), reviewWorkflow, workspaceService, access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    await expect(svc.rejectChangeRequest(9, makeUser(), 'open', 'someone-else', 'main', 'w1')).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('origin was unreachable'),
+    });
+    expect(access.canWriteAtRef).not.toHaveBeenCalled();
+    expect(reviewWorkflow.cancelPr).not.toHaveBeenCalled();
+  });
+
+  it("rejectChangeRequest reads no grant for a request that is no longer open — cancelPr answers it", async () => {
+    const reviewWorkflow = makeReviewWorkflow();
+    (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('already-applied'));
+    const workspaceService = makeWorkspaceService();
+
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), reviewWorkflow, workspaceService, makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    await expect(svc.rejectChangeRequest(9, makeUser(), 'merged', null, 'main', 'w1')).rejects.toThrow('already-applied');
+    expect(workspaceService.ensureRemotesFetched).not.toHaveBeenCalled();
   });
 
   it('mergeChangeRequest wraps the underlying merge result in a "merged" outcome', async () => {
