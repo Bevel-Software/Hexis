@@ -741,11 +741,20 @@ export interface IWorkflowService {
    *   - refused (`WorkflowDomainError`, `kind: 'protected-update-target'`,
    *     403) for a protected branch: those are updated through change requests.
    *   - refused (`WorkflowValidationError`) when `from` is not on the shared
-   *     repository.
+   *     repository, or when a resolution names a path that is not conflicted.
+   *   - refused (`WorkflowDomainError`, `kind: 'branch-busy'`, 409) while the
+   *     workspace holds edits not committed yet: a merge over them could lose
+   *     them.
    *   - `pending-commits` when writes on either branch are still being
    *     committed (waited for, up to 20 seconds); nothing merged.
-   *   - a merge that lands but cannot be published answers the push's own
-   *     refusal, the merge commit kept on the branch for the next share.
+   *   - `merged` means the merge commit is PUBLISHED: the push runs inside the
+   *     merge's own reservation, and a push the host rejects because the
+   *     branch moved is retried with the merge replayed on top. A replay that
+   *     conflicts throws the typed pull-conflict error (recovery queued), the
+   *     merge commit kept on the branch and the checkout clean.
+   *
+   * Per-file read access to what a `conflicts` answer carries is the
+   * CALLER's to check and withhold, as for `fileAtBranch`.
    */
   updateBranch(
     workspaceId: string,
@@ -764,7 +773,10 @@ export interface IWorkflowService {
   /**
    * The repository-relative paths `branch` changes against `base` — a
    * three-dot diff of their published tips, rename-aware — the list a change
-   * request from `branch` into `base` would carry.
+   * request from `branch` into `base` would carry. Unfiltered: a path's name
+   * is information too, and which of them the caller may read is the
+   * CALLER's to decide (at `origin/<base>`, as the change-request reads do)
+   * before any of them is shown.
    */
   changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]>;
 }
