@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createAuthRoutes } from '../auth.routes.js';
-import type { AuthService } from '../auth.service.js';
+import { PasswordChangedMeanwhileError, type AuthService } from '../auth.service.js';
+import { AUTH_COOKIE_NAME } from '../auth.middleware.js';
 
 const authService = {
   loginWithPassword: vi.fn(async () => {
@@ -87,5 +88,30 @@ describe('auth routes — rate limiting', () => {
       expect((await post()).status).toBe(400);
     }
     expect((await post()).status).toBe(429);
+  });
+});
+
+describe('auth routes — change-password', () => {
+  const post = (base: string) =>
+    fetch(`${base}/api/auth/change-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword: 'old-password', newPassword: 'new-password-1' }),
+    });
+
+  it('hands the changer a fresh token, in the body and the auth cookie', async () => {
+    vi.mocked(authService.changePassword).mockResolvedValueOnce({ token: 'fresh-jwt' });
+    const res = await post(await listen());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, token: 'fresh-jwt' });
+    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${AUTH_COOKIE_NAME}=fresh-jwt;`))).toBe(true);
+  });
+
+  it('answers a change another session got in first with a 409 and its words, and no cookie', async () => {
+    vi.mocked(authService.changePassword).mockRejectedValueOnce(new PasswordChangedMeanwhileError());
+    const res = await post(await listen());
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/changed from another session/);
+    expect(res.headers.getSetCookie()).toEqual([]);
   });
 });

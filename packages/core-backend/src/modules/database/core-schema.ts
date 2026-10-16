@@ -42,6 +42,16 @@ export const users = pgTable('users', {
    */
   passwordHash: text('password_hash'),
   /**
+   * Which generation of this account's sessions is honoured. Every session
+   * token carries the value it was issued at (`sv`; a token from before the
+   * column existed carries none and counts as 0), and one whose value is not
+   * the row's is refused. Changing the password moves it on, so every session
+   * opened with the old password ends at its next request — the one that
+   * made the change is handed a fresh token. Connection keys are not
+   * sessions and do not look at it.
+   */
+  sessionVersion: integer('session_version').default(0).notNull(),
+  /**
    * The one onboarding fact the server keeps: has this person concluded the
    * connect-your-agent setup (the welcome page's Done, or the reminder
    * pill's dismiss — one field, both doors). False drives the pill in every

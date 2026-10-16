@@ -1,4 +1,4 @@
-import { authFetch } from '../../../lib/api';
+import { authFetch, setToken } from '../../../lib/api';
 
 /** One row of the admin Accounts list (`GET /api/admin/accounts`). */
 export interface AccountSummary {
@@ -48,7 +48,11 @@ async function readError(res: Response, fallback: string): Promise<string> {
   return (body as { error?: string }).error || fallback;
 }
 
-/** Self-service password change. `currentPassword` is required once one is set. */
+/**
+ * Self-service password change. `currentPassword` is required once one is set.
+ * The change ends every session opened before it, this one's included, so the
+ * fresh token the server hands back replaces the stored one.
+ */
 export async function changePassword(
   currentPassword: string | undefined,
   newPassword: string,
@@ -59,6 +63,8 @@ export async function changePassword(
     body: JSON.stringify({ currentPassword, newPassword }),
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not change password'));
+  const body = (await res.json()) as { token: string };
+  setToken(body.token);
 }
 
 export async function listAccounts(): Promise<AccountSummary[]> {
