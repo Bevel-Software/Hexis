@@ -853,6 +853,10 @@ export function SkillPage({
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
+          // A page of the skill opens on the Knowledge file page, where its tools are.
+          onOpenInPlatform={
+            fileWorkspacePath ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath)) : undefined
+          }
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
            * `Propose changes` for EVERYONE and jump to the Knowledge editor —

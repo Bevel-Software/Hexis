@@ -11,6 +11,7 @@ import {
   answerToolCall,
   asToolCall,
   pageName,
+  useOpenPageInPlatform,
   usePageTools,
 } from './htmlToolBridge';
 import {
@@ -72,6 +73,7 @@ export function HtmlRenderer({
   // The viewer's tools, for a page on the app's file page — the one place
   // that provides them. Everywhere else the page gets `bevel.tools = null`.
   const pageTools = usePageTools();
+  const openPageInPlatform = useOpenPageInPlatform();
   const toolPagePath = surface === null && pageTools ? pageTools.pagePath : null;
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   /**
@@ -260,10 +262,12 @@ export function HtmlRenderer({
 
   const openInPlatform = useCallback(() => {
     closeCard(false);
-    // In the app this opens the file page; on the embed the surface opens it
-    // through the host, in a new tab.
-    openWorkspacePath(filePath);
-  }, [closeCard, openWorkspacePath, filePath]);
+    // The host's own way when it has one (a skill page, whose filePath is
+    // relative to the skill); otherwise, in the app this opens the file page,
+    // and on the embed the surface opens it through the host, in a new tab.
+    if (openPageInPlatform) openPageInPlatform();
+    else openWorkspacePath(filePath);
+  }, [closeCard, openPageInPlatform, openWorkspacePath, filePath]);
 
   useEffect(() => {
     frameHeightRef.current = frameHeight;

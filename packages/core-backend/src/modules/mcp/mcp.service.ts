@@ -202,18 +202,27 @@ interface RequestSurface {
    */
   hidden: ReadonlyMap<string, ScreenedHiddenTool>;
   /**
-   * A manual other than the knowledge base's failed to load, or was skipped
-   * for a failure remembered from an earlier load. Such a surface is cached
-   * only briefly: the failure may clear, and the manual must be tried again
-   * long before an hour is up.
+   * A manual other than the knowledge base's failed to load for a reason that
+   * may clear by itself within the minute — a token refresh that has not
+   * settled. Such a surface is cached only briefly, so the manual is tried
+   * again as soon as its refresh policy allows.
+   *
+   * A manual that failed for any other reason (a variable no one has set, a
+   * server that does not answer, a definition that does not parse) does NOT
+   * shorten the surface's life: on a knowledge base where one `.tool` is
+   * broken that would rebuild every person's client every minute. What mends
+   * such a manual reaches the cache another way — a secret set evicts the
+   * clients built without it, an edited `.tool` is a new catalog revision —
+   * and a server that was merely down is tried again on the person's next
+   * build, at the latest after an hour unused.
    */
   degraded: boolean;
 }
 
 /**
  * How long a surface missing a manual that failed is kept (see
- * {@link RequestSurface.degraded}): short of the failure memo's own window,
- * so the manual is retried as soon as the memo would allow.
+ * {@link RequestSurface.degraded}): the refresh policy's window, so the
+ * manual is retried as soon as a refresh may have settled.
  */
 const DEGRADED_SURFACE_MAX_AGE_MS = 60_000;
 
@@ -1091,8 +1100,8 @@ export class McpService {
    * pool (see {@link attachDownstream}).
    *
    * Failures are memoized per (user, manual definition) for a few minutes (see
-   * {@link ManualFailureMemo}): a surface that lost a manual is rebuilt within
-   * the minute (see {@link RequestSurface.degraded}), and a manual with a broken credential (expired OAuth, revoked key) would
+   * {@link ManualFailureMemo}): a surface is rebuilt when its catalog
+   * revision or the caller's secrets change (see {@link RequestSurface.degraded}), and a manual with a broken credential (expired OAuth, revoked key) would
    * otherwise re-dial its provider on every single one. The definition's
    * fingerprint is part of the key, so a manual edited after a failure (a
    * corrected `mcp.json` URL) is tried on the very next request.
@@ -1169,7 +1178,6 @@ export class McpService {
           const recent = this.manualFailures.recentFailure(userId, memoKey);
           if (recent !== undefined) {
             log.warn(`skipping manual "${name}" (recent failure, not retried): ${recent}`);
-            degraded = true;
             return { isKb, ok: true as const };
           }
         }
@@ -1201,7 +1209,7 @@ export class McpService {
             // policy's one and hold the manual down after the provider is back.
             if (!result.retryable) this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
             if (result.signInMissing) unavailable.push({ utcpName: rewritten });
-            else degraded = true;
+            else if (result.retryable) degraded = true;
             log.warn(`skipping manual "${name}": ${result.error}`);
           } else if (!isKb) {
             this.manualFailures.clear(userId, memoKey);

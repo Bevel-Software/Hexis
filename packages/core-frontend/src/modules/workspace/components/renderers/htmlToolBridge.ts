@@ -42,6 +42,18 @@ export function usePageTools(): PageTools | null {
   return useContext(PageToolsContext);
 }
 
+/**
+ * How to open the page on the app's file page, for a host whose `filePath` is
+ * not a workspace path — a skill page names its files relative to the skill
+ * (`view.html`). Absent, the renderer opens its own `filePath` (the embed's
+ * surface does that in a new tab, through its host).
+ */
+export const OpenPageInPlatformContext = createContext<(() => void) | null>(null);
+
+export function useOpenPageInPlatform(): (() => void) | null {
+  return useContext(OpenPageInPlatformContext);
+}
+
 /** The four members a page calls, by the name the frame posts. */
 export type PageToolFunction = 'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain';
 

@@ -419,13 +419,42 @@ describe('McpService — one tool client per person and catalog revision', () =>
   });
 });
 
+describe('McpService — a broken tool server', () => {
+  it('keeps the client for the hour: a manual that fails to load is no reason to rebuild every minute', async () => {
+    let now = 1_000_000;
+    const { state, mcp } = await harness({ surfaceCache: { now: () => now } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // A `.tool` whose server does not answer: it fails at every build.
+    state.extraManuals = [
+      { name: 'down_server', call_template_type: 'http', url: 'http://127.0.0.1:1/manual', http_method: 'GET' } as CallTemplate,
+    ];
+    const first = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    expect(first).toContain('read_file');
+    expect(first.some((n) => n.startsWith('down_server'))).toBe(false);
+    now += 70_000;
+    await (await connect(mcp)).listTools();
+    now += 50 * 60 * 1000;
+    await (await connect(mcp)).listTools();
+    expect(state.builds).toBe(1);
+
+    // What mends it reaches the cache: the admin sets the missing secret.
+    mcp.onSecretsChanged(null);
+    await (await connect(mcp)).listTools();
+    expect(state.builds).toBe(2);
+  });
+});
+
 describe('McpService — retained heap of warm clients of one catalog', () => {
-  it('grows by less than 100 KB per client beyond the first, across 300 people', { timeout: 120_000 }, async () => {
+  it('grows by less than 100 KB per client beyond the first, across 300 people', { timeout: 600_000 }, async () => {
     setFlagsFromString('--expose-gc');
     const gc = runInNewContext('gc') as () => void;
-    // A catalog whose definitions alone are ~300 KB: held per client, 300
-    // clients would be ~90 MB, and the bound below could not hold.
-    const { mcp } = await harness({ fillerTools: { count: 60, descriptionBytes: 4_000 } });
+    // A catalog whose definitions alone are ~240 KB: held per client, 300
+    // clients would be ~70 MB, and the bound below could not hold. A dozen
+    // large tools rather than many small ones: the bytes are what is
+    // measured, and each tool costs every build a schema check, which under a
+    // loaded suite is the difference between seconds and minutes.
+    const { mcp } = await harness({ fillerTools: { count: 12, descriptionBytes: 20_000 } });
     const settle = async () => {
       for (let i = 0; i < 3; i++) {
         gc();

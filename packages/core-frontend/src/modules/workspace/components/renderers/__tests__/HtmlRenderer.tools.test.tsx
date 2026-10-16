@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
-import { PageToolsContext } from '../htmlToolBridge';
+import { OpenPageInPlatformContext, PageToolsContext } from '../htmlToolBridge';
 import { GitContext, type GitContextValue } from '../../../../git/state/git.context';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 
@@ -211,6 +211,27 @@ describe('the platform card where there are no tools', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open in the platform' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'q2', result: false }));
     expect(openWorkspacePath).toHaveBeenCalledWith(PATH);
+  });
+
+  it("on a skill page opens the page the host's way, not the skill-relative name", async () => {
+    const open = vi.fn();
+    const { container } = render(
+      <MemoryRouter initialEntries={['/skills-and-tools/skills/roadmap']}>
+        <WorkspaceContext.Provider value={workspace}>
+          <GitContext.Provider value={git}>
+            <OpenPageInPlatformContext.Provider value={open}>
+              <HtmlRenderer content="<h1>Roadmap</h1>" filePath="view.html" onSave={async () => undefined} readOnly />
+            </OpenPageInPlatformContext.Provider>
+          </GitContext.Provider>
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+    const frame = frameChannel(await frameOf(container));
+    frame.post({ type: 'bevel.tools.require', requestId: 'q1' });
+    expect(await screen.findByText('view uses tools that are only available in the platform')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open in the platform' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'q1', result: false }));
+    expect(open).toHaveBeenCalledTimes(1);
   });
 
   it('refuses a tool call outright where there are no tools', async () => {
