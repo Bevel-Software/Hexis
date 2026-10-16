@@ -114,18 +114,14 @@ export function createTeamsRoutes(
         };
       };
 
-      // Which groups to list. An admin manages every group, so sees them all.
-      // Anyone else sees only the groups they are in: a group's NAME is
-      // information too. A deployment that gives each client, author or
+      // Which groups to list: the resolver's one answer to who sees which
+      // group (every group for an admin, only their own for anyone else), the
+      // same the share dialog offers and a grant may name. A group's NAME is
+      // information too: a deployment that gives each client, author or
       // customer a group of their own would otherwise show every member the
       // whole roster, even though the slices of groups they are not in come
       // back empty.
-      const [isAdmin, ownGroups] = await Promise.all([
-        accessControl.holdsAdminRootWrite(wsId, email),
-        accessControl.groupsOfUser(wsId, email),
-      ]);
-      const mine = new Set(ownGroups);
-      const listed = isAdmin ? groups : groups.filter((name) => mine.has(name));
+      const listed = await accessControl.visibleGroups(wsId, email, groups);
 
       const teams: TeamAccess[] = [
         slice(EVERYONE_TEAM, await accessControl.canReadAsEveryoneBatch(wsId, probes)),

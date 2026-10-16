@@ -1668,6 +1668,13 @@ export class AccessControlService implements IAccessControl {
     return names;
   }
 
+  async visibleGroups(workspaceId: string, userEmail: string, groups: readonly string[]): Promise<string[]> {
+    if (groups.length === 0) return [];
+    if (await this.holdsAdminRootWrite(workspaceId, userEmail)) return [...groups];
+    const mine = new Set(await this.groupsOfUser(workspaceId, userEmail));
+    return groups.filter((g) => mine.has(g));
+  }
+
   async canWriteBatch(
     workspaceId: string,
     userEmail: string,
