@@ -276,6 +276,16 @@ describe('DirectoryGroupsPage', () => {
     expect(dialog.queryByText(/cannot read/)).not.toBeInTheDocument();
   });
 
+  it('the delete confirm with no listed rules does not claim nothing is shared — unreadable rules may exist', async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete Design' }));
+
+    const dialog = within(screen.getByRole('dialog'));
+    expect(dialog.getByText('No access rule you can read references this group.')).toBeInTheDocument();
+    expect(dialog.queryByText(/Nothing is shared/)).not.toBeInTheDocument();
+    expect(dialog.queryByText(/lose nothing/)).not.toBeInTheDocument();
+  });
+
   it('idp mode: read-only roster, no mutation controls, membership note shown', async () => {
     vi.mocked(getGroupsRoster).mockResolvedValue(IDP_ROSTER);
     renderPage();

@@ -62,7 +62,9 @@ export function DirectoryGroupsPage() {
   // Group pending delete confirmation (manual mode).
   const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
   // Only rules in files the admin can read: the roster leaves the rest out
-  // entirely (Admin status does not grant read, not even a count).
+  // entirely (Admin status does not grant read, not even a count). So the
+  // copy below always says "you can read" and never claims there are no
+  // other rules — it reads the same whether or not unreadable ones exist.
   const deleteRuleCount = deleteTarget?.referencedBy.length ?? 0;
   // The overlay panel's "a directory connection exists" signal — true between
   // connecting and the first push, when the roster still reads 'manual' but
@@ -296,7 +298,7 @@ export function DirectoryGroupsPage() {
               <>
                 <p className="text-xs text-ink leading-snug">
                   {deleteRuleCount} access rule
-                  {deleteRuleCount === 1 ? '' : 's'} reference
+                  {deleteRuleCount === 1 ? '' : 's'} you can read reference
                   {deleteRuleCount === 1 ? 's' : ''} this group and will stop
                   matching anyone after deletion:
                 </p>
@@ -310,7 +312,7 @@ export function DirectoryGroupsPage() {
               </>
             ) : (deleteTarget.assignedToRoles?.length ?? 0) === 0 ? (
               <p className="text-xs text-ink leading-snug">
-                Nothing is shared with this group. Its members lose nothing else.
+                No access rule you can read references this group.
               </p>
             ) : null}
             {/* Role assignments are unassigned atomically with the delete —

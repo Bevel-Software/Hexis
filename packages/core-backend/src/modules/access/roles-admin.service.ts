@@ -312,8 +312,9 @@ export class RolesAdminService {
   /**
    * The roster: every role on the default branch with members + references.
    * `viewerEmail` is who the roster is for: `referencedBy` names only the
-   * files that viewer can read and counts the rest — being an Admin is not
-   * read access to every file, and a path is itself a disclosure.
+   * files that viewer can read and omits the rest entirely, without a count —
+   * being an Admin is not read access to every file, and a path, or even a
+   * count of rules in unreadable content, is itself a disclosure.
    */
   async getRoster(viewerEmail: string): Promise<RoleRosterEntry[]> {
     const workspaceId = await this.ensureWorkspace();

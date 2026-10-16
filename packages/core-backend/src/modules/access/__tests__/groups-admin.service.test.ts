@@ -511,7 +511,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
     }
   });
 
-  it('referencedBy names only the files the viewer can read and counts the rest', async () => {
+  it('referencedBy names only the files the viewer can read and omits the rest entirely, uncounted', async () => {
     const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-refs-'));
     try {
       const repo2 = path.join(root2, KB);
