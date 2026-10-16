@@ -17,7 +17,7 @@ import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import type { ILlmUsageMeter } from '../tool-auth/llm-usage-meter.js';
 import '../tool-auth/external-api-key.interface.js'; // req.externalApiKeyId augmentation
 import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
-import { isPagePath } from '../audit/audit.contract.js';
+import { isPagePath } from '../audit/index.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */
 function extractBearer(req: Request): string {

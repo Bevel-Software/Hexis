@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { RequestAudit } from '../audit/request-audit.js';
+import type { RequestAudit } from '../audit/index.js';
 
 /**
  * What ONE MCP request brings to the tool client it runs on: the bearer its
