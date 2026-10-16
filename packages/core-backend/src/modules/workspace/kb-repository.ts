@@ -6,6 +6,7 @@ import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
 import { fetchInstant } from './fetch-instant.js';
+import { readGitfile } from '../kb-fs/git-dir.js';
 import {
   cloneCredentialConfigArgs,
   cloneTrackingConfigArgs,
@@ -144,23 +145,6 @@ async function rewriteFile(file: string, text: string): Promise<void> {
   } finally {
     await handle.close();
   }
-}
-
-/**
- * The folder a gitfile (`gitdir: <path>`) names, resolved against the file's
- * own folder as git does; null when the file says nothing of the kind.
- */
-export async function readGitfile(gitfile: string): Promise<string | null> {
-  let text: string;
-  try {
-    text = await fs.readFile(gitfile, 'utf-8');
-  } catch (err) {
-    if (isAbsence(err) || (err as NodeJS.ErrnoException).code === 'EISDIR') return null;
-    throw err;
-  }
-  const m = /^gitdir:\s*(.+?)\s*$/m.exec(text);
-  if (!m) return null;
-  return path.resolve(path.dirname(gitfile), m[1]!);
 }
 
 export interface KbRepositoryOptions {
@@ -729,8 +713,11 @@ export class KbRepository implements IKbRepository {
       }
       const entries = (await inClone(['reflog', 'show', '--format=%H', 'refs/stash']))
         .split('\n').map((l) => l.trim()).filter(Boolean);
-      if (entries.length !== logged || (logged > 0 && entries[0] !== stashTop)) {
-        throw new Error(`the stash log of ${cloneDir} holds ${logged} entries, git read ${entries.length} with ${entries[0] ?? 'nothing'} the latest, not ${stashTop}`);
+      if (entries.length !== logged) {
+        throw new Error(`the stash log of ${cloneDir} holds ${logged} entries, git read ${entries.length}`);
+      }
+      if (logged > 0 && entries[0] !== stashTop) {
+        throw new Error(`the stash log of ${cloneDir} starts at ${entries[0]}, not at the stash tip ${stashTop}`);
       }
       (logged > 0 ? entries : [stashTop]).forEach((sha, i) => wanted.push({ sha, dest: `${namespace}/stash/${i}` }));
     }
