@@ -129,6 +129,18 @@ export function createAccessRoutes(
   };
 
   /**
+   * The groups `email` may be offered as a grantee, or name in a grant: the
+   * resolver's ONE answer to who sees which group (`visibleGroups`: every
+   * group for an admin, only their own for anyone else), the same the
+   * Library's Groups tab lists. Read on the default branch, where the active
+   * group source lives. The picker never names a group the caller has no
+   * part in, and the grant route refuses one with the same words as a group
+   * that does not exist.
+   */
+  const visibleGroups = (email: string, groups: string[]): Promise<string[]> =>
+    accessControl.visibleGroups(kb.defaultWorkspaceId(), email, groups);
+
+  /**
    * The plugins `email` may DISCOVER — read the folder's access.md, the same
    * verdict the plugin index lists on. Both the suggest list and the grant
    * route go through this, so a plugin hidden from the picker cannot be
@@ -491,8 +503,9 @@ export function createAccessRoutes(
    * names — resolved from the DEFAULT branch, the authoritative source),
    * groups (the ACTIVE group source, same authority), and people (branch-local
    * to `:id`). Roles/groups come from the resolver's CACHED model — no fresh
-   * file reads per keystroke. Roles + groups are small + non-sensitive so they
-   * always show; PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query
+   * file reads per keystroke. Roles are small + non-sensitive so they always
+   * show; GROUPS are the caller's own unless they are an admin (see
+   * `visibleGroups`); PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query
    * can't dump the whole directory (email-harvesting guard). People are the
    * union of the KB-canonical set (roles.yaml + access.md grants) and the
    * `users` table (logged-in users). Results are capped. Each person carries
@@ -527,7 +540,7 @@ export function createAccessRoutes(
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
-      const matchedGroups = groups
+      const matchedGroups = (await visibleGroups(user.email, groups))
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
@@ -934,9 +947,12 @@ export function createAccessRoutes(
       } else if (principal.kind === 'group') {
         // A group grant must name a group in the ACTIVE source (IdP-synced or
         // manual) on the default branch — same authority the suggest list
-        // uses. No role-collision refusal: bare tokens resolve GROUP-FIRST,
-        // so the written bare name IS the group.
-        const { groups } = await defaultBranchPrincipals();
+        // uses — and one the caller may see (`visibleGroups`): a group hidden
+        // from the picker is refused here with the same words as one that
+        // does not exist, so the grant route is no oracle for group names.
+        // No role-collision refusal: bare tokens resolve GROUP-FIRST, so the
+        // written bare name IS the group.
+        const groups = await visibleGroups(user.email, (await defaultBranchPrincipals()).groups);
         const canonical = canonicalRoleName(principal.group);
         if (!groups.some((g) => canonicalRoleName(g) === canonical)) {
           throw new AccessMutationError(

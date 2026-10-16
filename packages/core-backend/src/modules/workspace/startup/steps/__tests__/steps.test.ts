@@ -5,7 +5,6 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { KbStartupRunner } from '../../kb-startup-runner.js';
 import { NodeGitRunner } from '../../../../workflow/git/node-git-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
@@ -21,6 +20,7 @@ import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { renderTemplateText } from '../template-source.js';
 import { TOOL_PREFIX_LINE, composeAgentInstructions, platformInstructions } from '../../../../agent-instructions/index.js';
 import { testKbContext } from '../../../../../__tests__/kb-context.js';
+import { newKbStartupRunner } from '../../../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -102,7 +102,7 @@ async function seedUpstream(
 }
 
 function makeRunner(steps: OnServerStart[], templateDir: string = TEMPLATE_DIR) {
-  return new KbStartupRunner({
+  return newKbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
     workspacesRoot,
@@ -781,7 +781,8 @@ describe('TemplateFilesStep: the guide copies earlier releases wrote', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect((await fs.lstat(path.join(dir, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
-    expect(await fs.readlink(path.join(dir, 'AGENTS.md'))).toBe('conventions/ours.md');
+    // Windows reads the link back with its own separator.
+    expect((await fs.readlink(path.join(dir, 'AGENTS.md'))).replace(/\\/g, '/')).toBe('conventions/ours.md');
     expect(norm(await fs.readFile(path.join(dir, 'conventions/ours.md'), 'utf8'))).toBe(MANAGED_GUIDE_COPY);
   });
 });

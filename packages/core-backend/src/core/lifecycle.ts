@@ -449,6 +449,12 @@ export interface CoreStopDeps {
   /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
   agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /**
+   * The grep pattern matcher, whose worker threads are this graph's own: ended
+   * here so a graph a tenant host evicts leaves no worker behind. Optional: a
+   * caller that has not built one passes nothing.
+   */
+  patternMatcher?: { close(): Promise<void> };
+  /**
    * The workflow service, for the tidy-up it runs after each sweep (closing
    * empty requests, removing leftover branches): detached from whatever
    * started it, so stopped and awaited here before the pool goes. Optional:
@@ -580,6 +586,10 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // tenant cannot find a branch deletion still running under it.
   if (deps.workflowService) {
     await bounded(deps.workflowService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
+  }
+  // Its workers end with the graph; a search still running is answered busy.
+  if (deps.patternMatcher) {
+    await bounded(deps.patternMatcher.close(), remaining(), 'ending the search workers', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

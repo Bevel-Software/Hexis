@@ -149,8 +149,8 @@ export async function notifyAgentRead(
  * that throws refuses it with its own message and status; with none registered
  * this is a no-op.
  *
- * `wsPath` is omitted by the one write-capable tool with no resolvable target,
- * `execute_command` — the hook then decides at the coarser session level.
+ * `wsPath` is omitted by a write-capable operation with no resolvable
+ * target — the hook then decides at the coarser session level.
  */
 export async function assertAgentWriteAllowed(
   gate: AgentAccessGate,
