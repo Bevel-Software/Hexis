@@ -8,6 +8,7 @@ import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data
 import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
+  CONNECT_TOOLS_PATH,
   decodePluginSegment,
   pathForPlugin,
   pathForPluginsIndex,
@@ -492,7 +493,7 @@ export function PluginPage() {
                 : 'integrations need setup: connect them'
             } to unblock this plugin's skills.`}
           </span>{' '}
-          <Button variant="outline" size="tiny" onClick={() => navigate('/connect')}>
+          <Button variant="outline" size="tiny" onClick={() => navigate(CONNECT_TOOLS_PATH)}>
             Finish setup
           </Button>
         </Banner>

@@ -4,8 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../workspace.service.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * What happens to work ALREADY IN FLIGHT when the knowledge-base repository is
@@ -56,7 +56,7 @@ function heldRunner() {
 }
 
 function service(runner: IGitRunner) {
-  return new WorkspaceService(
+  return newWorkspaceService(
     workspacesRoot,
     () => `${root}/configured.git`,
     testKbContext({ branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),
@@ -138,12 +138,19 @@ describe('a bootstrap in flight when the working copy is taken away', () => {
 
     // The replacement lands while the clone runs.
     svc.forgetClone(WORKSPACE_ID);
-    // Let the clone — and every config call after it — finish.
-    for (let i = 0; i < 40 && calls.length > 0; i++) {
+    // Let the checkout — and every git call after it — finish. Until the open
+    // has settled, not until no call is pending for a moment: making the
+    // repository does filesystem work between its git calls.
+    let settled = false;
+    void opening.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    for (let i = 0; i < 400 && !settled; i++) {
       const pending = calls.splice(0, calls.length);
       for (const call of pending) call.settle();
       await Promise.resolve();
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 5));
     }
 
     await refused;

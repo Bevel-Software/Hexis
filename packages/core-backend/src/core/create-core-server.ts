@@ -475,7 +475,7 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore, core.starterPackService, core.disk);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
   // `open_page` — the knowledge-base page shown inside a chat. Registered
   // here, on the same router as the file tools, because it answers with
   // `read_file`'s own read: the read hook, the access gate and the
@@ -509,7 +509,13 @@ export async function createCoreServer(
   // one-time link is the whole credential an agent's `curl` carries. Every
   // file behind it was judged when `request_file_download` issued it.
   toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
+  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
+    accessControl: core.accessControl,
+    defaultWorkspaceId: () => core.kb.defaultWorkspaceId(),
+    // A skill's files as committed on the default branch, for the whole-skill
+    // verdict: the same clone and the same git the skill's history is read from.
+    committedFiles: core.gitService,
+  });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
   registerPluginsTools(core.toolRegistry, core.kb);
@@ -671,6 +677,7 @@ export async function createCoreServer(
     core.accessControl,
     core.workspaceService,
     core.authService,
+    core.authService,
     core.workflowService,
     core.eventBus,
     core.db,
@@ -759,6 +766,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.accountHooks,
     core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —

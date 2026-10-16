@@ -4,6 +4,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../access-control.interface.js';
+import { AccessControlService } from '../access-control.service.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
@@ -31,6 +32,10 @@ async function makeHarness(opts: {
   files?: Record<string, string>;
   roles?: string[];
   groups?: string[];
+  /** Whether the caller is an admin, who is offered every group. Defaults to true. */
+  admin?: boolean;
+  /** The groups the caller is a member of — all a non-admin is offered, or may grant to. */
+  memberOf?: string[];
 }): Promise<{ server: Server; baseUrl: string; files: Map<string, string> }> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -46,6 +51,12 @@ async function makeHarness(opts: {
       groups: opts.groups ?? [],
       people: [],
     })),
+    holdsAdminRootWrite: vi.fn(async () => opts.admin ?? true),
+    groupsOfUser: vi.fn(async () => opts.memberOf ?? []),
+    // The real policy over the two stubs above: who sees which group is the
+    // resolver's one answer, not something a route (or this double) decides.
+    visibleGroups: (wsId: string, email: string, groups: readonly string[]) =>
+      AccessControlService.prototype.visibleGroups.call(accessControl, wsId, email, groups),
     eligibleWriters: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
@@ -88,7 +99,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -211,6 +222,61 @@ describe('group principals on the share surface', () => {
     expect(body.roles).toEqual(['Everyone', 'Product']);
     // Deprecated alias — keeps the shipped dialog alive for one release.
     expect(body.plugins).toEqual(body.roles);
+  });
+
+  it("suggest offers someone who is not an admin only the groups they are in, never another group's name", async () => {
+    h = await makeHarness({ roles: ['Everyone'], groups: ['GTM Team', 'Product'], admin: false, memberOf: ['Product'] });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { roles: string[]; groups: string[] };
+    expect(body.groups).toEqual(['Product']);
+    expect(body.roles).toEqual(['Everyone']); // roles are not withheld
+  });
+
+  it('suggest offers someone in no group, who is not an admin, no groups at all', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'], admin: false });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=`);
+    const body = (await res.json()) as { groups: string[] };
+    expect(body.groups).toEqual([]);
+  });
+
+  it('a non-admin grants to a group they are in', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'], admin: false, memberOf: ['Product'] });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'Product' },
+    });
+    expect(res.status).toBe(200);
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- Product');
+  });
+
+  it('a non-admin granting to a group they are not in is refused exactly like an unknown group', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'], admin: false, memberOf: ['Product'] });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'GTM Team' },
+    });
+    // Same status, same body as a group that does not exist — the WHOLE
+    // answer, message included, with only the name asked about differing —
+    // so the grant route confirms no group name the picker would not have
+    // offered.
+    const ghost = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'Ghost Team' },
+    });
+    expect(res.status).toBe(404);
+    expect(ghost.status).toBe(404);
+    const hiddenBody = (await res.json()) as Record<string, unknown>;
+    const ghostBody = (await ghost.json()) as Record<string, unknown>;
+    expect(hiddenBody).toMatchObject({ kind: 'unknown-group', group: 'GTM Team' });
+    expect(JSON.stringify(hiddenBody).replaceAll('GTM Team', 'Ghost Team')).toBe(JSON.stringify(ghostBody));
+    expect(h.files.has(`${KB}/Sales/access.md`)).toBe(false);
   });
 
   it('revokes with a group principal (name-based, no existence check)', async () => {

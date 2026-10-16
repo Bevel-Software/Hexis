@@ -55,6 +55,8 @@ async function makeHarness(opts: {
     grantSources: vi.fn(async () => ({ read: [{ kind: 'direct' }] })),
     invalidate: vi.fn(),
     kbPrincipals: vi.fn(async () => ({ roles: [], groups: [], people: opts.kbPeople ?? [] })),
+    // No groups in this source, so the answer is the empty list the service gives for one.
+    visibleGroups: vi.fn(async (_w: string, _e: string, groups: readonly string[]) => [...groups]),
     eligibleWriters: vi.fn(async () => ({ roles: [], users: granted })),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: granted })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
@@ -104,6 +106,7 @@ async function makeHarness(opts: {
     createAccessRoutes(
       accessControl,
       workspaceService,
+      authService,
       authService,
       workflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,

@@ -117,6 +117,18 @@ describe('KbPageHeader', () => {
     expect(edit).toHaveAttribute('title', 'Ali Raza is editing this page');
   });
 
+  // A hold under the viewer's own id (another tab, their agent) is not
+  // "someone else": the title says it is theirs and never names them.
+  it('disables Edit for the viewer\'s own hold without naming them', () => {
+    renderHeader({ lockedBy: 'Juan V.', lockedByYou: true });
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    expect(edit).toBeDisabled();
+    expect(edit).toHaveAttribute(
+      'title',
+      'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.',
+    );
+  });
+
   it('swaps Edit for Done in edit mode', () => {
     renderHeader({ editMode: true });
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();

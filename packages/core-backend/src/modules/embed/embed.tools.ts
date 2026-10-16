@@ -104,6 +104,10 @@ export function registerEmbedTools(
       type: 'object',
       properties: {
         path: { type: 'string', description: 'The path that was shown (echoes the input).' },
+        heading: {
+          type: 'string',
+          description: 'The heading the view opens at (echoes the input). Absent when none was named.',
+        },
         content: { type: 'string', description: "The page's text, exactly as `read_file` answers it." },
         embedUrl: {
           type: 'string',
@@ -163,12 +167,16 @@ export function registerEmbedTools(
         result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
 
       const appUrl = deps.appUrlFor(repoRelative, heading);
+      // The heading goes back beside the path: the view calls this tool again
+      // with both when its token runs out (see `mcp-app/page.html`), and a
+      // result is all it is told.
+      const echoed = heading ? { heading } : {};
       // No view on a plain-http deployment (Decision 8): a host's https
       // sandbox cannot load from it. The text and the app address are still
       // the answer, and the tool says why there is no view rather than
       // handing back an address no host can open.
       if (!deps.canBeReached()) {
-        return { path: raw, content, appUrl, branch, note: HTTP_DEPLOYMENT_NOTE };
+        return { path: raw, ...echoed, content, appUrl, branch, note: HTTP_DEPLOYMENT_NOTE };
       }
       // Minted for the identity THIS MCP session authenticated — the
       // signed-in user, or the owner of the connection key the agent carries.
@@ -178,7 +186,7 @@ export function registerEmbedTools(
         userId: ctx.user.id,
         reference: heading ? `${repoRelative}#${heading}` : repoRelative,
       });
-      return { path: raw, content, embedUrl, appUrl, branch };
+      return { path: raw, ...echoed, content, embedUrl, appUrl, branch };
     }),
   );
 }

@@ -8,6 +8,7 @@ import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.
 import { assertOneSpecPerLine, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { readRevSha } from '../kb-fs/index.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -66,19 +67,35 @@ import {
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
 
+/** A full object id, which is what every at-ref gate resolves its ref to before reading. */
+function isCommitSha(ref: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref);
+}
+
+/**
+ * What one spec of a batched read came back as: a blob's text, nothing at
+ * that path, or an object that is not a file (a directory, say). The last
+ * two are told apart on purpose: for the model at a commit, a path that is
+ * there but is not a file is not "absent", it is config the model cannot be
+ * read from.
+ */
+type CatFileOutcome =
+  | { kind: 'blob'; text: string }
+  | { kind: 'missing' }
+  | { kind: 'non-blob'; type: string };
+
 /**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
- * them — the blob's text, or null when the spec is missing/ambiguous at the
- * ref or resolves to a non-blob (e.g. a directory). Output protocol per
- * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
- * (the spec may itself contain spaces, hence the endsWith checks).
+ * them. Output protocol per request: `<oid> <type> <size>\n<size bytes>\n`,
+ * or `<spec> missing\n` (the spec may itself contain spaces, hence the
+ * endsWith checks).
  */
-async function catFileBatch(
+async function catFileBatchOutcomes(
   runner: IGitRunner,
   repoDir: string,
   specs: string[],
-): Promise<(string | null)[]> {
+): Promise<CatFileOutcome[]> {
   // Bytes, not text: every `<size>` in the header counts bytes, and the walk
   // below has to step by that count through content that is not all ASCII.
   // One spec per LINE is the protocol, and this walk depends on getting back
@@ -91,7 +108,7 @@ async function catFileBatch(
     input: `${specs.join('\n')}\n`,
     encoding: 'buffer',
   });
-  const results: (string | null)[] = [];
+  const results: CatFileOutcome[] = [];
   let off = 0;
   for (let i = 0; i < specs.length; i++) {
     const nl = out.indexOf(0x0a, off);
@@ -99,7 +116,7 @@ async function catFileBatch(
     const header = out.subarray(off, nl).toString('utf-8');
     off = nl + 1;
     if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-      results.push(null);
+      results.push({ kind: 'missing' });
       continue;
     }
     const parts = header.split(' ');
@@ -107,12 +124,31 @@ async function catFileBatch(
     if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
       throw new Error(`unexpected git cat-file header: ${header}`);
     }
-    // Non-blob (a directory path resolves to a tree) → null, but the
-    // payload still has to be skipped to stay aligned.
-    results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
+    // A non-blob (a directory path resolves to a tree) is reported as such,
+    // and its payload still has to be skipped to stay aligned.
+    results.push(
+      parts[1] === 'blob'
+        ? { kind: 'blob', text: out.subarray(off, off + size).toString('utf-8') }
+        : { kind: 'non-blob', type: parts[1]! },
+    );
     off += size + 1; // payload + trailing LF
   }
   return results;
+}
+
+/**
+ * {@link catFileBatchOutcomes} for callers that want text or nothing: the
+ * blob's text, or null when the spec is missing at the ref or resolves to a
+ * non-blob — the own-entries reads, where a directory where a file was
+ * named simply carries no entries.
+ */
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  const outcomes = await catFileBatchOutcomes(runner, repoDir, specs);
+  return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
 
@@ -130,15 +166,16 @@ interface AccessModel {
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
    *
-   * This exists for the two hardcoded `write` rescues below and the root write
-   * floor, and only those. It is NOT a general grant: it never enters scope
-   * resolution, so it gives no read, no download, and no write beyond
-   * `roles.yaml`, `access.md`, and what the root floor reaches (see
-   * `hasPermissionResolved`). The deployment owner is the person who can already change
-   * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
-   * nothing they could not already take — while withholding it turns a
-   * `roles.yaml` that has lost its last Admin into a knowledge base nobody
-   * can repair through the app.
+   * An owner IS an Admin, for every verb: resolution gives them the Admin
+   * role's own keys (`principalKeysOf`), so they read, download, write and
+   * own exactly where a member of the role does and are excluded exactly
+   * where the role is, and they hold the two hardcoded `write` rescues and
+   * the root floor as the role does. The owner is the person who can already
+   * change `ADMIN_EMAIL` itself, so none of this concedes anything they could
+   * not already take — while withholding it turns a `roles.yaml` that has
+   * lost its last Admin into a knowledge base nobody can repair through the
+   * app, and an owner the file does not name into someone the write floor
+   * admits everywhere and the read gate admits nowhere.
    */
   deploymentOwners: ReadonlySet<string>;
 }
@@ -478,18 +515,37 @@ function resolveAtPath(
 /**
  * Every principal key a caller holds: the tokens their email is a member of,
  * plus the PUBLIC keys every caller holds regardless (a plugin principal
- * whose plugin grants `everyone`). Undefined when there is nothing at all,
+ * whose plugin grants `everyone`), plus — for a deployment owner — the Admin
+ * role's own keys, whether or not `roles.yaml` names them: the owner IS an
+ * Admin (see `AccessModel.deploymentOwners`), so every rule that binds the
+ * role binds them, for every verb. Undefined when there is nothing at all,
  * matching the plain `byEmail.get` the tier-2 check used to read.
  */
 function principalKeysOf(model: AccessModel, email: string): Set<string> | undefined {
   const own = model.roles.byEmail.get(email);
   const pub = model.roles.publicKeys;
-  if (!pub?.size) return own;
-  return new Set([...(own ?? []), ...pub]);
+  const asOwner = model.deploymentOwners.has(email) && !own?.has(ADMIN_ROLE_KEY);
+  if (!pub?.size && !asOwner) return own;
+  return new Set([
+    ...(own ?? []),
+    ...(pub ?? []),
+    ...(asOwner ? principalKeysOfToken(model, ADMIN_ROLE_KEY) : []),
+  ]);
 }
 
 /** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
 const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * The verbs the Admin floor at the repository root confers: write, and the
+ * read that write implies (`VERB_REQUIRES`). An admin who may change
+ * everything under the root may see it; otherwise the read-before-write gate
+ * refuses them the very change the floor grants. Download is not implied by
+ * write and stays with the access tree.
+ */
+function holdsAdminFloor(verb: Verb): boolean {
+  return verb === 'write' || verb === 'read';
+}
 
 /**
  * Add to `keys` what holding them confers on top: every plugin principal
@@ -540,9 +596,10 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 /**
  * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
  * of principal KEYS with no person behind them — no direct-email tier, no
- * admin rescue, no machine-owned rule — only the Admin write floor, when the
- * keys include the Admin role. Closest scope first; within a scope a
- * grant to any key wins over a denial to another, exactly as for a person.
+ * admin rescue, no machine-owned rule — only the Admin floor (write, and the
+ * read it implies), when the keys include the Admin role. Closest scope
+ * first; within a scope a grant to any key wins over a denial to another,
+ * exactly as for a person.
  */
 function hasPermissionForKeys(
   model: AccessModel,
@@ -551,7 +608,7 @@ function hasPermissionForKeys(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
-  const adminFloor = verb === 'write' && keys.has(ADMIN_ROLE_KEY);
+  const adminFloor = holdsAdminFloor(verb) && keys.has(ADMIN_ROLE_KEY);
   for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
     if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
     let grant = false;
@@ -620,17 +677,20 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
- * One floor for `write`, applied during the walk: an admin (same definition)
- * always holds `write` at the repository root. When the walk reaches the root
- * `access.md` (or the own frontmatter of a file directly in the root) — or runs
- * out of scopes without a verdict — an admin is granted,
- * whatever the root file says, so no root rule can lock the deployment out of
- * its own tree. A NEARER scope still decides first: a subfolder that denies
- * Admin (or denies `everyone` without naming Admin) excludes admins there like
- * anyone else. The root file's own entries are not rewritten — the floor is a
- * verdict, not a grant line — so `grantSources` stays file-backed.
+ * One floor for `write` and the `read` it implies (`holdsAdminFloor`), applied
+ * during the walk: an admin (same definition) always holds both at the
+ * repository root. When the walk reaches the root `access.md` (or the own
+ * frontmatter of a file directly in the root) — or runs out of scopes without
+ * a verdict — an admin is granted, whatever the root file says, so no root
+ * rule can lock the deployment out of its own tree, and nobody who may change
+ * everything under the root is refused the sight of it. A NEARER scope still
+ * decides first: a subfolder that denies Admin (or denies `everyone` without
+ * naming Admin) excludes admins there like anyone else. The root file's own
+ * entries are not rewritten — the floor is a verdict, not a grant line — so
+ * `grantSources` stays file-backed.
  *
- * No special-cases for `read`/`download` — they fall through to scope resolution.
+ * No special-case for `download` (or `owner`) — they fall through to scope
+ * resolution; write implies read, not download.
  */
 function hasPermissionResolved(
   model: AccessModel,
@@ -676,14 +736,12 @@ function decidePermissionResolved(
     }
   }
 
-  const adminFloor = verb === 'write' && isAdminEmail(model, email);
-  // For write, the deployment owner IS Admin — the floor admits them, so the
-  // Admin rules along the way bind them too: a subfolder denying Admin excludes
-  // the owner exactly as it excludes the role's members.
-  let userRoles = principalKeysOf(model, email);
-  if (adminFloor && !userRoles?.has(ADMIN_ROLE_KEY)) {
-    userRoles = new Set([...(userRoles ?? []), ...principalKeysOfToken(model, ADMIN_ROLE_KEY)]);
-  }
+  const adminFloor = holdsAdminFloor(verb) && isAdminEmail(model, email);
+  // The deployment owner IS Admin: `principalKeysOf` gives them the role's
+  // keys, so the Admin rules along the way bind them too — a subfolder
+  // denying Admin excludes the owner exactly as it excludes the role's
+  // members, and one granting Admin admits them.
+  const userRoles = principalKeysOf(model, email);
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
@@ -1090,12 +1148,11 @@ function canEveryoneReadResolved(
   // Every *named* principal must also still read. A collapsed deny may have
   // been shadowed by a closer-scope `everyone` grant, so re-resolve each
   // candidate through the closeness-first gate rather than trusting the
-  // collapsed deny state. (Role members live in roles.yaml; inline-named users
-  // come from `byEmail`.)
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
-  for (const email of candidates) {
+  // collapsed deny state. The candidates are the same set the eligible-email
+  // lists enumerate — roles.yaml members, inline-named users, and the
+  // deployment owner, whom a `deny Admin` carves out like any member of the
+  // role whether or not roles.yaml names them.
+  for (const email of namedCandidateEmails(model, byEmail)) {
     if (!hasPermissionResolved(model, 'read', email, relativePath, fileOwn)) return false;
   }
   return true;
@@ -1106,11 +1163,14 @@ function canEveryoneReadResolved(
  *
  * Read is default-deny: a path is readable only when resolution grants the
  * caller `read` directly, via one of their roles, via the built-in `everyone`
- * role, or via `owner:` (owners implicitly read).
+ * role, or via `write:`/`owner:` (both imply read).
  *
- * No admin rescue (mirrors `download`): admins read a node only if an
- * `access.md` lists them — directly, via a role, through `everyone`, or as an
- * owner.
+ * No admin rescue on root files (that is write's), but the Admin floor
+ * holds: an admin — a member of the role or the deployment owner — reads
+ * wherever no nearer scope excludes Admin, whether or not the root names it,
+ * because the floor gives them write there and write implies read. A
+ * subfolder that denies Admin, or everyone, takes the read away as it does
+ * for any principal.
  */
 function canReadResolved(
   model: AccessModel,
@@ -1183,9 +1243,10 @@ function eligibleHoldersResolved(
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
-  // The Admin write floor (see `hasPermissionResolved`): Admin holds write here
-  // whenever no nearer scope excludes it, whether or not any file names it.
-  if (verb === 'write' && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
+  // The Admin floor (see `hasPermissionResolved`): Admin holds write, and the
+  // read it implies, here whenever no nearer scope excludes it, whether or not
+  // any file names it.
+  if (holdsAdminFloor(verb) && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
     const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY)!;
     if (allowedFor(principalKeysOfToken(model, ADMIN_ROLE_KEY))) addPrincipal(adminRole.displayName, 'role');
   }
@@ -1232,8 +1293,8 @@ function eligibleHoldersResolved(
 
 /**
  * Every individual the model names: `roles.yaml` members, emails named inline
- * at this path's scope, and the deployment owner (Admin for the write floor
- * even when `roles.yaml` does not list them).
+ * at this path's scope, and the deployment owner (bound by every rule that
+ * names Admin even when `roles.yaml` does not list them).
  */
 function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
   const candidates = new Set<string>(model.deploymentOwners);
@@ -1315,7 +1376,13 @@ function ineligibleNamedEmailsResolved(
  * was built from (not the ref name that led there), so the per-file
  * own-entries reads that follow a gate resolve against exactly that tree.
  */
-type AtRefModel = { model: AccessModel; resolvedRef: string };
+/**
+ * A model built at a commit, with the commit it was built at and, when the
+ * tree is not too large to hold, every path the commit carries: what the
+ * own-entries reads need to tell a path that is absent at the commit (a
+ * fact, remembered) from a blob the batch could not read (never remembered).
+ */
+type AtRefModel = { model: AccessModel; resolvedRef: string; tree: ReadonlySet<string> | null };
 /**
  * One build's outcome: a model, no roles.yaml at the commit, or one that
  * doesn't parse. A git read failure is none of these: it throws
@@ -1359,22 +1426,50 @@ export class AccessControlService implements IAccessControl {
    *
    * This is what makes the change-request gates affordable. One detail read
    * plus one approval click runs six at-ref gates, and before this cache
-   * every one of them rebuilt the model from git: an `ls-tree -r` plus a
-   * `git show` per `access.md`, ~270ms each on a real knowledge base. Six
-   * builds per click was the lag behind the approve checkmark.
+   * every one of them rebuilt the model from git. A build is two git calls
+   * (`buildModelAtCommit`: one `ls-tree`, one `cat-file --batch` for every
+   * file the model reads), and each call forks the server process, which
+   * costs tens of milliseconds on a server holding a large heap.
    *
-   * Bounded FIFO, so a long-lived server holds the last few tips rather than
-   * one model per commit it ever gated against. A build that found no usable
-   * roles.yaml is deliberately NOT cached, and a build that saw any git read
-   * fail never becomes a model at all: it throws AccessUnreadableError and the
-   * gate fails closed for that call. Both are what a transient failure looks
-   * like, and pinning either to a commit would turn one hiccup into a wrong
-   * verdict, denying or granting, until the base branch moved. Concurrent
-   * misses on the same commit share one build via `atRefInFlight`.
+   * Bounded FIFO. The bound is sized for a listing that resolves access at
+   * every open change request's two refs: one commit per open request plus
+   * the targets, and a knowledge base with a hundred open requests was
+   * evicting in a cycle under the old bound of 64, rebuilding every model on
+   * every listing — thousands of forks, minutes of the main thread, and
+   * every other request waiting behind them. A commit's tree never changes,
+   * so a model is good for as long as it is held; the bound only caps memory.
+   *
+   * A commit with no roles.yaml is remembered too (`atRefNoRoles`): the batch
+   * read answers "missing" for it from git itself, which is as final as the
+   * commit. What is never cached is a build that saw a git read FAIL: it
+   * throws AccessUnreadableError and the gate fails closed for that call, and
+   * pinning that to a commit would turn one hiccup into a wrong verdict until
+   * the branch moved. Concurrent misses on the same commit share one build
+   * via `atRefInFlight`.
    */
   private readonly atRefCache = new Map<string, AtRefModel>();
+  private readonly atRefNoRoles = new Set<string>();
   private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
-  private static readonly AT_REF_CACHE_MAX = 64;
+  private static readonly AT_REF_CACHE_MAX = 512;
+
+  /**
+   * A path's own access entries AT A COMMIT, keyed by commit + path. A blob
+   * at a commit never changes, so neither does what it declares for itself:
+   * no TTL, no invalidation, and no workspace in the key (every clone holds
+   * the same objects). This is the read every at-ref gate makes after the
+   * model: one `cat-file --batch` per call for the paths asked, which a
+   * change-request listing made once per ref per listing for the same paths
+   * at the same commits. Bounded FIFO; the bound only caps memory.
+   */
+  private readonly ownEntriesAtCommit = new Map<string, OwnEntries | null>();
+  private static readonly OWN_ENTRIES_AT_COMMIT_MAX = 16_384;
+  /** Paths a cached model keeps of its commit's tree, at most; a larger tree is not kept. */
+  private static readonly TREE_INDEX_MAX_PATHS = 20_000;
+  /** Paths held across every cached model's tree, at most; past it the oldest models let their tree go. */
+  private static readonly TREE_INDEX_BUDGET = 500_000;
+  private readonly treeIndexMaxPaths: number;
+  private readonly treeIndexBudget: number;
+  private treePathsHeld = 0;
 
   /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
@@ -1409,10 +1504,19 @@ export class AccessControlService implements IAccessControl {
      * run on the default layout.
      */
     private readonly kb: Pick<KbContext, 'layout'> = { layout: DEFAULT_KB_LAYOUT },
+    /**
+     * How much of the commits' trees the at-ref models may hold (see
+     * `TREE_INDEX_MAX_PATHS`, `TREE_INDEX_BUDGET`). The defaults are the
+     * deployment's; a suite lowers them to reach the bounds with a small
+     * repository.
+     */
+    limits: { treeIndexMaxPaths?: number; treeIndexBudget?: number } = {},
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
     );
+    this.treeIndexMaxPaths = limits.treeIndexMaxPaths ?? AccessControlService.TREE_INDEX_MAX_PATHS;
+    this.treeIndexBudget = limits.treeIndexBudget ?? AccessControlService.TREE_INDEX_BUDGET;
   }
 
   /**
@@ -1552,6 +1656,23 @@ export class AccessControlService implements IAccessControl {
       result.set(p, hasPermissionForKeys(model, 'read', NO_KEYS, p, owns[i]));
     });
     return result;
+  }
+
+  async groupsOfUser(workspaceId: string, userEmail: string): Promise<string[]> {
+    const model = await this.loadModel(workspaceId);
+    const email = canonicalEmail(userEmail);
+    const names: string[] = [];
+    for (const principal of model.roles.byCanonical.values()) {
+      if (principal.kind === 'group' && principal.emails.has(email)) names.push(principal.displayName);
+    }
+    return names;
+  }
+
+  async visibleGroups(workspaceId: string, userEmail: string, groups: readonly string[]): Promise<string[]> {
+    if (groups.length === 0) return [];
+    if (await this.holdsAdminRootWrite(workspaceId, userEmail)) return [...groups];
+    const mine = new Set(await this.groupsOfUser(workspaceId, userEmail));
+    return groups.filter((g) => mine.has(g));
   }
 
   async canWriteBatch(
@@ -2071,7 +2192,7 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return hasPermissionResolved(loaded.model, 'write', userEmail, relativePath, own);
   }
 
@@ -2084,7 +2205,7 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return canReadResolved(loaded.model, userEmail, relativePath, own);
   }
 
@@ -2107,7 +2228,7 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole path set — a per-path `git
     // show` spawn made CR owner-routing take minutes on large change sets.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
       const machineOwned = machineAnswers.get(p);
@@ -2132,7 +2253,7 @@ export class AccessControlService implements IAccessControl {
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole set — see canWriteBatchAtRef.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
       result.set(p, canReadResolved(loaded.model, userEmail, p, owns.get(p) ?? null));
@@ -2155,13 +2276,32 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
   }
 
   async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
     const model = await this.loadModel(workspaceId);
     return isAdminEmail(model, canonicalEmail(userEmail));
+  }
+
+  async adminEmails(workspaceId: string): Promise<string[]> {
+    let model: AccessModel;
+    try {
+      model = await this.loadModel(workspaceId);
+    } catch (err) {
+      // As canRestorePlatformFile: with no model to ask, the deployment owners
+      // are the only admins left. A `roles.yaml` that does not parse is that
+      // by design; anything else (a clone being read, the disk) is said, so a
+      // list that names fewer admins than there are is diagnosable.
+      if (!(err instanceof AccessConfigError)) {
+        log.warn('the access model could not be loaded; the admins list names the deployment owners only:', { err });
+      }
+      return [...this.deploymentOwners];
+    }
+    const candidates = new Set<string>(model.deploymentOwners);
+    for (const email of model.roles.byEmail.keys()) candidates.add(email);
+    return [...candidates].filter((email) => isAdminEmail(model, email));
   }
 
   async canRestorePlatformFile(
@@ -2250,7 +2390,7 @@ export class AccessControlService implements IAccessControl {
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     for (const p of relativePaths) {
       if (result.has(p)) continue;
       const own = owns.get(p) ?? null;
@@ -2468,8 +2608,14 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePath: string,
+    tree: ReadonlySet<string> | null = null,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
+    // At a commit (what every gate passes: `resolvedRef`), the batched read
+    // and its memo answer; a single `git show` stays for a symbolic ref.
+    if (isCommitSha(ref)) {
+      return (await this.readOwnEntriesAtRefBatch(repoDir, ref, [relativePath], tree)).get(relativePath) ?? null;
+    }
     const text = await this.showAtRef(repoDir, ref, relativePath);
     if (text === null) return null;
     if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
@@ -2488,21 +2634,58 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePaths: string[],
+    tree: ReadonlySet<string> | null = null,
   ): Promise<Map<string, OwnEntries | null>> {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
+    const memo = isCommitSha(ref) ? this.ownEntriesAtCommit : null;
     for (const p of relativePaths) {
-      if (p === 'roles.yaml') result.set(p, null);
-      else if (!wanted.includes(p)) wanted.push(p);
+      if (p === 'roles.yaml') {
+        result.set(p, null);
+        continue;
+      }
+      const key = `${ref}\0${p}`;
+      if (memo?.has(key)) {
+        result.set(p, memo.get(key) ?? null);
+        continue;
+      }
+      // A path the commit's tree does not carry has no own entries, as a
+      // fact about the commit: remembered, and not read. (A change request
+      // that adds a file asks about it at the base, where it does not exist
+      // yet; one that deletes a file asks at the head.)
+      if (tree && !tree.has(p)) {
+        result.set(p, null);
+        if (memo) this.rememberOwnEntriesAtCommit(key, null);
+        continue;
+      }
+      if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
     const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
-      if (text === null) result.set(p, null);
-      else result.set(p, isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text));
+      if (text === null) {
+        // Absent at the commit (when no tree was there to say so first), or
+        // a blob git could not read: the batch says "missing" for both, and
+        // only the first is a fact about the commit. Answered as no own
+        // entries, as before, but never remembered.
+        result.set(p, null);
+        return;
+      }
+      const own = isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
+      result.set(p, own);
+      // What a blob declares for itself — including nothing — is a fact about the commit.
+      if (memo) this.rememberOwnEntriesAtCommit(`${ref}\0${p}`, own);
     });
     return result;
+  }
+
+  private rememberOwnEntriesAtCommit(key: string, value: OwnEntries | null): void {
+    this.ownEntriesAtCommit.set(key, value);
+    if (this.ownEntriesAtCommit.size > AccessControlService.OWN_ENTRIES_AT_COMMIT_MAX) {
+      const oldest = this.ownEntriesAtCommit.keys().next().value;
+      if (oldest !== undefined) this.ownEntriesAtCommit.delete(oldest);
+    }
   }
 
   /**
@@ -2556,28 +2739,38 @@ export class AccessControlService implements IAccessControl {
   /**
    * List every `access.md` path that exists at any depth as of `ref`.
    * The access tree is structure-agnostic: any `access.md` participates
-   * regardless of where it sits. Uses `git ls-tree -r --name-only`.
-   * `'error'` when git failed: a model built without its access files is
-   * not the model, and the caller must not cache it as one.
+   * regardless of where it sits. Uses `git ls-tree -r -z --name-only`: `-z`
+   * puts a NUL between paths and prints them as they are, where the default
+   * output C-quotes a path with a non-ASCII or special character, which would
+   * then name nothing when read back. `'error'` when git failed: a model
+   * built without its access files is not the model, and the caller must not
+   * cache it as one.
    */
   private async listAccessFilesAtRef(
     repoDir: string,
     ref: string,
-  ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[] } | 'error'> {
     try {
-      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '--name-only', ref]);
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
+      const all: string[] = [];
+      // The fixed-name sources the tree carries (roles.yaml, the groups
+      // files): a read of one of these that comes back empty is "absent"
+      // only when the tree does not name it.
+      const named = new Set<string>();
       const { pluginsDir } = this.kb.layout;
-      for (const line of stdout.split('\n')) {
-        const p = line.trim();
+      for (const p of stdout.split('\0')) {
         if (!p) continue;
+        // One past the cap is enough to know the tree is not kept.
+        if (all.length <= this.treeIndexMaxPaths) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
+        else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         }
       }
-      return { accessFiles: out, pluginDirs };
+      return { accessFiles: out, pluginDirs, named, all };
     } catch {
       return 'error';
     }
@@ -2622,6 +2815,9 @@ export class AccessControlService implements IAccessControl {
       const key = `${workspaceId}\0${commit}`;
       const hit = this.atRefCache.get(key);
       if (hit) return hit;
+      // A commit known to carry no roles.yaml: the next candidate, without a
+      // build (see `atRefNoRoles`).
+      if (this.atRefNoRoles.has(key)) continue;
       // Registered BEFORE the first await on the build path, so concurrent
       // misses on one commit share a single build instead of all racing past
       // an empty in-flight check together.
@@ -2630,6 +2826,7 @@ export class AccessControlService implements IAccessControl {
         pending = this.buildModelAtCommit(repoDir, commit, candidate)
           .then((built) => {
             if (typeof built !== 'string') this.rememberAtRef(key, built);
+            else if (built === 'no-roles') this.rememberNoRolesAtRef(key);
             return built;
           })
           .finally(() => {
@@ -2648,6 +2845,14 @@ export class AccessControlService implements IAccessControl {
   /** The commit `ref` points at in this clone, or null when it doesn't resolve. */
   private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
     if (!ref || ref.startsWith('-')) return null;
+    // The ref files first (`readRevSha`): the names git would try, in git's
+    // order, read without a process. "Missing" from the files is what
+    // rev-parse answers nothing for; "unreadable" — a spelling the reader
+    // does not resolve, a tag it cannot peel, a file it could not read — is
+    // git's to decide, as the authority.
+    const fromFiles = await readRevSha(repoDir, ref);
+    if (fromFiles === 'missing') return null;
+    if (fromFiles !== 'unreadable') return fromFiles.sha;
     try {
       const { stdout } = await this.gitRunner.run(repoDir, [
         'rev-parse',
@@ -2668,9 +2873,30 @@ export class AccessControlService implements IAccessControl {
 
   private rememberAtRef(key: string, value: AtRefModel): void {
     this.atRefCache.set(key, value);
+    this.treePathsHeld += value.tree?.size ?? 0;
     if (this.atRefCache.size > AccessControlService.AT_REF_CACHE_MAX) {
       const oldest = this.atRefCache.keys().next().value;
-      if (oldest !== undefined) this.atRefCache.delete(oldest);
+      if (oldest !== undefined) {
+        this.treePathsHeld -= this.atRefCache.get(oldest)?.tree?.size ?? 0;
+        this.atRefCache.delete(oldest);
+      }
+    }
+    // The trees are a budget of their own, across every held model: past
+    // it, the oldest models keep their model and let their tree go — the
+    // gate still answers, absence is just no longer remembered for them.
+    for (const held of this.atRefCache.values()) {
+      if (this.treePathsHeld <= this.treeIndexBudget) break;
+      if (!held.tree) continue;
+      this.treePathsHeld -= held.tree.size;
+      held.tree = null;
+    }
+  }
+
+  private rememberNoRolesAtRef(key: string): void {
+    this.atRefNoRoles.add(key);
+    if (this.atRefNoRoles.size > AccessControlService.AT_REF_CACHE_MAX) {
+      const oldest = this.atRefNoRoles.values().next().value;
+      if (oldest !== undefined) this.atRefNoRoles.delete(oldest);
     }
   }
 
@@ -2681,6 +2907,15 @@ export class AccessControlService implements IAccessControl {
    * means the commit carries no roles.yaml (the caller tries its next
    * candidate); `'malformed'` means it does but it doesn't parse (the caller
    * answers null, as it always has).
+   *
+   * TWO git calls, whatever the tree holds: one `ls-tree` to learn which
+   * files the model is made of, then one `cat-file --batch` that reads all of
+   * them — roles.yaml, the groups sources, every access.md and every plugin
+   * manifest. It used to be one `git show` per file, and each git call forks
+   * the server process, which on a server holding a large heap costs tens of
+   * milliseconds of the main thread per call: a knowledge base with a few
+   * dozen access files paid a second or more per commit, times every ref a
+   * listing resolves.
    */
   private async buildModelAtCommit(
     repoDir: string,
@@ -2693,20 +2928,74 @@ export class AccessControlService implements IAccessControl {
     // and the caller fails closed (AccessUnreadableError, a 503) until a
     // retry reads the tree in full.
     const tag = `${label}@${commit.slice(0, 7)}`;
+
+    const listed = await this.listAccessFilesAtRef(repoDir, commit);
+    if (listed === 'error') {
+      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
+      throw new AccessUnreadableError(label, 'access.md (ls-tree)');
+    }
+    const wanted = [
+      'roles.yaml',
+      SYNCED_GROUPS_YAML,
+      GROUPS_YAML,
+      ...listed.accessFiles,
+      ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
+    ];
+    let outcomes: CatFileOutcome[];
+    try {
+      outcomes = await catFileBatchOutcomes(this.gitRunner, repoDir, wanted.map((p) => `${commit}:${p}`));
+    } catch (err) {
+      // The operational signal: one line per failed build, naming the commit,
+      // so a run of these is visible in the logs.
+      logger(`access@${tag}`).warn(
+        `git read of the access tree failed; refusing to decide from a partial tree: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new AccessUnreadableError(label, 'access tree (cat-file)');
+    }
+    const fetched = new Map<string, CatFileOutcome>();
+    wanted.forEach((p, i) => fetched.set(p, outcomes[i] ?? { kind: 'missing' }));
+    const refuse = (relativePath: string, why: string): never => {
+      logger(`access@${tag}`).warn(`${relativePath} ${why}; refusing to decide from a partial tree`);
+      throw new AccessUnreadableError(label, relativePath);
+    };
+    // What the build reads. "Missing" from the batch is "absent" only for a
+    // groups source the tree does not name. A path the tree names — an
+    // access.md, a plugin manifest, or a groups file the listing carried —
+    // that comes back missing has a blob git could not read (a lost object),
+    // and one that is not a file is a tree the model cannot be read from:
+    // either way the build fails closed rather than drop what that file
+    // would deny. A path the build did not prefetch (none today) is read on
+    // its own, told apart from a git failure as before.
+    const inTree = (relativePath: string) =>
+      listed.named.has(relativePath) || !(relativePath === SYNCED_GROUPS_YAML || relativePath === GROUPS_YAML);
     const read = async (relativePath: string): Promise<string | null> => {
-      const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
-      if (outcome.kind === 'error') {
-        // The operational signal: one line per failed read, naming the commit
-        // and the path, so a run of these is visible in the logs.
-        logger(`access@${tag}`).warn(`git read of ${relativePath} failed; refusing to decide from a partial tree`);
-        throw new AccessUnreadableError(label, relativePath);
+      const got = fetched.get(relativePath);
+      if (got === undefined) {
+        const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
+        if (outcome.kind === 'error') refuse(relativePath, 'could not be read');
+        return outcome.kind === 'text' ? outcome.text : null;
       }
-      return outcome.kind === 'text' ? outcome.text : null;
+      if (got.kind === 'blob') return got.text;
+      if (got.kind === 'non-blob') return refuse(relativePath, `is a ${got.type}, not a file`);
+      if (!inTree(relativePath)) return null;
+      return refuse(relativePath, 'is in the tree but its blob could not be read');
     };
 
-    const rolesYaml = await read('roles.yaml');
-    if (rolesYaml === null) return 'no-roles';
-    const rolesParsed = parseRolesYaml(rolesYaml);
+    // roles.yaml decides the build's outcome, so its states are read
+    // directly. Absent from the tree is "no roles here" (the caller tries
+    // its next candidate ref). In the tree but unreadable refuses the build:
+    // answering "no roles" for it would be remembered for the commit and
+    // would send a short ref through to origin, which may grant. A directory
+    // of that name is as malformed as a file that does not parse (the caller
+    // answers null, and never falls through to a ref that might grant what
+    // this one does not).
+    const roles = fetched.get('roles.yaml') ?? { kind: 'missing' as const };
+    if (roles.kind === 'missing') {
+      if (listed.named.has('roles.yaml')) refuse('roles.yaml', 'is in the tree but its blob could not be read');
+      return 'no-roles';
+    }
+    if (roles.kind === 'non-blob') return 'malformed';
+    const rolesParsed = parseRolesYaml(roles.text);
     if (!rolesParsed.ok) return 'malformed';
 
     // Same group loading as the working-tree model, read AT THE COMMIT — the
@@ -2731,11 +3020,6 @@ export class AccessControlService implements IAccessControl {
     for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
-    const listed = await this.listAccessFilesAtRef(repoDir, commit);
-    if (listed === 'error') {
-      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
-      throw new AccessUnreadableError(label, 'access.md (ls-tree)');
-    }
     for (const p of listed.accessFiles) {
       const text = await read(p);
       if (text === null) continue;
@@ -2780,6 +3064,10 @@ export class AccessControlService implements IAccessControl {
         deploymentOwners: this.deploymentOwners,
       },
       resolvedRef: commit,
+      // The listing already named every path; held so an own-entries read
+      // can tell absence from a lost blob, unless the tree is too large to
+      // hold for every cached commit (then absence is simply not remembered).
+      tree: listed.all.length <= this.treeIndexMaxPaths ? new Set(listed.all) : null,
     };
   }
 }

@@ -15,7 +15,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import { WorkspaceService } from '../workspace.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * The folder download over the REAL resolver and the REAL zip builder.
@@ -89,7 +89,7 @@ describe('GET /folder/zip judges every file it packs (real resolver, real zip)',
       await fs.writeFile(abs, contents);
     }
 
-    const workspaceService = new WorkspaceService(
+    const workspaceService = newWorkspaceService(
       root,
       'https://example.invalid/kb.git',
       testKbContext({ kbDirName: KB }),

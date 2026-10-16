@@ -3,6 +3,40 @@ import { Pencil, Eye, RotateCw } from 'lucide-react';
 import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
+import { useRendererSurface } from './rendererSurface';
+import {
+  HTML_FRAME_KEY_STEP,
+  HTML_FRAME_MAX_HEIGHT,
+  HTML_FRAME_MIN_HEIGHT,
+  HTML_FRAME_STANDARD_HEIGHT,
+  attachFrameResizeHandle,
+} from './frameResizeHandle';
+
+/**
+ * Where the reader's chosen frame height is kept, per browser: a
+ * convenience, like a remembered tab. A browser that cannot store it is
+ * asked nothing and shows the standard height each time.
+ */
+const FRAME_HEIGHT_KEY = 'bevel.htmlFrame.height';
+
+function rememberedFrameHeight(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(FRAME_HEIGHT_KEY));
+    return Number.isFinite(stored) && stored >= HTML_FRAME_MIN_HEIGHT && stored <= HTML_FRAME_MAX_HEIGHT
+      ? Math.round(stored)
+      : HTML_FRAME_STANDARD_HEIGHT;
+  } catch {
+    return HTML_FRAME_STANDARD_HEIGHT;
+  }
+}
+
+function rememberFrameHeight(height: number): void {
+  try {
+    window.localStorage.setItem(FRAME_HEIGHT_KEY, String(height));
+  } catch {
+    // Not stored: the standard height next time, which is no worse than today.
+  }
+}
 
 export function HtmlRenderer({
   content,
@@ -15,7 +49,21 @@ export function HtmlRenderer({
   readOnly = false,
 }: FileRendererProps) {
   const { openLink } = useFileNav();
+  // Whether the surface's host grows with the page (an issue panel) rather
+  // than giving it a pane to scroll in (the app, the MCP App's pane).
+  const sizesToContent = useRendererSurface()?.sizesToContent === true;
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
+  /**
+   * The frame's height where the host grows with the page: the standard
+   * height, or the one this reader last chose in this browser; the reader
+   * drags the handle under the frame to change it. Never derived from the
+   * page — a frame is its own document, and a height read off a page that
+   * is itself laid out in the frame feeds back into itself.
+   */
+  const [frameHeight, setFrameHeight] = useState(() => (sizesToContent ? rememberedFrameHeight() : HTML_FRAME_STANDARD_HEIGHT));
+  const frameHeightRef = useRef(frameHeight);
+  const [dragging, setDragging] = useState(false);
+  const handleRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState(content);
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
@@ -99,6 +147,34 @@ export function HtmlRenderer({
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
   }, [openLink, filePath]);
+
+  useEffect(() => {
+    frameHeightRef.current = frameHeight;
+  }, [frameHeight]);
+
+  // The handle under the frame, where the host grows with the page: a drag
+  // or the arrow keys set the frame's height, and a height the reader
+  // settled on is remembered in this browser. Attached whenever the handle
+  // is on screen — it comes and goes with the preview.
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!sizesToContent || !handle) return;
+    return attachFrameResizeHandle(handle, {
+      current: () => frameHeightRef.current,
+      apply: (height) => {
+        setDragging(true);
+        setFrameHeight(height);
+      },
+      settle: (height) => {
+        setDragging(false);
+        setFrameHeight(height);
+        rememberFrameHeight(height);
+      },
+      min: HTML_FRAME_MIN_HEIGHT,
+      max: HTML_FRAME_MAX_HEIGHT,
+      step: HTML_FRAME_KEY_STEP,
+    });
+  }, [sizesToContent, mode, previewError, bundledSrcdoc]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -202,19 +278,48 @@ export function HtmlRenderer({
           {previewError}
         </div>
       ) : bundledSrcdoc ? (
-        <iframe
-          key={reloadKey}
-          ref={iframeRef}
-          srcDoc={bundledSrcdoc}
-          title={filePath}
-          // `allow-scripts` only — without `allow-same-origin` the iframe's
-          // origin is opaque/null. Combined with the document's CSP
-          // (`connect-src 'none'`) and the postMessage-only data channel, the
-          // iframe cannot exfiltrate, navigate, popup, or fetch.
-          sandbox="allow-scripts"
-          referrerPolicy="no-referrer"
-          className="flex-1 w-full bg-white rounded-xs border border-line"
-        />
+        <>
+          <iframe
+            key={reloadKey}
+            ref={iframeRef}
+            srcDoc={bundledSrcdoc}
+            title={filePath}
+            // `allow-scripts` only — without `allow-same-origin` the iframe's
+            // origin is opaque/null. Combined with the document's CSP
+            // (`connect-src 'none'`) and the postMessage-only data channel, the
+            // iframe cannot exfiltrate, navigate, popup, or fetch.
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            // In a pane the frame fills it and scrolls inside; where the host
+            // grows with the page, the frame has the reader's height (a
+            // flex-grown frame in an auto-height column would collapse to the
+            // browser's default 150px instead), as its CONTENT box, so the
+            // page's viewport is exactly that height and the border is not
+            // taken out of it. While the handle is dragged the frame takes no
+            // pointer — a frame is its own document, and would keep the
+            // pointer the moment it crossed in.
+            className={`w-full bg-white rounded-xs border border-line ${sizesToContent ? 'shrink-0' : 'flex-1'}`}
+            style={
+              sizesToContent
+                ? { height: frameHeight, boxSizing: 'content-box', pointerEvents: dragging ? 'none' : undefined }
+                : undefined
+            }
+          />
+          {sizesToContent && (
+            <div
+              ref={handleRef}
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize the page"
+              aria-valuenow={frameHeight}
+              aria-valuemin={HTML_FRAME_MIN_HEIGHT}
+              aria-valuemax={HTML_FRAME_MAX_HEIGHT}
+              tabIndex={0}
+              title="Drag to make the page taller or shorter"
+              className="shrink-0 h-2 mt-1 rounded-xs cursor-row-resize outline-none hover:bg-hover focus-visible:bg-accent-hover/60 data-[dragging=true]:bg-accent-hover/60 transition-colors"
+            />
+          )}
+        </>
       ) : (
         <div className="flex items-center justify-center h-full text-ink-muted text-sm">
           Loading preview…

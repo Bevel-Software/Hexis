@@ -38,6 +38,17 @@ export class LockApiError extends Error {
 export const EDITING_ENDED_MESSAGE =
   'Your editing session ended. Check the page and edit it again if anything is missing.';
 
+/**
+ * What a person reads when the page is held under their own user id —
+ * another of their tabs, a browser that closed without giving it back, or
+ * their agent saving. Never "<their own name> is editing this page": the
+ * server refuses their own live hold on purpose (an agent writes as the
+ * person who connected it), so the honest answer is that it is theirs and
+ * will free up.
+ */
+export const SELF_HOLD_MESSAGE =
+  'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.';
+
 async function unwrap<T>(res: Response): Promise<T> {
   if (res.ok) return (await res.json()) as T;
   let body: unknown;
@@ -59,9 +70,11 @@ async function unwrap<T>(res: Response): Promise<T> {
 /**
  * Try to acquire the lock for `(branch, path)`. Resolves with the
  * `AcquireLockResult` payload — `acquired: true` when the caller now
- * holds the lock, `acquired: false` when someone else does (the
- * holder's lock state is included so the UI can render "X is editing
- * this page" without a follow-up call).
+ * holds the lock, `acquired: false` when a live hold is held elsewhere:
+ * someone else's, or the caller's own from another tab or their agent
+ * (the server refuses a live hold whoever holds it). The hold is included
+ * so the UI can say "X is editing this page", or `SELF_HOLD_MESSAGE` for
+ * the caller's own, without a follow-up call.
  */
 export async function acquireLock(
   workspaceId: string,
@@ -116,24 +129,30 @@ export async function checkpointLockedFile(
 }
 
 /**
- * Release the lock AND commit any pending edits as a final change.
- * Returns `null` when the file had no pending edits (idempotent on a
- * clean release).
+ * Release the lock. The server drops the hold at once and queues the
+ * commit of whatever is on disk for its background worker, answering
+ * `{ queued: true }` — there is no change to return yet, so this resolves
+ * with nothing once the hold is released.
+ *
+ * `keepalive` lets the request outlive the page that sends it: the release
+ * a closing or reloading tab sends on `pagehide`. Unlike `sendBeacon`, a
+ * keep-alive `fetch` still carries the bearer header.
  */
 export async function releaseLock(
   workspaceId: string,
   branch: string,
   path: string,
   summary?: string,
-): Promise<Change | null> {
-  const { change } = await unwrap<{ change: Change | null }>(
+  options: { keepalive?: boolean } = {},
+): Promise<void> {
+  await unwrap<{ queued: true }>(
     await authFetch(`/api/workspace/${workspaceId}/workflow/locks`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ branch, path, summary }),
+      ...(options.keepalive ? { keepalive: true } : {}),
     }),
   );
-  return change;
 }
 
 /**

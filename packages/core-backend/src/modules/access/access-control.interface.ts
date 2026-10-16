@@ -149,8 +149,11 @@ export type AccessDecisionSource = {
  * `via` names the tier that matched and `principal` the display name of the
  * group, role or plugin principal it matched on (the caller's own email for
  * `person`, `everyone` for the built-in). `admin-floor` is Admin's write at
- * the repository root, which no rule there can take away; its source is the
- * root's rules, or null when the root has none.
+ * the repository root, and the read that write implies, which no rule there
+ * can take away; its source is the scope the floor decided at — the root's
+ * rules (`folder`), or the own `frontmatter` of a file directly in the root,
+ * whose entries are part of the root and cannot take the floor away either —
+ * or null when the walk found no scope at all.
  */
 export interface AccessDecision {
   allowed: boolean;
@@ -230,6 +233,28 @@ export interface IAccessControl {
    * lists.
    */
   canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>>;
+
+  /**
+   * The display names of the groups `userEmail` is a member of, in the
+   * active group source (`groups.yaml`, or the IdP-synced file), spelled as
+   * `kbPrincipals` spells them. Direct membership only: a role that lists a
+   * group does not make its holders members of it. Empty when the person is
+   * in no group.
+   */
+  groupsOfUser(workspaceId: string, userEmail: string): Promise<string[]>;
+
+  /**
+   * Which of `groups` (names from the active group source) `userEmail` may
+   * SEE: every one for an admin, who manages them all, and only the groups
+   * they are a member of ({@link groupsOfUser}) for anyone else. A group's
+   * name is information — on a deployment that gives each client, author or
+   * customer a group of its own, the list of groups is the client list — so
+   * this ONE answer is what the Library's Groups tab lists, what the share
+   * dialog offers as a grantee, and what a grant may name; a group outside it
+   * is treated as one that does not exist. Order and spelling of `groups` are
+   * kept.
+   */
+  visibleGroups(workspaceId: string, userEmail: string, groups: readonly string[]): Promise<string[]>;
 
   /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
@@ -677,6 +702,16 @@ export interface IAccessControl {
    * root: the floor keeps it, so the deny could only be rolled back.
    */
   holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
+
+  /**
+   * Every address the resolver treats as an Admin in the working-tree model,
+   * each once: the Admin role's members — through a group too — and the
+   * deployment owners. The same membership answer {@link holdsAdminRootWrite}
+   * gives one address at a time, enumerated. When the model cannot be loaded
+   * (a `roles.yaml` that does not parse makes nobody an Admin), the
+   * deployment owners alone.
+   */
+  adminEmails(workspaceId: string): Promise<string[]>;
 
   /**
    * Whether `userEmail` may put a misplaced platform file back at

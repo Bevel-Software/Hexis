@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -15,12 +14,12 @@ import {
 } from './agent-access.gate.js';
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
+import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import {
   assertInsideRepo,
   assertRepoRootNameFree,
@@ -69,6 +68,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { endsTheSearch, type IPatternMatcher, type IPatternSearch } from './pattern-matcher.contract.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
@@ -673,7 +673,7 @@ type FileGrepOutcome =
 async function grepOneFile(
   fs: LocalFilesystem,
   path: string,
-  re: RegExp,
+  matcher: IPatternSearch,
   out: { path: string; line: number; text: string }[],
   max: number,
   docs: DocGrepState,
@@ -696,9 +696,10 @@ async function grepOneFile(
   }
   if (content === null) return 'no-text';
   const lines = content.split('\n');
-  for (let i = 0; i < lines.length && out.length < max; i++) {
-    re.lastIndex = 0;
-    if (re.test(lines[i])) out.push({ path, line: i + 1, text: lines[i].slice(0, 300) });
+  // matchingLines posts these to the worker in bounded batches, so no one
+  // copy of a large file runs on the request thread.
+  for (const i of await matcher.matchingLines(lines, max - out.length)) {
+    out.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
   }
   return 'searched';
 }
@@ -741,7 +742,7 @@ async function searchRootKind(
 async function grepWalk(
   fs: LocalFilesystem,
   dir: string,
-  re: RegExp,
+  matcher: IPatternSearch,
   out: { path: string; line: number; text: string }[],
   max: number,
   depth: number,
@@ -767,7 +768,7 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+      await grepWalk(fs, p, matcher, out, max, depth + 1, gate, notifyRead, docs, skip);
     } else if (skip(p)) {
       continue;
     } else {
@@ -777,9 +778,12 @@ async function grepWalk(
       await notifyRead(p);
       // A file the walk cannot read is silently skipped: one unreadable entry
       // must not fail a search over the whole tree.
+      // A pattern too expensive to finish, or no worker free to run it, is not
+      // an unreadable file: either ends the whole search.
       try {
-        await grepOneFile(fs, p, re, out, max, docs);
-      } catch {
+        await grepOneFile(fs, p, matcher, out, max, docs);
+      } catch (err) {
+        if (endsTheSearch(err)) throw err;
         continue;
       }
     }
@@ -868,9 +872,10 @@ export interface WorkspaceToolsPorts {
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
  * methods Mastra's tools call (via `ctx.getFilesystem(a.branch as string)`), so behaviour is
  * identical and write-side ops still flow through the lock/commit pipeline.
- * `edit_file`, `grep`, and `execute_command` are tool-level (no filesystem
- * method), so they're implemented here. File ops are `both`; `execute_command`
- * is INTERNAL-only (arbitrary shell as the caller is too dangerous to expose).
+ * `edit_file` and `grep` are tool-level (no filesystem method), so they're
+ * implemented here. There is no shell tool: an agent never composes a command
+ * line, and every git operation it needs is a platform tool with fixed
+ * arguments.
  */
 export function registerWorkspaceTools(
   registry: IToolRegistry,
@@ -934,6 +939,13 @@ export function registerWorkspaceTools(
    * file primitives; without it `start_session` answers the id alone.
    */
   disk?: ITreeWalker,
+  /**
+   * What runs a caller's `grep` pattern off the request thread, under a
+   * budget (see `pattern-matcher.contract.ts`). Owned by the composition
+   * root, which closes it with the graph. Optional for the harnesses about the
+   * other file primitives; without it `grep` is not mounted.
+   */
+  patternMatcher?: IPatternMatcher,
 ): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
@@ -965,6 +977,28 @@ export function registerWorkspaceTools(
 
   /** A repo-relative path in the workspace-relative form every tool speaks. */
   const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
+
+  /**
+   * `canWrite` for workspace paths, as `list_files` and `read_file` report it:
+   * whether the caller may commit a change there directly on the DEFAULT
+   * branch, whichever branch the call read — one batch per call (see
+   * `defaultBranchWriteVerdicts`). The repository folder itself is judged as
+   * the repository root; a path outside the repository never lands on the
+   * default branch, so it is `false`.
+   */
+  const canWriteAt = async (ctx: ToolContext, wsPaths: string[]): Promise<Map<string, boolean>> => {
+    const relOf = (p: string): string | null => {
+      const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
+      return norm === kbDirName ? '' : toKbRelative(norm, kbDirName);
+    };
+    const rels = wsPaths.map(relOf);
+    const verdicts = await defaultBranchWriteVerdicts(
+      { accessControl, defaultWorkspaceId: () => kb.defaultWorkspaceId() },
+      ctx,
+      rels.filter((r): r is string => r !== null),
+    );
+    return new Map(wsPaths.map((p, i) => [p, rels[i] !== null && verdicts.get(rels[i]!) === true]));
+  };
   const sourceToWs = (s: AccessDecisionSource | null) => (s ? { ...s, path: toWs(s.path) } : null);
 
   /**
@@ -1563,15 +1597,6 @@ export function registerWorkspaceTools(
      * read-only key may still not make (`request_file_download`).
      */
     writeScope?: boolean;
-    /**
-     * This tool resolves `branch` ITSELF and must not be pre-checked here.
-     * Only `execute_command` sets it: for an internal session that leaves the
-     * argument off, it falls back to the caller's own focused branch (from its
-     * signed token) rather than refusing. It still answers the same
-     * `branch-required` kind when there is nothing to fall back on — see its
-     * handler. Every other tool takes the check below.
-     */
-    resolvesBranchItself?: boolean;
     /** Arguments this tool refuses by name itself, with its own wording (see `ToolDefSpec.refusesItself`). */
     refusesItself?: string[];
     handler: ToolHandler;
@@ -1630,9 +1655,9 @@ export function registerWorkspaceTools(
     redescribe();
     kb.onLayoutApplied(redescribe);
     agentAccessGate.notes.onChange(redescribe);
-    // Internal-only tools (e.g. `execute_command`) keep their route mounted —
-    // our agent calls it over the same loopback — but gate it to internal-source
-    // callers so an external connection key can't invoke it by name.
+    // Internal-only tools keep their route mounted — our agent calls them over
+    // the same loopback — but gate them to internal-source callers so an
+    // external connection key can't invoke one by name.
     router.post(
       path.slice('/api'.length),
       toolAuth,
@@ -1683,8 +1708,7 @@ export function registerWorkspaceTools(
             );
           }
         },
-        // `execute_command` resolves its own branch (see `resolvesBranchItself`).
-        { write: spec.write, writeScope: spec.writeScope, ...(spec.resolvesBranchItself ? { branch: 'own' as const } : {}) },
+        { write: spec.write, writeScope: spec.writeScope },
       ),
     );
   };
@@ -1823,7 +1847,19 @@ export function registerWorkspaceTools(
    * hook, the extraction and the not-found message all have to match, and a
    * copy drifts on the first change to any of them.
    */
-  const readForTool: ReadForTool = async (branch, p, ctx) => {
+  const readForTool: ReadForTool = async (branch, p, ctx) => (await readServed(branch, p, ctx)).result;
+
+  /**
+   * {@link readForTool}, also saying, at the guide's name, whether a file of
+   * the knowledge base's own answered first on THIS branch (`guide`: `own`)
+   * or the platform's guide answered alone (`alone`); `null` for any other
+   * path. `read_file` needs it to judge `canWrite` there (see its handler).
+   */
+  const readServed = async (
+    branch: string,
+    p: string,
+    ctx: ToolContext,
+  ): Promise<{ result: ReadResult; guide: 'own' | 'alone' | null }> => {
     // The guide's name at the repository root answers with the platform's
     // guide, which is text the code owns and every agent may read: no gate
     // and no read hook for it. A file the knowledge base keeps under that
@@ -1832,7 +1868,8 @@ export function registerWorkspaceTools(
     // guide an earlier release wrote to disk (still on a draft, say) is
     // recognised by its header and not served a second time.
     if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
-      return { kind: 'text', text: await guideAt(branch, ctx, p) };
+      const { text, own } = await guideServed(branch, ctx, p);
+      return { result: { kind: 'text', text }, guide: own ? 'own' : 'alone' };
     }
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
     await assertCanRead(readGateFor(branch, ctx), p);
@@ -1841,20 +1878,39 @@ export function registerWorkspaceTools(
     // the access gate and the read hook above — a document read is still a
     // KB read. ONE registry dispatch picks the reader by extension.
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-    return readers.readerFor(p).read(bytes, p);
+    return { result: await readers.readerFor(p).read(bytes, p), guide: null };
+  };
+
+  /**
+   * Whether the DEFAULT branch has a file of the knowledge base's own at the
+   * guide's name that this caller may read — not a copy of the platform's
+   * guide an earlier release wrote. Telling the two apart reads the file, so
+   * that branch's read hook is asked first, as {@link ownGuideFile} does —
+   * after the gate, before the bytes. A refusal, like any failure, is
+   * `false`, so `canWrite` fails closed.
+   */
+  const ownGuideOnDefault = async (ctx: ToolContext, p: string): Promise<boolean> => {
+    try {
+      const fs = await ctx.getFilesystem(kb.defaultBranch);
+      if (!(await ownGuideReadable(fs, kb.defaultBranch, ctx, p))) return false;
+      await notifyAgentRead(agentAccessGate, ctx, kb.defaultBranch, p);
+      return await isOwnEntryStill(fs, p);
+    } catch {
+      return false;
+    }
   };
 
   mount({
     name: 'read_file',
     gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. What comes back for a document, an email file, an image ' +
-      'or any other binary file is the content rule\'s business (see the shared rules): text files as text, documents and ' +
-      'email files as extracted text, an image as the picture itself, anything else as a one-line description. ' +
-      'Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored ' +
-      'for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. ' +
-      'It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: such a ref belongs to no ' +
-      'workspace, so `branch` is ignored for it.',
+      'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text as ' +
+      'text, documents and email as extracted text, an image as the picture, anything else as a one-line ' +
+      'description. Also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
+      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. `offset`/`limit` slice the ' +
+      'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
+      'spills, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
+      CAN_WRITE_CLAUSE,
     inputs: {
       type: 'object',
       properties: {
@@ -1869,7 +1925,16 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path that was read (echoes the input).'), content: str('File (or spill) content, sliced if offset/limit were given.') },
+      properties: {
+        path: str('The path that was read (echoes the input).'),
+        content: str('File (or spill) content, sliced if offset/limit were given.'),
+        canWrite: {
+          type: 'boolean',
+          description:
+            'Whether you may commit a change to this file directly on the default branch, under that branch\'s access ' +
+            'rules — the same answer whichever branch you read. Absent for a spill ref.',
+        },
+      },
       required: ['path', 'content'],
     },
     write: false,
@@ -1886,7 +1951,19 @@ export function registerWorkspaceTools(
           ? content.slice(start, limit !== undefined ? start + limit : undefined)
           : content;
       };
-      const result = await readForTool(a.branch as string, p, ctx);
+      const branch = a.branch as string;
+      const { result, guide } = await readServed(branch, p, ctx);
+      // Judged after the read, so a path the caller may not read is refused
+      // before anything is said about writing it. At the guide's name this
+      // answers for the knowledge base's own file there, as `file_stat` does:
+      // where the platform's guide stands alone there is nothing to change —
+      // `false`, whether nothing is there or a file the caller may not read.
+      // Like every verdict here, that is decided on the DEFAULT branch, not
+      // the one read: a draft that deleted or added the file must not move
+      // the answer about what can land directly.
+      const ownOnDefault =
+        guide === null || (branch === kb.defaultBranch ? guide === 'own' : await ownGuideOnDefault(ctx, p));
+      const canWrite = ownOnDefault && (await canWriteAt(ctx, [p])).get(p) === true;
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1898,14 +1975,17 @@ export function registerWorkspaceTools(
       // content blocks before any client could try to validate it, so the
       // schema keeps describing the text path it has always described.
       // `offset`/`limit` are meaningless on a picture and are ignored.
+      // The picture's answer has no fields beside it, so its `canWrite` rides
+      // in the text note that accompanies it.
       if (result.kind === 'image') {
-        return mcpImageResult(result.data, result.mimeType, result.note);
+        const verdict = `canWrite: ${canWrite}`;
+        return mcpImageResult(result.data, result.mimeType, result.note ? `${result.note} (${verdict})` : verdict);
       }
       // Text and refusals alike land in `content` — a refusal (corrupt
       // document, unreadable binary, oversized image) IS the file's honest
       // textual answer, sliced like any other content.
       const content = result.kind === 'text' ? result.text : result.message;
-      return { path: p, content: slice(content) };
+      return { path: p, content: slice(content), canWrite };
     },
   });
 
@@ -1925,10 +2005,14 @@ export function registerWorkspaceTools(
    * node is indistinguishable from an absent one on every other read.
    */
   /** What a read of the guide's path answers: the guide, after the knowledge base's own readable file when it has one. */
-  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> => {
+  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> =>
+    (await guideServed(branch, ctx, p)).text;
+
+  /** {@link guideAt}, also saying whether a file of the knowledge base's own came first. */
+  const guideServed = async (branch: string, ctx: ToolContext, p: string): Promise<{ text: string; own: boolean }> => {
     const guide = await agentGuide!();
     const own = await ownGuideFile(branch, ctx, p);
-    return own === null ? guide : withPlatformGuideAppended(own, guide);
+    return own === null ? { text: guide, own: false } : { text: withPlatformGuideAppended(own, guide), own: true };
   };
 
   const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
@@ -2008,7 +2092,8 @@ export function registerWorkspaceTools(
     name: 'list_files',
     gated: true,
     description:
-      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it.`,
+      `List a directory. Returns \`{ path, entries: [{ name, type, size?, canWrite }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it. ` +
+      `\`canWrite\`: may you change that file, or add a file directly inside that folder, directly on the default branch. ${CAN_WRITE_CLAUSE}`,
     inputs: {
       type: 'object',
       properties: {
@@ -2028,8 +2113,19 @@ export function registerWorkspaceTools(
           description: 'Directory entries.',
           items: {
             type: 'object',
-            properties: { name: str('Entry name.'), type: str('`file` or `directory`.'), size: int('Size in bytes (files only).') },
-            required: ['name', 'type'],
+            properties: {
+              name: str('Entry name.'),
+              type: str('`file` or `directory`.'),
+              size: int('Size in bytes (files only).'),
+              canWrite: {
+                type: 'boolean',
+                description:
+                  'Whether you may commit directly on the default branch, under that branch\'s access rules: for a ' +
+                  'file, a change to it; for a folder, a new file directly inside it, by that folder\'s own rules. ' +
+                  'The same answer whichever branch you listed.',
+              },
+            },
+            required: ['name', 'type', 'canWrite'],
           },
         },
       },
@@ -2042,7 +2138,12 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
-      return { path: a.path ?? '', entries: filtered };
+      // One batch for the listing. A folder is judged at its own path, whose
+      // rules (its `access.md` and those above it) are what a file added
+      // directly inside it would get.
+      const wsPathOf = (e: DirEntry): string => (dir ? `${dir}/${e.name}` : e.name);
+      const verdicts = await canWriteAt(ctx, filtered.map(wsPathOf));
+      return { path: a.path ?? '', entries: filtered.map((e) => ({ ...e, canWrite: verdicts.get(wsPathOf(e)) === true })) };
     },
   });
 
@@ -2285,171 +2386,172 @@ export function registerWorkspaceTools(
     },
   });
 
-  mount({
-    name: 'grep',
-    gated: true,
-    description:
-      'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
-    inputs: {
-      type: 'object',
-      properties: {
-        branch: BRANCH_INPUT,
-        pattern: str('JavaScript regular expression.'),
-        path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
-        ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
-        max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
-        sessionId: SESSION_ID_INPUT,
-      },
-      required: ['branch', 'pattern'],
-      additionalProperties: false,
-    },
-    outputs: {
-      type: 'object',
-      properties: {
-        matches: {
-          type: 'array',
-          description: 'Matching lines (capped by `max_results`).',
-          items: {
-            type: 'object',
-            properties: { path: str('Workspace-relative file path.'), line: int('1-based line number.'), text: str('The matching line (truncated to 300 chars).') },
-            required: ['path', 'line', 'text'],
-          },
+  // Mounted only when the composition supplied a matcher — see the
+  // `patternMatcher` parameter. Core always does.
+  if (patternMatcher) {
+    const patterns = patternMatcher;
+    mount({
+      name: 'grep',
+      gated: true,
+      description:
+        'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
+      inputs: {
+        type: 'object',
+        properties: {
+          branch: BRANCH_INPUT,
+          pattern: str('JavaScript regular expression.'),
+          path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
+          ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
+          max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
+          sessionId: SESSION_ID_INPUT,
         },
-        truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
-        note: str('Present when the empty/partial result needs explaining: a `path` naming a file with no searchable text (image, binary, corrupt document), or documents (office/PDF/email files) left unsearched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover those.'),
+        required: ['branch', 'pattern'],
+        additionalProperties: false,
       },
-      required: ['matches', 'truncated'],
-    },
-    write: false,
-    handler: async (a, ctx: ToolContext) => {
-      let re: RegExp;
-      try {
-        re = new RegExp(a.pattern as string, a.ignore_case ? 'i' : '');
-      } catch (err) {
-        throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
-      }
-      // No path means the whole REPOSITORY, not the workspace directory above
-      // it. The workspace root also holds whatever an older build left beside
-      // the checkout, and the read gate has no rules for a path outside the
-      // repository — it answers "readable" — so a walk from there would hand
-      // any caller the contents of every stray, including documents that were
-      // uploaded to a restricted folder and landed beside it instead. The
-      // boot note names those for an operator; no tool reads them.
-      // An EMPTY string is the same absence: the normaliser leaves it alone
-      // (an empty path is the handler's to explain), and here it would
-      // otherwise name the workspace directory by another spelling.
-      const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
-      const fs = await ctx.getFilesystem(a.branch as string);
-      const gate = readGateFor(a.branch as string, ctx);
-      const out: { path: string; line: number; text: string }[] = [];
-      const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
-      const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
-      // The empty root is the workspace itself — always a directory, and never
-      // worth a stat.
-      // A placeholder named on its own is searched as what it is to every
-      // other tool: nothing.
-      const kind =
-        searchRoot === ''
-          ? 'directory'
-          : isFolderPlaceholder(searchRoot)
-            ? 'missing'
-            : await searchRootKind(fs, searchRoot);
-      /** Why a single-file search found nothing, when "no matches" would be a lie. */
-      let fileNote: string | undefined;
-      // The guide is searched where it is read: a search of the repository
-      // root covers it, and a search of its own path is a search of what
-      // `read_file` answers there. The composed text is what is searched —
-      // the knowledge base's own readable file first, then the platform's
-      // guide — under the guide's path and with the line numbers a read of
-      // it gives. The walk leaves that one file to this: a match the walk
-      // made there would be the same line again, and one it COUNTED against
-      // `max_results` would be a file later in the tree never searched while
-      // the answer says nothing was cut. A file the caller may not read is
-      // absent from it, as it is from the read.
-      const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
-      const rel = toKbRelative(searchRoot, kbDirName);
-      const coversGuide =
-        agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
-      // The search root goes to the read hook — once, and only when it is
-      // repository content: a folder, or a file of the knowledge base's own.
-      // The guide's own path is not told here, because `guideAt` tells the
-      // hook of the organisation's file there exactly as `read_file` does
-      // (after the gate), and the platform's guide alone is nobody's file to
-      // note. Each file the walk opens goes to the hook per file below, so a
-      // hook sees every path a grep reached rather than only its root.
-      if (!(coversGuide && kind !== 'directory')) {
-        await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
-      }
-      if (coversGuide) {
-        if (kind === 'directory') {
+      outputs: {
+        type: 'object',
+        properties: {
+          matches: {
+            type: 'array',
+            description: 'Matching lines (capped by `max_results`).',
+            items: {
+              type: 'object',
+              properties: { path: str('Workspace-relative file path.'), line: int('1-based line number.'), text: str('The matching line (truncated to 300 chars).') },
+              required: ['path', 'line', 'text'],
+            },
+          },
+          truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
+          note: str('Present when the empty/partial result needs explaining: a `path` naming a file with no searchable text (image, binary, corrupt document), or documents (office/PDF/email files) left unsearched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover those.'),
+        },
+        required: ['matches', 'truncated'],
+      },
+      write: false,
+      handler: async (a, ctx: ToolContext) => {
+        // The caller's pattern never runs on the request thread: a backtracking
+        // one would hold the event loop for everyone (see IPatternMatcher).
+        const matcher = patterns.search(a.pattern as string, a.ignore_case ? 'i' : '');
+        // No path means the whole REPOSITORY, not the workspace directory above
+        // it. The workspace root also holds whatever an older build left beside
+        // the checkout, and the read gate has no rules for a path outside the
+        // repository — it answers "readable" — so a walk from there would hand
+        // any caller the contents of every stray, including documents that were
+        // uploaded to a restricted folder and landed beside it instead. The
+        // boot note names those for an operator; no tool reads them.
+        // An EMPTY string is the same absence: the normaliser leaves it alone
+        // (an empty path is the handler's to explain), and here it would
+        // otherwise name the workspace directory by another spelling.
+        const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
+        const fs = await ctx.getFilesystem(a.branch as string);
+        const gate = readGateFor(a.branch as string, ctx);
+        const out: { path: string; line: number; text: string }[] = [];
+        const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
+        const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
+        // The empty root is the workspace itself — always a directory, and never
+        // worth a stat.
+        // A placeholder named on its own is searched as what it is to every
+        // other tool: nothing.
+        const kind =
+          searchRoot === ''
+            ? 'directory'
+            : isFolderPlaceholder(searchRoot)
+              ? 'missing'
+              : await searchRootKind(fs, searchRoot);
+        /** Why a single-file search found nothing, when "no matches" would be a lie. */
+        let fileNote: string | undefined;
+        // The guide is searched where it is read: a search of the repository
+        // root covers it, and a search of its own path is a search of what
+        // `read_file` answers there. The composed text is what is searched —
+        // the knowledge base's own readable file first, then the platform's
+        // guide — under the guide's path and with the line numbers a read of
+        // it gives. The walk leaves that one file to this: a match the walk
+        // made there would be the same line again, and one it COUNTED against
+        // `max_results` would be a file later in the tree never searched while
+        // the answer says nothing was cut. A file the caller may not read is
+        // absent from it, as it is from the read.
+        const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
+        const rel = toKbRelative(searchRoot, kbDirName);
+        const coversGuide =
+          agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
+        // The search root goes to the read hook — once, and only when it is
+        // repository content: a folder, or a file of the knowledge base's own.
+        // The guide's own path is not told here, because `guideAt` tells the
+        // hook of the organisation's file there exactly as `read_file` does
+        // (after the gate), and the platform's guide alone is nobody's file to
+        // note. Each file the walk opens goes to the hook per file below, so a
+        // hook sees every path a grep reached rather than only its root.
+        if (!(coversGuide && kind !== 'directory')) {
+          await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
+        }
+        if (coversGuide) {
+          if (kind === 'directory') {
+            await grepWalk(
+              fs,
+              searchRoot,
+              matcher,
+              out,
+              max,
+              0,
+              gate,
+              (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
+              docs,
+              (p) => p === guidePath,
+            );
+          }
+          const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
+          for (const i of await matcher.matchingLines(lines, max - out.length)) {
+            out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
+          }
+        } else if (kind === 'directory') {
           await grepWalk(
             fs,
             searchRoot,
-            re,
+            matcher,
             out,
             max,
             0,
             gate,
             (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
             docs,
-            (p) => p === guidePath,
           );
+        } else {
+          // Not a directory: the permission verdict comes BEFORE every other
+          // one, and it is `read_file`'s own gate on the same path — so grep
+          // answers a path the caller may not read exactly as read_file does,
+          // and can never confirm the existence of one read_file would hide.
+          // That ordering holds even when the stat itself failed: a denied path
+          // gets the 403, never the filesystem's complaint about it.
+          await assertCanRead(gate, searchRoot);
+          if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
+          // A named FILE is searched directly: routing it through the walk would
+          // fail its readdir and answer an empty match list, which the caller
+          // cannot tell from "the pattern is not in this file".
+          const outcome = await orNotFound(
+            searchRoot,
+            () => grepOneFile(fs, searchRoot, matcher, out, max, docs),
+            'Nothing to search',
+          );
+          if (outcome === 'no-text') {
+            fileNote =
+              `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
+              'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
+              'because the pattern is absent.';
+          }
         }
-        const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
-        for (let i = 0; i < lines.length && out.length < max; i++) {
-          re.lastIndex = 0;
-          if (re.test(lines[i]!)) out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
-        }
-      } else if (kind === 'directory') {
-        await grepWalk(
-          fs,
-          searchRoot,
-          re,
-          out,
-          max,
-          0,
-          gate,
-          (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
-          docs,
-        );
-      } else {
-        // Not a directory: the permission verdict comes BEFORE every other
-        // one, and it is `read_file`'s own gate on the same path — so grep
-        // answers a path the caller may not read exactly as read_file does,
-        // and can never confirm the existence of one read_file would hide.
-        // That ordering holds even when the stat itself failed: a denied path
-        // gets the 403, never the filesystem's complaint about it.
-        await assertCanRead(gate, searchRoot);
-        if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
-        // A named FILE is searched directly: routing it through the walk would
-        // fail its readdir and answer an empty match list, which the caller
-        // cannot tell from "the pattern is not in this file".
-        const outcome = await orNotFound(
-          searchRoot,
-          () => grepOneFile(fs, searchRoot, re, out, max, docs),
-          'Nothing to search',
-        );
-        if (outcome === 'no-text') {
-          fileNote =
-            `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
-            'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
-            'because the pattern is absent.';
-        }
-      }
-      const note =
-        fileNote ??
-        (docs.skippedUncached > 0
-          ? `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
-            `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
-            'same grep to extract and search the next batch.'
-          : undefined);
-      return {
-        matches: out,
-        truncated: out.length >= max,
-        ...(note !== undefined ? { note } : {}),
-      };
-    },
-  });
+        const note =
+          fileNote ??
+          (docs.skippedUncached > 0
+            ? `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
+              `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
+              'same grep to extract and search the next batch.'
+            : undefined);
+        return {
+          matches: out,
+          truncated: out.length >= max,
+          ...(note !== undefined ? { note } : {}),
+        };
+      },
+    });
+  }
 
   // ── writes (through the lock/commit pipeline) ───────────────────────────
   mount({
@@ -3964,194 +4066,6 @@ export function registerWorkspaceTools(
       };
     });
   }
-
-  // ── shell (internal-only) ───────────────────────────────────────────────
-  mount({
-    name: 'execute_command',
-    gated: true,
-    description:
-      'Run a shell command in the workspace directory. Returns `{ stdout, stderr, exitCode }` (output capped). Use for git status/log, grep/rg, build/test commands.',
-    internalOnly: true,
-    fileTool: false,
-    // The one tool the mount's branch check skips: the handler below resolves an
-    // omitted `branch` to the internal caller's focused branch before refusing.
-    resolvesBranchItself: true,
-    inputs: {
-      type: 'object',
-      properties: {
-        branch: BRANCH_INPUT,
-        command: str('The shell command line to run.'),
-        timeout_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Timeout in ms (default 30000).' },
-        sessionId: SESSION_ID_INPUT,
-      },
-      // `branch` stays REQUIRED here on purpose, and must not be relaxed to make
-      // the handler's focused-branch fallback "reachable". This list is the
-      // contract the model is TAUGHT — declaring it required is what makes the
-      // caller always name its branch, which is the fix for the workspace this
-      // tool used to resolve as "undefined". It is not a runtime gate: nothing in
-      // the tool route validates inputs against this schema, so a branch-less call
-      // still reaches the handler and still hits the `ctx.focusedBranch` fallback
-      // (covered by "falls back to the session focused branch when branch is
-      // omitted"). The fallback is a safety net for a model that disobeys the
-      // contract — not a sanctioned calling convention to advertise.
-      required: ['branch', 'command'],
-      additionalProperties: false,
-    },
-    outputs: {
-      type: 'object',
-      properties: {
-        stdout: str('Captured standard output (truncated to 50,000 chars).'),
-        stderr: str('Captured standard error (truncated to 50,000 chars).'),
-        exitCode: int('Process exit code; -1 if it was killed (timeout/abort) or failed to spawn.'),
-      },
-      required: ['stdout', 'stderr', 'exitCode'],
-    },
-    write: true,
-    handler: async (a, ctx: ToolContext) => {
-      // Resolve the branch FIRST — before the policy gates below — so a malformed
-      // call always gets the 400 that names what is missing, rather than a 403
-      // from a restricted session masking it. Unlike the file tools (which route
-      // through `getOrCreateForUser` and fall back to the default branch),
-      // execute_command turns `branch` straight into a workspace — so a bad value
-      // would `encodeURIComponent(undefined)` to the string "undefined", then try
-      // to CLONE a branch literally named "undefined", 500ing and leaving an
-      // `<workspaces>/undefined/` shell behind.
-      //
-      // Two distinct cases:
-      //  - branch OMITTED (`undefined`): the in-app chat agent may leave it off a
-      //    call. For an internal session we fall back to the caller's own focused
-      //    branch (`ctx.focusedBranch`, from its signed token), so the command runs
-      //    against the workspace the session is on (e.g. `main`) end to end. An
-      //    external caller carries no focused branch, so it stays absent → 400.
-      //  - branch PRESENT but invalid (the literal "undefined"/"null", empty, or
-      //    malformed): a broken value, never a real branch — fail closed, never
-      //    silently reinterpret it as the focused branch.
-      const raw = a.branch;
-      const branch = raw === undefined ? ctx.focusedBranch : raw;
-      if (typeof branch !== 'string' || branch.length === 0) {
-        throw new ToolError(
-          'execute_command requires a `branch`: pass the branch (draft) whose workspace to run the command in — the one you are currently working on.',
-          400,
-          // The same discriminator every other KB tool answers a branch-less
-          // call with, so a client switches on one kind across the surface.
-          // The MESSAGE stays this tool's own: it can name the focused-branch
-          // fallback that only applies here.
-          { kind: 'branch-required' },
-        );
-      }
-      // A stringified absent value. Both are syntactically valid git branch names,
-      // so `assertValidBranchName` below happily accepts them — and accepting one
-      // is the whole bug this tool is guarded for: `getOrCreateForBranch("undefined")`
-      // clones a branch literally named "undefined" into `<workspaces>/undefined/`
-      // and 500s. Reject them by name, ahead of the shape check.
-      if (branch === 'undefined' || branch === 'null') {
-        throw new ToolError(
-          `execute_command got the literal string "${branch}" as \`branch\` — that is a stringified absent value, not a branch. ` +
-            'Pass the real branch (draft) whose workspace to run the command in.',
-          400,
-          { kind: 'branch-required' },
-        );
-      }
-      // Then the SHAPE, via the one canonical validator every other branch path
-      // uses — no hand-maintained list of suspicious literals, which would both
-      // miss malformed refs (`..`, `-x`, `foo/.lock`) and reserve names git
-      // considers perfectly valid. Runs on the RAW string, so a whitespace-padded
-      // `" main "` is refused rather than silently trimmed into a different
-      // branch than the caller passed.
-      try {
-        assertValidBranchName(branch);
-      } catch (err) {
-        throw new ToolError(
-          `execute_command got an invalid \`branch\`: ${(err as Error).message} — ` +
-            'pass the exact branch (draft) whose workspace to run the command in.',
-          400,
-        );
-      }
-      // Shell is a write path with no single target path to check, so the
-      // write hook is asked once for the call itself, with no path — and the
-      // run must not be restricted to a file type either, since shell could
-      // write anything.
-      writePolicy.assertUnrestricted(ctx.sessionId);
-      await assertAgentWriteAllowed(agentAccessGate, ctx, branch);
-      // Canonical per-branch bootstrap entry point — it owns the workspace-id
-      // encoding and the single-flight clone, so the shell never derives a
-      // workspace path by hand.
-      const cwd = (await ctx.workspaceService.getOrCreateForBranch(branch)).absolutePath;
-      const timeoutMs = typeof a.timeout_ms === 'number' ? a.timeout_ms : 30_000;
-      // cwd is the workspace ROOT so shell paths match the workspace-relative
-      // paths every other file tool uses — but the git clone lives one level
-      // deeper, at <workspace>/<kbDirName>/.git. For a bare `git status` /
-      // `git diff` (what the agent prompt teaches) point git there explicitly so
-      // it resolves the KB clone instead of failing with "not a git repository".
-      //
-      // Because the command runs under `shell: true`, GIT_DIR/GIT_WORK_TREE
-      // apply to the WHOLE shell, so restrict the override to a *standalone* bare
-      // `git …` invocation. Otherwise the KB repo context would (a) leak into a
-      // chained step that spawns its own git — `git commit && npm ci` — and (b)
-      // override a caller's explicit `git -C …` / `--git-dir` / `--work-tree`.
-      const command = (a.command as string).trim();
-      const isStandaloneGit =
-        /^git(\s|$)/.test(command) &&
-        !/[;&|`\n]|\$\(/.test(command) &&
-        !/(?:^|\s)(?:-C|--git-dir|--work-tree)(?:[=\s]|$)/.test(command);
-      const env = isStandaloneGit
-        ? {
-            ...process.env,
-            GIT_DIR: join(cwd, kbDirName, '.git'),
-            GIT_WORK_TREE: join(cwd, kbDirName),
-          }
-        : process.env;
-      return new Promise((resolve) => {
-        // Own process group on POSIX, so a timeout or abort kills the WHOLE
-        // tree. `shell: true` puts an `sh` between us and the command; killing
-        // only that shell left whatever it had started running on — orphaned,
-        // unreaped, still holding the workspace and its memory. A self-hosted
-        // deployment leaked ~4,500 tasks that way before nothing could fork.
-        const detached = process.platform !== 'win32';
-        const child = spawn(a.command as string, { cwd, shell: true, env, detached });
-        let stdout = '';
-        let stderr = '';
-        const killTree = () => {
-          try {
-            if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
-            else child.kill('SIGKILL');
-          } catch {
-            try {
-              child.kill('SIGKILL');
-            } catch {
-              // Already gone.
-            }
-          }
-        };
-        const timer = setTimeout(killTree, timeoutMs);
-        // If the caller disconnects (request aborted), kill the tree instead of
-        // letting it run to the timeout; the resulting `close`/`error` settles
-        // the promise through `finish`.
-        const onAbort = killTree;
-        ctx.abortSignal.addEventListener('abort', onAbort, { once: true });
-        const finish = (value: unknown) => {
-          clearTimeout(timer);
-          ctx.abortSignal.removeEventListener('abort', onAbort);
-          resolve(value);
-        };
-        // Cap accumulation while streaming so a verbose command can't exhaust
-        // memory before `close`; the final slice keeps the output bound.
-        const OUTPUT_CAP = 50_000;
-        child.stdout.on('data', (d) => {
-          if (stdout.length < OUTPUT_CAP) stdout += d.toString();
-        });
-        child.stderr.on('data', (d) => {
-          if (stderr.length < OUTPUT_CAP) stderr += d.toString();
-        });
-        child.on('close', (code) => {
-          finish({ stdout: stdout.slice(0, 50_000), stderr: stderr.slice(0, 50_000), exitCode: code ?? -1 });
-        });
-        child.on('error', (err) => {
-          finish({ stdout, stderr: `${stderr}\n${String(err)}`.slice(0, 50_000), exitCode: -1 });
-        });
-      });
-    },
-  });
 
   // The one read `open_page` borrows — see `readForTool` above.
   return { readForTool };

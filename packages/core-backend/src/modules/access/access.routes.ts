@@ -21,6 +21,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
+import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -51,6 +52,7 @@ import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import '../auth/auth.middleware.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
@@ -85,6 +87,8 @@ export function createAccessRoutes(
   accessControl: IAccessControl,
   workspaceService: WorkspaceService,
   authService: AuthService,
+  /** Auth's switch-off coordination, for the invite's promotion (`ifActive`). */
+  switchGuard: IAccountSwitchGuard,
   workflowService: WorkflowService,
   eventBus: WorkflowEventBus,
   db: Database,
@@ -123,6 +127,18 @@ export function createAccessRoutes(
     // `plugins` is defensive: an older resolver double may omit it.
     return { roles, groups, plugins: plugins ?? [] };
   };
+
+  /**
+   * The groups `email` may be offered as a grantee, or name in a grant: the
+   * resolver's ONE answer to who sees which group (`visibleGroups`: every
+   * group for an admin, only their own for anyone else), the same the
+   * Library's Groups tab lists. Read on the default branch, where the active
+   * group source lives. The picker never names a group the caller has no
+   * part in, and the grant route refuses one with the same words as a group
+   * that does not exist.
+   */
+  const visibleGroups = (email: string, groups: string[]): Promise<string[]> =>
+    accessControl.visibleGroups(kb.defaultWorkspaceId(), email, groups);
 
   /**
    * The plugins `email` may DISCOVER — read the folder's access.md, the same
@@ -431,12 +447,15 @@ export function createAccessRoutes(
 
   /**
    * POST /api/workspace/:id/access/batch
-   * Body: `{ paths: string[], verb?: 'write' | 'owner' }`. Returns
+   * Body: `{ paths: string[], verb?: 'write' | 'owner' | 'read' }`. Returns
    * `{ results: { [path]: boolean } }`.
    *
    * `verb` defaults to `write`, the question every existing caller asks.
    * `owner` answers from the `owner:` lists alone — no admin rescue, and a
-   * writer is not an owner — which is what an Owner pill has to mean.
+   * writer is not an owner — which is what an Owner pill has to mean. `read`
+   * is the verdict the single lookup's `canRead` gives, for many paths at
+   * once: what New page asks on a draft branch, where a page may go wherever
+   * its author may read, of every Knowledge folder in one request.
    */
   router.post('/workspace/:id/access/batch', async (req, res) => {
     const user = await requireUser(req, res);
@@ -451,13 +470,18 @@ export function createAccessRoutes(
       res.status(400).json({ error: 'paths cannot exceed 500 entries per request' });
       return;
     }
-    if (verb !== 'write' && verb !== 'owner') {
-      res.status(400).json({ error: 'verb must be "write" or "owner"' });
+    if (verb !== 'write' && verb !== 'owner' && verb !== 'read') {
+      res.status(400).json({ error: 'verb must be "write", "owner" or "read"' });
       return;
     }
 
     try {
-      const batch = verb === 'owner' ? accessControl.canOwnerBatch : accessControl.canWriteBatch;
+      const batch =
+        verb === 'owner'
+          ? accessControl.canOwnerBatch
+          : verb === 'read'
+            ? accessControl.canReadBatch
+            : accessControl.canWriteBatch;
       const result = await batch.call(
         accessControl,
         req.params.id,
@@ -479,8 +503,9 @@ export function createAccessRoutes(
    * names — resolved from the DEFAULT branch, the authoritative source),
    * groups (the ACTIVE group source, same authority), and people (branch-local
    * to `:id`). Roles/groups come from the resolver's CACHED model — no fresh
-   * file reads per keystroke. Roles + groups are small + non-sensitive so they
-   * always show; PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query
+   * file reads per keystroke. Roles are small + non-sensitive so they always
+   * show; GROUPS are the caller's own unless they are an admin (see
+   * `visibleGroups`); PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query
    * can't dump the whole directory (email-harvesting guard). People are the
    * union of the KB-canonical set (roles.yaml + access.md grants) and the
    * `users` table (logged-in users). Results are capped. Each person carries
@@ -515,7 +540,7 @@ export function createAccessRoutes(
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
-      const matchedGroups = groups
+      const matchedGroups = (await visibleGroups(user.email, groups))
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
@@ -922,9 +947,12 @@ export function createAccessRoutes(
       } else if (principal.kind === 'group') {
         // A group grant must name a group in the ACTIVE source (IdP-synced or
         // manual) on the default branch — same authority the suggest list
-        // uses. No role-collision refusal: bare tokens resolve GROUP-FIRST,
-        // so the written bare name IS the group.
-        const { groups } = await defaultBranchPrincipals();
+        // uses — and one the caller may see (`visibleGroups`): a group hidden
+        // from the picker is refused here with the same words as one that
+        // does not exist, so the grant route is no oracle for group names.
+        // No role-collision refusal: bare tokens resolve GROUP-FIRST, so the
+        // written bare name IS the group.
+        const groups = await visibleGroups(user.email, (await defaultBranchPrincipals()).groups);
         const canonical = canonicalRoleName(principal.group);
         if (!groups.some((g) => canonicalRoleName(g) === canonical)) {
           throw new AccessMutationError(
@@ -1228,6 +1256,39 @@ export function createAccessRoutes(
     }
   });
 
+  // Who the admins are, for anyone signed in: the top bar tells someone who
+  // is not an admin to ask one, and names them. Names and emails ONLY — the
+  // roster above (every role, its members, groups and references) stays
+  // admin-only. Names come from the accounts table; an admin with no account
+  // yet (a deployment admin before first sign-in, say) is named by address.
+  // A role member whose account is switched off cannot sign in to invite
+  // anyone, so is left out; a deployment admin is not (it signs in with the
+  // environment's password regardless).
+  router.get('/access/admins', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const emails = await rolesAdmin.getAdminEmails();
+      const rows =
+        emails.length === 0
+          ? []
+          : await db
+              .select({ email: users.email, name: users.name, deactivatedAt: users.deactivatedAt })
+              .from(users)
+              .where(inArray(users.emailBidx, emails));
+      const names = new Map(rows.map((r) => [canonicalEmail(r.email), r.name?.trim() ?? '']));
+      const off = new Set(rows.filter((r) => r.deactivatedAt).map((r) => canonicalEmail(r.email)));
+      const admins = emails
+        .filter((email) => !off.has(email) || rolesAdmin.isFixedAdmin(email))
+        .map((email) => ({ name: names.get(email) || email, email }))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.email.localeCompare(b.email));
+      res.json({ admins });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   // NOTE: POST /access/roles (create), PATCH /access/roles/:canonical
   // (rename), and DELETE /access/roles/:canonical are GONE — roles are
   // app-defined capabilities, not user-editable objects.
@@ -1239,7 +1300,23 @@ export function createAccessRoutes(
       await assertRolesAdmin(user.email);
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
-      res.json({ roles: await rolesAdmin.addMember(user, canonical, email) });
+      // `ifActive`: the invite's promotion, which leaves a switched-off
+      // account unchanged. Inside the roles file's lock, auth reads the
+      // account under the address's switch lock and keeps that transaction
+      // open until roles.yaml is written and committed
+      // (`IAccountSwitchGuard.whileSwitchedOn`). So a switch-off either committed
+      // before the read (the promotion is refused) or waits until the
+      // promotion is written (it lands after, as for any Admin switched off
+      // later: the place in roles stays, the credentials stop being honoured).
+      const ifActive = (req.body ?? {}).ifActive;
+      if (ifActive !== undefined && typeof ifActive !== 'boolean') {
+        res.status(400).json({ error: 'ifActive must be a boolean' });
+        return;
+      }
+      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> => switchGuard.whileSwitchedOn(email, write);
+      res.json({
+        roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { aroundWrite: whileSwitchedOn } : undefined),
+      });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

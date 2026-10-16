@@ -518,6 +518,33 @@ export interface AppRegistry {
    */
   welcomeExit?: { path: string; label: string };
   /**
+   * Where the maker's name in "Hexis by Bevel" leads (see `ProductName`):
+   * the login page, the first-run screen and the toolbar, where a wide
+   * toolbar links the name beside the apps and a compact one, whose name
+   * sits inside the menu's trigger, links it at the foot of the app menu.
+   * Absent or empty, it is the maker's own site. A distribution with a front
+   * door of its own points it there: the hosted cloud sends it to its
+   * Impressum, so the provider's details are one click from any workspace
+   * page on a wide toolbar and two on a compact one.
+   */
+  makerLink?: string;
+  /**
+   * What the app menu's own entry for `makerLink` says, where the name is
+   * not on screen as a link: the compact toolbar, and a wide one with more
+   * than three apps. Absent or empty, it says "Hexis by Bevel". The hosted
+   * cloud says "Impressum", so a page in the app names its Impressum as one
+   * a visitor recognises, not only behind the maker's name.
+   */
+  makerLinkLabel?: string;
+  /**
+   * Links under the sign-in card, on the login page only: the app behind it
+   * shows none. For a deployment whose provider must name itself to anyone
+   * who reaches it, such as the hosted cloud, which lists its Impressum and
+   * privacy policy here because German law wants them easy to recognise on
+   * every page of a commercial service. Absent or empty, there are none.
+   */
+  loginLinks?: { label: string; href: string }[];
+  /**
    * A panel inside the invite dialog, between the role choice and the footer.
    *
    * Core invites by creating accounts and knows nothing about what a place in
@@ -533,16 +560,38 @@ export interface AppRegistry {
    * Commands a distribution adds to the toolbar's command menu (Ctrl/⌘K),
    * listed after core's own.
    *
-   * Core's commands are the verbs every deployment has — New page, Invite
-   * people, the apps, the settings pages. A verb like "New ontology" belongs
+   * Core's commands are the verbs every deployment has — Create new page,
+   * Invite people, the apps, the settings pages. A verb like "New ontology" belongs
    * to the distribution that has ontologies, so core offers the place rather
    * than the command, as it does for folder-menu entries. Each one is plain
    * data plus `visible` and `run`, both handed the menu's context (router,
    * admin verdict, page on screen) — see `CommandAction`. An id core already
-   * uses is dropped; a `visible` that throws costs only its own row. Absent
+   * uses is dropped; a `visible` that throws costs only its own row. A
+   * command's `shortcut` is one letter, with or without Shift
+   * (`{ key: 'o', shift: true }`); one that is not, or that takes a key
+   * already bound, is dropped with its hint. Absent
    * means the menu offers core's commands and no others.
    */
   commandActions?: CommandAction[];
+  /**
+   * Where a renderer that draws the knowledge graph (a dashboard's HTML)
+   * gets the graph from, on each surface it can be mounted on: the app,
+   * where the reader's session reads it, and the embed, where only the
+   * embed token does. Core has no graph; a distribution that has one
+   * registers both, and its renderer asks `useKbGraphLoader` — which
+   * answers `inEmbed` through the embed's surface and `inApp` in the app —
+   * rather than any address, so the same renderer draws inside a chat or an
+   * issue panel as it draws in the app.
+   */
+  kbGraphSource?: KbGraphSource;
+}
+
+/** See {@link AppRegistry.kbGraphSource}. What the graph is, is the distribution's; core carries it as is. */
+export interface KbGraphSource {
+  /** The graph as the signed-in reader may see it, for `workspaceId`. */
+  inApp(workspaceId: string): Promise<unknown>;
+  /** The graph as the embed token's viewer may see it. */
+  inEmbed(token: string): Promise<unknown>;
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {

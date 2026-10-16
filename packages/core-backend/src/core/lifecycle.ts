@@ -425,13 +425,18 @@ export interface CoreStopDeps {
   /** The lease loop from {@link holdCommitWorkerLease}: its stop finishes the in-flight commit and releases the lease. */
   commitWorker: Pick<LeaseLoopHandle, 'stop'>;
   /**
-   * Background work to wind down before the pool goes — the join-request
-   * sweep and its jobs, today. The timer is stopped first so nothing new is
-   * scheduled, then the jobs already running are awaited (within the budget)
-   * so the pool is not ended under a clone or a push that is still writing
-   * to it. Optional: a caller that has not built them yet passes nothing.
+   * The plugin join-request jobs, whose sweep must be wound down before the
+   * pool goes. The timer is stopped first so nothing new is scheduled, then
+   * the jobs already running are awaited (within the budget) so the pool is
+   * not ended under a clone or a push that is still writing to it. Optional:
+   * a caller that has not built them yet passes nothing.
+   *
+   * Named as `CoreServices` names it, because the graph IS what is passed
+   * here (`stopCore(graph.core)`): under another name the slot stayed empty,
+   * the sweep outlived every stopped graph, and a multi-tenant host gained
+   * one more sweeper querying an ended pool, every minute, per eviction.
    */
-  backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
+  pluginJoinRequestJobs?: { stopSweeping(): void; drain(): Promise<void> };
   /**
    * The agent upload store, whose own sweep deletes staged bytes nobody
    * applied. Stopped with this graph because the next graph for the same
@@ -443,6 +448,12 @@ export interface CoreStopDeps {
   agentUploadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
   agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /**
+   * The grep pattern matcher, whose worker threads are this graph's own: ended
+   * here so a graph a tenant host evicts leaves no worker behind. Optional: a
+   * caller that has not built one passes nothing.
+   */
+  patternMatcher?: { close(): Promise<void> };
   /**
    * The workflow service, for the tidy-up it runs after each sweep (closing
    * empty requests, removing leftover branches): detached from whatever
@@ -532,7 +543,7 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // server is closed (or the tenant is no longer routed to), so this is the
   // earliest point the interval is dead weight. Synchronous and unfailing
   // — it just clears an interval — so it needs no budget of its own.
-  deps.backgroundJobs?.stopSweeping();
+  deps.pluginJoinRequestJobs?.stopSweeping();
   // And the upload store's sweep, for the same reason and in the same breath:
   // synchronous, and it only clears an interval and tells a sweep already
   // running to stop deleting.
@@ -548,11 +559,18 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // Clearing the interval stops future ticks; it does nothing to a job a
   // tick already started, which holds a claim it heartbeats through the
   // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
-  // that finishes releases or marks its row; one that cannot in time is
-  // killed with the process and its claim goes stale for the next sweep
-  // — which is the recovery every crash already gets.
-  if (deps.backgroundJobs) {
-    await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+  // that finishes releases or marks its row. One that cannot in time is
+  // NOT cancelled — the bounded wait only stops waiting — and what becomes
+  // of it depends on who is stopping: a process shutting down takes it
+  // along; a tenant host evicting one graph ends the pool under it, which
+  // cancels nothing already running — a clone or push in flight finishes
+  // on its own — but its next heartbeat or database write fails, so from
+  // there the job records nothing and stops. Either way its claim goes
+  // stale and the next sweep — the next boot's, or a live graph's — picks
+  // the row up and does the whole thing again, which is the recovery every
+  // crash already gets (and why each step is written to be redone).
+  if (deps.pluginJoinRequestJobs) {
+    await bounded(deps.pluginJoinRequestJobs.drain(), remaining(), 'finishing the join-request jobs', log);
   }
   // The sweep in flight when the interval was cleared: awaited so the next
   // graph for this tenant cannot start staging bytes while a store it has
@@ -568,6 +586,10 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // tenant cannot find a branch deletion still running under it.
   if (deps.workflowService) {
     await bounded(deps.workflowService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
+  }
+  // Its workers end with the graph; a search still running is answered busy.
+  if (deps.patternMatcher) {
+    await bounded(deps.patternMatcher.close(), remaining(), 'ending the search workers', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

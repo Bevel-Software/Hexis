@@ -17,8 +17,11 @@ import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { KbRepository, repositoryDirFor } from '../modules/workspace/kb-repository.js';
+import type { IKbRepository } from '../modules/workspace/kb-repository.contract.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
-import { EmbedService } from '../modules/embed/embed.service.js';
+import type { EmbedService } from '../modules/embed/embed.service.js';
+import { composeEmbedService } from './compose-embed.js';
 import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
 import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
@@ -61,10 +64,13 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
+import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
+import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
+import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
@@ -241,6 +247,8 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
+  /** Runs a caller's `grep` pattern off the request thread under a budget; its workers end when the graph stops. */
+  patternMatcher: IPatternMatcher;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
    * session cookie — none when it carries none that verifies — so the
@@ -302,6 +310,12 @@ export interface CoreServices {
   githubFacade: GitHubFacade;
   githubFacadeCredentials: GitHubFacadeCredentialsService;
   authService: AuthService;
+  /**
+   * The seam for "an account was invited": a deployment registers here how
+   * the person is told (the cloud's mail, say), and the invite's answer says
+   * whether somebody did. Core registers nothing.
+   */
+  accountHooks: IAccountHooks;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
   gitService: GitService;
@@ -562,6 +576,30 @@ export async function createCoreServices(
    * Under the backups root: a persistent volume of its own, and one nothing
    * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
    */
+  // Shared mutex so git and diff operations on the same workspace serialize
+  // against each other — a backup-reseed races a concurrent commit otherwise.
+  const workspaceMutex = new WorkspaceMutex();
+  /**
+   * The knowledge base's ONE repository: every branch workspace is a worktree
+   * of it (see `kb-repository.ts`). One instance, handed to the workspace
+   * service, the startup phase and (through the workspace service) the git
+   * layer, so one fetch serves every workspace and the writes to its one
+   * config file are serialized in one place. Git operations in the worktrees
+   * are not serialized against each other beyond the workspace mutex: git's
+   * own locks cover a repository shared by worktrees.
+   *
+   * Under the backups root, like the set-aside copies: a persistent volume in
+   * every shipped compose file, so no new mount is needed, and outside the
+   * workspaces root, where the orphan sweep never sees it. The folder name
+   * starts with a dot, which no branch — and so no backup ledger's workspace
+   * id — can. On hexis-cloud every tenant has its own backups root: one
+   * repository per tenant.
+   */
+  const kbRepository: IKbRepository = new KbRepository({
+    dir: repositoryDirFor(config.workspacesRoot, kbDirName, path.join(config.backupsRoot, '.kb-repository')),
+    kbRepoUrl: () => repositorySource.url(),
+    gitRunner,
+  });
   const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
   /**
    * What must leave with a working copy that is set aside, whoever sets it
@@ -627,6 +665,7 @@ export async function createCoreServices(
             );
           });
       }),
+    kbRepository,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -664,6 +703,9 @@ export async function createCoreServices(
     // The same folder the workspace service sets aside into — see
     // `replacedWorkingCopiesRoot` above for why the two must agree.
     setAsideRoot: replacedWorkingCopiesRoot,
+    // The one repository every branch workspace is a worktree of — the same
+    // instance the workspace service holds (see `kbRepository` above).
+    repository: kbRepository,
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,
@@ -733,6 +775,7 @@ export async function createCoreServices(
       'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
       'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
   });
+  const patternMatcher = new WorkerPatternMatcher();
   const agentDownloadStore = new AgentDownloadStore({
     root: agentDownloadsRoot,
     publicBaseUrl: config.publicBackendUrl,
@@ -815,10 +858,10 @@ export async function createCoreServices(
     ports.accountAdmission,
   );
   const authMiddleware = createAuthMiddleware(authService);
+  // Who tells an invited person: the composition root of a distribution
+  // registers its listener here, after this returns (see `AccountHooks`).
+  const accountHooks = new AccountHooks();
 
-  // Shared mutex so git and diff operations on the same workspace serialize
-  // against each other — a backup-reseed races a concurrent commit otherwise.
-  const workspaceMutex = new WorkspaceMutex();
   // Workflow lifecycle hooks — the ONE registry this composition shares
   // between GitService (advisory commit validation), the agent-access gate
   // (the blocking agentRead / preWrite hooks), and the composition root,
@@ -1278,26 +1321,31 @@ export async function createCoreServices(
   // judges them with the same access resolver the app file page uses, so what
   // a reader may see and change inside a chat is what they may see and change
   // in the app — never a second answer to the same question.
-  const embedService = new EmbedService(
-    // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
-    // the environment value, empty on a deployment that took the default or
-    // named it in setup, and every path the embed builds starts with it.
-    { ...config, kbDirName },
-    kb,
-    workspaceService,
-    accessControl,
-    authService,
-    workflowService,
-    gitService,
-    new AccountLinkService(db),
-    // The SAME extension-to-reader registry `read_file` dispatches on, so the
-    // embed answer to "is this text, or bytes a renderer fetches?" cannot
-    // disagree with what a read of the file returns.
-    createFileReaderRegistry(docExtractService),
-    // The SAME pre-disk gate the file editor and the agent tools run: a
-    // `roles.yaml` that would not parse is refused before it is written, from
-    // a chat exactly as from the app.
-    makeRolesYamlWriteValidator(kbDirName),
+  const embedService = composeEmbedService(
+    {
+      // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+      // the environment value, empty on a deployment that took the default or
+      // named it in setup, and every path the embed builds starts with it.
+      config: { ...config, kbDirName },
+      kb,
+      workspaceService,
+      accessControl,
+      authService,
+      workflowService,
+      gitService,
+      accountLinks: new AccountLinkService(db),
+      // The SAME extension-to-reader registry `read_file` dispatches on, so the
+      // embed answer to "is this text, or bytes a renderer fetches?" cannot
+      // disagree with what a read of the file returns.
+      readers: createFileReaderRegistry(docExtractService),
+      // The SAME pre-disk gate the file editor and the agent tools run: a
+      // `roles.yaml` that would not parse is refused before it is written, from
+      // a chat exactly as from the app.
+      validateWrite: makeRolesYamlWriteValidator(kbDirName),
+    },
+    // A node-id reference resolves only where a node graph is: the
+    // distribution's, when it registers one (`ports.embedNodeIdResolver`).
+    ports,
   );
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.
@@ -1582,6 +1630,7 @@ export async function createCoreServices(
     spillStore,
     agentUploadStore,
     agentDownloadStore,
+    patternMatcher,
     agentDownloadFetcher,
     docExtractService,
     accessControl,
@@ -1608,6 +1657,7 @@ export async function createCoreServices(
     githubFacade,
     githubFacadeCredentials,
     authService,
+    accountHooks,
     authMiddleware,
     accountErasureService,
     gitService,

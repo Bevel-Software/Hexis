@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { createShutdown, holdCommitWorkerLease, holdable, stopCore, withStartupTask, type LeasedWorker } from '../lifecycle.js';
+import { createShutdown, stopCore, withStartupTask, type LeasedWorker } from '../../index.js';
+// The lease helpers are the module's own, not on the entry point: their
+// ordering is pinned here, where the module is the unit under test.
+import { holdCommitWorkerLease, holdable } from '../lifecycle.js';
 import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
+import { WorkerPatternMatcher } from '../../modules/workspace/bounded-matcher.js';
 
 /** A lease the suite scripts: what each `tryAcquire` answers, and a way to lose it. */
 function fakeLease(answers: boolean[]) {
@@ -254,12 +258,12 @@ describe('createShutdown', () => {
             order.push('commitWorker.stop');
           },
         },
-        backgroundJobs: {
+        pluginJoinRequestJobs: {
           stopSweeping() {
-            order.push('backgroundJobs.stopSweeping');
+            order.push('pluginJoinRequestJobs.stopSweeping');
           },
           async drain() {
-            order.push('backgroundJobs.drain');
+            order.push('pluginJoinRequestJobs.drain');
           },
         },
         agentUploadStore: {
@@ -296,12 +300,12 @@ describe('createShutdown', () => {
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
-      'backgroundJobs.stopSweeping',
+      'pluginJoinRequestJobs.stopSweeping',
       // The upload sweep is stopped in the same breath as the other timers,
       // and drained before the pool goes: a graph that is stopping must not
       // leave a sweep walking the staging root its replacement will stage into.
       'agentUploadStore.stopSweeping',
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
       'commitWorker.stop',
       'db.end',
@@ -311,8 +315,8 @@ describe('createShutdown', () => {
   it('waits for the jobs a tick already started before the pool goes, within the budget', async () => {
     const d = deps();
     let release: () => void = () => undefined;
-    d.deps.backgroundJobs!.drain = () => {
-      d.order.push('backgroundJobs.drain');
+    d.deps.pluginJoinRequestJobs!.drain = () => {
+      d.order.push('pluginJoinRequestJobs.drain');
       return new Promise<void>((resolve) => {
         release = resolve;
       });
@@ -326,9 +330,9 @@ describe('createShutdown', () => {
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
-      'backgroundJobs.stopSweeping',
+      'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
     ]);
     release();
     await done;
@@ -348,7 +352,7 @@ describe('createShutdown', () => {
     // `commitWorker.stop` — which awaits an in-flight commit and can take
     // most of the shutdown budget — would start fresh clone/commit/push work
     // that the process exit immediately after kills mid-git.
-    const stopped = d.order.indexOf('backgroundJobs.stopSweeping');
+    const stopped = d.order.indexOf('pluginJoinRequestJobs.stopSweeping');
     expect(stopped).toBeGreaterThanOrEqual(0);
     expect(stopped).toBeLessThan(d.order.indexOf('commitWorker.stop'));
     expect(stopped).toBeLessThan(d.order.indexOf('db.end'));
@@ -357,7 +361,7 @@ describe('createShutdown', () => {
   it('shuts down cleanly when no background jobs were built yet', async () => {
     const d = deps();
     // A stop that lands mid-boot: the services exist, the jobs do not.
-    delete (d.deps as { backgroundJobs?: unknown }).backgroundJobs;
+    delete (d.deps as { pluginJoinRequestJobs?: unknown }).pluginJoinRequestJobs;
     delete (d.deps as { agentUploadStore?: unknown }).agentUploadStore;
     const shutdown = createShutdown(d.deps as never);
     const done = shutdown('SIGTERM');
@@ -374,8 +378,8 @@ describe('createShutdown', () => {
 
   it('does not wait past the budget for jobs that never finish, and still ends the pool', async () => {
     const d = deps();
-    d.deps.backgroundJobs!.drain = () => {
-      d.order.push('backgroundJobs.drain');
+    d.deps.pluginJoinRequestJobs!.drain = () => {
+      d.order.push('pluginJoinRequestJobs.drain');
       return new Promise<void>(() => undefined); // a clone that never returns
     };
     const shutdown = createShutdown(d.deps as never, { deadlineMs: 60 });
@@ -384,7 +388,7 @@ describe('createShutdown', () => {
     d.finishClose();
     await done;
     expect(d.order.slice(-4)).toEqual([
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
       'commitWorker.stop',
       'db.end',
@@ -400,9 +404,9 @@ describe('createShutdown', () => {
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
-      'backgroundJobs.stopSweeping',
+      'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
       'commitWorker.stop',
       'db.end',
@@ -432,12 +436,12 @@ describe('stopCore', () => {
             order.push('commitWorker.stop');
           },
         },
-        backgroundJobs: {
+        pluginJoinRequestJobs: {
           stopSweeping() {
-            order.push('backgroundJobs.stopSweeping');
+            order.push('pluginJoinRequestJobs.stopSweeping');
           },
           async drain() {
-            order.push('backgroundJobs.drain');
+            order.push('pluginJoinRequestJobs.drain');
           },
         },
         agentUploadStore: {
@@ -478,11 +482,11 @@ describe('stopCore', () => {
     const g = graph();
     await stopCore(g.core as never);
     expect(g.order).toEqual([
-      'backgroundJobs.stopSweeping',
+      'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'startupRetry.stop',
       'workflowService.stopTidying',
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
       'workflowService.drainTidy',
       'commitWorker.stop',
@@ -523,10 +527,10 @@ describe('stopCore', () => {
     const core = { ...g.core, startupRetry: null, secretsScope: undefined };
     await stopCore(core as never);
     expect(g.order).toEqual([
-      'backgroundJobs.stopSweeping',
+      'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'workflowService.stopTidying',
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
       'workflowService.drainTidy',
       'commitWorker.stop',
@@ -534,16 +538,31 @@ describe('stopCore', () => {
     ]);
   });
 
+  it('ends the grep matcher\'s workers, so an evicted graph leaves no search running behind it', async () => {
+    const g = graph();
+    const patternMatcher = new WorkerPatternMatcher();
+    // A search holding a worker for its whole 5 s budget when the graph is stopped.
+    const running = patternMatcher.search('^(a+)+$', '').matchingLines([`${'a'.repeat(39)}!`], 1);
+    await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    await stopCore({ ...g.core, patternMatcher } as never);
+    await expect(running).rejects.toMatchObject({ status: 503, details: { code: 'search_busy' } });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // Closed for good: nothing after the stop starts a worker.
+    await expect(patternMatcher.search('b', '').matchingLines(['b'], 1)).rejects.toMatchObject({ status: 503 });
+    expect(g.order.at(-1)).toBe('db.end');
+  });
+
   it('does not wait past the budget for a worker that never stops, and still ends the pool', async () => {
     const g = graph();
     const core = { ...g.core, commitWorker: { stop: () => new Promise<void>(() => undefined) } };
     await stopCore(core as never, { deadlineMs: 50 });
     expect(g.order).toEqual([
-      'backgroundJobs.stopSweeping',
+      'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'startupRetry.stop',
       'workflowService.stopTidying',
-      'backgroundJobs.drain',
+      'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
       'workflowService.drainTidy',
       'db.end',
