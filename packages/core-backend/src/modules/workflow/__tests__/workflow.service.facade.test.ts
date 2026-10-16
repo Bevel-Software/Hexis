@@ -350,7 +350,7 @@ describe('WorkflowService.updateBranch', () => {
     await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions: [{ path: 'knowledge-base/A.md', content: 'x' }] });
     const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
     const opts = (merge.mock.calls[0] as unknown[])[4] as { authorizeResolutions: (m: unknown) => Promise<void> };
-    await opts.authorizeResolutions({ ours: 'o', theirs: 't', conflicted: ['A.md'] });
+    await opts.authorizeResolutions({ ours: 'o', theirs: 't' });
     // Read on the draft, read at `origin/<from>` and the local ref as the compare route decides, then the change gate.
     expect(access.canRead).toHaveBeenCalledWith('ada%2Fdraft', 'ada@x.io', 'A.md');
     expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 'origin/target-company-state', 'ada@x.io', 'A.md');
@@ -359,7 +359,7 @@ describe('WorkflowService.updateBranch', () => {
     // Not readable on the draft: refused before the change gate is asked.
     (access.canRead as ReturnType<typeof vi.fn>).mockResolvedValue(false);
     asked.length = 0;
-    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't', conflicted: ['A.md'] })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
+    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
     expect(asked).toEqual([]);
   });
 

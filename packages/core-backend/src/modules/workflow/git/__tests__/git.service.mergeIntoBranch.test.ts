@@ -384,11 +384,11 @@ describe('GitService.mergeIntoBranch', () => {
     });
   });
 
-  it('asks the resolution authorizer inside the merge with the commits fetched, and undoes the merge when it refuses', async () => {
+  it('asks the resolution authorizer inside the reservation with the commits fetched, before the merge touches the checkout', async () => {
     const { repo, pusher } = await seed(root);
     const theirs = await pushOn(pusher, TARGET, { 'shared.md': 'line 1\nline 2 from target\nline 3\n' }, 'target edits line 2');
     const ours = await commitLocally(repo, { 'shared.md': 'line 1\nline 2 from draft\nline 3\n' }, 'draft edits line 2');
-    const asked: unknown[] = [];
+    const asked: Array<{ merge: unknown; head: string; mergeHead: boolean; sharedOnDisk: string }> = [];
     const svc = service();
     const err = await svc
       .mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
@@ -396,14 +396,22 @@ describe('GitService.mergeIntoBranch', () => {
         body: 'b',
         resolutions: [{ path: 'shared.md', content: 'resolved\n' }],
         authorizeResolutions: async (merge) => {
-          asked.push(merge);
+          // What the checkout holds while the question is asked: the draft's
+          // own commit, clean, nothing of the merge on disk yet — so a rule
+          // read from it is the draft's, not a conflict-marked one.
+          asked.push({
+            merge,
+            head: (await gitOut(repo, ['rev-parse', 'HEAD'])).trim(),
+            mergeHead: await gitOut(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(() => true, () => false),
+            sharedOnDisk: await fs.readFile(path.join(repo, 'shared.md'), 'utf-8'),
+          });
           throw new WorkflowDomainError('not yours to settle', 403);
         },
       })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(WorkflowDomainError);
-    // Asked with the target's tip as fetched by this very merge, and the conflicted set.
-    expect(asked).toEqual([{ ours, theirs, conflicted: ['shared.md'] }]);
+    // Asked with the target's tip as fetched by this very merge.
+    expect(asked).toEqual([{ merge: { ours, theirs }, head: ours, mergeHead: false, sharedOnDisk: 'line 1\nline 2 from draft\nline 3\n' }]);
     expect((await gitOut(repo, ['rev-parse', 'HEAD'])).trim()).toBe(ours);
     expect((await gitOut(repo, ['status', '--porcelain'])).trim()).toBe('');
     await expect(gitOut(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).rejects.toThrow();

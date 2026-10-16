@@ -175,9 +175,10 @@ export interface IGitService {
    * published as any local commit is. Without `publish` nothing is pushed
    * and the caller publishes. Resolutions come with `authorizeResolutions`
    * (required with them, refused without): it is asked inside the
-   * reservation, after the fetch, with the two commits the merge is between
-   * and before any resolution is written; throwing refuses and undoes the
-   * merge.
+   * reservation, after the fetch and before the merge touches the checkout,
+   * with the two commits the merge is between — the checkout clean at
+   * `ours`, so a rule read from it is the branch's own commit's, never a
+   * tree mid-merge; throwing refuses before anything is written.
    *
    * Refused when the workspace is not on `branch`, or holds edits not yet
    * committed (`kind: 'branch-busy'`, 409): a merge over them could lose them.
@@ -191,13 +192,13 @@ export interface IGitService {
       | { resolutions?: undefined; authorizeResolutions?: undefined }
       | {
           resolutions: MergeResolution[];
-          authorizeResolutions: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
+          authorizeResolutions: (merge: { ours: string; theirs: string }) => Promise<void>;
         }
     ),
   ): Promise<MergeIntoBranchOutcome>;
   /**
-   * One file as `branch` has it (its local head, else `origin/<branch>`),
-   * with the commit it was read at. `content` is null when the file is not
+   * One file as `branch` has PUBLISHED it (`origin/<branch>`; its local head
+   * only for a branch origin does not have), with the commit it was read at. `content` is null when the file is not
    * there; a path that is a folder at that commit is refused, as every
    * per-file history read refuses it. Access to the file at that commit is
    * the caller's to check.

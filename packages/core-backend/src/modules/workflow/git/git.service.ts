@@ -1565,7 +1565,7 @@ export class GitService implements IGitService {
       body: string;
       resolutions?: MergeResolution[];
       publish?: boolean;
-      authorizeResolutions?: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
+      authorizeResolutions?: (merge: { ours: string; theirs: string }) => Promise<void>;
     },
   ): Promise<MergeIntoBranchOutcome> {
     assertValidBranchName(branch);
@@ -1643,14 +1643,16 @@ export class GitService implements IGitService {
       describeConflicts: boolean;
       publish: boolean;
       /**
-       * Decide whether the caller may settle the conflicts the resolutions
-       * name, given the two commits the merge is actually between — asked
-       * INSIDE the reservation, after the fetch, so the rules read are those
-       * of the source commit being merged, not of a tracking ref from before
-       * it moved. Throwing refuses, and refuses before any resolution is
-       * written; the merge is undone.
+       * Decide whether the caller may settle the paths the resolutions name,
+       * given the two commits the merge is actually between — asked INSIDE
+       * the reservation, after the fetch and BEFORE the merge touches the
+       * checkout: the source rules read are those of the commit being
+       * merged, not of a tracking ref from before it moved, and the
+       * checkout's are the branch's own commit (`ours`), clean — never a
+       * tree mid-merge, where a rule file's conflict markers or merged
+       * content would decide. Throwing refuses before anything is written.
        */
-      authorizeResolutions?: (merge: { ours: string; theirs: string; conflicted: string[] }) => Promise<void>;
+      authorizeResolutions?: (merge: { ours: string; theirs: string }) => Promise<void>;
     },
   ): Promise<MergeIntoBranchOutcome> {
     const theirsRef = `refs/remotes/origin/${fromBranch}`;
@@ -1680,6 +1682,10 @@ export class GitService implements IGitService {
     await this.git(cwd, ['fetch', '--no-write-fetch-head', 'origin', `+refs/heads/${fromBranch}:${theirsRef}`]);
     const ours = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
     const theirs = (await this.git(cwd, ['rev-parse', theirsRef])).stdout.trim();
+    // Resolutions are authorized here, on the clean checkout at `ours` with
+    // `theirs` fetched, before the merge changes a single file. Which of
+    // them are conflicted is matched after the merge; a stray one is refused.
+    if (opts.resolutions.size > 0 && opts.authorizeResolutions) await opts.authorizeResolutions({ ours, theirs });
 
     let mergeStdout = '';
     try {
@@ -1721,7 +1727,6 @@ export class GitService implements IGitService {
           if (opts.describeConflicts) for (const p of conflicted) files.push(await this.describeConflict(cwd, p));
           return { done: false, outcome: { kind: 'conflicts', from: fromBranch, mergeBase, ours, theirs, files, unresolved } };
         }
-        if (opts.authorizeResolutions) await opts.authorizeResolutions({ ours, theirs, conflicted });
         for (const p of conflicted) await this.applyResolution(cwd, opts.resolutions.get(p)!);
         const still = await this.conflictedPaths(cwd);
         if (still.length > 0) throw new Error(`still conflicted after the resolutions were applied: ${still.join(', ')}`);

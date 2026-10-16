@@ -4744,12 +4744,14 @@ export class WorkflowService implements IWorkflowService {
         resolutions,
         publish: true,
         // A resolution writes a file on the draft from what both branches
-        // hold of it. It is authorized inside the merge, against the source
-        // commit actually merged: the caller must read the file on the draft
-        // and on `from` as fetched (`readableOnBranch`, the compare route's
-        // rule), and may change it on the draft by the one rule every draft
-        // write takes — the change gate `acquireLock` asks, not a write
-        // permission a draft never requires.
+        // hold of it. It is authorized inside the merge's reservation, after
+        // the fetch and before the merge touches the checkout — the draft's
+        // tree clean at its own commit, so the rules read from it are the
+        // draft's, never a rule file mid-merge: the caller must read the
+        // file on the draft and on `from` as fetched (`readableOnBranch`, the
+        // compare route's rule), and may change it on the draft by the one
+        // rule every draft write takes — the change gate `acquireLock` asks,
+        // not a write permission a draft never requires.
         authorizeResolutions: async () => {
           for (const r of resolutions) {
             const rel = r.path.startsWith(`${this.kbDirName}/`) ? r.path.slice(this.kbDirName.length + 1) : r.path;
