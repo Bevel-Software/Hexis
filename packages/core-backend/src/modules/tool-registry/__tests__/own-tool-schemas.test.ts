@@ -59,7 +59,7 @@ const CORE_SERVER_SOURCE = new URL('../../../core/create-core-server.ts', import
 const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) => void }> = [
   {
     name: 'registerWorkflowTools',
-    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext(), async () => true, { canRead: async () => true, canReadAtRef: async () => true } as never),
+    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext(), async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map() } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never),
   },
   {
     name: 'registerChangeRequestReadTools',

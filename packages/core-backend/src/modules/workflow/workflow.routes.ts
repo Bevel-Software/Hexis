@@ -38,6 +38,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertReadableOnBranch } from './read-on-branch.js';
 import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
@@ -413,39 +414,23 @@ export function createWorkflowRoutes(
     // The other history endpoints serve commits of the URL workspace's own
     // branch, so its working-tree verdict covers what they return. This one
     // serves content of TWO caller-named branches — the verdict must come
-    // from the refs actually being served, or a caller could pick a
-    // workspace whose tree grants what the compared branches' trees deny.
-    //
-    // The comparison prefers a LOCAL ref (and the working tree for the
-    // checked-out branch) over `origin/<branch>`, so both candidate refs are
-    // authorized: every ref that RESOLVES must grant the read, and a branch
-    // none of whose refs resolve is denied — never serve a ref that cannot
-    // be authorized. (The working-tree side is additionally covered by the
-    // workspace `canRead` above.)
+    // from the refs actually being served (`readableOnBranch`, the one rule
+    // this route and the agent's history tools share), or a caller could
+    // pick a workspace whose tree grants what the compared branches' trees
+    // deny. (The working-tree side is additionally covered by the workspace
+    // `canRead` above.) An access-model failure keeps its own status: an
+    // unreadable access tree is the documented 503 a client retries, not a
+    // permanent 403 denial.
     {
       const user = await requireUser(req, res);
       if (!user) return;
       const repoRelative = toKbRelative(pathParam, kbDirName)!;
       for (const branch of [fromBranch, toBranch]) {
-        const verdicts: (boolean | null)[] = [];
-        for (const ref of [`origin/${branch}`, branch]) {
-          try {
-            verdicts.push(await accessControl.canReadAtRef(req.params.id, ref, user.email, repoRelative));
-          } catch (err) {
-            // An access-model FAILURE is not an unresolvable ref: mapped to
-            // null it would let the other candidate's grant serve a ref
-            // whose authorization errored. Fail closed — but keep the
-            // error's own status: an unreadable access tree is the
-            // documented 503 a client retries, not a permanent 403 denial.
-            const { status, body } = toHttpError(err);
-            res.status(status).json(body);
-            return;
-          }
-        }
-        const denied = verdicts.some((v) => v === false);
-        const unresolvable = verdicts.every((v) => v === null);
-        if (denied || unresolvable) {
-          res.status(403).json({ error: `You don't have permission to read "${pathParam}" on "${branch}".` });
+        try {
+          await assertReadableOnBranch(accessControl, req.params.id, user.email, repoRelative, branch, pathParam);
+        } catch (err) {
+          const { status, body } = toHttpError(err);
+          res.status(status).json(body);
           return;
         }
       }

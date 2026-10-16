@@ -296,7 +296,7 @@ describe('WorkflowService.updateBranch', () => {
     expect(git.push).not.toHaveBeenCalled();
   });
 
-  it('merges the named branch into the draft as the user, then publishes the draft', async () => {
+  it('merges the named branch into the draft as the user, published inside the merge\'s own reservation', async () => {
     const git = gitThatMerges({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
     const svc = build(git);
     const resolutions = [{ path: 'A.md', content: 'resolved\n' }];
@@ -308,12 +308,23 @@ describe('WorkflowService.updateBranch', () => {
       'ada/draft',
       'target-company-state',
       user,
-      expect.objectContaining({ subject: 'Merge target-company-state into ada/draft', resolutions }),
+      expect.objectContaining({ subject: 'Merge target-company-state into ada/draft', resolutions, publish: true }),
     );
     expect((merge.mock.calls[0] as unknown[])[4]).toMatchObject({ body: expect.stringContaining('A.md') });
-    expect(git.push).toHaveBeenCalledWith('ada%2Fdraft', user);
-    // Merged first, published after.
-    expect(merge.mock.invocationCallOrder[0]).toBeLessThan((git.push as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+    // The git layer publishes while it still holds the workspace; no second push from here.
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it('hands a replay that conflicted during the publish to recovery, as every pull does', async () => {
+    const git = gitThatMerges(null);
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi
+      .fn()
+      .mockRejectedValue(new PullRebaseConflictError('ada/draft', ['A.md'], 'replay conflicted'));
+    const pending = makePendingCommits();
+    await expect(build(git, pending).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' })).rejects.toBeInstanceOf(
+      PullRebaseConflictError,
+    );
+    expect(pending.enqueueIfAbsent).toHaveBeenCalled();
   });
 
   it('takes the draft\'s own shared state when no source is named, and publishes nothing on conflicts', async () => {

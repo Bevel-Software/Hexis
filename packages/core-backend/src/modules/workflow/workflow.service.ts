@@ -4728,13 +4728,22 @@ export class WorkflowService implements IWorkflowService {
       (resolutions.length > 0
         ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
         : '');
-    const outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, { subject, body, resolutions });
-    if (outcome.kind === 'merged') {
-      // The same push every save and share makes: a rejection runs the
-      // cooperative recovery (pull with the merge preserved, push again), and
-      // a refusal answers as a refused share does, the commit kept locally.
-      await this.pushWithRecovery(workspaceId, branch, '(update)', user);
+    let outcome: UpdateBranchOutcome;
+    try {
+      // Published inside the merge's own reservation (`publish`): nothing
+      // lands between the merge commit and its push. A push the host
+      // rejects is retried with the merge replayed on the moved branch; a
+      // replay that conflicts is the stranded-commit case every pull hands
+      // to recovery.
+      outcome = await this.git.mergeIntoBranch(workspaceId, branch, from, user, { subject, body, resolutions, publish: true });
+    } catch (err) {
+      if (err instanceof PullRebaseConflictError) {
+        this.noteGitSyncFailed(workspaceId, branch, err, { paths: err.conflictedPaths, message: err.message });
+        await this.queuePullConflictRecovery(workspaceId, err, user);
+      }
+      throw err;
     }
+    if (outcome.kind === 'merged') this.noteGitSyncOk(workspaceId, branch);
     return outcome;
   }
 
