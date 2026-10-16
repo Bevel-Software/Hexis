@@ -14,6 +14,7 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
+import { WorkerPatternMatcher, type WorkerPatternMatcherOptions } from '../bounded-matcher.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
 import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
@@ -138,6 +139,12 @@ let callerSource: 'internal' | 'external' | 'session' = 'internal';
  * ONCE (it clears itself), so a test's later writes are ordinary ones.
  */
 let raceHook: (() => Promise<void>) | null = null;
+/**
+ * The grep matcher `start()` wires, built from `matcherOptions` (the
+ * defaults, unless a test narrows the pool) and closed after each test.
+ */
+let patternMatcher: WorkerPatternMatcher | undefined;
+let matcherOptions: WorkerPatternMatcherOptions = {};
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -146,6 +153,8 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  await patternMatcher?.close();
+  patternMatcher = new WorkerPatternMatcher(matcherOptions);
   hooks = new WorkflowHooks();
   notes = new ToolDescriptionNotes();
   callerSource = 'internal';
@@ -307,7 +316,7 @@ async function start(
     recoveryBotEmail: RECOVERY_BOT,
     hooks,
     notes,
-  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText);
+  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText, undefined, undefined, undefined, patternMatcher);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
@@ -338,10 +347,13 @@ const post = (url: string, body: unknown = {}) =>
 beforeEach(() => {
   /* fresh per test via start() */
   guideText = 'THE PLATFORM GUIDE\n';
+  matcherOptions = {};
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
   httpServer = undefined;
+  await patternMatcher?.close();
+  patternMatcher = undefined;
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = '';
@@ -1251,6 +1263,123 @@ describe('grep with a path that names a file', () => {
     const res = await grep(base, { pattern: 'needle', path: 'notes' });
     expect(res.matches.map((m) => m.path).sort()).toEqual([`${KB_DIR}/notes/one.md`, `${KB_DIR}/notes/sub/two.md`]);
     expect(res.note).toBeUndefined();
+  });
+});
+
+/**
+ * A caller's pattern runs off the event loop under a budget (WorkerPatternMatcher):
+ * one that backtracks for ever is stopped with a worded 400, and every other
+ * request keeps being served meanwhile — here, a `read_file` on the same
+ * server, which shares the one loop the pattern used to hold.
+ */
+describe('a pattern too expensive to match', () => {
+  const LONG_LINE = `${'a'.repeat(39)}!`;
+
+  it('answers 400 "too expensive" fast over a 40-character line, while other calls stay under a second', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `intro\n${LONG_LINE}\n`);
+    const started = Date.now();
+    const searching = post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$', path: `${KB_DIR}/redos.md` }).then(
+      async (res) => ({ status: res.status, body: (await res.json()) as { error: string; code?: string }, took: Date.now() - started }),
+    );
+    // Probe while the search runs: each read must answer within a second.
+    const probes: number[] = [];
+    let done = false;
+    void searching.finally(() => (done = true));
+    while (!done) {
+      const t = Date.now();
+      const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` });
+      expect(res.status).toBe(200);
+      probes.push(Date.now() - t);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const { status, body, took } = await searching;
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/^Pattern too expensive: /);
+    expect(body.code).toBe('pattern_too_expensive');
+    expect(body.error).toContain("this search's 5 s budget");
+    expect(took).toBeLessThan(5_000 + 2_000);
+    expect(probes.length).toBeGreaterThan(0);
+    expect(Math.max(...probes)).toBeLessThan(1_000);
+  });
+
+  it('stops it in a directory walk too, rather than skipping the file as unreadable', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `${LONG_LINE}\n`);
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$' });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/^Pattern too expensive: /);
+  });
+
+  it('answers a directory walk 503 when no worker is free, rather than skipping every file as unreadable', async () => {
+    // One worker and room for one search to wait: two expensive greps fill both.
+    matcherOptions = { budgetMs: 1_000, poolMax: 1, maxWaiting: 1 };
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `${LONG_LINE}\n`);
+    await fs.writeFile(`${KB_DIR}/hit.md`, 'needle\n');
+    const expensive = () =>
+      post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$', path: `${KB_DIR}/redos.md` }).then((r) => r.status);
+    const holding = expensive();
+    await new Promise((r) => setTimeout(r, 200));
+    const queued = expensive();
+    await new Promise((r) => setTimeout(r, 100));
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { code?: string }).code).toBe('search_busy');
+    // The two that held the pool answered as they always would, and it serves again after.
+    expect(await Promise.all([holding, queued])).toEqual([400, 400]);
+    const after = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' });
+    expect(after.status).toBe(200);
+  });
+
+  it('spends one budget across every file a search reads: each alone fits, all of them together do not', async () => {
+    // How long the pattern takes over one line IN A WORKER, which backtracks at
+    // its own pace, not this thread's: once on a fresh worker (`first`, which
+    // can be several times slower) and then again on the same one (`again`).
+    // Timed through a probe matcher of the same kind, on a line long enough
+    // that `again` is at least 50 ms.
+    let line = '';
+    let first = 0;
+    let again = 0;
+    for (let n = 16; again < 50; n++) {
+      line = `${'a'.repeat(n)}!`;
+      const probe = new WorkerPatternMatcher();
+      try {
+        await probe.search('x', '').matchingLines(['x'], 1); // the worker is up before anything is timed
+        let t = performance.now();
+        await probe.search('^(a+)+$', '').matchingLines([line], 1);
+        first = performance.now() - t;
+        t = performance.now();
+        await probe.search('^(a+)+$', '').matchingLines([line], 1);
+        again = performance.now() - t;
+      } finally {
+        await probe.close();
+      }
+    }
+    // A budget well above what any one file costs, and enough files that
+    // together they cost about twice the budget.
+    const budgetMs = Math.ceil(Math.max(first, again) * 1.5) + 200;
+    const files = Math.ceil((2 * budgetMs) / again);
+    matcherOptions = { budgetMs };
+    const base = await start();
+    for (let i = 1; i <= files; i++) await fs.writeFile(`${KB_DIR}/slow-${String(i).padStart(3, '0')}.md`, `${line}\n`);
+    const all = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$' });
+    expect(all.status).toBe(400);
+    const body = (await all.json()) as { error: string; code?: string };
+    expect(body.code).toBe('pattern_too_expensive');
+    expect(body.error).toMatch(/^Pattern too expensive: /);
+    // Any one of the same files, searched alone, fits the same budget.
+    const one = await post(`${base}/api/agent/tools/grep`, { pattern: '^(a+)+$', path: `${KB_DIR}/slow-001.md` });
+    expect(one.status).toBe(200);
+    expect(((await one.json()) as { matches: unknown[] }).matches).toEqual([]);
+  });
+
+  it('a control pattern over the same line still matches', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/redos.md`, `intro\n${LONG_LINE}\n`);
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: '^a+!$', path: `${KB_DIR}/redos.md` });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { matches: unknown[] }).matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 2, text: LONG_LINE }]);
   });
 });
 
@@ -2375,6 +2504,16 @@ describe('branch is a required parameter in the tool contract', () => {
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      // So `grep` is mounted; it spawns no worker, as nothing here searches.
+      new WorkerPatternMatcher(),
     );
     return registry;
   }

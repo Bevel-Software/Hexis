@@ -68,6 +68,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { endsTheSearch, type IPatternMatcher, type IPatternSearch } from './pattern-matcher.contract.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
@@ -672,7 +673,7 @@ type FileGrepOutcome =
 async function grepOneFile(
   fs: LocalFilesystem,
   path: string,
-  re: RegExp,
+  matcher: IPatternSearch,
   out: { path: string; line: number; text: string }[],
   max: number,
   docs: DocGrepState,
@@ -695,9 +696,10 @@ async function grepOneFile(
   }
   if (content === null) return 'no-text';
   const lines = content.split('\n');
-  for (let i = 0; i < lines.length && out.length < max; i++) {
-    re.lastIndex = 0;
-    if (re.test(lines[i])) out.push({ path, line: i + 1, text: lines[i].slice(0, 300) });
+  // matchingLines posts these to the worker in bounded batches, so no one
+  // copy of a large file runs on the request thread.
+  for (const i of await matcher.matchingLines(lines, max - out.length)) {
+    out.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
   }
   return 'searched';
 }
@@ -740,7 +742,7 @@ async function searchRootKind(
 async function grepWalk(
   fs: LocalFilesystem,
   dir: string,
-  re: RegExp,
+  matcher: IPatternSearch,
   out: { path: string; line: number; text: string }[],
   max: number,
   depth: number,
@@ -766,7 +768,7 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+      await grepWalk(fs, p, matcher, out, max, depth + 1, gate, notifyRead, docs, skip);
     } else if (skip(p)) {
       continue;
     } else {
@@ -776,9 +778,12 @@ async function grepWalk(
       await notifyRead(p);
       // A file the walk cannot read is silently skipped: one unreadable entry
       // must not fail a search over the whole tree.
+      // A pattern too expensive to finish, or no worker free to run it, is not
+      // an unreadable file: either ends the whole search.
       try {
-        await grepOneFile(fs, p, re, out, max, docs);
-      } catch {
+        await grepOneFile(fs, p, matcher, out, max, docs);
+      } catch (err) {
+        if (endsTheSearch(err)) throw err;
         continue;
       }
     }
@@ -934,6 +939,13 @@ export function registerWorkspaceTools(
    * file primitives; without it `start_session` answers the id alone.
    */
   disk?: ITreeWalker,
+  /**
+   * What runs a caller's `grep` pattern off the request thread, under a
+   * budget (see `pattern-matcher.contract.ts`). Owned by the composition
+   * root, which closes it with the graph. Optional for the harnesses about the
+   * other file primitives; without it `grep` is not mounted.
+   */
+  patternMatcher?: IPatternMatcher,
 ): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
@@ -2374,171 +2386,172 @@ export function registerWorkspaceTools(
     },
   });
 
-  mount({
-    name: 'grep',
-    gated: true,
-    description:
-      'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
-    inputs: {
-      type: 'object',
-      properties: {
-        branch: BRANCH_INPUT,
-        pattern: str('JavaScript regular expression.'),
-        path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
-        ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
-        max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
-        sessionId: SESSION_ID_INPUT,
-      },
-      required: ['branch', 'pattern'],
-      additionalProperties: false,
-    },
-    outputs: {
-      type: 'object',
-      properties: {
-        matches: {
-          type: 'array',
-          description: 'Matching lines (capped by `max_results`).',
-          items: {
-            type: 'object',
-            properties: { path: str('Workspace-relative file path.'), line: int('1-based line number.'), text: str('The matching line (truncated to 300 chars).') },
-            required: ['path', 'line', 'text'],
-          },
+  // Mounted only when the composition supplied a matcher — see the
+  // `patternMatcher` parameter. Core always does.
+  if (patternMatcher) {
+    const patterns = patternMatcher;
+    mount({
+      name: 'grep',
+      gated: true,
+      description:
+        'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
+      inputs: {
+        type: 'object',
+        properties: {
+          branch: BRANCH_INPUT,
+          pattern: str('JavaScript regular expression.'),
+          path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
+          ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
+          max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
+          sessionId: SESSION_ID_INPUT,
         },
-        truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
-        note: str('Present when the empty/partial result needs explaining: a `path` naming a file with no searchable text (image, binary, corrupt document), or documents (office/PDF/email files) left unsearched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover those.'),
+        required: ['branch', 'pattern'],
+        additionalProperties: false,
       },
-      required: ['matches', 'truncated'],
-    },
-    write: false,
-    handler: async (a, ctx: ToolContext) => {
-      let re: RegExp;
-      try {
-        re = new RegExp(a.pattern as string, a.ignore_case ? 'i' : '');
-      } catch (err) {
-        throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
-      }
-      // No path means the whole REPOSITORY, not the workspace directory above
-      // it. The workspace root also holds whatever an older build left beside
-      // the checkout, and the read gate has no rules for a path outside the
-      // repository — it answers "readable" — so a walk from there would hand
-      // any caller the contents of every stray, including documents that were
-      // uploaded to a restricted folder and landed beside it instead. The
-      // boot note names those for an operator; no tool reads them.
-      // An EMPTY string is the same absence: the normaliser leaves it alone
-      // (an empty path is the handler's to explain), and here it would
-      // otherwise name the workspace directory by another spelling.
-      const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
-      const fs = await ctx.getFilesystem(a.branch as string);
-      const gate = readGateFor(a.branch as string, ctx);
-      const out: { path: string; line: number; text: string }[] = [];
-      const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
-      const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
-      // The empty root is the workspace itself — always a directory, and never
-      // worth a stat.
-      // A placeholder named on its own is searched as what it is to every
-      // other tool: nothing.
-      const kind =
-        searchRoot === ''
-          ? 'directory'
-          : isFolderPlaceholder(searchRoot)
-            ? 'missing'
-            : await searchRootKind(fs, searchRoot);
-      /** Why a single-file search found nothing, when "no matches" would be a lie. */
-      let fileNote: string | undefined;
-      // The guide is searched where it is read: a search of the repository
-      // root covers it, and a search of its own path is a search of what
-      // `read_file` answers there. The composed text is what is searched —
-      // the knowledge base's own readable file first, then the platform's
-      // guide — under the guide's path and with the line numbers a read of
-      // it gives. The walk leaves that one file to this: a match the walk
-      // made there would be the same line again, and one it COUNTED against
-      // `max_results` would be a file later in the tree never searched while
-      // the answer says nothing was cut. A file the caller may not read is
-      // absent from it, as it is from the read.
-      const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
-      const rel = toKbRelative(searchRoot, kbDirName);
-      const coversGuide =
-        agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
-      // The search root goes to the read hook — once, and only when it is
-      // repository content: a folder, or a file of the knowledge base's own.
-      // The guide's own path is not told here, because `guideAt` tells the
-      // hook of the organisation's file there exactly as `read_file` does
-      // (after the gate), and the platform's guide alone is nobody's file to
-      // note. Each file the walk opens goes to the hook per file below, so a
-      // hook sees every path a grep reached rather than only its root.
-      if (!(coversGuide && kind !== 'directory')) {
-        await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
-      }
-      if (coversGuide) {
-        if (kind === 'directory') {
+      outputs: {
+        type: 'object',
+        properties: {
+          matches: {
+            type: 'array',
+            description: 'Matching lines (capped by `max_results`).',
+            items: {
+              type: 'object',
+              properties: { path: str('Workspace-relative file path.'), line: int('1-based line number.'), text: str('The matching line (truncated to 300 chars).') },
+              required: ['path', 'line', 'text'],
+            },
+          },
+          truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
+          note: str('Present when the empty/partial result needs explaining: a `path` naming a file with no searchable text (image, binary, corrupt document), or documents (office/PDF/email files) left unsearched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover those.'),
+        },
+        required: ['matches', 'truncated'],
+      },
+      write: false,
+      handler: async (a, ctx: ToolContext) => {
+        // The caller's pattern never runs on the request thread: a backtracking
+        // one would hold the event loop for everyone (see IPatternMatcher).
+        const matcher = patterns.search(a.pattern as string, a.ignore_case ? 'i' : '');
+        // No path means the whole REPOSITORY, not the workspace directory above
+        // it. The workspace root also holds whatever an older build left beside
+        // the checkout, and the read gate has no rules for a path outside the
+        // repository — it answers "readable" — so a walk from there would hand
+        // any caller the contents of every stray, including documents that were
+        // uploaded to a restricted folder and landed beside it instead. The
+        // boot note names those for an operator; no tool reads them.
+        // An EMPTY string is the same absence: the normaliser leaves it alone
+        // (an empty path is the handler's to explain), and here it would
+        // otherwise name the workspace directory by another spelling.
+        const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
+        const fs = await ctx.getFilesystem(a.branch as string);
+        const gate = readGateFor(a.branch as string, ctx);
+        const out: { path: string; line: number; text: string }[] = [];
+        const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
+        const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
+        // The empty root is the workspace itself — always a directory, and never
+        // worth a stat.
+        // A placeholder named on its own is searched as what it is to every
+        // other tool: nothing.
+        const kind =
+          searchRoot === ''
+            ? 'directory'
+            : isFolderPlaceholder(searchRoot)
+              ? 'missing'
+              : await searchRootKind(fs, searchRoot);
+        /** Why a single-file search found nothing, when "no matches" would be a lie. */
+        let fileNote: string | undefined;
+        // The guide is searched where it is read: a search of the repository
+        // root covers it, and a search of its own path is a search of what
+        // `read_file` answers there. The composed text is what is searched —
+        // the knowledge base's own readable file first, then the platform's
+        // guide — under the guide's path and with the line numbers a read of
+        // it gives. The walk leaves that one file to this: a match the walk
+        // made there would be the same line again, and one it COUNTED against
+        // `max_results` would be a file later in the tree never searched while
+        // the answer says nothing was cut. A file the caller may not read is
+        // absent from it, as it is from the read.
+        const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
+        const rel = toKbRelative(searchRoot, kbDirName);
+        const coversGuide =
+          agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
+        // The search root goes to the read hook — once, and only when it is
+        // repository content: a folder, or a file of the knowledge base's own.
+        // The guide's own path is not told here, because `guideAt` tells the
+        // hook of the organisation's file there exactly as `read_file` does
+        // (after the gate), and the platform's guide alone is nobody's file to
+        // note. Each file the walk opens goes to the hook per file below, so a
+        // hook sees every path a grep reached rather than only its root.
+        if (!(coversGuide && kind !== 'directory')) {
+          await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
+        }
+        if (coversGuide) {
+          if (kind === 'directory') {
+            await grepWalk(
+              fs,
+              searchRoot,
+              matcher,
+              out,
+              max,
+              0,
+              gate,
+              (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
+              docs,
+              (p) => p === guidePath,
+            );
+          }
+          const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
+          for (const i of await matcher.matchingLines(lines, max - out.length)) {
+            out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
+          }
+        } else if (kind === 'directory') {
           await grepWalk(
             fs,
             searchRoot,
-            re,
+            matcher,
             out,
             max,
             0,
             gate,
             (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
             docs,
-            (p) => p === guidePath,
           );
+        } else {
+          // Not a directory: the permission verdict comes BEFORE every other
+          // one, and it is `read_file`'s own gate on the same path — so grep
+          // answers a path the caller may not read exactly as read_file does,
+          // and can never confirm the existence of one read_file would hide.
+          // That ordering holds even when the stat itself failed: a denied path
+          // gets the 403, never the filesystem's complaint about it.
+          await assertCanRead(gate, searchRoot);
+          if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
+          // A named FILE is searched directly: routing it through the walk would
+          // fail its readdir and answer an empty match list, which the caller
+          // cannot tell from "the pattern is not in this file".
+          const outcome = await orNotFound(
+            searchRoot,
+            () => grepOneFile(fs, searchRoot, matcher, out, max, docs),
+            'Nothing to search',
+          );
+          if (outcome === 'no-text') {
+            fileNote =
+              `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
+              'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
+              'because the pattern is absent.';
+          }
         }
-        const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
-        for (let i = 0; i < lines.length && out.length < max; i++) {
-          re.lastIndex = 0;
-          if (re.test(lines[i]!)) out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
-        }
-      } else if (kind === 'directory') {
-        await grepWalk(
-          fs,
-          searchRoot,
-          re,
-          out,
-          max,
-          0,
-          gate,
-          (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
-          docs,
-        );
-      } else {
-        // Not a directory: the permission verdict comes BEFORE every other
-        // one, and it is `read_file`'s own gate on the same path — so grep
-        // answers a path the caller may not read exactly as read_file does,
-        // and can never confirm the existence of one read_file would hide.
-        // That ordering holds even when the stat itself failed: a denied path
-        // gets the 403, never the filesystem's complaint about it.
-        await assertCanRead(gate, searchRoot);
-        if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
-        // A named FILE is searched directly: routing it through the walk would
-        // fail its readdir and answer an empty match list, which the caller
-        // cannot tell from "the pattern is not in this file".
-        const outcome = await orNotFound(
-          searchRoot,
-          () => grepOneFile(fs, searchRoot, re, out, max, docs),
-          'Nothing to search',
-        );
-        if (outcome === 'no-text') {
-          fileNote =
-            `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
-            'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
-            'because the pattern is absent.';
-        }
-      }
-      const note =
-        fileNote ??
-        (docs.skippedUncached > 0
-          ? `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
-            `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
-            'same grep to extract and search the next batch.'
-          : undefined);
-      return {
-        matches: out,
-        truncated: out.length >= max,
-        ...(note !== undefined ? { note } : {}),
-      };
-    },
-  });
+        const note =
+          fileNote ??
+          (docs.skippedUncached > 0
+            ? `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
+              `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
+              'same grep to extract and search the next batch.'
+            : undefined);
+        return {
+          matches: out,
+          truncated: out.length >= max,
+          ...(note !== undefined ? { note } : {}),
+        };
+      },
+    });
+  }
 
   // ── writes (through the lock/commit pipeline) ───────────────────────────
   mount({
