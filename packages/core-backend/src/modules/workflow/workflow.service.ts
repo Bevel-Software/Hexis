@@ -70,7 +70,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { ReadOnBranchDeniedError } from './read-on-branch.js';
+import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -4799,12 +4799,10 @@ export class WorkflowService implements IWorkflowService {
             const rel = r.path.startsWith(`${this.kbDirName}/`) ? r.path.slice(this.kbDirName.length + 1) : r.path;
             // At the two COMMITS the merge is of — pinned by the merge itself,
             // never at a ref a concurrent fetch can move between this verdict
-            // and the merge. A commit whose rules cannot be read (null) grants
-            // nothing.
-            const readable =
-              (await this.accessControl.canReadAtRef(workspaceId, ours, user.email, rel)) === true &&
-              (await this.accessControl.canReadAtRef(workspaceId, theirs, user.email, rel)) === true;
-            if (!readable) throw new ReadOnBranchDeniedError(rel, from);
+            // and the merge — by the one rule the tool shows a conflict by.
+            if (!(await readableAtCommits(this.accessControl, workspaceId, user.email, rel, [ours, theirs]))) {
+              throw new ReadOnBranchDeniedError(rel, from);
+            }
             await this.changeGate.assertMayChange(workspaceId, user.email, rel, 'file');
           }
         },

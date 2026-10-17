@@ -1634,10 +1634,11 @@ export class GitService implements IGitService {
    * checkout stuck in a merge is what breaks the commit worker and every
    * later operation on the branch.
    *
-   * `publish` pushes the merge commit inside this same reservation, so no
-   * save or sync can land between the commit and its push; a push the host
-   * rejects because the branch moved is retried after replaying onto the
-   * moved branch with the merge kept (`--rebase-merges`), up to three times.
+   * `publish` runs over the merge commit inside this same reservation, so no
+   * save or sync can land between the commit and its push; it is the
+   * caller's push policy (the workflow's `pushWithRecovery`: one replay onto
+   * the moved branch with the merge kept, `--rebase-merges`, then the typed
+   * hand-off) over this checkout's own unlocked moves.
    */
   private async mergeRefIntoCheckout(
     workspaceId: string,

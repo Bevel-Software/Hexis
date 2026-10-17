@@ -49,6 +49,28 @@ export async function readablePathsAt(
   return new Set([...verdicts].filter(([, allowed]) => allowed).map(([p]) => p));
 }
 
+/**
+ * Whether `userEmail` may read `repoRelativePath` at EVERY one of `commits`
+ * — ONE rule for what a merge carries of a file: the two commits the merge
+ * is of (`ours`, `theirs`), pinned by the merge itself, so the verdict is
+ * about the bytes actually merged and shown, never about a branch ref a
+ * fetch may have moved since. A commit whose rules cannot be read (null)
+ * grants nothing. Asked by the service before a resolution is written and by
+ * the tool before a conflict's sides are shown.
+ */
+export async function readableAtCommits(
+  accessControl: Pick<IAccessControl, 'canReadAtRef'>,
+  workspaceId: string,
+  userEmail: string,
+  repoRelativePath: string,
+  commits: readonly string[],
+): Promise<boolean> {
+  for (const sha of commits) {
+    if ((await accessControl.canReadAtRef(workspaceId, sha, userEmail, repoRelativePath)) !== true) return false;
+  }
+  return true;
+}
+
 /** The refusal `readableOnBranch` answers false with, as both callers word it. */
 export class ReadOnBranchDeniedError extends WorkflowDomainError {
   constructor(displayPath: string, branch: string) {

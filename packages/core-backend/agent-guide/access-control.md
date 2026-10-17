@@ -260,9 +260,10 @@ File-level write access decides how a change lands on the default branch:
   `list_file_changes` says who changed what and why), then call
   `update_branch` again **with the same `from`** and `resolutions`, one per
   conflicted path: `content`, the resolved text, or `choose` (`ours`,
-  `theirs`, `delete`). A resolution is a write: it takes your write
-  permission on the path, as `write_file` does. It merges, commits as you
-  and publishes. Nothing else is written that way: an ordinary edit goes
+  `theirs`, `delete`). A resolution is a write on your draft: it takes the
+  rule every save on the draft takes (no write permission is asked on a
+  draft) and you must be able to read the file at both commits the merge is
+  of. It merges, commits as you and publishes. Nothing else is written that way: an ordinary edit goes
   through the file tools. You have no git command; there is never a
   half-done merge on disk for you to finish.
 - `merge_branch` refuses to merge a draft into the branch its open change

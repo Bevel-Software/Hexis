@@ -6,7 +6,7 @@ import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/agent-access.gate.js';
-import { readableOnBranch, readablePathsAt, assertReadableOnBranch } from '../read-on-branch.js';
+import { readablePathsAt, readableAtCommits, assertReadableOnBranch } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
@@ -1124,27 +1124,25 @@ export function registerWorkflowTools(
         });
       }
       const workspaceId = await workspaceOf(ctx, branch);
-      const source = from ?? branch;
       /** A hook's own refusal (it carries a status); anything else is a failure of the hook, not an answer. */
       const isRefusal = (err: unknown): boolean => typeof (err as { status?: unknown })?.status === 'number';
       /**
-       * Whether the caller may read `rel` on both sides of this merge — the
-       * workspace's own branch and `source` as published — with the
-       * deployment's read hook told of the read, as every history read tells
-       * it: a hook that refuses makes the file one the caller may not read; a
-       * hook that fails is not an answer and propagates.
+       * Whether the caller may read `rel` on both sides of this merge — at
+       * the two COMMITS the answer says the merge was of, which is what its
+       * bytes are from, never at a branch ref that may have moved since the
+       * reservation was released — with the deployment's read hook told of
+       * the read, as every history read tells it: a hook that refuses makes
+       * the file one the caller may not read; a hook that fails is not an
+       * answer and propagates.
        */
-      const mayReadBothSides = async (rel: string): Promise<boolean> => {
+      const mayReadBothSides = async (rel: string, at: { ours: string; theirs: string }): Promise<boolean> => {
         try {
           await notifyAgentRead(agentAccessGate, ctx, branch, `${kbDirName}/${rel}`);
         } catch (err) {
           if (isRefusal(err)) return false;
           throw err;
         }
-        return (
-          (await accessControl.canRead(workspaceId, ctx.user.email, rel)) &&
-          (await readableOnBranch(accessControl, workspaceId, ctx.user.email, rel, source))
-        );
+        return readableAtCommits(accessControl, workspaceId, ctx.user.email, rel, [at.ours, at.theirs]);
       };
       // A resolution reads a file on both branches and writes it on the
       // draft, so the deployment's hooks are asked as they are for any read
@@ -1177,7 +1175,7 @@ export function registerWorkflowTools(
       // name is information too: a file the caller may not read on both is
       // left out of `files` and `unresolved` alike and only counted.
       const files = [];
-      for (const f of outcome.files) if (await mayReadBothSides(f.path)) files.push(f);
+      for (const f of outcome.files) if (await mayReadBothSides(f.path, outcome)) files.push(f);
       const shown = new Set(files.map((f) => f.path));
       return {
         ...outcome,
