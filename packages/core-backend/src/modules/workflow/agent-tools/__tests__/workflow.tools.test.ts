@@ -194,19 +194,19 @@ const workflowService = {
     calls.push(['fileAtChange', ws, path, sha]);
     return { baseline: 'before\n', current: 'after\n' };
   },
-  fileAtBranch: async (ws: string, path: string, branch: string, authorize?: (sha: string) => Promise<void>) => {
+  fileAtBranch: async (ws: string, path: string, branch: string, authorize?: (commits: string[]) => Promise<void>) => {
     calls.push(['fileAtBranch', ws, path, branch]);
-    // As the service: the verdict at the commit, before anything about the path there.
-    await authorize?.('tip-of-' + branch);
+    // As the service: the verdict at every commit the branch resolves to, before anything about the path there.
+    await authorize?.(['tip-of-' + branch]);
     return { sha: 'tip-of-' + branch, ref: `refs/remotes/origin/${branch}`, content: `on ${branch}\n` };
   },
   showFileAtChange: async (ws: string, path: string, sha: string) => {
     calls.push(['showFileAtChange', ws, path, sha]);
     return '@@ patch of ' + sha;
   },
-  compareFile: async (ws: string, path: string, from: string, to: string, authorize?: (s: { from: string; to: string }) => Promise<void>) => {
+  compareFile: async (ws: string, path: string, from: string, to: string, authorize?: (s: { from: string[]; to: string[] }) => Promise<void>) => {
     calls.push(['compareFile', ws, path, from, to]);
-    await authorize?.({ from: 'tip-of-' + from, to: 'tip-of-' + to });
+    await authorize?.({ from: ['tip-of-' + from], to: ['tip-of-' + to] });
     return { diff: `@@ ${from}..${to}`, from: 'tip-of-' + from, to: 'tip-of-' + to };
   },
   branchStatus: async (ws: string) => {

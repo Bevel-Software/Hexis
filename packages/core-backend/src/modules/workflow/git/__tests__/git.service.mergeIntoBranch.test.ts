@@ -657,25 +657,31 @@ describe('GitService.readFileAtBranch', () => {
     // The caller's verdict is asked with the commit BEFORE the path is
     // described at it: a folder the caller may not read is refused as
     // unreadable, never as a folder.
-    const asked: string[] = [];
-    const refuse = async (sha: string): Promise<void> => {
-      asked.push(sha);
+    const asked: string[][] = [];
+    const refuse = async (commits: string[]): Promise<void> => {
+      asked.push(commits);
       throw new WorkflowDomainError('not yours to read', 403);
     };
     await expect(svc.readFileAtBranch(workspaceId, 'docs', TARGET, refuse)).rejects.toThrow(/not yours to read/);
     await expect(svc.readFileAtBranch(workspaceId, 'other.md', TARGET, refuse)).rejects.toThrow(/not yours to read/);
-    expect(asked).toEqual([theirs, theirs]);
-    const allowed: string[] = [];
-    expect((await svc.readFileAtBranch(workspaceId, 'other.md', TARGET, async (sha) => { allowed.push(sha); })).content).toBe('other, changed on target\n');
-    expect(allowed).toEqual([theirs]);
+    // The target resolves here to its published tip only (no local head of it).
+    expect(asked).toEqual([[theirs], [theirs]]);
+    const allowed: string[][] = [];
+    expect((await svc.readFileAtBranch(workspaceId, 'other.md', TARGET, async (commits) => { allowed.push(commits); })).content).toBe('other, changed on target\n');
+    expect(allowed).toEqual([[theirs]]);
   });
 
   it('reads the PUBLISHED tip, not a local head that has moved past it', async () => {
     const { repo } = await seed(root);
     const svc = new GitService(stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }), stubWorkflowHooks(), testKbContext());
     const published = (await gitOut(repo, ['rev-parse', `origin/${DRAFT}`])).trim();
-    await commitLocally(repo, { 'other.md': 'not shared yet\n' }, 'local only');
-    const read = await svc.readFileAtBranch(workspaceId, 'other.md', DRAFT);
+    const local = await commitLocally(repo, { 'other.md': 'not shared yet\n' }, 'local only');
+    const asked: string[][] = [];
+    const read = await svc.readFileAtBranch(workspaceId, 'other.md', DRAFT, async (commits) => { asked.push(commits); });
     expect(read).toEqual({ sha: published, ref: `refs/remotes/origin/${DRAFT}`, content: 'other\n' });
+    // The verdict is asked at BOTH commits the branch resolves to — the
+    // published tip served, and the local head past it — so a grant at one
+    // never outruns a denial at the other.
+    expect(asked).toEqual([[published, local]]);
   });
 });

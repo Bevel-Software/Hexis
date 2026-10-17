@@ -448,7 +448,9 @@ describe('WorkflowService.updateBranch', () => {
     expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 'o', 'ada@x.io', 'A.md');
     expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 't', 'ada@x.io', 'A.md');
     expect((access.canReadAtRef as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).not.toContain('origin/target-company-state');
-    expect(asked).toEqual([['ada%2Fdraft', 'ada@x.io', 'A.md', 'file']]);
+    // The gate takes the workspace path, as every save hands it one — a
+    // repository-relative path would read as outside the knowledge base.
+    expect(asked).toEqual([['ada%2Fdraft', 'ada@x.io', 'knowledge-base/A.md', 'file']]);
 
     // Not readable at the draft's commit: refused before the change gate is asked.
     (access.canReadAtRef as ReturnType<typeof vi.fn>).mockImplementation(async (_ws: string, ref: string) => ref !== 'o');

@@ -217,15 +217,17 @@ export interface IGitService {
    * `content` is null when the file is not there; a path that is a folder at
    * that commit is refused, as every per-file history read refuses it.
    * Access to the file at that commit is the caller's to check: `authorize`,
-   * when given, is asked with the commit inside the reservation before
-   * anything is said about the path there (the folder refusal included),
-   * and its throw is the answer.
+   * when given, is asked inside the reservation before anything is said
+   * about the path there (the folder refusal included), with every commit
+   * the branch resolves to in this repository (its local head and its
+   * published tip, whichever resolve; the served one first), all of which
+   * are the caller's to require a grant from; its throw is the answer.
    */
   readFileAtBranch(
     workspaceId: string,
     relativePath: string,
     branch: string,
-    authorize?: (sha: string) => Promise<void>,
+    authorize?: (commits: string[]) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
   createBranch(
@@ -372,9 +374,14 @@ export interface IGitService {
    * its commit is the checkout's head): what a caller authorizes the diff
    * at, so a fetch that moves a branch after this call cannot have swapped
    * in content the verdict never saw. `authorize`, when given, is asked
-   * with those two commits inside the reservation before anything is said
-   * about the path at either — a refusal that names what the path is there
-   * (a folder) is itself an answer — and its throw is the answer.
+   * inside the reservation, before anything is said about the path at
+   * either side (a refusal that names what the path is there — a folder —
+   * is itself an answer), with EVERY commit each branch resolves to in this
+   * repository: its local head and its published tip, whichever resolve,
+   * the served one first. All of them are the caller's to require a grant
+   * from — a grant at the served commit must not outrun a denial at the
+   * other, which is what the compare route has always required of both
+   * refs — and its throw is the answer.
    *
    * Read-only: nothing is checked out, fetched, or written.
    */
@@ -383,7 +390,7 @@ export interface IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
-    authorize?: (sides: { from: string; to: string }) => Promise<void>,
+    authorize?: (sides: { from: string[]; to: string[] }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }>;
   // `workingStatus` + `diffFileWorking` removed: under save=share the
   // working tree is never dirty, so listing dirty files / diffing them

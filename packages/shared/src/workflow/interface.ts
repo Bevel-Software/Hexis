@@ -230,17 +230,19 @@ export interface IWorkflowService {
    * is the raw unified diff body — empty when identical, with the "new
    * file" / "deleted file" headers when the file only exists on one side —
    * and `from`/`to` the commits each side was served from. `authorize` is
-   * the caller's read verdict at those commits: asked inside the git
-   * layer's reservation before anything is said about the path at either,
-   * its throw the answer. Required: content from another branch is never
-   * served without it.
+   * the caller's read verdict, asked inside the git layer's reservation
+   * before anything is said about the path at either side, with every
+   * commit each branch resolves to in this repository (local head and
+   * published tip, the served one first) — all must grant, as the compare
+   * route has always required of both refs; its throw is the answer.
+   * Required: content from another branch is never served without it.
    */
   compareFile(
     workspaceId: string,
     path: string,
     fromBranch: string,
     toBranch: string,
-    authorize: (sides: { from: string; to: string }) => Promise<void>,
+    authorize: (sides: { from: string[]; to: string[] }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }>;
   /**
    * Diff of one file at a specific change (sha) — i.e. `git show <sha> -- <path>`.
@@ -772,15 +774,16 @@ export interface IWorkflowService {
   /**
    * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).
    * Access to the file at that commit is the caller's to check — through
-   * `authorize`, asked with the commit before anything is said about the
-   * path there. Required: content from another branch is never served
-   * without it.
+   * `authorize`, asked before anything is said about the path there with
+   * every commit the branch resolves to (local head and published tip, the
+   * served one first), all of which must grant. Required: content from
+   * another branch is never served without it.
    */
   fileAtBranch(
     workspaceId: string,
     path: string,
     branch: string,
-    authorize: (sha: string) => Promise<void>,
+    authorize: (commits: string[]) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }>;
   /**
    * The repository-relative paths `branch` changes against `base` — a

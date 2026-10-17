@@ -38,7 +38,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import { assertReadableAtCommit } from './read-on-branch.js';
+import { assertReadableAtCommits } from './read-on-branch.js';
 import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
@@ -416,9 +416,12 @@ export function createWorkflowRoutes(
     // serves content of TWO caller-named branches — the verdict must come
     // from the commits actually served (`readableAtCommits`, the one rule
     // this route and the agent's history tools share): the service pins the
-    // commit each side is read at and asks this verdict at those inside its
-    // reservation, before anything is said about the path at either — never
-    // at a branch ref a fetch may move between a verdict and a read. (The
+    // commit each side is read at and asks this verdict inside its
+    // reservation, before anything is said about the path at either, with
+    // every commit the branch resolves to — its local head and its published
+    // tip, all of which must grant, as this route has always required of
+    // both refs — never at a branch ref a fetch may move between a verdict
+    // and a read. (The
     // working-tree side is additionally covered by the workspace `canRead`
     // above.) An access-model failure keeps its own status: an unreadable
     // access tree is the documented 503 a client retries, not a permanent
@@ -428,8 +431,8 @@ export function createWorkflowRoutes(
     const repoRelative = toKbRelative(pathParam, kbDirName)!;
     try {
       const compared = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch, async (sides) => {
-        await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, sides.from, fromBranch, pathParam);
-        await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, sides.to, toBranch, pathParam);
+        await assertReadableAtCommits(accessControl, req.params.id, user.email, repoRelative, sides.from, fromBranch, pathParam);
+        await assertReadableAtCommits(accessControl, req.params.id, user.email, repoRelative, sides.to, toBranch, pathParam);
       });
       res.json({ diff: compared.diff });
     } catch (err) {

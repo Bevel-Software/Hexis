@@ -128,7 +128,8 @@ describe('GitService.diffFileBetweenBranches', () => {
     const tip = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
 
     const asked: unknown[] = [];
-    const sides = { from: base, to: tip };
+    // Local branches only: each side resolves to the one commit it was served from.
+    const sides = { from: [base], to: [tip] };
     const { diff } = await svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', async (s) => {
       asked.push(s);
     });

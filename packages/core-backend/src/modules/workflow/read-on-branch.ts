@@ -59,17 +59,21 @@ export class ReadOnBranchDeniedError extends WorkflowDomainError {
   }
 }
 
-/** `readableAtCommits` at the commit `branch`'s content was served from, thrown when it answers false. */
-export async function assertReadableAtCommit(
+/**
+ * `readableAtCommits` at every commit `branch` resolves to (the one its
+ * content was served from, and any other its local head or published tip
+ * names), thrown when it answers false.
+ */
+export async function assertReadableAtCommits(
   accessControl: Pick<IAccessControl, 'canReadAtRef'>,
   workspaceId: string,
   userEmail: string,
   repoRelativePath: string,
-  commit: string,
+  commits: readonly string[],
   branch: string,
   displayPath: string = repoRelativePath,
 ): Promise<void> {
-  if (!(await readableAtCommits(accessControl, workspaceId, userEmail, repoRelativePath, [commit]))) {
+  if (!(await readableAtCommits(accessControl, workspaceId, userEmail, repoRelativePath, commits))) {
     throw new ReadOnBranchDeniedError(displayPath, branch);
   }
 }

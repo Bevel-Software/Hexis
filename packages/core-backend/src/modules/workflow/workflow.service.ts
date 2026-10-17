@@ -1279,7 +1279,7 @@ export class WorkflowService implements IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
-    authorize: (sides: { from: string; to: string }) => Promise<void>,
+    authorize: (sides: { from: string[]; to: string[] }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }> {
     return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch, authorize);
   }
@@ -4833,7 +4833,10 @@ export class WorkflowService implements IWorkflowService {
             if (!(await readableAtCommits(this.accessControl, workspaceId, user.email, rel, [ours, theirs]))) {
               throw new ReadOnBranchDeniedError(rel, from);
             }
-            await this.changeGate.assertMayChange(workspaceId, user.email, rel, 'file');
+            // The gate takes the WORKSPACE path, as `acquireLock` hands it
+            // one: a repository-relative path reads as outside the knowledge
+            // base there, which the gate waves through.
+            await this.changeGate.assertMayChange(workspaceId, user.email, `${this.kbDirName}/${rel}`, 'file');
           }
         },
       });
@@ -4844,7 +4847,7 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     path: string,
     branch: string,
-    authorize: (sha: string) => Promise<void>,
+    authorize: (commits: string[]) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }> {
     return this.git.readFileAtBranch(workspaceId, path, branch, authorize);
   }

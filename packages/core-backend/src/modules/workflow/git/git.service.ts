@@ -1953,7 +1953,7 @@ export class GitService implements IGitService {
     workspaceId: string,
     relativePath: string,
     branch: string,
-    authorize?: (sha: string) => Promise<void>,
+    authorize?: (commits: string[]) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }> {
     assertValidRelativePath(relativePath);
     assertValidBranchName(branch);
@@ -1964,10 +1964,11 @@ export class GitService implements IGitService {
       // shared is nobody else's to read, so `origin/<branch>` comes first and
       // the local head serves only a branch origin does not have.
       const { ref, sha } = await this.resolvePublishedBranch(cwd, branch);
-      // The caller's verdict, at this commit, BEFORE anything is said about
-      // the path there: a refusal that names what the path is (a folder) is
-      // an answer about content the caller may not read.
-      if (authorize) await authorize(sha);
+      // The caller's verdict, at every commit the branch resolves to here
+      // (the served one first), BEFORE anything is said about the path at
+      // it: a refusal that names what the path is (a folder) is an answer
+      // about content the caller may not read.
+      if (authorize) await authorize(await this.branchCommits(cwd, branch, sha));
       // Per file, as every history read: a folder's content at a commit is
       // every child's, which the per-file gate never checked.
       await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
@@ -3165,7 +3166,7 @@ export class GitService implements IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
-    authorize?: (sides: { from: string; to: string }) => Promise<void>,
+    authorize?: (sides: { from: string[]; to: string[] }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }> {
     assertValidRelativePath(relativePath);
     assertValidBranchName(fromBranch);
@@ -3181,10 +3182,16 @@ export class GitService implements IGitService {
       const fromRef = (await this.git(cwd, ['rev-parse', await this.resolveBranchRef(cwd, fromBranch)])).stdout.trim();
       const toRef = (await this.git(cwd, ['rev-parse', await this.resolveBranchRef(cwd, toBranch)])).stdout.trim();
       const pinned = (diff: string): { diff: string; from: string; to: string } => ({ diff, from: fromRef, to: toRef });
-      // The caller's verdict at both commits BEFORE anything is said about
-      // the path at either: a refusal that names what the path is there (a
-      // folder) is an answer about content the caller may not read.
-      if (authorize) await authorize({ from: fromRef, to: toRef });
+      // The caller's verdict at every commit each side resolves to here (the
+      // served one first) BEFORE anything is said about the path at either:
+      // a refusal that names what the path is there (a folder) is an answer
+      // about content the caller may not read.
+      if (authorize) {
+        await authorize({
+          from: await this.branchCommits(cwd, fromBranch, fromRef),
+          to: await this.branchCommits(cwd, toBranch, toRef),
+        });
+      }
       await this.assertNotTreeAtRef(cwd, fromRef, repoRelativePath, relativePath);
       await this.assertNotTreeAtRef(cwd, toRef, repoRelativePath, relativePath);
       // When one side is the currently-checked-out branch, diff against the
@@ -4149,6 +4156,24 @@ export class GitService implements IGitService {
       }
     }
     throw new WorkflowValidationError(`unknown branch: ${branch}`);
+  }
+
+  /**
+   * Every commit `branch` resolves to in this repository — its local head
+   * and its published tip (`origin/<branch>`), whichever resolve, deduped,
+   * `served` first. What a caller's read verdict is asked at: content of
+   * another branch is served from one of them, and a grant at the served one
+   * must not outrun a denial at the other (a draft's unshared commits may
+   * carry rules its published tip does not, and the other way round) — the
+   * rule the compare route always applied to both refs, pinned to commits.
+   */
+  private async branchCommits(cwd: string, branch: string, served: string): Promise<string[]> {
+    const commits = [served];
+    for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+      const sha = await this.revParseOrNull(cwd, ref);
+      if (sha && !commits.includes(sha)) commits.push(sha);
+    }
+    return commits;
   }
 
   /**
