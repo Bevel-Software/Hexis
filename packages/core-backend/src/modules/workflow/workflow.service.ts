@@ -4772,32 +4772,32 @@ export class WorkflowService implements IWorkflowService {
     const underLifecycleLocks = <T>(fn: () => Promise<T>): Promise<T> =>
       from === branch ? this.branchLifecycle.runAll([`branch:${branch}`], fn) : this.runOnBranchPair(from, branch, fn);
     return underLifecycleLocks(async () => {
-    if (from !== branch) {
-      const open = await this.openRequestBlockingMerge(from, branch);
-      if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
-    }
-    if (!(await this.git.remoteBranchExists(workspaceId, from))) {
-      throw new WorkflowValidationError(`No branch named "${from}" on the shared repository.`);
-    }
-    const resolutions = opts.resolutions ?? [];
-    const subject = from === branch ? `Merge the shared ${branch} into the local one` : `Merge ${from} into ${branch}`;
-    const body =
-      (from === branch
-        ? `The branch had moved on the shared repository while this workspace held commits of its own; both are kept.`
-        : `Brings the latest ${from} into ${branch}.`) +
-      (resolutions.length > 0
-        ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
-        : '');
-    // Published inside the merge's own reservation: nothing lands between
-    // the merge commit and its push, and the push is EVERY workflow push's
-    // `pushWithRecovery`, run over the merge's own unlocked moves — a
-    // rejection replays the merge (kept as a merge) onto the moved branch
-    // and pushes again; a replay that conflicts or a host that refuses
-    // answers as every refused share answers, the banner noted and the
-    // typed hand-off thrown, naming the branch (no single file is at issue)
-    // and never a conflicted path. The merge commit stays local for the
-    // next push of the branch to carry.
-    return this.git.mergeIntoBranch(workspaceId, branch, from, user, {
+      if (from !== branch) {
+        const open = await this.openRequestBlockingMerge(from, branch);
+        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
+      }
+      if (!(await this.git.remoteBranchExists(workspaceId, from))) {
+        throw new WorkflowValidationError(`No branch named "${from}" on the shared repository.`);
+      }
+      const resolutions = opts.resolutions ?? [];
+      const subject = from === branch ? `Merge the shared ${branch} into the local one` : `Merge ${from} into ${branch}`;
+      const body =
+        (from === branch
+          ? `The branch had moved on the shared repository while this workspace held commits of its own; both are kept.`
+          : `Brings the latest ${from} into ${branch}.`) +
+        (resolutions.length > 0
+          ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
+          : '');
+      // Published inside the merge's own reservation: nothing lands between
+      // the merge commit and its push, and the push is EVERY workflow push's
+      // `pushWithRecovery`, run over the merge's own unlocked moves — a
+      // rejection replays the merge (kept as a merge) onto the moved branch
+      // and pushes again; a replay that conflicts or a host that refuses
+      // answers as every refused share answers, the banner noted and the
+      // typed hand-off thrown, naming the branch (no single file is at issue)
+      // and never a conflicted path. The merge commit stays local for the
+      // next push of the branch to carry.
+      return this.git.mergeIntoBranch(workspaceId, branch, from, user, {
         subject,
         body,
         resolutions,
