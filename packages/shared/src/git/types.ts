@@ -187,9 +187,13 @@ export interface IGitService {
    * Without `publish` nothing is pushed. Resolutions come with `authorizeResolutions`
    * (required with them, refused without): it is asked inside the
    * reservation, after the fetch and before the merge touches the checkout,
-   * with the two commits the merge is between — the checkout clean at
-   * `ours`, so a rule read from it is the branch's own commit's, never a
-   * tree mid-merge; throwing refuses before anything is written.
+   * with the two commits the merge is of — `theirs` is the commit merged,
+   * described and recorded, never the ref it was read from, which a
+   * concurrent fetch may move — the checkout clean at `ours`, so a rule
+   * read from it is the branch's own commit's, never a tree mid-merge;
+   * throwing refuses before anything is written. Nothing to merge is a
+   * question of ancestry: a source the branch does not yet reach is merged
+   * in even when the two trees are identical.
    *
    * Refused when the workspace is not on `branch`, or holds edits not yet
    * committed (`kind: 'branch-busy'`, 409): a merge over them could lose them.

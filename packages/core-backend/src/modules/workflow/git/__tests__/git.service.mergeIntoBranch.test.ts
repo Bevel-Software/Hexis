@@ -127,6 +127,44 @@ describe('GitService.mergeIntoBranch', () => {
     expect((await gitOut(pusher, ['ls-remote', 'origin', `refs/heads/${DRAFT}`])).trim()).not.toContain(outcome.sha);
   });
 
+  it('merges diverged tips whose trees are identical, so the draft records the target\'s history and stops reading as behind it', async () => {
+    const { repo, pusher } = await seed(root);
+    const theirs = await pushOn(pusher, TARGET, { 'other.md': 'the same change\n' }, 'target changes other');
+    const ours = await commitLocally(repo, { 'other.md': 'the same change\n' }, 'draft makes the same change');
+
+    const outcome = await service().mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, { subject: 's', body: 'b' });
+    expect(outcome.kind).toBe('merged');
+    if (outcome.kind !== 'merged') return;
+    expect((await gitOut(repo, ['log', '-1', '--format=%P', outcome.sha])).trim().split(' ')).toEqual([ours, theirs]);
+    expect((await gitOut(repo, ['rev-parse', `${outcome.sha}^{tree}`])).trim()).toBe((await gitOut(repo, ['rev-parse', `${ours}^{tree}`])).trim());
+    await gitOut(repo, ['merge-base', '--is-ancestor', theirs, 'HEAD']);
+  });
+
+  it('merges the commit it authorized, not the ref it was read from, when a fetch moves the ref in between', async () => {
+    const { repo, pusher } = await seed(root);
+    const theirs = await pushOn(pusher, TARGET, { 'shared.md': 'line 1\nline 2 from target\nline 3\n' }, 'target edits line 2');
+    const ours = await commitLocally(repo, { 'shared.md': 'line 1\nline 2 from draft\nline 3\n' }, 'draft edits line 2');
+    let moved = '';
+    const outcome = await service().mergeIntoBranch(workspaceId, DRAFT, TARGET, USER, {
+      subject: 's',
+      body: 'b',
+      resolutions: [{ path: 'shared.md', content: 'resolved\n' }],
+      authorizeResolutions: async (merge) => {
+        expect(merge).toEqual({ ours, theirs });
+        // The target moves on the host, and a fetch (the timer's sync, another
+        // workspace's merge — the refs are the repository's) moves the ref.
+        moved = await pushOn(pusher, TARGET, { 'shared.md': 'line 1\nline 2 moved\nline 3\n', 'late.md': 'late\n' }, 'target moves after the fetch');
+        await runGit(repo, ['fetch', '-q', 'origin', `+refs/heads/${TARGET}:refs/remotes/origin/${TARGET}`]);
+      },
+    });
+    expect(outcome.kind).toBe('merged');
+    if (outcome.kind !== 'merged') return;
+    // Merged: the commit that was authorized; the moved tip is not an ancestor and its file is not here.
+    expect((await gitOut(repo, ['log', '-1', '--format=%P', outcome.sha])).trim().split(' ')).toEqual([ours, theirs]);
+    await expect(gitOut(repo, ['merge-base', '--is-ancestor', moved, outcome.sha])).rejects.toThrow();
+    await expect(fs.access(path.join(repo, 'late.md'))).rejects.toThrow();
+  });
+
   it('answers nothing-to-merge, with the tip, when the draft already holds the target', async () => {
     const { repo } = await seed(root);
     const tip = (await gitOut(repo, ['rev-parse', 'HEAD'])).trim();

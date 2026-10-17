@@ -370,14 +370,19 @@ describe('WorkflowService.updateBranch', () => {
     const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
     const opts = (merge.mock.calls[0] as unknown[])[4] as { authorizeResolutions: (m: unknown) => Promise<void> };
     await opts.authorizeResolutions({ ours: 'o', theirs: 't' });
-    // Read on the draft, read at `origin/<from>` and the local ref as the compare route decides, then the change gate.
-    expect(access.canRead).toHaveBeenCalledWith('ada%2Fdraft', 'ada@x.io', 'A.md');
-    expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 'origin/target-company-state', 'ada@x.io', 'A.md');
+    // Read at the two COMMITS the merge is of — never at a branch ref — then the change gate.
+    expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 'o', 'ada@x.io', 'A.md');
+    expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 't', 'ada@x.io', 'A.md');
+    expect((access.canReadAtRef as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).not.toContain('origin/target-company-state');
     expect(asked).toEqual([['ada%2Fdraft', 'ada@x.io', 'A.md', 'file']]);
 
-    // Not readable on the draft: refused before the change gate is asked.
-    (access.canRead as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    // Not readable at the draft's commit: refused before the change gate is asked.
+    (access.canReadAtRef as ReturnType<typeof vi.fn>).mockImplementation(async (_ws: string, ref: string) => ref !== 'o');
     asked.length = 0;
+    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
+    expect(asked).toEqual([]);
+    // A commit whose rules cannot be read grants nothing.
+    (access.canReadAtRef as ReturnType<typeof vi.fn>).mockImplementation(async (_ws: string, ref: string) => (ref === 't' ? null : true));
     await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
     expect(asked).toEqual([]);
   });

@@ -70,7 +70,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { readableOnBranch, ReadOnBranchDeniedError } from './read-on-branch.js';
+import { ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -4790,16 +4790,20 @@ export class WorkflowService implements IWorkflowService {
         // the fetch and before the merge touches the checkout — the draft's
         // tree clean at its own commit, so the rules read from it are the
         // draft's, never a rule file mid-merge: the caller must read the
-        // file on the draft and on `from` as fetched (`readableOnBranch`, the
-        // compare route's rule), and may change it on the draft by the one
-        // rule every draft write takes — the change gate `acquireLock` asks,
-        // not a write permission a draft never requires.
-        authorizeResolutions: async () => {
+        // file at the draft's commit and at the source commit the merge is
+        // of, and may change it on the draft by the one rule every draft
+        // write takes — the change gate `acquireLock` asks, not a write
+        // permission a draft never requires.
+        authorizeResolutions: async ({ ours, theirs }) => {
           for (const r of resolutions) {
             const rel = r.path.startsWith(`${this.kbDirName}/`) ? r.path.slice(this.kbDirName.length + 1) : r.path;
+            // At the two COMMITS the merge is of — pinned by the merge itself,
+            // never at a ref a concurrent fetch can move between this verdict
+            // and the merge. A commit whose rules cannot be read (null) grants
+            // nothing.
             const readable =
-              (await this.accessControl.canRead(workspaceId, user.email, rel)) &&
-              (await readableOnBranch(this.accessControl, workspaceId, user.email, rel, from));
+              (await this.accessControl.canReadAtRef(workspaceId, ours, user.email, rel)) === true &&
+              (await this.accessControl.canReadAtRef(workspaceId, theirs, user.email, rel)) === true;
             if (!readable) throw new ReadOnBranchDeniedError(rel, from);
             await this.changeGate.assertMayChange(workspaceId, user.email, rel, 'file');
           }

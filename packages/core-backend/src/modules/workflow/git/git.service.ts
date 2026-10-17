@@ -970,16 +970,18 @@ export class GitService implements IGitService {
   async isAncestor(workspaceId: string, ancestor: string, descendant: string): Promise<boolean> {
     const sha = /^[0-9a-f]{4,64}$/i;
     if (!sha.test(ancestor) || !sha.test(descendant)) throw new Error('isAncestor takes commit ids');
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      try {
-        await this.git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant]);
-        return true;
-      } catch (err) {
-        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return false;
-        throw err;
-      }
-    });
+    return this.mutex.run(workspaceId, async () => this.isAncestorUnlocked(await this.repoDir(workspaceId), ancestor, descendant));
+  }
+
+  /** `isAncestor`'s body, for a caller that already holds the workspace's reservation. */
+  private async isAncestorUnlocked(cwd: string, ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await this.git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant]);
+      return true;
+    } catch (err) {
+      if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return false;
+      throw err;
+    }
   }
 
   /**
@@ -1692,15 +1694,34 @@ export class GitService implements IGitService {
     // stale ref would hide exactly the conflicts this merge exists to surface.
     await this.git(cwd, ['fetch', '--no-write-fetch-head', 'origin', `+refs/heads/${fromBranch}:${theirsRef}`]);
     const ours = (await this.git(cwd, ['rev-parse', 'HEAD'])).stdout.trim();
+    // The COMMIT the merge is of, from here on — never the ref it was read
+    // from: the repository's refs are shared by every worktree and moved by
+    // every fetch (the timer's sync, another workspace's merge), so what is
+    // authorized, merged, described and recorded is this one sha.
     const theirs = (await this.git(cwd, ['rev-parse', theirsRef])).stdout.trim();
     // Resolutions are authorized here, on the clean checkout at `ours` with
     // `theirs` fetched, before the merge changes a single file. Which of
     // them are conflicted is matched after the merge; a stray one is refused.
     if (opts.resolutions.size > 0 && opts.authorizeResolutions) await opts.authorizeResolutions({ ours, theirs });
+    // A merge with nothing to settle leaves no resolution a place to go: one
+    // supplied anyway names a path that is not conflicted, and is refused as
+    // such rather than dropped on the floor behind a published merge.
+    const noConflictsFor = (): WorkflowValidationError =>
+      new WorkflowValidationError(
+        `nothing conflicted, so nothing is resolved here: ${[...opts.resolutions.keys()].join(', ')}.`,
+        { kind: 'not-conflicted', paths: [...opts.resolutions.keys()] },
+      );
+    // Nothing to merge is a question of ANCESTRY, not of content: a source
+    // the branch already reaches is merged; one it does not reach is merged
+    // in even when the two trees are identical, so the branch records that
+    // it holds the source's history and stops reading as behind it.
+    if (await this.isAncestorUnlocked(cwd, theirs, ours)) {
+      if (opts.resolutions.size > 0) throw noConflictsFor();
+      return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
+    }
 
-    let mergeStdout = '';
     try {
-      mergeStdout = (await this.git(cwd, ['merge', '--no-commit', '--no-ff', theirsRef])).stdout;
+      await this.git(cwd, ['merge', '--no-commit', '--no-ff', theirs]);
     } catch (err) {
       // A conflict, or another failure: either way the merge may be on disk
       // from here on, and every exit below undoes it.
@@ -1731,7 +1752,7 @@ export class GitService implements IGitService {
           // Described while the merge is on disk — the three stages and the
           // marked-up working copy exist only then — and undone (by
           // `settleMerge`) before the answer leaves the reservation.
-          const mergeBase = await this.git(cwd, ['merge-base', 'HEAD', theirsRef])
+          const mergeBase = await this.git(cwd, ['merge-base', ours, theirs])
             .then((r) => r.stdout.trim() || null)
             .catch(() => null);
           const files: ConflictedFile[] = [];
@@ -1747,25 +1768,14 @@ export class GitService implements IGitService {
         };
       });
     }
-    // A merge with nothing to settle leaves no resolution a place to go: one
-    // supplied anyway names a path that is not conflicted, and is refused as
-    // such rather than dropped on the floor behind a published merge.
-    const noConflictsFor = (): WorkflowValidationError =>
-      new WorkflowValidationError(
-        `nothing conflicted, so nothing is resolved here: ${[...opts.resolutions.keys()].join(', ')}.`,
-        { kind: 'not-conflicted', paths: [...opts.resolutions.keys()] },
-      );
-    if (/Already up to date/i.test(mergeStdout)) {
-      if (opts.resolutions.size > 0) throw noConflictsFor();
-      return { kind: 'nothing-to-merge', sha: ours, from: fromBranch };
-    }
+    // A clean merge: committed whatever it staged — an empty diff (the two
+    // sides made the same change) is still the source's history joined.
     return this.settleMerge(cwd, async () => {
       if (opts.resolutions.size > 0) throw noConflictsFor();
-      const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
-      if (staged.trim() === '') return { done: false, outcome: { kind: 'nothing-to-merge', sha: ours, from: fromBranch } };
       return { done: true, outcome: await this.commitMerge(workspaceId, cwd, branch, fromBranch, user, opts, []) };
     });
   }
+
 
   /**
    * Run `work` while a merge may be on disk, and leave none: an answer with
