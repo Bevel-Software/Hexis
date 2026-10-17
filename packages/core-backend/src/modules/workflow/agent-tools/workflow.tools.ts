@@ -796,9 +796,11 @@ export function registerWorkflowTools(
 
   /**
    * The per-file read gate for content served from ANOTHER branch — the
-   * compare route's rule: at the commit the service serves it from, asked by
-   * the service inside its reservation before anything is said about the
-   * path there.
+   * compare route's rule: at every commit the branch resolves to (the one
+   * the service serves it from, and its other tip when the local head and
+   * the published tip differ), all of which must grant, asked by the
+   * service inside its reservation before anything is said about the path
+   * there.
    */
   const requireReadAtCommits = (ctx: ToolContext, workspaceId: string, rel: string, commits: readonly string[], branch: string): Promise<void> =>
     assertReadableAtCommits(accessControl, workspaceId, ctx.user.email, rel, commits, branch);

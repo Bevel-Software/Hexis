@@ -4170,10 +4170,27 @@ export class GitService implements IGitService {
   private async branchCommits(cwd: string, branch: string, served: string): Promise<string[]> {
     const commits = [served];
     for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
-      const sha = await this.revParseOrNull(cwd, ref);
+      const sha = await this.refCommitOrAbsent(cwd, ref);
       if (sha && !commits.includes(sha)) commits.push(sha);
     }
     return commits;
+  }
+
+  /**
+   * The commit `ref` names, or null when the ref is ABSENT — and nothing
+   * else: a lookup that fails for any other reason (a corrupt repository, a
+   * deadline) throws, because a verdict list this feeds must not quietly
+   * lose a commit. `git rev-parse --verify --quiet` says "absent" with exit
+   * 1 and an empty stderr.
+   */
+  private async refCommitOrAbsent(cwd: string, ref: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
+      return stdout.trim() || null;
+    } catch (err) {
+      if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1 && (err.stderr ?? '').trim() === '') return null;
+      throw err;
+    }
   }
 
   /**

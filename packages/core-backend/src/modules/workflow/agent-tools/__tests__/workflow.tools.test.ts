@@ -196,8 +196,10 @@ const workflowService = {
   },
   fileAtBranch: async (ws: string, path: string, branch: string, authorize?: (commits: string[]) => Promise<void>) => {
     calls.push(['fileAtBranch', ws, path, branch]);
-    // As the service: the verdict at every commit the branch resolves to, before anything about the path there.
-    await authorize?.(['tip-of-' + branch]);
+    // As the service: the verdict at every commit the branch resolves to,
+    // before anything about the path there. `me/moved` is a branch whose
+    // local head has moved past its published tip: two commits.
+    await authorize?.(branch === 'me/moved' ? ['tip-of-me/moved', 'local-of-me/moved'] : ['tip-of-' + branch]);
     return { sha: 'tip-of-' + branch, ref: `refs/remotes/origin/${branch}`, content: `on ${branch}\n` };
   },
   showFileAtChange: async (ws: string, path: string, sha: string) => {
@@ -206,7 +208,8 @@ const workflowService = {
   },
   compareFile: async (ws: string, path: string, from: string, to: string, authorize?: (s: { from: string[]; to: string[] }) => Promise<void>) => {
     calls.push(['compareFile', ws, path, from, to]);
-    await authorize?.({ from: ['tip-of-' + from], to: ['tip-of-' + to] });
+    const commitsOf = (b: string) => (b === 'me/moved' ? ['tip-of-me/moved', 'local-of-me/moved'] : ['tip-of-' + b]);
+    await authorize?.({ from: commitsOf(from), to: commitsOf(to) });
     return { diff: `@@ ${from}..${to}`, from: 'tip-of-' + from, to: 'tip-of-' + to };
   },
   branchStatus: async (ws: string) => {
@@ -267,6 +270,8 @@ const accessControl = {
     calls.push(['canReadAtRef', ws, ref, email, rel]);
     if (ref.endsWith('me/unknown')) return null;
     if (ref.endsWith('me/hidden')) return false;
+    // `me/moved`: its published tip grants, its local head (past it) denies.
+    if (ref === 'local-of-me/moved') return false;
     return !rel.startsWith('Secret/');
   },
   canReadBatch: async (ws: string, email: string, rels: string[]) => {
@@ -1112,6 +1117,20 @@ describe('history and syncing tools', () => {
     expect(calls).toContainEqual(['fileAtBranch', DRAFT_WS, 'knowledge-base/KnowledgeBase/Foo.md', 'main']);
     expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, 'tip-of-main', 'e@x', 'KnowledgeBase/Foo.md']);
     expect(calls.filter((c) => c[0] === 'canReadAtRef').map((c) => c[2])).toEqual(['tip-of-main']);
+  });
+
+  it('read_file_at and compare_file require every commit a branch resolves to grant: a served tip that grants never outruns a local head that denies', async () => {
+    const base = await start();
+    const read = await post(tool(base, 'read_file_at'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'me/moved' });
+    expect(read.status).toBe(403);
+    expect(JSON.stringify(await read.json())).not.toContain('on me/moved');
+    expect(calls.filter((c) => c[0] === 'canReadAtRef').map((c) => c[2])).toEqual(['tip-of-me/moved', 'local-of-me/moved']);
+
+    calls = [];
+    const diff = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'me/moved', to: DRAFT });
+    expect(diff.status).toBe(403);
+    expect(JSON.stringify(await diff.json())).not.toContain('@@');
+    expect(calls.filter((c) => c[0] === 'canReadAtRef').map((c) => c[2])).toEqual(['tip-of-me/moved', 'local-of-me/moved']);
   });
 
   it('read_file_at refuses a branch whose commit denies the read, and one whose rules cannot be read, disclosing nothing', async () => {
