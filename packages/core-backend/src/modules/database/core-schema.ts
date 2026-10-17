@@ -455,6 +455,27 @@ export const secrets = pgTable('secrets', {
 }));
 
 /**
+ * Tools a person took OUT of their agent on the Connect page ("Skipped by you").
+ *
+ * A skip used to be a deleted credential plus a flag held by the page, so a
+ * reload put the tool back to "Needs your sign-in" and nothing anywhere
+ * remembered the choice. A row here IS the choice: the Connect listing reports
+ * it, and the agent catalog (`GET /api/agent/all-tools`) leaves the manual out
+ * for that person until they include it again, which deletes the row.
+ *
+ * Keyed by the manual's catalog NAME — the namespace its secrets are stored
+ * under — not by file path, so the choice follows the tool the way its keys
+ * do. Dies with the user.
+ */
+export const skippedTools = pgTable('skipped_tools', {
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  manual: text('manual').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.manual] }),
+}));
+
+/**
  * OAuth clients dynamically registered by MCP clients (RFC 7591 DCR). When an
  * MCP client (claude.ai, Claude Code) connects to `/api/mcp` without a
  * connection key, it registers itself here via `POST /register`, then runs the

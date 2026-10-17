@@ -169,7 +169,8 @@ describe('GET /agent/catalog-revision', () => {
     });
     // Per-caller and ACL-filtered by the services themselves: the route adds
     // no second read model that could show a tool the listing hides.
-    expect(catalogFingerprints).toHaveBeenCalledWith('someone@example.com');
+    // Nothing to leave out: no skip source is wired here.
+    expect(catalogFingerprints).toHaveBeenCalledWith('someone@example.com', undefined);
     expect(listSkills).toHaveBeenCalledWith('someone@example.com');
   });
 

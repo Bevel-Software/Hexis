@@ -12,6 +12,7 @@ import {
   configuredAs,
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
+import type { ISkippedToolsService } from './skipped-tools.service.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
 import type { IConnectionProbeService } from '../connection-probe/connection-probe.contract.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
@@ -21,6 +22,8 @@ import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId
 
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;
+  /** The tools each person took out of their agent on the Connect page. */
+  skippedTools: ISkippedToolsService;
   /** The released branch's clone — where the `.tool` files the access verdicts are read from live. */
   kb: Pick<KbContext, 'defaultWorkspaceId'>;
   /** Source of `.tool` manuals + their declared variable scopes (default-branch catalog). */
@@ -80,7 +83,7 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, accessControl, connectionProbe, kb } = deps;
+  const { secretsVault, skippedTools, toolManualService, accessControl, connectionProbe, kb } = deps;
   const router = express.Router();
   // A FUNCTION, not a constant. Routers are constructed at boot, and on a
   // deployment configured through the setup screen the branch model does not
@@ -278,6 +281,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await secretsVault.statusFor(userId, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
+      // What the caller took out of their agent. Reported on every row of the
+      // tool, so the page shows the same choice after a reload and in another
+      // session — it used to live only in the page that made it.
+      const skipped = await skippedTools.skippedBy(userId);
       // Who may set a tool's workspace values — writers of its `.tool` file, the
       // same verdict the admin write route enforces. Resolved once per manual
       // because both the key rows and the sign-in rows ask it.
@@ -299,6 +306,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
             path: m.path,
             type: m.type,
             canWrite,
+            skipped: skipped.has(m.name),
             // Plain (non-OAuth) vars render as key rows under "Keys".
             variables: (m.variables ?? [])
               .filter((v) => !v.oauth)
@@ -329,8 +337,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               .filter((v) => v.scope !== 'admin' || !v.configured),
           };
         })
-        // Only surface tools that actually have something to show.
-        .filter((t) => t.variables.length > 0);
+        // Only surface tools that actually have something to show — and a
+        // skipped tool always does: its Include. A manual that lost its last
+        // key row after the skip would otherwise vanish from the page while
+        // the agent's catalog still leaves it out, with no way back.
+        .filter((t) => t.variables.length > 0 || t.skipped);
 
       // OAuth-backed per-user vars render as Authorize buttons under "Sign-ins".
       // Keyed by slug+var (the caller's row may not exist yet), with authorized
@@ -363,6 +374,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               needsReauth,
               ownerConfigured,
               ownerOnly: !ownerConfigured && !canWrite,
+              skipped: skipped.has(m.name),
             };
           });
       });
@@ -378,12 +390,45 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         .filter((s) => s.kind === 'oauth' && !toolOAuthKeys.has(s.key))
         .map((s) => ({ id: s.id, key: s.key, label: s.label, authorized: s.authorized ?? false }));
 
-      res.json({ tools, oauth, toolOAuth });
+      // A skipped tool kept only for its Include does not need a key card
+      // when one of its sign-in rows already carries that Include.
+      const signInSlugs = new Set(toolOAuth.map((o) => o.slug));
+      const keyCards = tools.filter((t) => t.variables.length > 0 || !signInSlugs.has(t.slug));
+
+      res.json({ tools: keyCards, oauth, toolOAuth });
     } catch (err) {
       log.error('connect/pending failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
+
+  // Take a tool out of the caller's agent ("Skipped by you" on /connect), or
+  // put it back. The choice is stored, not inferred from a missing credential:
+  // the listing above reports it and the agent catalog (`/agent/all-tools`)
+  // leaves the manual out until it is included again. Wiping the caller's
+  // saved keys is the page's half of a skip and goes through the per-var
+  // DELETE as before. Addressed by slug like every other per-tool route, and
+  // only for a tool the caller may read — one they may not is a 404, exactly
+  // as it is everywhere else.
+  router.put('/connect/skipped/:slug', (req, res) => void setSkipped(req, res, true));
+  router.delete('/connect/skipped/:slug', (req, res) => void setSkipped(req, res, false));
+
+  async function setSkipped(req: express.Request, res: express.Response, skip: boolean): Promise<void> {
+    const userId = req.userId;
+    const email = req.userEmail;
+    if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const slug = String(req.params.slug);
+      const manual = (await toolManualService.listAccessible(email)).find((m) => m.slug === slug);
+      if (!manual) return void res.status(404).json({ error: 'Tool not found' });
+      if (skip) await skippedTools.skip(userId, manual.name);
+      else await skippedTools.include(userId, manual.name);
+      res.status(204).end();
+    } catch (err) {
+      log.error(`connect/skipped ${skip ? 'skip' : 'include'} failed:`, { err });
+      res.status(500).json({ error: 'Internal error' });
+    }
+  }
 
   // Set/replace a tool's ADMIN (shared) secret — requires WRITE on the `.tool` file.
   router.put('/secrets/tools/:slug/vars/:var/admin', async (req, res) => {

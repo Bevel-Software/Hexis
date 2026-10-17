@@ -313,8 +313,9 @@ export class ToolManualService implements IToolManualService {
     return (await this.scan()).manuals.map(toSummary);
   }
 
-  async catalogFingerprints(userEmail: string): Promise<string[]> {
-    return (await this.accessibleManuals(userEmail)).map(manualFingerprint);
+  async catalogFingerprints(userEmail: string, except?: ReadonlySet<string>): Promise<string[]> {
+    const manuals = await this.accessibleManuals(userEmail);
+    return (except ? manuals.filter((m) => !except.has(String(m.name))) : manuals).map(manualFingerprint);
   }
 
   async getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null> {
