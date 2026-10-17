@@ -9,6 +9,8 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
 import { WorkflowValidationError, BranchNameError } from '../../../../shared/domain-errors.js';
+import { GitRunError, type IGitRunner } from '../../../../shared/git.contract.js';
+import { NodeGitRunner } from '../node-git-runner.js';
 
 const execFileAsync = promisify(execFile);
 const PROCESS_MAP_DIR = 'knowledge-base';
@@ -143,6 +145,41 @@ describe('GitService.diffFileBetweenBranches', () => {
     };
     await expect(svc.diffFileBetweenBranches(workspaceId, 'Docs', 'current-company-state', 'alice/edit-foo', refuse)).rejects.toThrow(/not yours to read/);
     expect(asked).toEqual([sides, sides]);
+  });
+
+  it('fails closed when a lookup of a side\'s other tip fails for any reason but absence: no diff, the verdict never asked', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\n', 'base');
+    await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\nline two\n', 'add line two');
+    const inner = new NodeGitRunner();
+    // The secondary lookup (`refs/remotes/origin/alice/edit-foo`, absent in
+    // this local-only repository) fails the way a corrupt repository or a
+    // deadline fails — not the way an absent ref answers.
+    let failure: GitRunError | null = null;
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (failure && args[0] === 'rev-parse' && args.includes('refs/remotes/origin/alice/edit-foo')) throw failure;
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext(), undefined, null, gitRunner);
+    const asked: unknown[] = [];
+    const authorize = async (s: unknown): Promise<void> => { asked.push(s); };
+    for (const f of [
+      new GitRunError('git rev-parse failed', { exitCode: 128, stderr: 'fatal: bad object' }),
+      new GitRunError('git rev-parse timed out', { timedOut: true }),
+    ]) {
+      failure = f;
+      await expect(svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', authorize)).rejects.toBe(f);
+    }
+    expect(asked).toEqual([]);
+    // An absent ref is the one answer that is "no such commit": the diff goes on.
+    failure = null;
+    expect((await svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', authorize)).diff).toContain('+line two');
+    expect(asked).toHaveLength(1);
   });
 
   it('returns the empty string when the file is identical on both branches', async () => {

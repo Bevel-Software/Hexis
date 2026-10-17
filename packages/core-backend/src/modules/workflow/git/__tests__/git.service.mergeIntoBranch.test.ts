@@ -5,7 +5,7 @@ import os from 'node:os';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { GitService } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
-import type { IGitRunner } from '../../../../shared/git.contract.js';
+import { GitRunError, type IGitRunner } from '../../../../shared/git.contract.js';
 import type { ReservedPushOps } from '@bevel-software/platform-shared';
 import { PullRebaseConflictError, WorkflowDomainError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
@@ -683,5 +683,39 @@ describe('GitService.readFileAtBranch', () => {
     // published tip served, and the local head past it — so a grant at one
     // never outruns a denial at the other.
     expect(asked).toEqual([[published, local]]);
+  });
+
+  it('fails closed when a lookup of the branch\'s other tip fails for any reason but absence: nothing is served, the verdict never asked', async () => {
+    const { repo, pusher } = await seed(root);
+    await pushOn(pusher, TARGET, { 'other.md': 'other, changed on target\n' }, 'target edits');
+    await runGit(repo, ['fetch', '-q', 'origin']);
+    const inner = new NodeGitRunner();
+    // The secondary lookup (`refs/heads/<target>`, absent here) fails the way
+    // a corrupt repository or a deadline fails — not the way an absent ref
+    // answers (exit 1, empty stderr).
+    let failure: GitRunError | null = null;
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (failure && args[0] === 'rev-parse' && args.includes(`refs/heads/${TARGET}`)) throw failure;
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const svc = new GitService(stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }), stubWorkflowHooks(), testKbContext(), undefined, null, gitRunner);
+    const asked: string[][] = [];
+    const authorize = async (commits: string[]): Promise<void> => { asked.push(commits); };
+    for (const f of [
+      new GitRunError('git rev-parse failed', { exitCode: 128, stderr: 'fatal: bad object' }),
+      new GitRunError('git rev-parse timed out', { timedOut: true }),
+    ]) {
+      failure = f;
+      await expect(svc.readFileAtBranch(workspaceId, 'other.md', TARGET, authorize)).rejects.toBe(f);
+    }
+    expect(asked).toEqual([]);
+    // An absent ref is the one answer that is "no such commit": the read goes on.
+    failure = null;
+    expect((await svc.readFileAtBranch(workspaceId, 'other.md', TARGET, authorize)).content).toBe('other, changed on target\n');
+    expect(asked).toHaveLength(1);
   });
 });
