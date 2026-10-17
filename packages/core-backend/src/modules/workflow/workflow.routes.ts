@@ -415,20 +415,22 @@ export function createWorkflowRoutes(
     // branch, so its working-tree verdict covers what they return. This one
     // serves content of TWO caller-named branches — the verdict must come
     // from the commits actually served (`readableAtCommits`, the one rule
-    // this route and the agent's history tools share): the diff is made
-    // first, pinned to the commit each side was read at, and authorized at
-    // those before any of it is answered — never at a branch ref a fetch may
-    // move between a verdict and a read. (The working-tree side is
-    // additionally covered by the workspace `canRead` above.) An
-    // access-model failure keeps its own status: an unreadable access tree
-    // is the documented 503 a client retries, not a permanent 403 denial.
+    // this route and the agent's history tools share): the service pins the
+    // commit each side is read at and asks this verdict at those inside its
+    // reservation, before anything is said about the path at either — never
+    // at a branch ref a fetch may move between a verdict and a read. (The
+    // working-tree side is additionally covered by the workspace `canRead`
+    // above.) An access-model failure keeps its own status: an unreadable
+    // access tree is the documented 503 a client retries, not a permanent
+    // 403 denial.
     const user = await requireUser(req, res);
     if (!user) return;
     const repoRelative = toKbRelative(pathParam, kbDirName)!;
     try {
-      const compared = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch);
-      await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, compared.from, fromBranch, pathParam);
-      await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, compared.to, toBranch, pathParam);
+      const compared = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch, async (sides) => {
+        await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, sides.from, fromBranch, pathParam);
+        await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, sides.to, toBranch, pathParam);
+      });
       res.json({ diff: compared.diff });
     } catch (err) {
       const { status, body } = toHttpError(err);

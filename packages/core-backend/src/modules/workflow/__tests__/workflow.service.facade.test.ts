@@ -332,6 +332,27 @@ describe('WorkflowService.updateBranch', () => {
     expect(created).toBe(true);
   });
 
+  it("takes no key on a protected `from`: two drafts refreshing from the default branch do not wait on each other", async () => {
+    const git = gitThatMerges(null);
+    let release: () => void = () => {};
+    const merges: string[] = [];
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn((workspaceId: string) => {
+      merges.push(workspaceId);
+      if (workspaceId === 'ada%2Fdraft') {
+        return new Promise((resolve) => { release = () => resolve({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] }); });
+      }
+      return Promise.resolve({ kind: 'merged', sha: 'n', from: 'target-company-state', resolvedPaths: [] });
+    });
+    const svc = build(git);
+    const first = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    await new Promise((r) => setTimeout(r, 30));
+    // The second draft's refresh from the same protected branch completes while the first still holds its merge.
+    expect(await svc.updateBranch('bob%2Fdraft', user, { from: 'target-company-state' })).toMatchObject({ kind: 'merged', sha: 'n' });
+    expect(merges).toEqual(['ada%2Fdraft', 'bob%2Fdraft']);
+    release();
+    expect(await first).toMatchObject({ kind: 'merged', sha: 'm' });
+  });
+
   it('merges the named branch into the draft as the user, published inside the merge\'s own reservation', async () => {
     const git = gitThatMerges({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
     const svc = build(git);
@@ -483,7 +504,11 @@ describe('WorkflowService — change delegation', () => {
     const compared = await svc.compareFile('w1', 'Foo.md', 'a', 'b');
     // The commits each side was served from travel with the diff: what a caller authorizes it at.
     expect(compared).toEqual({ diff: '@@ diff', from: 'a1', to: 'b1' });
-    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b');
+    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b', undefined);
+    // The caller's verdict travels down to the git layer, which asks it at the pinned commits.
+    const authorize = vi.fn(async () => {});
+    await svc.compareFile('w1', 'Foo.md', 'a', 'b', authorize);
+    expect(git.diffFileBetweenBranches).toHaveBeenLastCalledWith('w1', 'Foo.md', 'a', 'b', authorize);
   });
 });
 

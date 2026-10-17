@@ -796,8 +796,9 @@ export function registerWorkflowTools(
 
   /**
    * The per-file read gate for content served from ANOTHER branch — the
-   * compare route's rule: at the commit the service read it at, asked after
-   * the read and before anything of it is answered.
+   * compare route's rule: at the commit the service serves it from, asked by
+   * the service inside its reservation before anything is said about the
+   * path there.
    */
   const requireReadAtCommit = (ctx: ToolContext, workspaceId: string, rel: string, commit: string, branch: string): Promise<void> =>
     assertReadableAtCommit(accessControl, workspaceId, ctx.user.email, rel, commit, branch);
@@ -892,11 +893,11 @@ export function registerWorkflowTools(
         const { baseline, current } = await ctx.workflowService.fileAtChange(workspaceId, path, at);
         return { path: rel, at, kind: 'commit', sha: at, content: current, before: baseline };
       }
-      // Read at the branch's published tip, then authorized at that very
-      // commit before any of it is answered: the ref is a name a fetch may
-      // move between a verdict and a read; the commit is not.
-      const read = await ctx.workflowService.fileAtBranch(workspaceId, path, at);
-      await requireReadAtCommit(ctx, workspaceId, rel, read.sha, at);
+      // Read at the branch's published tip, authorized at that very commit
+      // inside the read — before anything is said about the path there,
+      // the folder refusal included: the ref is a name a fetch may move
+      // between a verdict and a read; the commit is not.
+      const read = await ctx.workflowService.fileAtBranch(workspaceId, path, at, (sha) => requireReadAtCommit(ctx, workspaceId, rel, sha, at));
       return { path: rel, at, kind: 'branch', sha: read.sha, content: read.content };
     },
   });
@@ -946,9 +947,10 @@ export function registerWorkflowTools(
       if (typeof from !== 'string' || from.length === 0 || typeof to !== 'string' || to.length === 0) {
         throw new ToolError('Give `from` and `to` (two branches), or `at` (one commit).', 400);
       }
-      const compared = await ctx.workflowService.compareFile(workspaceId, path, from, to);
-      await requireReadAtCommit(ctx, workspaceId, rel, compared.from, from);
-      await requireReadAtCommit(ctx, workspaceId, rel, compared.to, to);
+      const compared = await ctx.workflowService.compareFile(workspaceId, path, from, to, async (sides) => {
+        await requireReadAtCommit(ctx, workspaceId, rel, sides.from, from);
+        await requireReadAtCommit(ctx, workspaceId, rel, sides.to, to);
+      });
       return { path: rel, diff: compared.diff };
     },
   });

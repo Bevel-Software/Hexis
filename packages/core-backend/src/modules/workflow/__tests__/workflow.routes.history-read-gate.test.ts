@@ -41,7 +41,11 @@ async function makeHarness(): Promise<Harness> {
   const accessControl = { canRead, canReadAtRef } as unknown as IAccessControl;
   const workflow = {
     listChangesForFile: vi.fn(async () => []),
-    compareFile: vi.fn(async (_w: string, _p: string, from: string, to: string) => ({ diff: '', from: `sha-of-${from}`, to: `sha-of-${to}` })),
+    compareFile: vi.fn(async (_w: string, _p: string, from: string, to: string, authorize?: (s: { from: string; to: string }) => Promise<void>) => {
+      const sides = { from: `sha-of-${from}`, to: `sha-of-${to}` };
+      await authorize?.(sides);
+      return { diff: '', ...sides };
+    }),
     showFileAtChange: vi.fn(async () => ''),
     fileAtChange: vi.fn(async () => ({ baseline: null, current: 'x' })),
   };

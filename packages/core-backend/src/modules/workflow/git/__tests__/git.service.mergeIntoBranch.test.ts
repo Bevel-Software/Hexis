@@ -653,6 +653,21 @@ describe('GitService.readFileAtBranch', () => {
     expect((await svc.readFileAtBranch(workspaceId, 'missing.md', TARGET)).content).toBeNull();
     await expect(svc.readFileAtBranch(workspaceId, 'docs', TARGET)).rejects.toThrow(/directory/);
     await expect(svc.readFileAtBranch(workspaceId, 'other.md', 'no/such/branch')).rejects.toThrow(/unknown branch/);
+
+    // The caller's verdict is asked with the commit BEFORE the path is
+    // described at it: a folder the caller may not read is refused as
+    // unreadable, never as a folder.
+    const asked: string[] = [];
+    const refuse = async (sha: string): Promise<void> => {
+      asked.push(sha);
+      throw new WorkflowDomainError('not yours to read', 403);
+    };
+    await expect(svc.readFileAtBranch(workspaceId, 'docs', TARGET, refuse)).rejects.toThrow(/not yours to read/);
+    await expect(svc.readFileAtBranch(workspaceId, 'other.md', TARGET, refuse)).rejects.toThrow(/not yours to read/);
+    expect(asked).toEqual([theirs, theirs]);
+    const allowed: string[] = [];
+    expect((await svc.readFileAtBranch(workspaceId, 'other.md', TARGET, async (sha) => { allowed.push(sha); })).content).toBe('other, changed on target\n');
+    expect(allowed).toEqual([theirs]);
   });
 
   it('reads the PUBLISHED tip, not a local head that has moved past it', async () => {

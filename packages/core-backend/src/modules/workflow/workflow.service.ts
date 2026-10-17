@@ -438,8 +438,12 @@ export class WorkflowService implements IWorkflowService {
     target: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const keys = [`branch:${source}`];
-    if (!this.kb.isProtectedBranch(target)) keys.push(`branch:${target}`);
+    // A PROTECTED branch's key is not reserved at EITHER end (see above):
+    // nothing can delete one, so the key would exclude nothing and only
+    // serialize every draft that refreshes from the default branch behind
+    // every other. The same branch at both ends (a draft syncing its own
+    // shared state) takes its one key.
+    const keys = [...new Set([source, target].filter((b) => !this.kb.isProtectedBranch(b)).map((b) => `branch:${b}`))];
     return this.branchLifecycle.runAll(keys, fn);
   }
 
@@ -1272,8 +1276,9 @@ export class WorkflowService implements IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
+    authorize?: (sides: { from: string; to: string }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }> {
-    return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
+    return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch, authorize);
   }
 
   fileAtForkPoint(
@@ -4767,11 +4772,9 @@ export class WorkflowService implements IWorkflowService {
     // Under the lifecycle lock of both branches, as `mergeBranch` and
     // `openChangeRequest` run: the "no open request" answer is only sound
     // while nobody can open one mid-merge, and a branch being merged into is
-    // not one to delete or recreate meanwhile. The branch's own shared state
-    // (from = branch) takes the one key.
-    const underLifecycleLocks = <T>(fn: () => Promise<T>): Promise<T> =>
-      from === branch ? this.branchLifecycle.runAll([`branch:${branch}`], fn) : this.runOnBranchPair(from, branch, fn);
-    return underLifecycleLocks(async () => {
+    // not one to delete or recreate meanwhile. A protected `from` takes no
+    // key, and the branch's own shared state (from = branch) takes the one.
+    return this.runOnBranchPair(from, branch, async () => {
       if (from !== branch) {
         const open = await this.openRequestBlockingMerge(from, branch);
         if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
@@ -4838,8 +4841,9 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     path: string,
     branch: string,
+    authorize?: (sha: string) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }> {
-    return this.git.readFileAtBranch(workspaceId, path, branch);
+    return this.git.readFileAtBranch(workspaceId, path, branch, authorize);
   }
 
   changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]> {

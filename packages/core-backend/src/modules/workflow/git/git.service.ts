@@ -1953,6 +1953,7 @@ export class GitService implements IGitService {
     workspaceId: string,
     relativePath: string,
     branch: string,
+    authorize?: (sha: string) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }> {
     assertValidRelativePath(relativePath);
     assertValidBranchName(branch);
@@ -1963,6 +1964,10 @@ export class GitService implements IGitService {
       // shared is nobody else's to read, so `origin/<branch>` comes first and
       // the local head serves only a branch origin does not have.
       const { ref, sha } = await this.resolvePublishedBranch(cwd, branch);
+      // The caller's verdict, at this commit, BEFORE anything is said about
+      // the path there: a refusal that names what the path is (a folder) is
+      // an answer about content the caller may not read.
+      if (authorize) await authorize(sha);
       // Per file, as every history read: a folder's content at a commit is
       // every child's, which the per-file gate never checked.
       await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
@@ -3160,6 +3165,7 @@ export class GitService implements IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
+    authorize?: (sides: { from: string; to: string }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }> {
     assertValidRelativePath(relativePath);
     assertValidBranchName(fromBranch);
@@ -3175,6 +3181,10 @@ export class GitService implements IGitService {
       const fromRef = (await this.git(cwd, ['rev-parse', await this.resolveBranchRef(cwd, fromBranch)])).stdout.trim();
       const toRef = (await this.git(cwd, ['rev-parse', await this.resolveBranchRef(cwd, toBranch)])).stdout.trim();
       const pinned = (diff: string): { diff: string; from: string; to: string } => ({ diff, from: fromRef, to: toRef });
+      // The caller's verdict at both commits BEFORE anything is said about
+      // the path at either: a refusal that names what the path is there (a
+      // folder) is an answer about content the caller may not read.
+      if (authorize) await authorize({ from: fromRef, to: toRef });
       await this.assertNotTreeAtRef(cwd, fromRef, repoRelativePath, relativePath);
       await this.assertNotTreeAtRef(cwd, toRef, repoRelativePath, relativePath);
       // When one side is the currently-checked-out branch, diff against the

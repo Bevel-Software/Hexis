@@ -117,6 +117,33 @@ describe('GitService.diffFileBetweenBranches', () => {
     expect(diff).toContain('+line two');
   });
 
+  it('asks the caller\'s verdict at the two commits served, before the path is described at either', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext());
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\n', 'base');
+    await commitFile(repo, 'Docs/a.md', 'a\n', 'a folder');
+    const base = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+    await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\nline two\n', 'add line two');
+    const tip = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+
+    const asked: unknown[] = [];
+    const sides = { from: base, to: tip };
+    const { diff } = await svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', async (s) => {
+      asked.push(s);
+    });
+    expect(diff).toContain('+line two');
+    expect(asked).toEqual([sides]);
+
+    // A folder the caller may not read is refused as unreadable, never as a folder.
+    const refuse = async (s: unknown): Promise<void> => {
+      asked.push(s);
+      throw new WorkflowValidationError('not yours to read');
+    };
+    await expect(svc.diffFileBetweenBranches(workspaceId, 'Docs', 'current-company-state', 'alice/edit-foo', refuse)).rejects.toThrow(/not yours to read/);
+    expect(asked).toEqual([sides, sides]);
+  });
+
   it('returns the empty string when the file is identical on both branches', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const svc = new GitService(

@@ -236,6 +236,7 @@ export interface IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
+    authorize?: (sides: { from: string; to: string }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }>;
   /**
    * Diff of one file at a specific change (sha) — i.e. `git show <sha> -- <path>`.
@@ -766,12 +767,15 @@ export interface IWorkflowService {
   ): Promise<UpdateBranchOutcome>;
   /**
    * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).
-   * Access to the file at that commit is the caller's to check.
+   * Access to the file at that commit is the caller's to check — through
+   * `authorize`, asked with the commit before anything is said about the
+   * path there.
    */
   fileAtBranch(
     workspaceId: string,
     path: string,
     branch: string,
+    authorize?: (sha: string) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }>;
   /**
    * The repository-relative paths `branch` changes against `base` — a

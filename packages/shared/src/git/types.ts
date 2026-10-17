@@ -213,15 +213,19 @@ export interface IGitService {
   ): Promise<MergeIntoBranchOutcome>;
   /**
    * One file as `branch` has PUBLISHED it (`origin/<branch>`; its local head
-   * only for a branch origin does not have), with the commit it was read at. `content` is null when the file is not
-   * there; a path that is a folder at that commit is refused, as every
-   * per-file history read refuses it. Access to the file at that commit is
-   * the caller's to check.
+   * only for a branch origin does not have), with the commit it was read at.
+   * `content` is null when the file is not there; a path that is a folder at
+   * that commit is refused, as every per-file history read refuses it.
+   * Access to the file at that commit is the caller's to check: `authorize`,
+   * when given, is asked with the commit inside the reservation before
+   * anything is said about the path there (the folder refusal included),
+   * and its throw is the answer.
    */
   readFileAtBranch(
     workspaceId: string,
     relativePath: string,
     branch: string,
+    authorize?: (sha: string) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
   createBranch(
@@ -367,7 +371,10 @@ export interface IGitService {
    * reservation (the checked-out side is served from the working tree;
    * its commit is the checkout's head): what a caller authorizes the diff
    * at, so a fetch that moves a branch after this call cannot have swapped
-   * in content the verdict never saw.
+   * in content the verdict never saw. `authorize`, when given, is asked
+   * with those two commits inside the reservation before anything is said
+   * about the path at either — a refusal that names what the path is there
+   * (a folder) is itself an answer — and its throw is the answer.
    *
    * Read-only: nothing is checked out, fetched, or written.
    */
@@ -376,6 +383,7 @@ export interface IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
+    authorize?: (sides: { from: string; to: string }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }>;
   // `workingStatus` + `diffFileWorking` removed: under save=share the
   // working tree is never dirty, so listing dirty files / diffing them
