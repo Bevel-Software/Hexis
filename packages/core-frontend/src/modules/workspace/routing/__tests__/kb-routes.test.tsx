@@ -121,6 +121,13 @@ describe('useFileNav.openFile', () => {
     );
   });
 
+  it('opens a page on its FILE PAGE by an address that asks for it — a new tab carries no router state', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('main');
+    result.current.openFilePage('knowledge-base/Skills/qa-bridge/view.html');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/main/knowledge-base/Skills/qa-bridge/view.html?as=file');
+  });
+
   it('opens a tree path verbatim even when a folder inside it is named like the kbDirName', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');

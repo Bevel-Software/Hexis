@@ -163,10 +163,10 @@ describe('AuditLogPage', () => {
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
 
     expect(listPrincipals).toHaveBeenCalledWith('all');
-    const alice = screen.getByRole('region', { name: 'Agents and keys for alice@example.com' });
+    const alice = screen.getByRole('region', { name: 'Agents, keys and pages for alice@example.com' });
     expect(within(alice).getByText('Alice')).toBeInTheDocument();
     expect(within(alice).getByText('CI pipeline')).toBeInTheDocument();
-    const bob = screen.getByRole('region', { name: 'Agents and keys for bob@example.com' });
+    const bob = screen.getByRole('region', { name: 'Agents, keys and pages for bob@example.com' });
     expect(within(bob).getByText('Claude link')).toBeInTheDocument();
     expect(within(bob).queryByText('Old script')).not.toBeInTheDocument();
     expect(screen.getByText(/2 accounts · 3 live · 1 revoked/)).toBeInTheDocument();
@@ -185,6 +185,39 @@ describe('AuditLogPage', () => {
     expect(screen.getByText('Old script')).toBeInTheDocument();
     expect(screen.getByText('Deleted by owner')).toBeInTheDocument();
     expect(screen.getByText(/18 events/)).toBeInTheDocument();
+  });
+
+  it("lists a page under its viewer by its path, with its refused calls, and offers nothing to revoke", async () => {
+    const page: AuditPrincipal = {
+      kind: 'page',
+      id: 'cGFnZQ',
+      label: 'Dashboards/Roadmap.html',
+      createdAt: NOW - DAY,
+      lastUsedAt: NOW - 60 * 1000,
+      revokedAt: null,
+      revokedBy: null,
+      eventCount: 2,
+      user: ALICE,
+    };
+    vi.mocked(listPrincipals).mockResolvedValue([page]);
+    vi.mocked(listEvents).mockResolvedValue({
+      events: [
+        { id: 'e1', kind: 'capability', manual: null, name: 'read_file', outcome: 'ok', at: NOW - 2 * 60 * 1000 },
+        { id: 'e2', kind: 'capability', manual: null, name: 'edit_file', outcome: 'refused', at: NOW - 60 * 1000 },
+      ],
+      total: 2,
+      nextCursor: null,
+    });
+    renderPage();
+    const row = await screen.findByRole('button', { name: /Dashboards\/Roadmap\.html/, expanded: false });
+    expect(within(row).getByText('Page')).toBeInTheDocument();
+    // A page is not a live connection: counted apart from them.
+    expect(screen.getByText(/0 live · 1 page/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Revoke/ })).not.toBeInTheDocument();
+    await userEvent.click(row);
+    await waitFor(() => expect(screen.getByText('refused')).toBeInTheDocument());
+    expect(listEvents).toHaveBeenCalledWith('page', 'cGFnZQ', { limit: 50 });
+    expect(screen.getByText('edit_file')).toBeInTheDocument();
   });
 
   it('expands a row to its events once, keeps them across a collapse, and filters them', async () => {
