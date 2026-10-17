@@ -2,33 +2,6 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /**
- * Whether `userEmail` may read `repoRelativePath` as another branch has it —
- * ONE answer for the app's compare route and the agent's history tools.
- *
- * Content served from another branch is read at the refs that could serve
- * it: the comparison prefers a local ref over `origin/<branch>`, so both
- * candidates are authorized. Every ref that resolves must grant the read,
- * and a branch none of whose refs resolve is denied: a ref that cannot be
- * authorized is never served. An access-model FAILURE is not an unresolvable
- * ref: it propagates with its own status (an unreadable access tree is the
- * documented 503 a client retries), never mapped to null, where the other
- * candidate's grant would serve a ref whose authorization errored.
- */
-export async function readableOnBranch(
-  accessControl: Pick<IAccessControl, 'canReadAtRef'>,
-  workspaceId: string,
-  userEmail: string,
-  repoRelativePath: string,
-  branch: string,
-): Promise<boolean> {
-  const verdicts: (boolean | null)[] = [];
-  for (const ref of [`origin/${branch}`, branch]) {
-    verdicts.push(await accessControl.canReadAtRef(workspaceId, ref, userEmail, repoRelativePath));
-  }
-  return !verdicts.some((v) => v === false) && !verdicts.every((v) => v === null);
-}
-
-/**
  * Which of `paths` `userEmail` may read at `origin/<base>`, as a membership
  * set — ONE rule for the change-request reads (their file lists, judged at
  * the request's base) and for `branch_status` (the paths a request would
@@ -51,12 +24,15 @@ export async function readablePathsAt(
 
 /**
  * Whether `userEmail` may read `repoRelativePath` at EVERY one of `commits`
- * — ONE rule for what a merge carries of a file: the two commits the merge
- * is of (`ours`, `theirs`), pinned by the merge itself, so the verdict is
- * about the bytes actually merged and shown, never about a branch ref a
- * fetch may have moved since. A commit whose rules cannot be read (null)
- * grants nothing. Asked by the service before a resolution is written and by
- * the tool before a conflict's sides are shown.
+ * — ONE rule for content served from another branch, for the app's compare
+ * route and the agent's history tools alike: the commits the service read
+ * the content at, pinned by the service inside its reservation (a diff's two
+ * sides, a file at a branch's published tip, the two commits a merge is of),
+ * so the verdict is about the bytes actually served, never about a branch
+ * ref a fetch may have moved between the verdict and the read. A commit
+ * whose rules cannot be read (null) grants nothing. An access-model FAILURE
+ * is not a null: it propagates with its own status (an unreadable access
+ * tree is the documented 503 a client retries).
  */
 export async function readableAtCommits(
   accessControl: Pick<IAccessControl, 'canReadAtRef'>,
@@ -71,7 +47,7 @@ export async function readableAtCommits(
   return true;
 }
 
-/** The refusal `readableOnBranch` answers false with, as both callers word it. */
+/** The refusal `readableAtCommits` answers false with, as every caller words it: the branch named, never the commit. */
 export class ReadOnBranchDeniedError extends WorkflowDomainError {
   constructor(displayPath: string, branch: string) {
     super(`You don't have permission to read "${displayPath}" on "${branch}".`, 403, {
@@ -83,16 +59,17 @@ export class ReadOnBranchDeniedError extends WorkflowDomainError {
   }
 }
 
-/** `readableOnBranch`, thrown when it answers false. */
-export async function assertReadableOnBranch(
+/** `readableAtCommits` at the commit `branch`'s content was served from, thrown when it answers false. */
+export async function assertReadableAtCommit(
   accessControl: Pick<IAccessControl, 'canReadAtRef'>,
   workspaceId: string,
   userEmail: string,
   repoRelativePath: string,
+  commit: string,
   branch: string,
   displayPath: string = repoRelativePath,
 ): Promise<void> {
-  if (!(await readableOnBranch(accessControl, workspaceId, userEmail, repoRelativePath, branch))) {
+  if (!(await readableAtCommits(accessControl, workspaceId, userEmail, repoRelativePath, [commit]))) {
     throw new ReadOnBranchDeniedError(displayPath, branch);
   }
 }

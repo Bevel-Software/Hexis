@@ -204,7 +204,7 @@ const workflowService = {
   },
   compareFile: async (ws: string, path: string, from: string, to: string) => {
     calls.push(['compareFile', ws, path, from, to]);
-    return `@@ ${from}..${to}`;
+    return { diff: `@@ ${from}..${to}`, from: 'tip-of-' + from, to: 'tip-of-' + to };
   },
   branchStatus: async (ws: string) => {
     calls.push(['branchStatus', ws]);
@@ -1101,23 +1101,23 @@ describe('history and syncing tools', () => {
     expect(calls).toContainEqual(['fileAtChange', DRAFT_WS, 'knowledge-base/KnowledgeBase/Foo.md', SHA]);
   });
 
-  it('read_file_at reads another branch at the refs that serve it, every resolving one granting', async () => {
+  it('read_file_at reads another branch at its published tip and authorizes at that very commit, never at a ref', async () => {
     const base = await start();
     const res = await post(tool(base, 'read_file_at'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at: 'main' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ path: 'KnowledgeBase/Foo.md', at: 'main', kind: 'branch', sha: 'tip-of-main', content: 'on main\n' });
-    expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, 'origin/main', 'e@x', 'KnowledgeBase/Foo.md']);
-    expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, 'main', 'e@x', 'KnowledgeBase/Foo.md']);
     expect(calls).toContainEqual(['fileAtBranch', DRAFT_WS, 'knowledge-base/KnowledgeBase/Foo.md', 'main']);
+    expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, 'tip-of-main', 'e@x', 'KnowledgeBase/Foo.md']);
+    expect(calls.filter((c) => c[0] === 'canReadAtRef').map((c) => c[2])).toEqual(['tip-of-main']);
   });
 
-  it('read_file_at refuses a branch whose refs deny the read, and one none of whose refs resolve', async () => {
+  it('read_file_at refuses a branch whose commit denies the read, and one whose rules cannot be read, disclosing nothing', async () => {
     const base = await start();
     for (const at of ['me/hidden', 'me/unknown']) {
       const res = await post(tool(base, 'read_file_at'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', at });
       expect(res.status, at).toBe(403);
+      expect(JSON.stringify(await res.json())).not.toContain(`on ${at}`);
     }
-    expect(calls.some((c) => c[0] === 'fileAtBranch')).toBe(false);
   });
 
   it('compare_file diffs one commit, or two branches after gating both', async () => {
@@ -1129,14 +1129,17 @@ describe('history and syncing tools', () => {
     const between = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'main', to: DRAFT });
     expect(between.status).toBe(200);
     expect(await between.json()).toEqual({ path: 'KnowledgeBase/Foo.md', diff: '@@ main..me/draft' });
+    // Authorized at the two commits the diff was made between, never at a ref.
     for (const b of ['main', DRAFT]) {
-      expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, `origin/${b}`, 'e@x', 'KnowledgeBase/Foo.md']);
+      expect(calls).toContainEqual(['canReadAtRef', DRAFT_WS, `tip-of-${b}`, 'e@x', 'KnowledgeBase/Foo.md']);
     }
+    expect(calls.filter((c) => c[0] === 'canReadAtRef').map((c) => c[2])).toEqual(['tip-of-main', `tip-of-${DRAFT}`]);
 
     const neither = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md' });
     expect(neither.status).toBe(400);
     const hidden = await post(tool(base, 'compare_file'), writeTok(), { branch: DRAFT, path: 'KnowledgeBase/Foo.md', from: 'me/hidden', to: DRAFT });
     expect(hidden.status).toBe(403);
+    expect(JSON.stringify(await hidden.json())).not.toContain('@@');
   });
 
   it('branch_status composes the branch\'s standing, against the fork base unless a base is named', async () => {

@@ -107,7 +107,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
     await commitFile(repo, 'Knowledge/Foo.md', 'line one\nline two\n', 'add line two');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'current-company-state',
@@ -130,7 +130,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // no edits to Same.md on the new branch
     await commitFile(repo, 'Knowledge/Other.md', 'sidecar\n', 'unrelated edit');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Same.md',
       'current-company-state',
@@ -151,7 +151,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/cleanup']);
     await deleteFileCommit(repo, 'Knowledge/Old.md', 'remove Old.md');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Old.md',
       'current-company-state',
@@ -173,7 +173,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/add-new']);
     await commitFile(repo, 'Knowledge/New.md', 'brand new\n', 'add New.md');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/New.md',
       'current-company-state',
@@ -211,7 +211,7 @@ describe('GitService.diffFileBetweenBranches', () => {
       testKbContext(),
     );
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'current-company-state',
@@ -240,7 +240,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
     await commitFile(repo, 'Knowledge/Foo.md', 'baseline\nedit\n', 'edit');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'knowledge-base/Knowledge/Foo.md',
       'current-company-state',
@@ -267,7 +267,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // and pressing save before sharing.
     await writeFile(repo, 'Knowledge/Foo.md', 'baseline\nfresh edit\n');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'current-company-state',
@@ -291,7 +291,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // Brand-new file, never committed — only on disk.
     await writeFile(repo, 'Knowledge/Brandnew.md', 'fresh content\n');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Brandnew.md',
       'current-company-state',
@@ -313,7 +313,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/draft']);
     await writeFile(repo, 'Knowledge/Brandnew.md', 'fresh content\n');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Brandnew.md',
       'alice/draft',
@@ -339,7 +339,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // side. Lines added on current-company-state — i.e. the *removal* of
     // "draft edit" — should appear as `+` on the to side, and "draft edit"
     // should appear as `-`.
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'alice/edit-foo',
@@ -443,7 +443,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await writeFile(repo, relPath, 'base content\nfeature edit\n');
     await svc.commitFile(workspaceId, user, relPath, 'feature edit');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       relPath,
       'current-company-state',

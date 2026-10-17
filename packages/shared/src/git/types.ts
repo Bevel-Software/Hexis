@@ -359,10 +359,15 @@ export interface IGitService {
    * Unified diff of a single file between two branches. Both names must
    * resolve to a known branch on this workspace (local head or
    * `refs/remotes/origin/<name>`); arbitrary refspecs and SHAs are
-   * rejected upstream. Returns the raw `git diff` output — empty string
+   * rejected upstream. `diff` is the raw `git diff` output — empty string
    * when the file is identical on both sides, a unified-diff body
    * otherwise (including the "new file mode" / "deleted file mode"
-   * headers when the file only exists on one side).
+   * headers when the file only exists on one side). `from` and `to` are
+   * the COMMITS each side was served from, resolved once inside the
+   * reservation (the checked-out side is served from the working tree;
+   * its commit is the checkout's head): what a caller authorizes the diff
+   * at, so a fetch that moves a branch after this call cannot have swapped
+   * in content the verdict never saw.
    *
    * Read-only: nothing is checked out, fetched, or written.
    */
@@ -371,7 +376,7 @@ export interface IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string>;
+  ): Promise<{ diff: string; from: string; to: string }>;
   // `workingStatus` + `diffFileWorking` removed: under save=share the
   // working tree is never dirty, so listing dirty files / diffing them
   // against HEAD reports the empty state by definition. Cross-branch

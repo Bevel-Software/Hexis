@@ -236,7 +236,7 @@ export interface IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string>;
+  ): Promise<{ diff: string; from: string; to: string }>;
   /**
    * Diff of one file at a specific change (sha) — i.e. `git show <sha> -- <path>`.
    * Used by the File viewer's History tab.

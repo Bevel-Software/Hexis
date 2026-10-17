@@ -38,7 +38,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import { assertReadableOnBranch } from './read-on-branch.js';
+import { assertReadableAtCommit } from './read-on-branch.js';
 import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
@@ -414,30 +414,22 @@ export function createWorkflowRoutes(
     // The other history endpoints serve commits of the URL workspace's own
     // branch, so its working-tree verdict covers what they return. This one
     // serves content of TWO caller-named branches — the verdict must come
-    // from the refs actually being served (`readableOnBranch`, the one rule
-    // this route and the agent's history tools share), or a caller could
-    // pick a workspace whose tree grants what the compared branches' trees
-    // deny. (The working-tree side is additionally covered by the workspace
-    // `canRead` above.) An access-model failure keeps its own status: an
-    // unreadable access tree is the documented 503 a client retries, not a
-    // permanent 403 denial.
-    {
-      const user = await requireUser(req, res);
-      if (!user) return;
-      const repoRelative = toKbRelative(pathParam, kbDirName)!;
-      for (const branch of [fromBranch, toBranch]) {
-        try {
-          await assertReadableOnBranch(accessControl, req.params.id, user.email, repoRelative, branch, pathParam);
-        } catch (err) {
-          const { status, body } = toHttpError(err);
-          res.status(status).json(body);
-          return;
-        }
-      }
-    }
+    // from the commits actually served (`readableAtCommits`, the one rule
+    // this route and the agent's history tools share): the diff is made
+    // first, pinned to the commit each side was read at, and authorized at
+    // those before any of it is answered — never at a branch ref a fetch may
+    // move between a verdict and a read. (The working-tree side is
+    // additionally covered by the workspace `canRead` above.) An
+    // access-model failure keeps its own status: an unreadable access tree
+    // is the documented 503 a client retries, not a permanent 403 denial.
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const repoRelative = toKbRelative(pathParam, kbDirName)!;
     try {
-      const diff = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch);
-      res.json({ diff });
+      const compared = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch);
+      await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, compared.from, fromBranch, pathParam);
+      await assertReadableAtCommit(accessControl, req.params.id, user.email, repoRelative, compared.to, toBranch, pathParam);
+      res.json({ diff: compared.diff });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

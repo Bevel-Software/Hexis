@@ -1272,7 +1272,7 @@ export class WorkflowService implements IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string> {
+  ): Promise<{ diff: string; from: string; to: string }> {
     return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
   }
 
@@ -4733,9 +4733,21 @@ export class WorkflowService implements IWorkflowService {
         { kind: 'protected-update-target', branch },
       );
     }
+    // The one merge a person makes: a change request's. An update that would
+    // land an OPEN request from `from` into this draft is that merge by
+    // another name, and `mergeBranch`'s gate refuses it here too — asked once
+    // before waiting, and again under the locks below, where the answer
+    // counts. (The other direction, the request's target into its source, is
+    // how a draft under review stays current, and is never blocked.)
+    if (from !== branch) {
+      const openBefore = await this.openRequestBlockingMerge(from, branch);
+      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);
+    }
     // The merge takes what the REMOTE holds of `from`, and the push publishes
     // the branch: writes still being committed on either would be missed by
-    // the first or swept up by the second. Waited for, as `mergeBranch` waits.
+    // the first or swept up by the second. Waited for, as `mergeBranch` waits
+    // — outside the lifecycle locks, which must not be held for seconds of
+    // waiting on a queue.
     for (const b of from === branch ? [branch] : [from, branch]) {
       const settled = await this.awaitPendingCommits(b);
       if (!settled.ok) {
@@ -4751,6 +4763,18 @@ export class WorkflowService implements IWorkflowService {
           message,
         };
       }
+    }
+    // Under the lifecycle lock of both branches, as `mergeBranch` and
+    // `openChangeRequest` run: the "no open request" answer is only sound
+    // while nobody can open one mid-merge, and a branch being merged into is
+    // not one to delete or recreate meanwhile. The branch's own shared state
+    // (from = branch) takes the one key.
+    const underLifecycleLocks = <T>(fn: () => Promise<T>): Promise<T> =>
+      from === branch ? this.branchLifecycle.runAll([`branch:${branch}`], fn) : this.runOnBranchPair(from, branch, fn);
+    return underLifecycleLocks(async () => {
+    if (from !== branch) {
+      const open = await this.openRequestBlockingMerge(from, branch);
+      if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
     }
     if (!(await this.git.remoteBranchExists(workspaceId, from))) {
       throw new WorkflowValidationError(`No branch named "${from}" on the shared repository.`);
@@ -4807,6 +4831,7 @@ export class WorkflowService implements IWorkflowService {
           }
         },
       });
+    });
   }
 
   fileAtBranch(

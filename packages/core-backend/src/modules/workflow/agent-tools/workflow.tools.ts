@@ -6,7 +6,7 @@ import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/agent-access.gate.js';
-import { readablePathsAt, readableAtCommits, assertReadableOnBranch } from '../read-on-branch.js';
+import { readablePathsAt, readableAtCommits, assertReadableAtCommit } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
@@ -182,9 +182,9 @@ export function registerWorkflowTools(
   /**
    * The per-file read gate the history tools apply: a file's past is the
    * file, so a history read takes the read the file itself takes — on the
-   * workspace for its own branch's history (`canRead`), at the refs that
-   * could serve another branch's content (`canReadAtRef`, through
-   * `readableOnBranch`, the compare route's own rule), and in batches for
+   * workspace for its own branch's history (`canRead`), at the commit
+   * another branch's content was served from (`canReadAtRef`, through
+   * `readableAtCommits`, the compare route's own rule), and in batches for
    * the path lists `branch_status` shows.
    */
   accessControl: Pick<IAccessControl, 'canRead' | 'canReadAtRef' | 'canReadBatch' | 'canReadBatchAtRef'>,
@@ -794,9 +794,13 @@ export function registerWorkflowTools(
     return rel;
   };
 
-  /** The per-file read gate for content served from ANOTHER branch — the compare route's rule (`readableOnBranch`). */
-  const requireReadAtBranch = (ctx: ToolContext, workspaceId: string, rel: string, branch: string): Promise<void> =>
-    assertReadableOnBranch(accessControl, workspaceId, ctx.user.email, rel, branch);
+  /**
+   * The per-file read gate for content served from ANOTHER branch — the
+   * compare route's rule: at the commit the service read it at, asked after
+   * the read and before anything of it is answered.
+   */
+  const requireReadAtCommit = (ctx: ToolContext, workspaceId: string, rel: string, commit: string, branch: string): Promise<void> =>
+    assertReadableAtCommit(accessControl, workspaceId, ctx.user.email, rel, commit, branch);
 
   /** Which of `paths` the caller may read at `origin/<base>` — the change-request reads' rule, `readablePathsAt`. */
   const readableAt = (ctx: ToolContext, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> =>
@@ -888,8 +892,11 @@ export function registerWorkflowTools(
         const { baseline, current } = await ctx.workflowService.fileAtChange(workspaceId, path, at);
         return { path: rel, at, kind: 'commit', sha: at, content: current, before: baseline };
       }
-      await requireReadAtBranch(ctx, workspaceId, rel, at);
+      // Read at the branch's published tip, then authorized at that very
+      // commit before any of it is answered: the ref is a name a fetch may
+      // move between a verdict and a read; the commit is not.
       const read = await ctx.workflowService.fileAtBranch(workspaceId, path, at);
+      await requireReadAtCommit(ctx, workspaceId, rel, read.sha, at);
       return { path: rel, at, kind: 'branch', sha: read.sha, content: read.content };
     },
   });
@@ -928,7 +935,7 @@ export function registerWorkflowTools(
       const workspaceId = await workspaceOf(ctx, branch);
       // As the compare route: the workspace's own gate on the path (the
       // checked-out side can be served from the working tree), then each
-      // compared branch at the refs that serve it.
+      // compared side at the commit it was served from.
       const rel = await requireRead(ctx, branch, workspaceId, path);
       if (typeof args.at === 'string' && args.at.length > 0) {
         if (!isCommitSha(args.at)) throw new ToolError('`at` must be a full commit sha.', 400);
@@ -939,8 +946,10 @@ export function registerWorkflowTools(
       if (typeof from !== 'string' || from.length === 0 || typeof to !== 'string' || to.length === 0) {
         throw new ToolError('Give `from` and `to` (two branches), or `at` (one commit).', 400);
       }
-      for (const b of [from, to]) await requireReadAtBranch(ctx, workspaceId, rel, b);
-      return { path: rel, diff: await ctx.workflowService.compareFile(workspaceId, path, from, to) };
+      const compared = await ctx.workflowService.compareFile(workspaceId, path, from, to);
+      await requireReadAtCommit(ctx, workspaceId, rel, compared.from, from);
+      await requireReadAtCommit(ctx, workspaceId, rel, compared.to, to);
+      return { path: rel, diff: compared.diff };
     },
   });
 

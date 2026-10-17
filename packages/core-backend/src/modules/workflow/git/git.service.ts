@@ -3160,7 +3160,7 @@ export class GitService implements IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string> {
+  ): Promise<{ diff: string; from: string; to: string }> {
     assertValidRelativePath(relativePath);
     assertValidBranchName(fromBranch);
     assertValidBranchName(toBranch);
@@ -3170,8 +3170,11 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
-      const fromRef = await this.resolveBranchRef(cwd, fromBranch);
-      const toRef = await this.resolveBranchRef(cwd, toBranch);
+      // Each side's COMMIT, read once here and diffed from here on: what the
+      // caller authorizes the answer at. The ref is a name a fetch may move.
+      const fromRef = (await this.git(cwd, ['rev-parse', await this.resolveBranchRef(cwd, fromBranch)])).stdout.trim();
+      const toRef = (await this.git(cwd, ['rev-parse', await this.resolveBranchRef(cwd, toBranch)])).stdout.trim();
+      const pinned = (diff: string): { diff: string; from: string; to: string } => ({ diff, from: fromRef, to: toRef });
       await this.assertNotTreeAtRef(cwd, fromRef, repoRelativePath, relativePath);
       await this.assertNotTreeAtRef(cwd, toRef, repoRelativePath, relativePath);
       // When one side is the currently-checked-out branch, diff against the
@@ -3191,11 +3194,7 @@ export class GitService implements IGitService {
         isToCurrent !== isFromCurrent &&
         (await this.isPathUntracked(cwd, repoRelativePath))
       ) {
-        return synthesizeUntrackedSideDiff(
-          cwd,
-          repoRelativePath,
-          isToCurrent ? 'added' : 'removed',
-        );
+        return pinned(await synthesizeUntrackedSideDiff(cwd, repoRelativePath, isToCurrent ? 'added' : 'removed'));
       }
       const args = ['diff', '--no-color'];
       if (isToCurrent && !isFromCurrent) {
@@ -3217,7 +3216,7 @@ export class GitService implements IGitService {
       args.push('--', repoRelativePath);
       try {
         const { stdout } = await this.git(cwd, args);
-        return stdout;
+        return pinned(stdout);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(

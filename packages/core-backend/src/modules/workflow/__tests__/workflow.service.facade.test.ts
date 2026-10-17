@@ -297,6 +297,41 @@ describe('WorkflowService.updateBranch', () => {
     expect(git.push).not.toHaveBeenCalled();
   });
 
+  it('refuses an update that would land an open change request from `from` into the draft, as the merge tool refuses it', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
+    const open = [{ number: 5, sourceBranch: 'target-company-state', targetBranch: 'ada/draft', state: 'open' }];
+    const svc = new WorkflowService(makeDb(open), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    const err = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, payload: { kind: 'open-change-request-blocks-merge', number: 5 } });
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+
+    // The other direction — the draft's own request, open INTO `from` — is
+    // how a draft under review stays current: never blocked.
+    const reverse = [{ number: 6, sourceBranch: 'ada/draft', targetBranch: 'target-company-state', state: 'open' }];
+    const syncing = new WorkflowService(makeDb(reverse), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    expect(await syncing.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' })).toMatchObject({ kind: 'merged' });
+  });
+
+  it("holds the draft's lifecycle key around the merge, as the merge tool does, so nothing opens a request or recreates the branch mid-merge", async () => {
+    const git = gitThatMerges(null);
+    let release: () => void = () => {};
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn(
+      () => new Promise((resolve) => { release = () => resolve({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] }); }),
+    );
+    (git.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ name: 'ada/draft' });
+    const svc = build(git);
+    const updating = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    await new Promise((r) => setTimeout(r, 30));
+    let created = false;
+    const creating = svc.createBranch('ada%2Fdraft', 'ada/draft').then(() => { created = true; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(created).toBe(false);
+    release();
+    expect(await updating).toMatchObject({ kind: 'merged' });
+    await creating;
+    expect(created).toBe(true);
+  });
+
   it('merges the named branch into the draft as the user, published inside the merge\'s own reservation', async () => {
     const git = gitThatMerges({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
     const svc = build(git);
@@ -442,11 +477,12 @@ describe('WorkflowService — change delegation', () => {
 
   it('compareFile delegates to git.diffFileBetweenBranches', async () => {
     const git = makeGit();
-    (git.diffFileBetweenBranches as ReturnType<typeof vi.fn>).mockResolvedValue('@@ diff');
+    (git.diffFileBetweenBranches as ReturnType<typeof vi.fn>).mockResolvedValue({ diff: '@@ diff', from: 'a1', to: 'b1' });
 
     const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
-    const diff = await svc.compareFile('w1', 'Foo.md', 'a', 'b');
-    expect(diff).toBe('@@ diff');
+    const compared = await svc.compareFile('w1', 'Foo.md', 'a', 'b');
+    // The commits each side was served from travel with the diff: what a caller authorizes it at.
+    expect(compared).toEqual({ diff: '@@ diff', from: 'a1', to: 'b1' });
     expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b');
   });
 });
