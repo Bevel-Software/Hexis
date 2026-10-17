@@ -226,17 +226,21 @@ export interface IWorkflowService {
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
   /**
    * Diff of one file between two branches. Both names must resolve to a
-   * known branch on this workspace (local head or remote-tracking). Returns
-   * the raw unified diff body — empty when identical, includes the
-   * "new file" / "deleted file" headers when the file only exists on one
-   * side.
+   * known branch on this workspace (local head or remote-tracking). `diff`
+   * is the raw unified diff body — empty when identical, with the "new
+   * file" / "deleted file" headers when the file only exists on one side —
+   * and `from`/`to` the commits each side was served from. `authorize` is
+   * the caller's read verdict at those commits: asked inside the git
+   * layer's reservation before anything is said about the path at either,
+   * its throw the answer. Required: content from another branch is never
+   * served without it.
    */
   compareFile(
     workspaceId: string,
     path: string,
     fromBranch: string,
     toBranch: string,
-    authorize?: (sides: { from: string; to: string }) => Promise<void>,
+    authorize: (sides: { from: string; to: string }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }>;
   /**
    * Diff of one file at a specific change (sha) — i.e. `git show <sha> -- <path>`.
@@ -769,13 +773,14 @@ export interface IWorkflowService {
    * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).
    * Access to the file at that commit is the caller's to check — through
    * `authorize`, asked with the commit before anything is said about the
-   * path there.
+   * path there. Required: content from another branch is never served
+   * without it.
    */
   fileAtBranch(
     workspaceId: string,
     path: string,
     branch: string,
-    authorize?: (sha: string) => Promise<void>,
+    authorize: (sha: string) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }>;
   /**
    * The repository-relative paths `branch` changes against `base` — a

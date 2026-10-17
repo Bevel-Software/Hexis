@@ -424,14 +424,17 @@ export class WorkflowService implements IWorkflowService {
    * opposite directions (`A -> B` and `B -> A`), and nothing is ever held
    * while waiting for the other key.
    *
-   * A PROTECTED target's key is NOT reserved. No path in the system can
-   * delete a protected branch (`git.deleteBranch` throws
+   * A PROTECTED branch's key is NOT reserved, at either end. No path in the
+   * system can delete a protected branch (`git.deleteBranch` throws
    * `ProtectedBranchError` before any lock, `retireMergedSourceBranch`
    * returns early on one), so the key would exclude nothing. It would only
-   * cost: nearly every request targets the protected default branch, so one
-   * shared key there would serialize every open on the hottest path for the
-   * duration of a fetch + merge + push + diff. The source needs no such
-   * carve-out; `openChangeRequest` refuses protected sources before locking.
+   * cost: nearly every request targets the protected default branch, and
+   * every draft refreshes FROM it (`updateBranch`, the merge tool's sync),
+   * so one shared key there would serialize every open on the hottest path for the
+   * duration of a fetch + merge + push + diff. A protected SOURCE takes no
+   * key for the same reason: `openChangeRequest` refuses protected sources
+   * before locking, and a draft refreshing from the default branch is
+   * exactly a protected source.
    */
   private runOnBranchPair<T>(
     source: string,
@@ -1276,7 +1279,7 @@ export class WorkflowService implements IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
-    authorize?: (sides: { from: string; to: string }) => Promise<void>,
+    authorize: (sides: { from: string; to: string }) => Promise<void>,
   ): Promise<{ diff: string; from: string; to: string }> {
     return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch, authorize);
   }
@@ -4225,8 +4228,8 @@ export class WorkflowService implements IWorkflowService {
     // while they are held: a bare read would let a person open the request
     // mid-merge and the agent would land its content anyway, which is the one
     // thing this tool exists to prevent. `runOnBranchPair` drops a protected
-    // target's key; the source key is held either way, and every competing
-    // request from this source takes it too.
+    // branch's key at either end; a draft source's key is held, and every
+    // competing request from this source takes it too.
     return this.runOnBranchPair(sourceBranch, targetBranch, async () => {
       // A person merges a change request. Only the request's OWN direction is
       // blocked: the target merged into the source is how a draft under review
@@ -4841,7 +4844,7 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     path: string,
     branch: string,
-    authorize?: (sha: string) => Promise<void>,
+    authorize: (sha: string) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }> {
     return this.git.readFileAtBranch(workspaceId, path, branch, authorize);
   }

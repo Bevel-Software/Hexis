@@ -312,44 +312,62 @@ describe('WorkflowService.updateBranch', () => {
     expect(await syncing.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' })).toMatchObject({ kind: 'merged' });
   });
 
+  /**
+   * A merge that signals when the git layer is entered and finishes only when
+   * released: what the lock tests hold the workspace with. No timing — the
+   * test waits for the signal, never for a clock.
+   */
+  const heldMerge = (sha: string) => {
+    let enter: () => void = () => {};
+    let release: () => void = () => {};
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const merge = () =>
+      new Promise((resolve) => {
+        release = () => resolve({ kind: 'merged', sha, from: 'target-company-state', resolvedPaths: [] });
+        enter();
+      });
+    return { merge, entered, release: () => release() };
+  };
+  /** Every settled promise has run its continuations: a macrotask boundary, not a guess at a duration. */
+  const settled = () => new Promise<void>((r) => setImmediate(r));
+
   it("holds the draft's lifecycle key around the merge, as the merge tool does, so nothing opens a request or recreates the branch mid-merge", async () => {
     const git = gitThatMerges(null);
-    let release: () => void = () => {};
-    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn(
-      () => new Promise((resolve) => { release = () => resolve({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] }); }),
-    );
+    const held = heldMerge('m');
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn(held.merge);
     (git.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ name: 'ada/draft' });
     const svc = build(git);
-    const updating = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
-    await new Promise((r) => setTimeout(r, 30));
-    let created = false;
-    const creating = svc.createBranch('ada%2Fdraft', 'ada/draft').then(() => { created = true; });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(created).toBe(false);
-    release();
+    const order: string[] = [];
+    const updating = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).then((o) => { order.push('merged'); return o; });
+    await held.entered;
+    const creating = svc.createBranch('ada%2Fdraft', 'ada/draft').then(() => { order.push('created'); });
+    // Without the key, the create (a resolved double) would be done by now.
+    await settled();
+    expect(order).toEqual([]);
+    held.release();
     expect(await updating).toMatchObject({ kind: 'merged' });
     await creating;
-    expect(created).toBe(true);
+    expect(order).toEqual(['merged', 'created']);
   });
 
   it("takes no key on a protected `from`: two drafts refreshing from the default branch do not wait on each other", async () => {
     const git = gitThatMerges(null);
-    let release: () => void = () => {};
+    const held = heldMerge('m');
     const merges: string[] = [];
     (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn((workspaceId: string) => {
       merges.push(workspaceId);
-      if (workspaceId === 'ada%2Fdraft') {
-        return new Promise((resolve) => { release = () => resolve({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] }); });
-      }
-      return Promise.resolve({ kind: 'merged', sha: 'n', from: 'target-company-state', resolvedPaths: [] });
+      return workspaceId === 'ada%2Fdraft'
+        ? held.merge()
+        : Promise.resolve({ kind: 'merged', sha: 'n', from: 'target-company-state', resolvedPaths: [] });
     });
     const svc = build(git);
     const first = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
-    await new Promise((r) => setTimeout(r, 30));
-    // The second draft's refresh from the same protected branch completes while the first still holds its merge.
+    await held.entered;
+    // The second draft's refresh from the same protected branch completes
+    // while the first still holds its merge (a key on `from` would hang it).
     expect(await svc.updateBranch('bob%2Fdraft', user, { from: 'target-company-state' })).toMatchObject({ kind: 'merged', sha: 'n' });
     expect(merges).toEqual(['ada%2Fdraft', 'bob%2Fdraft']);
-    release();
+    held.release();
     expect(await first).toMatchObject({ kind: 'merged', sha: 'm' });
   });
 
@@ -501,14 +519,12 @@ describe('WorkflowService — change delegation', () => {
     (git.diffFileBetweenBranches as ReturnType<typeof vi.fn>).mockResolvedValue({ diff: '@@ diff', from: 'a1', to: 'b1' });
 
     const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
-    const compared = await svc.compareFile('w1', 'Foo.md', 'a', 'b');
-    // The commits each side was served from travel with the diff: what a caller authorizes it at.
-    expect(compared).toEqual({ diff: '@@ diff', from: 'a1', to: 'b1' });
-    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b', undefined);
-    // The caller's verdict travels down to the git layer, which asks it at the pinned commits.
+    // The caller's verdict travels down to the git layer, which asks it at
+    // the pinned commits; those commits travel back with the diff.
     const authorize = vi.fn(async () => {});
-    await svc.compareFile('w1', 'Foo.md', 'a', 'b', authorize);
-    expect(git.diffFileBetweenBranches).toHaveBeenLastCalledWith('w1', 'Foo.md', 'a', 'b', authorize);
+    const compared = await svc.compareFile('w1', 'Foo.md', 'a', 'b', authorize);
+    expect(compared).toEqual({ diff: '@@ diff', from: 'a1', to: 'b1' });
+    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b', authorize);
   });
 });
 
