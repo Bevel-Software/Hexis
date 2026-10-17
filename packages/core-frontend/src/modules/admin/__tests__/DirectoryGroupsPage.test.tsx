@@ -266,6 +266,26 @@ describe('DirectoryGroupsPage', () => {
     await waitFor(() => expect(deleteGroup).toHaveBeenCalledWith('product'));
   });
 
+  it('the delete confirm counts and names only the rules the roster lists, with no hidden-content line', async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete Product' }));
+
+    const dialog = within(screen.getByRole('dialog'));
+    expect(dialog.getByText(/1 access rule\b/)).toBeInTheDocument();
+    expect(dialog.getByText(/docs\/roadmap\.md/)).toBeInTheDocument();
+    expect(dialog.queryByText(/cannot read/)).not.toBeInTheDocument();
+  });
+
+  it('the delete confirm with no listed rules does not claim nothing is shared — unreadable rules may exist', async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete Design' }));
+
+    const dialog = within(screen.getByRole('dialog'));
+    expect(dialog.getByText('No access rule you can read references this group.')).toBeInTheDocument();
+    expect(dialog.queryByText(/Nothing is shared/)).not.toBeInTheDocument();
+    expect(dialog.queryByText(/lose nothing/)).not.toBeInTheDocument();
+  });
+
   it('idp mode: read-only roster, no mutation controls, membership note shown', async () => {
     vi.mocked(getGroupsRoster).mockResolvedValue(IDP_ROSTER);
     renderPage();
@@ -344,6 +364,37 @@ describe('DirectoryGroupsPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Backend unreachable');
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+
+  it('names every rule whose bare group name resolves to a same-named role, with the group/ spelling', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      mode: 'idp',
+      groups: [
+        {
+          canonical: 'admin',
+          displayName: 'Admin',
+          members: ['mallory@example.com'],
+          referencedBy: [],
+          assignedToRoles: [],
+          bareNameResolvesToRole: [{ path: 'Knowledge/Board/access.md', verb: 'read' }],
+        },
+        ...IDP_ROSTER.groups,
+      ],
+      groupsHealth: { ok: true },
+    });
+    renderPage();
+    const report = await screen.findByRole('status');
+    expect(report).toHaveTextContent(/name a group the way a role is named/i);
+    expect(report).toHaveTextContent('Knowledge/Board/access.md');
+    expect(report).toHaveTextContent('read: Admin');
+    expect(report).toHaveTextContent('group/Admin');
+  });
+
+  it('shows no bare-name report when no group shares a role name', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue(MANUAL_ROSTER);
+    renderPage();
+    await screen.findByText('Product');
+    expect(screen.queryByText(/name a group the way a role is named/i)).not.toBeInTheDocument();
   });
 
   it('a roster whose groupsHealth is broken banners loudly: file, reason, "not being applied"', async () => {

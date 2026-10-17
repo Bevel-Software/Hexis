@@ -19,6 +19,7 @@ import type {
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
@@ -41,6 +42,8 @@ import {
   PLUGIN_TOKEN_PREFIX,
   PLUGIN_TOKEN_VERBS,
   ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
   type PluginTokenVerb,
   type Verb,
 } from '../access-model/access-grammar.js';
@@ -93,6 +96,8 @@ export function createAccessRoutes(
   eventBus: WorkflowEventBus,
   db: Database,
   kb: KbContext,
+  /** The composition root's walk, for the roles admin's reference scan. */
+  disk: ITreeWalker,
   /** This deployment's configured admins — the break-glass recovery roster. */
   recoveryAdmins: readonly string[] = [],
 ): express.Router {
@@ -103,6 +108,7 @@ export function createAccessRoutes(
     workspaceService,
     workflowService,
     accessControl,
+    disk,
     kbDirName,
     () => kb.defaultBranch,
     eventBus,
@@ -163,10 +169,10 @@ export function createAccessRoutes(
   /**
    * What the mutation routes accept as a principal. `group` and `plugin`
    * exist only at this boundary: in the access.md entry grammar a group grant
-   * is a bare-name token (bare names resolve GROUP-FIRST, then fall back to
-   * the role) and a plugin grant is the `plugin/<Name>/<verb>` token, so both
-   * are spliced as role-shaped principals — the separate kinds buy validation
-   * against the right namespace and honest 404s.
+   * is the `group/<Name>` token and a plugin grant is the
+   * `plugin/<Name>/<verb>` token, so both are spliced as role-shaped
+   * principals — the separate kinds buy validation against the right
+   * namespace and honest 404s.
    */
   type RoutePrincipal =
     | Principal
@@ -175,14 +181,16 @@ export function createAccessRoutes(
 
   /**
    * The role-shaped principal the splice layer actually writes/matches.
-   *   - group     → its bare name (group-first precedence resolves it).
-   *   - role      → the explicit `role/<Name>` token — the grant route WRITES
-   *                 roles that way from now on (bare role tokens remain
-   *                 read-compatible). The built-in `everyone` stays bare: it
-   *                 is not a roles.yaml role and has no `role/` alias.
+   *   - group     → the explicit `group/<Name>` token. Never the bare name:
+   *                 a bare name is the ROLE whenever one of that name exists,
+   *                 so a bare group grant could silently mean someone else.
+   *   - role      → the explicit `role/<Name>` token. Bare spellings in
+   *                 existing files remain read-compatible. The built-in
+   *                 `everyone` stays bare: it is not a roles.yaml role and
+   *                 has no `role/` alias.
    */
   const asSplicePrincipal = (p: RoutePrincipal): Principal => {
-    if (p.kind === 'group') return { kind: 'role', role: p.group };
+    if (p.kind === 'group') return { kind: 'role', role: `${GROUP_TOKEN_PREFIX}${groupName(p.group)}` };
     // Written with the folder's own casing; `parseAccessEntry` canonicalises
     // the name half to the manifest slug on the way back in.
     if (p.kind === 'plugin') return { kind: 'role', role: `${PLUGIN_TOKEN_PREFIX}${p.plugin.trim()}/${p.verb}` };
@@ -210,6 +218,14 @@ export function createAccessRoutes(
     }
     return p;
   };
+
+  /** A group as the caller named it, without a `group/` prefix it may carry (casing kept). */
+  function groupName(group: string): string {
+    const raw = group.trim();
+    return splitPrincipalToken(canonicalRoleName(raw)).prefix === 'group'
+      ? raw.slice(GROUP_TOKEN_PREFIX.length).trim()
+      : raw;
+  }
 
   // Authentication gate only. Per PLAN §3 the workspace `:id` is a branch
   // identifier — any authenticated user can read its access tree.
@@ -513,8 +529,8 @@ export function createAccessRoutes(
    * signed in — so the dialog can label them; it withholds nobody.
    *
    * A name shared by a group and a role is offered as BOTH — nothing is
-   * withheld: grant precedence resolves the collision (bare token = the
-   * group; the role is written as `role/<Name>`).
+   * withheld: each is written with its own prefix (`group/<Name>`,
+   * `role/<Name>`), so the collision never reaches the file.
    */
   router.get('/workspace/:id/access/suggest', async (req, res) => {
     const user = await requireUser(req, res);
@@ -950,10 +966,10 @@ export function createAccessRoutes(
         // uses — and one the caller may see (`visibleGroups`): a group hidden
         // from the picker is refused here with the same words as one that
         // does not exist, so the grant route is no oracle for group names.
-        // No role-collision refusal: bare tokens resolve GROUP-FIRST, so the
-        // written bare name IS the group.
+        // No role-collision refusal: the grant is written `group/<Name>`,
+        // which always resolves to the group.
         const groups = await visibleGroups(user.email, (await defaultBranchPrincipals()).groups);
-        const canonical = canonicalRoleName(principal.group);
+        const canonical = canonicalRoleName(groupName(principal.group));
         if (!groups.some((g) => canonicalRoleName(g) === canonical)) {
           throw new AccessMutationError(
             `No group named "${principal.group}". Pick an existing group.`,
@@ -978,8 +994,8 @@ export function createAccessRoutes(
           );
         }
       }
-      // Splice shape: group → bare token (group-first precedence); role →
-      // explicit `role/<Name>` token (see asSplicePrincipal).
+      // Splice shape: group → explicit `group/<Name>` token; role → explicit
+      // `role/<Name>` token (see asSplicePrincipal).
       const splicePrincipal = asSplicePrincipal(principal);
 
       const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
@@ -1047,18 +1063,12 @@ export function createAccessRoutes(
     try {
       const mode = (req.body as { mode?: unknown }).mode;
       const { repoRelTarget, kind, principal: routePrincipal } = parseMutationBody(req.body);
-      // A group principal converts straight to the role-shaped bare token —
-      // no existence check (revoking a grant whose group has since vanished
-      // must keep working).
+      // A group principal converts straight to its `group/<Name>` token — no
+      // existence check (revoking a grant whose group has since vanished must
+      // keep working). Which spellings a revoke strips is the mutation
+      // service's call: `group/<Name>` never matches `role/<Name>`, and the
+      // bare name only when no role of that name owns it.
       const principal = asSplicePrincipal(routePrincipal);
-      // GROUP revokes match the EXACT bare token only. The service's own
-      // shadow probe decides exact-vs-name for roles, but it cannot know a
-      // bare token was a GROUP once that group vanished from the active
-      // source — the name would read "unshadowed" and name-level matching
-      // would strip a same-named role's live `role/<Name>` grant. The route
-      // still knows the caller's kind, so it pins the matching here.
-      const revokeOpts =
-        routePrincipal.kind === 'group' ? ({ tokenMatch: 'exact' } as const) : undefined;
       // Optional `verb` scopes ALL three paths to a single verb: a default revoke
       // strips just that verb; remove-from-parent removes just that verb on the
       // ancestor; deny-here denies just that verb at the target. Absent ⇒ the
@@ -1114,7 +1124,7 @@ export function createAccessRoutes(
             );
           }
           // Scope the ancestor revoke to the same verb the user acted on (if any).
-          await mutation.revoke(workspaceId, 'folder', ancestorDir, principal, user.email, verb, revokeOpts);
+          await mutation.revoke(workspaceId, 'folder', ancestorDir, principal, user.email, verb);
         });
 
         accessControl.invalidate(workspaceId);
@@ -1133,7 +1143,7 @@ export function createAccessRoutes(
         await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
         await withEditLock(workspaceId, branch, gatePath, user, async () => {
           // Scope the deny to the same verb the user acted on (if any).
-          await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb, revokeOpts);
+          await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb);
         });
         accessControl.invalidate(workspaceId);
         logger('access.revoke.deny-here').info(
@@ -1152,7 +1162,7 @@ export function createAccessRoutes(
       const editPath = gatePath;
       let changed = false;
       await withEditLock(workspaceId, branch, editPath, user, async () => {
-        const r = await mutation.revoke(workspaceId, kind, repoRelTarget, principal, user.email, verb, revokeOpts);
+        const r = await mutation.revoke(workspaceId, kind, repoRelTarget, principal, user.email, verb);
         changed = r.changed;
       });
 
@@ -1249,7 +1259,7 @@ export function createAccessRoutes(
       // surface). The frontend hides the page, but the API must gate too — the
       // roster exposes every role + member email.
       await assertRolesAdmin(user.email);
-      res.json({ roles: await rolesAdmin.getRoster() });
+      res.json({ roles: await rolesAdmin.getRoster(user.email) });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

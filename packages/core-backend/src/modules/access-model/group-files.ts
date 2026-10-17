@@ -4,6 +4,7 @@ import {
   RESERVED_ROLE_NAMES,
   PLUGIN_TOKEN_PREFIX,
   ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
   canonicalEmail,
   canonicalRoleName,
   parseYamlSubset,
@@ -58,6 +59,7 @@ export const SYNCED_GROUPS_YAML = 'synced-groups.yaml';
  *   \x00-\x1f  control chars / newlines break line structure outright
  *   `role/…`   reserved: that spelling is the EXPLICIT role token in access
  *              entries — a group carrying it could never be referenced.
+ *   `group/…`  reserved likewise: the EXPLICIT group token.
  */
 export function unsafeNameReason(displayName: string): string | null {
   const trimmed = displayName.trim();
@@ -68,6 +70,9 @@ export function unsafeNameReason(displayName: string): string | null {
   if (trimmed.startsWith('-')) return "starts with '-'";
   if (canonicalRoleName(trimmed).startsWith(ROLE_TOKEN_PREFIX)) {
     return `starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix (the explicit role token in access entries)`;
+  }
+  if (canonicalRoleName(trimmed).startsWith(GROUP_TOKEN_PREFIX)) {
+    return `starts with the reserved '${GROUP_TOKEN_PREFIX}' prefix (the explicit group token in access entries)`;
   }
   if (canonicalRoleName(trimmed).startsWith(PLUGIN_TOKEN_PREFIX)) {
     return `starts with the reserved '${PLUGIN_TOKEN_PREFIX}' prefix (the plugin-principal token in access entries)`;

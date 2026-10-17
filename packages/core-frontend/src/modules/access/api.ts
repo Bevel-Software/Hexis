@@ -209,10 +209,9 @@ export function asInheritedError(err: unknown): InheritedRevokeError | null {
 /**
  * A grantable principal — a person (by email), a role (an app-defined
  * capability from the registry, or a legacy roles.yaml role), or a group (a
- * people-set from the active group source — IdP-synced or manual). Groups are
- * written as bare-name tokens (bare names resolve group-first); the backend
- * writes role grants as explicit `role/<Name>` tokens itself — the dialog
- * just sends `kind: 'role'`. The separate kinds exist so the backend
+ * people-set from the active group source — IdP-synced or manual). The backend
+ * writes groups as explicit `group/<Name>` tokens and roles as `role/<Name>`
+ * tokens itself, never a bare name — the dialog just sends the kind. The separate kinds exist so the backend
  * validates each against the right namespace.
  */
 export type Principal =

@@ -8,7 +8,15 @@ import {
   KbReferenceScanner,
   findRoleRefsInText,
   rewriteRoleTokensInText,
+  type PathVisibility,
 } from '../reference-scan.js';
+import type { ITreeWalker } from '../../../shared/fs.contract.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+
+/** A renaming person who may read every path. */
+const ALL_VISIBLE: PathVisibility = async (paths) => new Map(paths.map((p) => [p, true]));
+/** A renaming person who may read none of them. */
+const NONE_VISIBLE: PathVisibility = async (paths) => new Map(paths.map((p) => [p, false]));
 
 /**
  * Unit tests for the shared reference scanner's parse rules (comments,
@@ -166,18 +174,245 @@ describe('KbReferenceScanner — .tool frontmatter is scanned and rewritten like
       const toolBody = 'name: crm\ntype: mcp\n# not frontmatter below\n';
       await write(repo, 'Plugins/GTM/crm.tool', `---\nread:\n  - GTM Team\n---\n${toolBody}`);
       await write(repo, 'Plugins/GTM/notes.md', '---\nowner: GTM Team\n---\n# notes\n');
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
 
       const byToken = await scanner.scan('ws-1');
       const hits = (byToken.get('gtm team') ?? []).map((h) => h.path).sort();
       expect(hits).toEqual(['Plugins/GTM/crm.tool', 'Plugins/GTM/notes.md']);
 
-      const writes = await scanner.rewriteReferences('ws-1', 'gtm team', 'Go To Market', (m) => new Error(m));
+      const writes = await scanner.rewriteReferences('ws-1', 'gtm team', 'Go To Market', (m) => new Error(m), ALL_VISIBLE);
       const toolWrite = writes.find((w) => w.repoRelativePath === 'Plugins/GTM/crm.tool')!;
       expect(toolWrite.content).toContain('  - Go To Market');
       // The .tool body below the frontmatter is byte-for-byte intact.
       expect(toolWrite.content).toContain(toolBody);
       expect(writes.some((w) => w.repoRelativePath === 'Plugins/GTM/notes.md')).toBe(true);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('KbReferenceScanner — candidates are the resolver\'s walk, not the explorer\'s', () => {
+  it('scans and rewrites an access.md that .bevelignore hides from the explorer', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-ignore-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, '.bevelignore', 'Archive/\n');
+      // The resolver walks past .bevelignore, so this rule is ENFORCED.
+      await write(repo, 'Archive/access.md', '---\nwrite:\n  - Admin\n---\n');
+      // The explorer's listing, as the real one answers: what .bevelignore
+      // hides is not in it. A scan built on it would miss Archive/access.md.
+      const base = stubWorkspace(root);
+      const ws = {
+        ...base,
+        listFiles: async (id: string) => {
+          const tree = await base.listFiles(id);
+          const prune = (n: FileTreeEntry): FileTreeEntry => ({
+            ...n,
+            children: n.children
+              ?.filter((c) => c.relativePath !== `${KB}/Archive`)
+              .map(prune),
+          });
+          return prune(tree);
+        },
+      } as unknown as IWorkspaceService;
+      const scanner = new KbReferenceScanner(ws, new NodeFs(), KB);
+
+      expect((await scanner.scan('ws-1')).get('admin')).toEqual([{ path: 'Archive/access.md', verb: 'write' }]);
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE);
+      expect(writes.map((w) => w.repoRelativePath)).toEqual(['Archive/access.md']);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('KbReferenceScanner — references are what the resolver parses', () => {
+  // A body-governed access.md: the body is the folder's rules, the
+  // frontmatter the file's own — here a FLOW sequence, which only the
+  // resolver's full-YAML fallback reads. And a node whose owner is QUOTED.
+  const FLOW_ACCESS_MD = '---\nread: ["Admin"]\n---\nwrite:\n  - Admin\n';
+  const QUOTED_NODE = "---\nowner: 'Admin'\n---\n# Doc\n";
+
+  it('the scan reports quoted and flow-YAML rules the resolver enforces', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-yaml-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      await write(repo, 'Team/Doc.md', QUOTED_NODE);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+
+      const hits = (await scanner.scan('ws-1')).get('admin') ?? [];
+      expect(hits).toEqual(
+        expect.arrayContaining([
+          { path: 'Team/access.md', verb: 'write' },
+          { path: 'Team/access.md', verb: 'read' },
+          { path: 'Team/Doc.md', verb: 'owner' },
+        ]),
+      );
+      expect(hits).toHaveLength(3);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('an access.md the resolver drops as broken references nothing', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-broken-'));
+    try {
+      // A scalar where the verb needs a list: a hard parse error, so the
+      // resolver ignores the whole file.
+      await write(path.join(root, KB), 'Team/access.md', '---\nread: Admin\nwrite:\n  - Admin\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      expect((await scanner.scan('ws-1')).get('admin')).toBeUndefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a rename refuses with nothing written when a reference is in a form it cannot rewrite', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      await expect(
+        scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE),
+      ).rejects.toThrow(/Team\/access\.md name the old principal in a form the rename cannot rewrite/);
+      // Nothing was written: the file is byte-for-byte as before.
+      expect(await fs.readFile(path.join(repo, 'Team/access.md'), 'utf-8')).toBe(FLOW_ACCESS_MD);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the refusal counts a file the renaming person cannot read, never names it', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-hidden-'));
+    try {
+      await write(path.join(root, KB), 'Team/access.md', FLOW_ACCESS_MD);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      const err = await scanner
+        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), NONE_VISIBLE)
+        .catch((e: Error) => e);
+      expect((err as Error).message).toMatch(/^1 location you cannot read name the old principal/);
+      expect((err as Error).message).not.toContain('Team');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('KbReferenceScanner — a folder the walk cannot list', () => {
+  /** The real walk, reporting `Locked` as a folder it could not list. */
+  function walkerWithHole(hole = 'Locked'): ITreeWalker & { walks: number } {
+    const disk = new NodeFs();
+    const walker = {
+      walks: 0,
+      walk: (r: string, o: Parameters<NodeFs['walk']>[1], l: Parameters<NodeFs['walk']>[2]) => disk.walk(r, o, l),
+      walkFiles: (r: string, m: (b: string) => boolean, o?: { strict?: boolean }) => disk.walkFiles(r, m, o),
+      walkKb: async (r: string, l: Parameters<NodeFs['walkKb']>[1], o?: Parameters<NodeFs['walkKb']>[2]) => {
+        walker.walks++;
+        const result = await disk.walkKb(r, l, o);
+        return { holes: [...result.holes, hole] };
+      },
+    };
+    return walker;
+  }
+
+  it('a rename refuses with nothing written: the folder may hold references', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
+      await expect(
+        scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE),
+      ).rejects.toThrow(/Cannot list 1 folder .*rename aborted with no changes/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // The folder's own access.md may be as unreadable as its listing, so the
+  // visibility check cannot see the rules that close it: never named.
+  it('the refusal counts the folder and never names it, even to someone who could read every path', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-hidden-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
+      const err = await scanner
+        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE)
+        .catch((e: Error) => e);
+      expect((err as Error).message).toBe(
+        'Cannot list 1 folder that may reference the old principal while rewriting references; rename aborted with no changes',
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a folder name with a line break cannot forge a second line in the refusal', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole3-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole('Lo\nFAKE: line'), KB);
+      const err = await scanner
+        .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE)
+        .catch((e: Error) => e);
+      expect((err as Error).message).not.toContain('\n');
+      expect((err as Error).message).not.toContain('FAKE');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a file the rewrite cannot read is counted, never named, and its fs cause stays out of the error', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-unreadable-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      // The walk lists team/Ghost.md, but there is no file to read.
+      const disk = new NodeFs();
+      const walker: ITreeWalker = {
+        walk: (r, o, l) => disk.walk(r, o, l),
+        walkFiles: (r, m, o) => disk.walkFiles(r, m, o),
+        walkKb: async (r, l, o) => {
+          const result = await disk.walkKb(r, l, o);
+          for (const listener of l) listener.onFile?.('team', 'Ghost.md');
+          return result;
+        },
+      };
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
+      const causes: (string | undefined)[] = [];
+      const err = await scanner
+        .rewriteReferences(
+          'ws-1',
+          'sales',
+          'Revenue',
+          (m, cause) => {
+            causes.push(cause);
+            return new Error(m);
+          },
+          ALL_VISIBLE,
+        )
+        .catch((e: Error) => e);
+      expect((err as Error).message).toBe(
+        'Cannot read a file that may reference the old principal while rewriting references; rename aborted with no changes',
+      );
+      expect(causes).toEqual([undefined]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the advisory scan still answers what it read, but never caches an incomplete result', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole2-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const walker = walkerWithHole();
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
+      expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
+      await scanner.scan('ws-1');
+      // Not served from cache: the second scan retried the listing.
+      expect(walker.walks).toBe(2);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -192,7 +427,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
       const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB, bus);
 
       expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
 
@@ -216,22 +451,23 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
     try {
       const repo = path.join(root, KB);
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
-      // The workspace stub invalidates DURING the first scan's tree listing —
+      // The walker invalidates DURING the first scan's tree listing —
       // modelling a write that lands after the scan started reading.
-      const base = stubWorkspace(root);
+      const disk = new NodeFs();
       let armed = true;
-      const ws = {
-        ...base,
-        listFiles: async (id: string) => {
-          const tree = await base.listFiles(id);
+      const walker: ITreeWalker = {
+        walk: (r, o, l) => disk.walk(r, o, l),
+        walkFiles: (r, m, o) => disk.walkFiles(r, m, o),
+        walkKb: async (r, l, o) => {
+          const result = await disk.walkKb(r, l, o);
           if (armed) {
             armed = false;
             scanner.invalidate('ws-1');
           }
-          return tree;
+          return result;
         },
-      } as unknown as IWorkspaceService;
-      const scanner = new KbReferenceScanner(ws, KB);
+      };
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
 
       // The caller still gets the snapshot it asked for...
       expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
@@ -252,7 +488,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
       const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB, bus);
 
       const first = await scanner.scan('ws-1');
       for (const l of listeners) {
@@ -272,7 +508,7 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
       await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
       const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
       const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
-      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB, bus);
 
       const first = await scanner.scan('ws-1');
       for (const l of listeners) {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
+import { Banner } from '../../../shared/components/Banner';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAppRegistry } from '../../../core/registry';
@@ -60,6 +61,11 @@ export function DirectoryGroupsPage() {
   const [working, setWorking] = useState(false);
   // Group pending delete confirmation (manual mode).
   const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
+  // Only rules in files the admin can read: the roster leaves the rest out
+  // entirely (Admin status does not grant read, not even a count). So the
+  // copy below always says "you can read" and never claims there are no
+  // other rules — it reads the same whether or not unreadable ones exist.
+  const deleteRuleCount = deleteTarget?.referencedBy.length ?? 0;
   // The overlay panel's "a directory connection exists" signal — true between
   // connecting and the first push, when the roster still reads 'manual' but
   // manual edits would go dormant. See GroupsDirectoryPanelProps.
@@ -150,6 +156,12 @@ export function DirectoryGroupsPage() {
   const health = roster?.groupsHealth;
   const broken =
     brokenGroups ?? (health && !health.ok ? { file: health.file, reason: health.reason } : null);
+  // Groups that share a role's name, with the rules that spell them bare —
+  // those rules grant the ROLE, so an Admin must rewrite them if the group
+  // was meant.
+  const bareCollisions = (roster?.groups ?? []).filter(
+    (g) => (g.bareNameResolvesToRole?.length ?? 0) > 0,
+  );
 
   return (
     <>
@@ -169,6 +181,29 @@ export function DirectoryGroupsPage() {
                 {broken.reason ? <> Reason: {broken.reason}</> : null}
               </div>
             </div>
+          )}
+
+          {bareCollisions.length > 0 && (
+            <Banner tone="wait" role="status" className="text-xs">
+              <div className="font-semibold">
+                Some access rules name a group the way a role is named.
+              </div>
+              <div>
+                A bare name in an access rule means the role when one of that name exists. These
+                rules resolve to the role, not the group — write the group as <code>group/&lt;Name&gt;</code>{' '}
+                if it was meant:
+              </div>
+              <ul className="mt-1 list-disc pl-4">
+                {bareCollisions.flatMap((g) =>
+                  g.bareNameResolvesToRole!.map((ref, index) => (
+                    <li key={`${g.canonical}:${ref.path}:${ref.verb}:${index}`}>
+                      <code>{ref.path}</code> — {ref.verb}: {g.displayName} (write{' '}
+                      <code>group/{g.displayName}</code>)
+                    </li>
+                  )),
+                )}
+              </ul>
+            </Banner>
           )}
 
           {error && (
@@ -259,12 +294,12 @@ export function DirectoryGroupsPage() {
       >
         {deleteTarget && (
           <div className="space-y-2">
-            {deleteTarget.referencedBy.length > 0 ? (
+            {deleteRuleCount > 0 ? (
               <>
                 <p className="text-xs text-ink leading-snug">
-                  {deleteTarget.referencedBy.length} access rule
-                  {deleteTarget.referencedBy.length === 1 ? '' : 's'} reference
-                  {deleteTarget.referencedBy.length === 1 ? 's' : ''} this group and will stop
+                  {deleteRuleCount} access rule
+                  {deleteRuleCount === 1 ? '' : 's'} you can read reference
+                  {deleteRuleCount === 1 ? 's' : ''} this group and will stop
                   matching anyone after deletion:
                 </p>
                 <ul className="max-h-40 overflow-auto text-xs text-ink-muted space-y-0.5">
@@ -277,7 +312,7 @@ export function DirectoryGroupsPage() {
               </>
             ) : (deleteTarget.assignedToRoles?.length ?? 0) === 0 ? (
               <p className="text-xs text-ink leading-snug">
-                Nothing is shared with this group. Its members lose nothing else.
+                No access rule you can read references this group.
               </p>
             ) : null}
             {/* Role assignments are unassigned atomically with the delete —

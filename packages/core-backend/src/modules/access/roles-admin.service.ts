@@ -39,6 +39,7 @@ const log = logger('roles.recover');
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   ADMIN_CANONICAL,
@@ -70,7 +71,7 @@ import {
 import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
 import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from '../access-model/access-grammar.js';
 import { AdminLockedCommits } from './admin-locked-commit.js';
-import { KbReferenceScanner } from './reference-scan.js';
+import { KbReferenceScanner, readableReferences } from './reference-scan.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
 export class RolesAdminError extends WorkflowDomainError {
@@ -121,11 +122,11 @@ export interface RoleRosterEntry {
   capability: { description: string; groupAssignable: boolean } | null;
   /**
    * Every access rule referencing this ROLE — folder `access.md` AND node
-   * frontmatter. `role/<name>` hits always count; a BARE-token hit counts
-   * only when no group shadows the name (bare tokens resolve group-first, so
-   * a shadowed bare grant is the GROUP's reference, listed on the groups
-   * roster instead). Sound: this is the SAME scan the group rename/delete
-   * rewrites use.
+   * frontmatter. `role/<name>` and BARE-token hits both count — a bare name
+   * is always the role when the role exists, even when a group shares the
+   * name (that group is `group/<name>`). Sound: this is the SAME scan the
+   * group rename/delete rewrites use. Only files the roster's viewer can read
+   * are listed (see `getRoster`).
    */
   referencedBy: { path: string; verb: string }[];
 }
@@ -183,6 +184,8 @@ export class RolesAdminService {
     private readonly workspaceService: IWorkspaceService,
     private readonly workflowService: IWorkflowService,
     private readonly accessControl: IAccessControl,
+    /** The composition root's walk — the one the resolver finds access rules with. */
+    disk: ITreeWalker,
     private readonly kbDirName: string,
     /**
      * The branch whose roles.yaml is authoritative for admin status, read
@@ -226,7 +229,7 @@ export class RolesAdminService {
     // The event bus keeps the roster's `referencedBy` fresh: a share-dialog
     // grant/revoke on any access.md happens outside this service, and the
     // scanner invalidates its cache on those writes' events (TTL as backstop).
-    this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
+    this.references = new KbReferenceScanner(workspaceService, disk, kbDirName, eventBus);
     this.fixedAdminEmails = [
       ...new Set(deploymentAdmins.filter(Boolean).map((e) => canonicalEmail(e)).filter(Boolean)),
     ];
@@ -306,23 +309,24 @@ export class RolesAdminService {
 
   // ---- Read -------------------------------------------------------------
 
-  /** The roster: every role on the default branch with members + references. */
-  async getRoster(): Promise<RoleRosterEntry[]> {
+  /**
+   * The roster: every role on the default branch with members + references.
+   * `viewerEmail` is who the roster is for: `referencedBy` names only the
+   * files that viewer can read and omits the rest entirely, without a count —
+   * being an Admin is not read access to every file, and a path, or even a
+   * count of rules in unreadable content, is itself a disclosure.
+   */
+  async getRoster(viewerEmail: string): Promise<RoleRosterEntry[]> {
     const workspaceId = await this.ensureWorkspace();
     const text = await this.readRolesYaml(workspaceId);
     const model = parseRolesModel(text);
     // ONE sound scan of every candidate file (folder access.md + node
     // frontmatter) — cached in the shared scanner, so mutations returning the
     // fresh roster don't rerun the full-KB sweep — indexed by canonical entry
-    // token. Attribution per spelling: a `role/<name>` hit is ALWAYS the
-    // role's; a BARE hit is the role's only when no group shadows the name —
-    // bare tokens resolve group-first, so a shadowed bare grant belongs to the
-    // GROUP (and the groups roster attributes it there — the mirror image).
-    const [referencesByToken, activeGroups] = await Promise.all([
-      this.references.scan(workspaceId),
-      loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f)),
-    ]);
-    const groupOwnedBareNames = new Set(activeGroups.groups.keys());
+    // token. Attribution per spelling: a `role/<name>` hit and a BARE hit are
+    // both the role's — bare names resolve role-first, so a same-named group
+    // is only ever `group/<name>` (the groups roster's mirror image).
+    const referencesByToken = await this.references.scan(workspaceId);
     const out: RoleRosterEntry[] = [];
     for (const role of model) {
       const canonical = canonicalRoleName(role.displayName);
@@ -345,10 +349,17 @@ export class RolesAdminService {
           ? { description: registryEntry.description, groupAssignable: registryEntry.groupAssignable }
           : null,
         referencedBy: [
-          ...(groupOwnedBareNames.has(canonical) ? [] : referencesByToken.get(canonical) ?? []),
+          ...(referencesByToken.get(canonical) ?? []),
           ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${canonical}`) ?? []),
         ],
       });
+    }
+    const paths = [...new Set(out.flatMap((r) => r.referencedBy.map((ref) => ref.path)))];
+    if (paths.length > 0) {
+      const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
+      for (const r of out) {
+        r.referencedBy = readableReferences(r.referencedBy, readable);
+      }
     }
     return out;
   }
@@ -453,7 +464,7 @@ export class RolesAdminService {
     );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [OLD_ROLES_YAML, ROLES_YAML]);
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   // ---- Mutations --------------------------------------------------------
@@ -487,7 +498,7 @@ export class RolesAdminService {
   ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
     await this.runEdit(actor, (text) => editAddMember(text, canonical, email), opts?.aroundWrite);
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -545,7 +556,7 @@ export class RolesAdminService {
       }
       return editRemoveMember(text, canonical, email);
     });
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -575,12 +586,12 @@ export class RolesAdminService {
       }
       await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
     });
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   async unassignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
     await this.runEdit(actor, (text) => editRemoveGroupRef(text, canonical, groupName));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -692,7 +703,7 @@ export class RolesAdminService {
     );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   // ---- Internals --------------------------------------------------------
