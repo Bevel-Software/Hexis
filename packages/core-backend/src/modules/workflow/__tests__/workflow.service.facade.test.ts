@@ -1671,7 +1671,7 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
   function makeNotifyHarness(opts: {
     eligible?: ReturnType<typeof eligibility> | null;
     push?: ReturnType<typeof vi.fn>;
-    accounts?: { findUsersByEmailHash: ReturnType<typeof vi.fn> } | undefined;
+    accounts?: { findActiveAccountsByEmail: ReturnType<typeof vi.fn> } | undefined;
     link?: { url: string; urlNote?: string };
   } = {}) {
     const git = Object.assign(makeGit(), {
@@ -1693,10 +1693,11 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
       'accounts' in opts
         ? opts.accounts
         : {
-            findUsersByEmailHash: vi.fn(async (hashes: Set<string>) => {
+            findActiveAccountsByEmail: vi.fn(async (emails: readonly string[]) => {
               const found = new Map<string, { id: string; email: string; name: string }>();
-              for (const [email, account] of Object.entries(ACCOUNTS)) {
-                if (hashes.has(hashEmail(email))) found.set(hashEmail(email), account);
+              for (const email of emails) {
+                const account = ACCOUNTS[email];
+                if (account) found.set(email, account);
               }
               return found;
             }),
@@ -1738,14 +1739,13 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
         { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
       ],
       unresolvedApprovers: 0,
+      pushPending: false,
     });
     // No public address: no `url` at all, not a relative one.
     expect(event).not.toHaveProperty('url');
-    // The accounts were read once, for the distinct addresses.
-    expect(h.accounts!.findUsersByEmailHash).toHaveBeenCalledTimes(1);
-    expect(h.accounts!.findUsersByEmailHash.mock.calls[0]![0]).toEqual(
-      new Set([hashEmail('dana@acme.test'), hashEmail('lena@acme.test')]),
-    );
+    // The accounts were read once, for the distinct canonical addresses.
+    expect(h.accounts!.findActiveAccountsByEmail).toHaveBeenCalledTimes(1);
+    expect(h.accounts!.findActiveAccountsByEmail.mock.calls[0]![0]).toEqual(['dana@acme.test', 'lena@acme.test']);
     // The row landed before anyone was told, and the answer says who was.
     expect(h.values).toHaveBeenCalledTimes(1);
     expect(h.values.mock.invocationCallOrder[0]).toBeLessThan(h.run.mock.invocationCallOrder[0]!);
@@ -1782,7 +1782,7 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
     try {
       const failing = makeNotifyHarness({
         eligible,
-        accounts: { findUsersByEmailHash: vi.fn().mockRejectedValue(new Error('db down')) },
+        accounts: { findActiveAccountsByEmail: vi.fn().mockRejectedValue(new Error('db down')) },
       });
       await expect(failing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ notified: ['email'] });
       expect(failing.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
@@ -1797,14 +1797,14 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
     await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12, notified: [] });
   });
 
-  it('tells the listeners even when the host refused the push: the request exists', async () => {
+  it('tells the listeners even when the host refused the push, and says so: the request exists, its commits are still to land', async () => {
     const h = makeNotifyHarness({
       push: vi.fn().mockRejectedValue(new Error('git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)')),
     });
     const err = await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
     expect(h.run).toHaveBeenCalledTimes(1);
-    expect(h.run.mock.calls[0]![0]).toMatchObject({ number: 12, sourceBranch: 'ali/x', targetBranch: 'main' });
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ number: 12, sourceBranch: 'ali/x', targetBranch: 'main', pushPending: true });
   });
 
   it('tells the listeners once the branches\' lifecycle locks are released: a slow mailer holds up the answer, not a delete or a merge', async () => {

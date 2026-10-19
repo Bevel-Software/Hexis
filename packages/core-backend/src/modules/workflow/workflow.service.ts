@@ -114,6 +114,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import { EVERYONE_CANONICAL } from '../access-model/access-grammar.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { printable } from '../../shared/printable.js';
 
@@ -271,20 +272,14 @@ function buildAffectedOwnersBlock(paths: string[], resolved: EligibleWritersAtRe
 }
 
 /**
- * The built-in principal that grants anyone signed in, as the eligibility
- * lists name it (the token `eligibleWritersForPathsAtRef` answers — see the
- * same constant in `review-workflow.service.ts`).
- */
-const EVERYONE_CANONICAL = 'everyone';
-
-/**
  * The one question the open asks of accounts: which of these addresses have
- * one. `AuthService.findUsersByEmailHash` answers it in a single read; the
- * shape is spelled here so the workflow module imports nothing of auth's.
+ * a live account. `AuthService.findActiveAccountsByEmail` answers it in a
+ * single indexed read; the shape is spelled here so the workflow module
+ * imports nothing of auth's. Keyed by the canonical address asked for.
  */
 export interface ApproverAccounts {
-  findUsersByEmailHash(
-    hashes: Set<string>,
+  findActiveAccountsByEmail(
+    emails: readonly string[],
   ): Promise<Map<string, { id: string; email: string; name: string }>>;
 }
 
@@ -2536,10 +2531,11 @@ export class WorkflowService implements IWorkflowService {
     return { number: prNumber, eligible, detail, pushRefused: null };
     });
 
-    // The request exists either way — the reviewers are told all the same
-    // when the push was refused: the request is theirs to find, and the
-    // branch's next push carries the commits.
-    const notified = await this.notifyOpened(outcome.number, input, user, outcome.eligible);
+    // The request exists either way — the listeners are told all the same
+    // when the push was refused, with `pushPending` saying so: the request
+    // is there to find, its commits reach the host with the branch's next
+    // push, and what that is worth to a reviewer is each listener's call.
+    const notified = await this.notifyOpened(outcome.number, input, user, outcome.eligible, outcome.pushRefused !== null);
     if (outcome.pushRefused) throw outcome.pushRefused;
     return { ...outcome.detail, notified };
   }
@@ -2556,6 +2552,7 @@ export class WorkflowService implements IWorkflowService {
     input: OpenChangeRequestInput,
     user: AuthUser,
     eligible: EligibleWritersAtRef,
+    pushPending: boolean,
   ): Promise<string[]> {
     const { approvers, unresolvedApprovers } = await this.resolveApprovers(eligible);
     // Only an address a person can open from outside is handed over; the
@@ -2571,6 +2568,7 @@ export class WorkflowService implements IWorkflowService {
       approvers,
       unresolvedApprovers,
       ...(link.urlNote === undefined ? { url: link.url } : {}),
+      pushPending,
     });
   }
 
@@ -2579,31 +2577,31 @@ export class WorkflowService implements IWorkflowService {
    * Each path's eligibility already expands its roles and groups to the
    * addresses the access model names (`emails`), so a person is one address
    * however many paths or roles name them; the addresses are looked up as
-   * accounts in one read. An address with no account, and the built-in
-   * `everyone` (anyone signed in may approve; nobody can be listed for that),
-   * are counted, not handed over.
+   * live accounts in one read. An address with no account, or with one
+   * switched off, and the built-in `everyone` (anyone signed in may approve;
+   * nobody can be listed for that), are counted, not handed over.
    */
   private async resolveApprovers(
     eligible: EligibleWritersAtRef,
   ): Promise<{ approvers: ChangeRequestPerson[]; unresolvedApprovers: number }> {
-    const byHash = new Map<string, string>(); // email hash → canonical address
+    const addresses = new Set<string>();
     let everyone = false;
     for (const info of eligible?.values() ?? []) {
-      for (const email of info.emails) byHash.set(hashEmail(email), canonicalEmail(email));
+      for (const email of info.emails) addresses.add(canonicalEmail(email));
       if (info.roles.includes(EVERYONE_CANONICAL)) everyone = true;
     }
     let accounts = new Map<string, { id: string; email: string; name: string }>();
-    if (byHash.size > 0 && this.accounts) {
+    if (addresses.size > 0 && this.accounts) {
       try {
-        accounts = await this.accounts.findUsersByEmailHash(new Set(byHash.keys()));
+        accounts = await this.accounts.findActiveAccountsByEmail([...addresses]);
       } catch (err) {
         crLog.warn('the approvers of a change request could not be read as accounts; the listeners are handed none:', { err });
       }
     }
     const approvers: ChangeRequestPerson[] = [];
     let unresolvedApprovers = everyone ? 1 : 0;
-    for (const hash of byHash.keys()) {
-      const account = accounts.get(hash);
+    for (const address of addresses) {
+      const account = accounts.get(address);
       if (account) approvers.push({ id: account.id, email: account.email, name: account.name });
       else unresolvedApprovers++;
     }

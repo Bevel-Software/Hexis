@@ -9,6 +9,7 @@ const EVENT: ChangeRequestOpenedEvent = {
   openedBy: { id: 'u-ali', email: 'ali@acme.test', name: 'Ali' },
   approvers: [{ id: 'u-dana', email: 'dana@acme.test', name: 'Dana' }],
   unresolvedApprovers: 0,
+  pushPending: false,
 };
 
 describe('ChangeRequestHooks: a change request was opened', () => {

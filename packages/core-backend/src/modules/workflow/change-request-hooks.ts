@@ -45,6 +45,16 @@ export interface ChangeRequestOpenedEvent {
    * itself.
    */
   url?: string;
+  /**
+   * Whether the source branch's push was refused by the host as the request
+   * was opened: the request exists, but its commits reach the host only when
+   * an agent has reconciled the branch and pushed again, which is seconds
+   * usually and may fail. A listener decides what that is worth — a mail
+   * worded for it, a delay, or none — because a reviewer sent to the
+   * request before then opens one whose changes are not there yet. False
+   * when the push landed.
+   */
+  pushPending: boolean;
 }
 
 /**
