@@ -81,6 +81,22 @@ describe.skipIf(!PG_ADMIN_URL)('refresh-token rotation, on a real Postgres', () 
   /** Move the clock `n` minutes on. */
   const minutes = (n: number) => vi.setSystemTime(new Date(Date.now() + n * 60_000));
 
+  /**
+   * The mint refused by the unique index on `access_token_hash`, and by
+   * nothing else: Drizzle's wrapper around the insert, with Postgres's
+   * unique-violation code (23505) as the cause.
+   */
+  async function expectRefusedByUniqueIndex(call: Promise<unknown>): Promise<void> {
+    const err = await call.then(
+      () => {
+        throw new Error('the mint was not refused');
+      },
+      (e: unknown) => e as Error & { cause?: { code?: string } },
+    );
+    expect(err.message).toMatch(/Failed query: insert into "oauth_tokens"/);
+    expect(err.cause?.code).toBe('23505');
+  }
+
   /** The row a refresh token's hash resolves to, or undefined once pruned. */
   const rowOf = async (refreshToken: string) =>
     (await db.select().from(oauthTokens).where(eq(oauthTokens.refreshTokenHash, sha256(refreshToken))))[0];
@@ -212,9 +228,7 @@ describe.skipIf(!PG_ADMIN_URL)('refresh-token rotation, on a real Postgres', () 
     // A fresh token: the retire is rolled back with the failed mint.
     forcedRandom.bytes = collider;
     try {
-      // Drizzle reports the refused insert as its own error, the unique
-      // violation as the cause.
-      await expect(provider.exchangeRefreshToken(client, refresh)).rejects.toThrow(/Failed query: insert into "oauth_tokens"/);
+      await expectRefusedByUniqueIndex(provider.exchangeRefreshToken(client, refresh));
     } finally {
       forcedRandom.bytes = null;
     }
@@ -226,9 +240,7 @@ describe.skipIf(!PG_ADMIN_URL)('refresh-token rotation, on a real Postgres', () 
     // A retired token within the grace: the replay is rolled back with the failed mint too.
     forcedRandom.bytes = collider;
     try {
-      // Drizzle reports the refused insert as its own error, the unique
-      // violation as the cause.
-      await expect(provider.exchangeRefreshToken(client, refresh)).rejects.toThrow(/Failed query: insert into "oauth_tokens"/);
+      await expectRefusedByUniqueIndex(provider.exchangeRefreshToken(client, refresh));
     } finally {
       forcedRandom.bytes = null;
     }
