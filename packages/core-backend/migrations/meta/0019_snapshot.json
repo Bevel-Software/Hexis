@@ -1,5 +1,5 @@
 {
-  "id": "896625a3-a326-4628-a4f3-a876bb72be26",
+  "id": "a36676cf-375f-4576-afe7-f833962bd4fe",
   "prevId": "67aaaca1-2386-4a16-b1fe-f29858e77560",
   "version": "7",
   "dialect": "postgresql",
@@ -1375,6 +1375,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "rotated_at": {
+          "name": "rotated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "last_used_at": {
           "name": "last_used_at",
           "type": "timestamp",
@@ -1652,7 +1658,7 @@
       "checkConstraints": {
         "pending_commits_status": {
           "name": "pending_commits_status",
-          "value": "\"pending_commits\".\"status\" IN ('pending', 'running', 'recovering', 'needs_attention')"
+          "value": "\"pending_commits\".\"status\" IN ('pending', 'running', 'needs_attention')"
         }
       },
       "isRLSEnabled": false
