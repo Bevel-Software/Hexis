@@ -11,6 +11,19 @@ import { coreMigrationsDir } from '../../../assets.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
 
 /**
+ * The provider mints its tokens from `randomBytes`. One case below needs a
+ * mint to FAIL after the consume, with the database as the one saying no:
+ * while `forced` is set, every random draw is this buffer, so the minted
+ * access token's hash is one a seeded row already holds and the insert hits
+ * the unique index. Null the rest of the time, when the real generator runs.
+ */
+const { forcedRandom } = vi.hoisted(() => ({ forcedRandom: { bytes: null as Buffer | null } }));
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return { ...actual, randomBytes: (size: number) => forcedRandom.bytes ?? actual.randomBytes(size) };
+});
+
+/**
  * Refresh-token rotation as the DATABASE ends up holding it — on a real
  * Postgres, through the provider's public surface alone (a sign-in's pair
  * seeded as the token endpoint leaves one, then `exchangeRefreshToken`,
@@ -174,6 +187,57 @@ describe.skipIf(!PG_ADMIN_URL)('refresh-token rotation, on a real Postgres', () 
     expect(row?.rotatedAt).toBeInstanceOf(Date);
     expect(row?.revokedAt).toBeInstanceOf(Date);
     await expect(provider.exchangeRefreshToken(client, refresh)).rejects.toBeInstanceOf(InvalidGrantError);
+  }, PG_TEST_TIMEOUT);
+
+  it('a mint that fails after the consume rolls the consume back: the token is exactly as it was, and still refreshes', async () => {
+    // The consume and the mint are one transaction, and this is what that
+    // buys: the database refuses the insert (the minted access token's hash
+    // is one a seeded row already holds), the retire — then, on a second
+    // try, the replay — is rolled back with it, and the token that was
+    // presented is untouched rather than spent for nothing.
+    const { client, refresh } = await seed('rollback');
+    const collider = Buffer.alloc(32, 7);
+    const { client: other } = await seed('collider');
+    await db
+      .insert(oauthTokens)
+      .values({
+        accessTokenHash: sha256(PREFIX + collider.toString('base64url')),
+        refreshTokenHash: sha256(`${PREFIX}r_collider-pair`),
+        clientId: other.client_id,
+        userId: (await db.select({ id: users.id }).from(users).limit(1))[0]!.id,
+        scope: 'mcp',
+        expiresAt: new Date(Date.now() + HOUR),
+      });
+
+    // A fresh token: the retire is rolled back with the failed mint.
+    forcedRandom.bytes = collider;
+    try {
+      // Drizzle reports the refused insert as its own error, the unique
+      // violation as the cause.
+      await expect(provider.exchangeRefreshToken(client, refresh)).rejects.toThrow(/Failed query: insert into "oauth_tokens"/);
+    } finally {
+      forcedRandom.bytes = null;
+    }
+    const untouched = await rowOf(refresh);
+    expect(untouched?.rotatedAt).toBeNull();
+    expect(untouched?.revokedAt).toBeNull();
+    const winner = await provider.exchangeRefreshToken(client, refresh);
+
+    // A retired token within the grace: the replay is rolled back with the failed mint too.
+    forcedRandom.bytes = collider;
+    try {
+      // Drizzle reports the refused insert as its own error, the unique
+      // violation as the cause.
+      await expect(provider.exchangeRefreshToken(client, refresh)).rejects.toThrow(/Failed query: insert into "oauth_tokens"/);
+    } finally {
+      forcedRandom.bytes = null;
+    }
+    const stillRetired = await rowOf(refresh);
+    expect(stillRetired?.rotatedAt).toBeInstanceOf(Date);
+    expect(stillRetired?.revokedAt).toBeNull();
+    // Its one replay is still owed.
+    const loser = await provider.exchangeRefreshToken(client, refresh);
+    expect(loser.refresh_token).not.toBe(winner.refresh_token);
   }, PG_TEST_TIMEOUT);
 
   it("a revoke ends a retired pair's access token at once, hour or no hour", async () => {
