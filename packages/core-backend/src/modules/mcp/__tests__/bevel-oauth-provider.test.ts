@@ -323,11 +323,48 @@ describe('BevelOAuthProvider', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(captured.updateTargets).toEqual([oauthTokens, agentConnections, agentConnections]);
     expect(Object.keys(captured.set[1])).toEqual(['lastUsedAt']);
+    // The mint's prune keeps a retired row for its access hour plus the
+    // reuse grace — it can still verify and be replayed until then — and
+    // removes it after: the third term of the delete, cut off 61 minutes ago.
+    const prune = captured.where.map(render).find((w) => /"oauth_tokens"."rotated_at" < /.test(w.sql));
+    expect(prune, 'the mint prunes retired rows').toBeDefined();
+    // The dialect renders a Date parameter as its ISO string.
+    const rotatedCutoff = new Date(prune!.params.at(-1) as string | Date);
+    expect(Date.now() - rotatedCutoff.getTime()).toBeGreaterThanOrEqual(61 * 60_000);
+    expect(Date.now() - rotatedCutoff.getTime()).toBeLessThan(61 * 60_000 + 5_000);
 
-    // Widening is refused.
-    await expect(
-      makeProvider([[oldRow]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp', 'admin']),
-    ).rejects.toBeInstanceOf(InvalidScopeError);
+    // Widening is refused — invalid_scope to the client, and in the log like
+    // every other refusal.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        makeProvider([[oldRow]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp', 'admin']),
+      ).rejects.toBeInstanceOf(InvalidScopeError);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refresh refused: requested scope exceeds the originally granted scope/), expect.anything());
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a retired pair\'s access token verifies until its own expiry, and dies with a revoke like any other', async () => {
+    // Rotation sets `rotated_at` and leaves `revoked_at` null, and the
+    // verification predicate asks about `revoked_at` and `expires_at` only:
+    // so a runner still holding the old pair is served for the rest of its
+    // hour. The same predicate is what a revoke, a sign-out or a connection
+    // revoke then falsify, since all of those set `revoked_at` (or the
+    // connection's), none of which this change touched.
+    const row = {
+      id: 't-1', clientId: 'client-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+      expiresAt: new Date(Date.now() + 30 * 60_000), userId: 'user-1', userEmail: 'u@x.io',
+    };
+    const { provider, captured } = makeProvider([[row], undefined /* touch */, [] /* claim lost */, undefined /* stamp */]);
+    const info = await provider.verifyAccessToken('bevel-mcp_live');
+    expect(info.clientId).toBe('client-1');
+    const verify = render(captured.where[0]).sql;
+    expect(verify).toMatch(/"oauth_tokens"."revoked_at" is null/);
+    expect(verify).toMatch(/"oauth_tokens"."expires_at" > /);
+    expect(verify).toMatch(/"agent_connections"."revoked_at" is null/);
+    expect(verify).not.toMatch(/rotated_at/);
   });
 
   /** A row the rotation did not match, as the replay path then reads it. */
@@ -537,6 +574,10 @@ describe('BevelOAuthProvider', () => {
     ]);
     await provider.revokeToken(CLIENT, { token: 'bevel-mcp_r_old', token_type_hint: 'refresh_token' });
     expect(captured.updateTargets).toEqual([oauthTokens, agentConnections]);
+    // "Live" excludes a retired row: its successor is the live token, and a
+    // sign-out must not keep the connection open on a refresh token nobody
+    // can use any more.
+    expect(render(captured.where[1]).sql).toMatch(/"oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" is null/);
     expect(captured.set[1]).toMatchObject({ revokedBy: 'owner' });
     expect(captured.set[1].revokedAt).toBeInstanceOf(Date);
     expect(render(captured.where[2])).toMatchObject({ params: ['conn-1'] });

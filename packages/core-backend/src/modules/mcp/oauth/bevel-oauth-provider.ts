@@ -311,6 +311,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     if (scopes?.length) {
       const granted = new Set((row.scope ?? '').split(' ').filter(Boolean));
       if (!scopes.every((s) => granted.has(s))) {
+        // Refused like the others, in the log; `invalid_scope` to the client
+        // (RFC 6749 §5.2), since the token itself is fine.
+        log.warn('refresh refused: requested scope exceeds the originally granted scope', {
+          clientId: row.clientId,
+          connectionId: row.connectionId ?? null,
+          userId: row.userId,
+        });
         throw new InvalidScopeError('Requested scope exceeds the originally granted scope');
       }
       scope = scopes.join(' ');
