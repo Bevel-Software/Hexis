@@ -20,7 +20,13 @@
  *    registers (and for a stand-in one in a test).
  *  - `kbFileUrl` and `resolveKbHref`: the app's address for a file on a
  *    branch, and what a link in a page resolves to there, which a link out
- *    of such a mount has to name.
+ *    of such a mount has to name; `kbFilePageUrl`, the file page's address
+ *    even for a file a skill's page would otherwise claim, and
+ *    `asksForFilePage`, whether a location's query makes that ask.
+ *  - `OpenPageInPlatformContext`: how an HTML page mounted there is taken
+ *    to the file page when it needs tools and the viewer picks Open in the
+ *    platform (a skill page provides it; without it the renderer opens the
+ *    file's own address).
  *
  * Its routing contract (the Knowledge URL prefix and the segment decode),
  * where the page lands once the file on screen has closed, the "This file
@@ -38,7 +44,15 @@ export {
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
-export { KB_ROUTE_PREFIX, kbFileUrl, resolveKbHref, safeDecode } from './routing/kb-routes';
+export {
+  asksForFilePage,
+  KB_ROUTE_PREFIX,
+  kbFilePageUrl,
+  kbFileUrl,
+  resolveKbHref,
+  safeDecode,
+} from './routing/kb-routes';
+export { OpenPageInPlatformContext } from './components/renderers/htmlToolBridge';
 export { landingAfterClose } from './routing/landing';
 export { DeletedFileNotice } from './components/DeletedFileNotice';
 export { useItemDeletedElsewhere } from './hooks/useItemDeletedElsewhere';

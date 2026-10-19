@@ -47,6 +47,7 @@ import { suggestedPages } from '../utils/fileTree';
 import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
 import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
+import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
@@ -1196,8 +1197,11 @@ export function FileViewer() {
     // The renderer is a dynamic per-extension lookup resolved in a useMemo
     // above — not a component created during render. The provider hands the
     // open file's `download:` verdict to any DownloadFileButton inside the
-    // renderer without widening the renderer contract.
+    // renderer without widening the renderer contract. The page-tools
+    // provider is what makes this the file page for an HTML page: the one
+    // place its `window.bevel.tools` is answered, under its own path.
     <CanDownloadContext.Provider value={access.canDownload}>
+    <PageToolsContext.Provider value={{ pagePath: repoRelativePath ?? openFilePath }}>
     {/* eslint-disable-next-line react-hooks/static-components */}
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
@@ -1258,6 +1262,7 @@ export function FileViewer() {
       onSaveStateChange={setManualSaveState}
       readOnly={isReviewingPending || !(editMode || proposeMode)}
     />
+    </PageToolsContext.Provider>
     </CanDownloadContext.Provider>
   );
 

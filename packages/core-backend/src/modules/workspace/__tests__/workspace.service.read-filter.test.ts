@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { WorkspaceService, type ReadTreeFilter } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const KB = 'knowledge-base';
 
@@ -48,7 +49,7 @@ describe('WorkspaceService.listFiles — read filter', () => {
     // readers, say), and its files are readable.
     await mkFile(workspaceDir, 'Scopes/Deploy/SKILL.md');
     await mkFile(workspaceDir, 'Scopes/other.md');
-    svc = new WorkspaceService(root, 'https://example.invalid/repo.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    svc = newWorkspaceService(root, 'https://example.invalid/repo.git', testKbContext({ kbDirName: KB }), new NodeFs());
     await svc.getWorkspacePath(workspaceId);
   });
 

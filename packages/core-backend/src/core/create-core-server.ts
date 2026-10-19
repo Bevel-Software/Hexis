@@ -470,12 +470,13 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   // `delete_branch` sees change requests as `get_change_request` does.
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee);
+  // The history tools take the per-file read the file itself takes (`accessControl`).
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
   // The five read tools over change requests. Separate from the workflow tools
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore, core.starterPackService, core.disk);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
   // `open_page` — the knowledge-base page shown inside a chat. Registered
   // here, on the same router as the file tools, because it answers with
   // `read_file`'s own read: the read hook, the access gate and the

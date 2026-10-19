@@ -4,6 +4,7 @@ import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '
 import type { IDiffService } from './diff.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkspaceMutex } from '../kb-fs/mutex.js';
+import { gitDirOf } from '../kb-fs/index.js';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
@@ -385,10 +386,11 @@ export class DiffService implements IDiffService {
   private async tryReadCurrentBranch(workspaceId: string): Promise<string> {
     const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
     try {
-      const head = await fs.readFile(
-        path.join(workspaceDir, this.kbDirName, '.git', 'HEAD'),
-        'utf-8',
-      );
+      // A worktree's `.git` is a FILE naming its folder in the repository,
+      // where its HEAD lives; a full clone's is the folder itself.
+      const gitDir = await gitDirOf(path.join(workspaceDir, this.kbDirName));
+      if (gitDir === null) return '';
+      const head = await fs.readFile(path.join(gitDir, 'HEAD'), 'utf-8');
       const m = head.match(/^ref:\s+refs\/heads\/(.+?)\s*$/);
       return m ? m[1] : '';
     } catch {

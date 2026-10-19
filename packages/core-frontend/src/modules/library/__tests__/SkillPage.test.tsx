@@ -30,6 +30,22 @@ const apiMock = vi.hoisted(() => ({
   readFile: vi.fn(),
   listSkillAccessRequests: vi.fn(async (): Promise<unknown[]> => []),
 }));
+/**
+ * The props the page last handed its reading pane — so a test can drive a
+ * callback the pane only reaches through an HTML page's frame (Open in the
+ * platform). The pane itself renders as it always does.
+ */
+const paneProps = vi.hoisted(() => ({ last: null as null | { onOpenInPlatform?: () => void } }));
+vi.mock('../components/skill-page/SkillFilePane', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../components/skill-page/SkillFilePane')>();
+  return {
+    SkillFilePane: (props: Parameters<typeof real.SkillFilePane>[0]) => {
+      paneProps.last = props;
+      return real.SkillFilePane(props);
+    },
+  };
+});
+
 vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
   getSkill: apiMock.getSkill,
@@ -133,6 +149,8 @@ vi.mock('../state/library-data', () => ({
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { LibraryToastProvider } from '../state/toast';
 import { expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
 
 const workspace = {
   workspaceId: 'target-company-state',
@@ -302,7 +320,15 @@ function renderPage(
 
 /** Where a link out of the page took the router: the Knowledge app's path. */
 function NavigatedTo() {
-  return <div data-testid="navigated-to">{useLocation().pathname}</div>;
+  const location = useLocation();
+  return (
+    <>
+      <div data-testid="navigated-to">{location.pathname}</div>
+      <div data-testid="navigated-raw-file">
+        {String((location.state as { rawFile?: boolean } | null)?.rawFile === true)}
+      </div>
+    </>
+  );
 }
 
 /**
@@ -435,6 +461,17 @@ describe('SkillPage', () => {
     expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/skills-and-tools\/connect$/);
   });
 
+  it("opens a page of the skill on the Knowledge file page, not back on this page, for Open in the platform", async () => {
+    renderPage(true);
+    await settled();
+    expect(paneProps.last?.onOpenInPlatform).toBeTypeOf('function');
+    act(() => paneProps.last!.onOpenInPlatform!());
+    // The file's own address, with the state that makes the item route show
+    // the file route rather than this skill page again.
+    expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/workspace\/[^/]+\/knowledge-base\/Skills\/newsletter\/SKILL\.md$/);
+    expect(screen.getByTestId('navigated-raw-file')).toHaveTextContent('true');
+  });
+
   it('loads the skill and shows its name, needed integrations and files', async () => {
     renderPage(false);
 
@@ -476,6 +513,12 @@ describe('SkillPage', () => {
     renderPage(false);
     await screen.findByRole('heading', { name: 'newsletter' });
     expectTitleRowSpansTheDocumentColumn();
+  });
+
+  it('keeps the tails of its title: it truncates, with room for its ink', async () => {
+    renderPage(false);
+    await screen.findByRole('heading', { name: 'newsletter' });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
   });
 
   it('marks the open tab selected and loads a bundled file on click', async () => {

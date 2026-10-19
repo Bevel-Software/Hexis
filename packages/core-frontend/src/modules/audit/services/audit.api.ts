@@ -7,13 +7,14 @@ import { authFetch } from '../../../lib/api';
  * rather than shared, like the admin inbox's, because the feature is small.
  */
 
-export type AuditPrincipalKind = 'key' | 'agent';
+/** `page`: an HTML page of the knowledge base whose script called tools as the person viewing it. */
+export type AuditPrincipalKind = 'key' | 'agent' | 'page';
 
-/** One row of the Audit log: an agent connection or a connection key, with its owner. */
+/** One row of the Audit log: an agent connection, a connection key or a page, with its owner. */
 export interface AuditPrincipal {
   kind: AuditPrincipalKind;
   id: string;
-  /** The key's label, or the agent's registered name ("Claude"). */
+  /** The key's label, the agent's registered name ("Claude"), or the page's knowledge-base path. */
   label: string;
   /** For a key: `key` by hand, `github-link` for a Claude link. Absent for an agent. */
   keyKind?: string;
@@ -31,7 +32,8 @@ export interface AuditPrincipal {
 }
 
 export type AgentEventKind = 'capability' | 'tool' | 'skill';
-export type AgentEventOutcome = 'ok' | 'error' | 'denied';
+/** `denied`: the sign-in for the tool was missing. `refused`: the viewer denied a page's request to write. */
+export type AgentEventOutcome = 'ok' | 'error' | 'denied' | 'refused';
 
 export interface AgentEvent {
   id: string;

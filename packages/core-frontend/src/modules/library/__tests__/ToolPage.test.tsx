@@ -69,6 +69,8 @@ vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { DEFAULT_BRANCH, type WorkflowEvent } from '@bevel-software/platform-shared';
 import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
@@ -257,6 +259,12 @@ describe('ToolPage: frame', () => {
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
     expectTitleRowSpansTheDocumentColumn();
     expect(container.querySelector('article')!.className).not.toContain('max-w-');
+  });
+
+  it('keeps the tails of its title\'s g, y and p: the room on the title and on the row that clips it', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {
