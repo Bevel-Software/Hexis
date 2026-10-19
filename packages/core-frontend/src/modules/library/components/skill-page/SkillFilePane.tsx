@@ -4,6 +4,7 @@ import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
+import { OpenPageInPlatformContext } from '../../../workspace';
 import type { DiffLine } from '../../../change-requests/utils/diff';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
@@ -32,6 +33,12 @@ interface SkillFilePaneProps {
   headingLink?(slug: string): string;
   /** Image source resolver, same contract as `KbMarkdownView`; absent ⇒ plain `<img>` tags. */
   resolveImage?: KbImageResolver;
+  /**
+   * Open this file on the app's file page — what an HTML page's "Open in the
+   * platform" does here, since `file` is relative to the skill, not a
+   * workspace path.
+   */
+  onOpenInPlatform?(): void;
 }
 
 /**
@@ -55,6 +62,7 @@ export function SkillFilePane({
   onOpenNodeId,
   headingLink,
   resolveImage,
+  onOpenInPlatform,
 }: SkillFilePaneProps) {
   return (
     <FilePaneCard file={file} actions={actions} notice={notice} className="mt-4">
@@ -83,7 +91,9 @@ export function SkillFilePane({
         // Sized wrapper because the renderer fills its parent, and this card
         // has no height of its own.
         <div className="h-[70vh]">
-          <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
+          <OpenPageInPlatformContext.Provider value={onOpenInPlatform ?? null}>
+            <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
+          </OpenPageInPlatformContext.Provider>
         </div>
       ) : (
         <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">

@@ -13,7 +13,7 @@ import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
 import { PageActions } from './PageActions';
 import { PendingItemReview } from './PendingItemReview';
 import { cn } from '../../../lib/utils';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { PersonalAddDialog } from './PersonalAddDialog';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { copyToClipboard } from '../utils/clipboard';
@@ -120,10 +120,11 @@ export function PersonalPluginPage() {
         {/* Clipped, and allowed to take the row's shortfall, for the reason
             the plugin page's is — the trail is a fixed width, so a group that
             could only shrink would run its content across the actions beside
-            it on a narrow viewport. */}
-        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+            it on a narrow viewport. The ink room is on this group as well as
+            on the title, because the group clips to the title's line box too. */}
+        <div className={`flex min-w-0 flex-1 items-center gap-2 overflow-hidden ${TITLE_INK_ROOM}`}>
           <PluginBreadcrumb />
-          <h1 className="min-w-0 truncate text-display font-semibold" title={name}>
+          <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={name}>
             {name}
           </h1>
         </div>

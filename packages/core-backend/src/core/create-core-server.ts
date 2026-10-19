@@ -470,7 +470,8 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   // `delete_branch` sees change requests as `get_change_request` does.
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee);
+  // The history tools take the per-file read the file itself takes (`accessControl`).
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
   // The five read tools over change requests. Separate from the workflow tools
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.

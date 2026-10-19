@@ -7,6 +7,7 @@ import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
   isUuid,
+  parsePagePrincipalId,
   type AuditPrincipalRef,
   type IAgentAuditService,
 } from './audit.contract.js';
@@ -20,7 +21,7 @@ const DEFAULT_EVENT_PAGE = 50;
 /**
  * The Audit log's routes, JWT-only (mounted behind the session middleware):
  *
- *   GET    /api/audit/principals?scope=me|all           — agents + keys, with owners and event counts
+ *   GET    /api/audit/principals?scope=me|all           — agents, keys and pages, with owners and event counts
  *   GET    /api/audit/principals/:kind/:id/events        — one principal's events, newest first, cursor-paged
  *   DELETE /api/audit/agents/:id                         — revoke an agent (owner or admin)
  *   DELETE /api/audit/keys/:id                           — revoke a key (owner or admin)
@@ -44,14 +45,20 @@ export function createAuditRoutes(
   const principalOf = (req: express.Request): AuditPrincipalRef | null => {
     const kind = String(req.params.kind);
     const id = String(req.params.id);
+    if (kind === 'page') return parsePagePrincipalId(id) ? { kind, id } : null;
     if ((kind !== 'key' && kind !== 'agent') || !isUuid(id)) return null;
     return { kind, id };
   };
 
-  /** Whether the caller may read or revoke `principal`: its owner, or an admin. Null when there is no such principal. */
-  const mayAct = async (req: express.Request, principal: AuditPrincipalRef): Promise<boolean | null> => {
+  /**
+   * Whether the caller may read `principal`'s events: its owner, or an admin.
+   * False both when there is no such principal and when it is someone else's,
+   * so the refusal does not tell a member which of another person's pages,
+   * agents or keys exist.
+   */
+  const mayRead = async (req: express.Request, principal: AuditPrincipalRef): Promise<boolean> => {
     const owner = await audit.ownerOf(principal);
-    if (owner === null) return null;
+    if (owner === null) return false;
     if (owner === req.userId) return true;
     return isAdmin(req);
   };
@@ -74,17 +81,12 @@ export function createAuditRoutes(
   router.get('/audit/principals/:kind/:id/events', async (req, res) => {
     const principal = principalOf(req);
     if (!principal) {
-      res.status(404).json({ error: 'No such agent or key' });
+      res.status(404).json({ error: 'No such agent, key or page' });
       return;
     }
     try {
-      const allowed = await mayAct(req, principal);
-      if (allowed === null) {
-        res.status(404).json({ error: 'No such agent or key' });
-        return;
-      }
-      if (!allowed) {
-        res.status(403).json({ error: 'Not yours' });
+      if (!(await mayRead(req, principal))) {
+        res.status(404).json({ error: 'No such agent, key or page' });
         return;
       }
       const rawLimit = Number(req.query.limit);

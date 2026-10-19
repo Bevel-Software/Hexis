@@ -117,7 +117,7 @@ import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
 import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
-import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
+import { WorkspaceIdMutex, WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import { assertGitVersion } from '../modules/workflow/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
 import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
@@ -578,7 +578,9 @@ export async function createCoreServices(
    */
   // Shared mutex so git and diff operations on the same workspace serialize
   // against each other — a backup-reseed races a concurrent commit otherwise.
-  const workspaceMutex = new WorkspaceMutex();
+  // Keyed by the CANONICAL workspace id: a route's Express-decoded `:id` and
+  // a tool's encoded one reserve the same clone (see `WorkspaceIdMutex`).
+  const workspaceMutex = new WorkspaceIdMutex();
   /**
    * The knowledge base's ONE repository: every branch workspace is a worktree
    * of it (see `kb-repository.ts`). One instance, handed to the workspace

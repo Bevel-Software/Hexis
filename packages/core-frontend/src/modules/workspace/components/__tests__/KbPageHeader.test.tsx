@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { KbPageHeader, type KbPageHeaderProps } from '../KbPageHeader';
+import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../../__tests__/title-ink-room';
 
 function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
   const props: KbPageHeaderProps = {
@@ -36,6 +38,11 @@ describe('KbPageHeader', () => {
   it('leads with the basename, minus a known extension', () => {
     renderHeader();
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Invariant');
+  });
+
+  it('keeps the tails of the title: it truncates, with room for its ink on it and on the group that clips it', () => {
+    renderHeader();
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
   });
 
   it("titles a plugin's plugin.json Plugin settings, with the file name on hover", () => {

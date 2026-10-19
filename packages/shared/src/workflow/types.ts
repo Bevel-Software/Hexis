@@ -17,6 +17,7 @@
 import type {
   BranchInfo,
   CommitAttribution,
+  MergeIntoBranchOutcome,
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '../git/types.js';
@@ -232,6 +233,16 @@ export type MergeBranchOutcome =
   | { kind: 'merged'; sha: string }
   | { kind: 'nothing-to-merge'; sha: string }
   | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] }
+  | { kind: 'pending-commits'; branch: string; pending: number; needsAttention?: string; message: string };
+
+/**
+ * What updating a branch from another (`updateBranch`) did: the merge's own
+ * outcomes (see `MergeIntoBranchOutcome`; `merged` here means the merge commit
+ * was also published), or `pending-commits` when writes on either branch were
+ * still being committed and nothing was merged.
+ */
+export type UpdateBranchOutcome =
+  | MergeIntoBranchOutcome
   | { kind: 'pending-commits'; branch: string; pending: number; needsAttention?: string; message: string };
 
 /**

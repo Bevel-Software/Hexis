@@ -2,6 +2,7 @@ import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 
 /**
  * The hosting/execution contract a module works against when it lets `toolHelpers`
@@ -63,6 +64,13 @@ export interface ToolContext {
   events: WorkflowEventBus;
   /** Build the lock-aware filesystem for `branch`'s workspace (cached). The tool supplies `branch` from its own input. */
   getFilesystem(branch: string): Promise<LocalFilesystem>;
+  /**
+   * The agent's pre-disk write gate for `branch`'s workspace (cached) — the
+   * one the filesystem above runs before a byte lands (`roles.yaml`: must
+   * parse, no new role, no unknown group). A tool that writes content by
+   * another road than that filesystem (a merge resolution) takes it too.
+   */
+  getWriteValidator(branch: string): Promise<WriteValidator>;
 }
 
 /**
