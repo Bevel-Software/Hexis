@@ -36,8 +36,8 @@ export interface ToolHandlerOptions {
   writeScope?: boolean;
   /**
    * How this route treats `branch`, when it must differ from what its
-   * `toolDef` recorded. Only `execute_command` sets it (`own`): it falls back
-   * to an internal caller's focused branch rather than being refused.
+   * `toolDef` recorded (`own`: the handler resolves it itself rather than
+   * being refused).
    */
   branch?: BranchHandling;
 }

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isAbsence } from '../../shared/fs.contract.js';
+import { gitDirOf } from './git-dir.js';
 
 /**
  * Where a ref points, read from the repository's own files instead of a
@@ -69,19 +70,13 @@ interface GitDirs {
 }
 
 async function gitDirsOf(repoDir: string): Promise<GitDirs | null> {
-  const dotGit = path.join(repoDir, '.git');
-  let gitDir: string;
+  let gitDir: string | null;
   try {
-    const st = await fs.stat(dotGit);
-    if (st.isDirectory()) gitDir = dotGit;
-    else if (st.isFile()) {
-      const m = /^gitdir:\s*(.+?)\s*$/m.exec(await fs.readFile(dotGit, 'utf-8'));
-      if (!m) return null;
-      gitDir = path.resolve(repoDir, m[1]!);
-    } else return null;
+    gitDir = await gitDirOf(repoDir);
   } catch {
     return null;
   }
+  if (gitDir === null) return null;
   let commonDir = gitDir;
   try {
     const pointer = (await fs.readFile(path.join(gitDir, 'commondir'), 'utf-8')).trim();

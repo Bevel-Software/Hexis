@@ -4,6 +4,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../access-control.interface.js';
+import { AccessControlService } from '../access-control.service.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
@@ -53,6 +54,10 @@ async function makeHarness(opts: {
     })),
     holdsAdminRootWrite: vi.fn(async () => opts.admin ?? true),
     groupsOfUser: vi.fn(async () => opts.memberOf ?? []),
+    // The real policy over the two stubs above: who sees which group is the
+    // resolver's one answer, not something a route (or this double) decides.
+    visibleGroups: (wsId: string, email: string, groups: readonly string[]) =>
+      AccessControlService.prototype.visibleGroups.call(accessControl, wsId, email, groups),
     eligibleWriters: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),

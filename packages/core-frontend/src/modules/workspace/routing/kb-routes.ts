@@ -64,6 +64,26 @@ export function kbFileUrl(branch: string, relativePath: string = ''): string {
 }
 
 /**
+ * The query that asks for a file's FILE PAGE whatever its path would
+ * otherwise open as — under `Skills/` and `Plugins/` every file in a skill's
+ * folder is that skill's page. Router state (`rawFile`) does this within one
+ * tab; a page opened in a NEW tab — the embed's "Open in the platform" —
+ * carries nothing but its URL, so the ask has to ride in it.
+ */
+const FILE_PAGE_PARAM = 'as';
+const FILE_PAGE_VALUE = 'file';
+
+/** `kbFileUrl`, asking for the file page itself (see `FILE_PAGE_PARAM`). */
+export function kbFilePageUrl(branch: string, relativePath: string): string {
+  return `${kbFileUrl(branch, relativePath)}?${FILE_PAGE_PARAM}=${FILE_PAGE_VALUE}`;
+}
+
+/** Whether a location's query is `kbFilePageUrl`'s ask for the file page. */
+export function asksForFilePage(searchParams: URLSearchParams): boolean {
+  return searchParams.get(FILE_PAGE_PARAM) === FILE_PAGE_VALUE;
+}
+
+/**
  * The canonical URL for a node: `/workspace/<branch>/<id>`. A bare id segment is
  * disjoint from a `.md` path (no slash/dot — see `NODE_ID_LINK_RE`), so the route
  * tells the two forms apart. `FileRoute` resolves the id to the underlying file.
@@ -464,6 +484,17 @@ export function useFileNav() {
     [branch, navigate],
   );
 
+  // The file page for a path a skill's page would otherwise claim (see
+  // `FILE_PAGE_PARAM`): an HTML page's "Open in the platform", whose tools
+  // are answered there and nowhere else.
+  const openFilePage = useCallback(
+    (path: string) => {
+      if (!branch) return;
+      navigate(kbFilePageUrl(branch, path));
+    },
+    [branch, navigate],
+  );
+
   const closeFile = useCallback(() => {
     if (!branch) return;
     navigate(kbFileUrl(branch));
@@ -479,10 +510,11 @@ export function useFileNav() {
       openFile: (pathOrUrl: string) => surface.openLink(pathOrUrl, ''),
       openLink: surface.openLink,
       openWorkspacePath: surface.openWorkspacePath,
+      openFilePage: surface.openFilePage,
       closeFile: () => undefined,
     };
   }
-  return { openFile, openLink, openWorkspacePath, closeFile };
+  return { openFile, openLink, openWorkspacePath, openFilePage, closeFile };
 }
 
 /**

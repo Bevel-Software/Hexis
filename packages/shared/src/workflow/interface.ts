@@ -43,7 +43,9 @@ import type {
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
+  UpdateBranchOutcome,
 } from './types.js';
+import type { MergeResolution } from '../git/types.js';
 
 export interface IWorkflowService {
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -224,17 +226,24 @@ export interface IWorkflowService {
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
   /**
    * Diff of one file between two branches. Both names must resolve to a
-   * known branch on this workspace (local head or remote-tracking). Returns
-   * the raw unified diff body — empty when identical, includes the
-   * "new file" / "deleted file" headers when the file only exists on one
-   * side.
+   * known branch on this workspace (local head or remote-tracking). `diff`
+   * is the raw unified diff body — empty when identical, with the "new
+   * file" / "deleted file" headers when the file only exists on one side —
+   * and `from`/`to` the commits each side was served from. `authorize` is
+   * the caller's read verdict, asked inside the git layer's reservation
+   * before anything is said about the path at either side, with every
+   * commit each branch resolves to in this repository (local head and
+   * published tip, the served one first) — all must grant, as the compare
+   * route has always required of both refs; its throw is the answer.
+   * Required: content from another branch is never served without it.
    */
   compareFile(
     workspaceId: string,
     path: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string>;
+    authorize: (sides: { from: string[]; to: string[] }) => Promise<void>,
+  ): Promise<{ diff: string; from: string; to: string }>;
   /**
    * Diff of one file at a specific change (sha) — i.e. `git show <sha> -- <path>`.
    * Used by the File viewer's History tab.
@@ -725,4 +734,73 @@ export interface IWorkflowService {
    * `merged` means a merge commit was made.
    */
   mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
+
+  /**
+   * Bring another branch's published state into the branch this workspace is
+   * on — `from` (a target the draft was forked from, say), or, left out, the
+   * branch's own published state when it diverged from the local one — as a
+   * merge commit authored by `user`, and publish it. The agent's way of
+   * refreshing a draft and of resolving conflicts: a conflict comes back
+   * described (`conflicts`: both sides, the base, the working copy with
+   * markers), the working tree untouched; a second call with a resolution
+   * per conflicted path lands the merge. See `IGitService.mergeIntoBranch`.
+   *
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-update-target'`,
+   *     403) for a protected branch: those are updated through change requests.
+   *   - refused (`WorkflowValidationError`) when `from` is not on the shared
+   *     repository, or when a resolution names a path that is not conflicted.
+   *   - refused (`WorkflowDomainError`, `kind: 'branch-busy'`, 409) while the
+   *     workspace holds edits not committed yet: a merge over them could lose
+   *     them.
+   *   - `pending-commits` when writes on either branch are still being
+   *     committed (waited for, up to 20 seconds); nothing merged.
+   *   - `merged` means the merge commit is PUBLISHED: the push runs inside the
+   *     merge's own reservation, through the cooperative recovery every
+   *     workflow push takes — a push the host rejects because the branch
+   *     moved is retried with the merge replayed on top. A replay that
+   *     conflicts, or a host that refuses, throws the saved-locally hand-off
+   *     (`PushNeedsAgentResolutionError`, its `path` the branch: no single
+   *     file is at issue, and no conflicted path is named), the merge commit
+   *     kept on the branch, unpublished, the checkout clean.
+   *
+   * Per-file read access to what a `conflicts` answer carries is the
+   * CALLER's to check and withhold, as for `fileAtBranch`. Resolutions come
+   * with `validateWrite`, the caller's pre-disk write gate (what its file
+   * writes take before a byte lands — a `roles.yaml` that must parse, say):
+   * required with them, refused without; asked with the workspace path and
+   * the content of every resolution that brings content, inside the merge's
+   * reservation before the merge runs; its throw refuses the update. A side
+   * kept whole brings no new content and is not asked.
+   */
+  updateBranch(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: { from?: string } & (
+      | { resolutions?: undefined; validateWrite?: undefined }
+      | { resolutions: MergeResolution[]; validateWrite: (wsPath: string, content: string) => void | Promise<void> }
+    ),
+  ): Promise<UpdateBranchOutcome>;
+  /**
+   * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).
+   * Access to the file at that commit is the caller's to check — through
+   * `authorize`, asked before anything is said about the path there with
+   * every commit the branch resolves to (local head and published tip, the
+   * served one first), all of which must grant. Required: content from
+   * another branch is never served without it.
+   */
+  fileAtBranch(
+    workspaceId: string,
+    path: string,
+    branch: string,
+    authorize: (commits: string[]) => Promise<void>,
+  ): Promise<{ sha: string; ref: string; content: string | null }>;
+  /**
+   * The repository-relative paths `branch` changes against `base` — a
+   * three-dot diff of their published tips, rename-aware — the list a change
+   * request from `branch` into `base` would carry. Unfiltered: a path's name
+   * is information too, and which of them the caller may read is the
+   * CALLER's to decide (at `origin/<base>`, as the change-request reads do)
+   * before any of them is shown.
+   */
+  changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]>;
 }

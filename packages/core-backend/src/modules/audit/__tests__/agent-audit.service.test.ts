@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { AgentAuditService, retentionDaysFrom } from '../agent-audit.service.js';
-import { AuditPrincipalNotFoundError, InvalidCursorError } from '../audit.contract.js';
+import { AuditPrincipalNotFoundError, InvalidCursorError, pagePrincipalId, parsePagePrincipalId } from '../audit.contract.js';
 import type { Database } from '../../database/connection.js';
 import { agentConnections, oauthTokens } from '../../database/schema.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
@@ -217,6 +217,8 @@ describe('AgentAuditService.listPrincipals', () => {
           { keyId: 'k-1', connectionId: null, n: 7 },
           { keyId: null, connectionId: 'c-1', n: 3 },
         ],
+        // pages
+        [],
       ],
       { listForUser: vi.fn(async () => [key({ lastUsedAt: NOW - 2 * DAY })]) },
     );
@@ -235,6 +237,7 @@ describe('AgentAuditService.listPrincipals', () => {
       [
         [{ connection: connection({ id: 'c-bob', userId: BOB.id }), user: BOB }],
         [],
+        [],
       ],
       { listForDeployment: vi.fn(async () => [{ ...key({}), user: ALICE }]) },
     );
@@ -244,6 +247,80 @@ describe('AgentAuditService.listPrincipals', () => {
     expect(rows.map((r) => r.user.email)).toEqual(['alice@example.com', 'bob@example.com']);
     expect((keyService.listForDeployment as any)).toHaveBeenCalled();
     expect((keyService.listForUser as any)).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentAuditService — a page as a principal', () => {
+  const ALICE_ID = '11111111-1111-4111-8111-111111111111';
+  const PAGE = 'Dashboards/Roadmap.html';
+
+  it("records a page's call under its path, with neither a key nor a connection", async () => {
+    const { service, captured } = makeService([undefined]);
+    service.record({
+      userId: ALICE_ID,
+      principal: { kind: 'page', path: PAGE },
+      kind: 'capability',
+      manual: null,
+      name: 'edit_file',
+      outcome: 'refused',
+      durationMs: null,
+    });
+    await flush();
+    expect(captured.values[0]).toMatchObject({
+      userId: ALICE_ID,
+      keyId: null,
+      connectionId: null,
+      pagePath: PAGE,
+      name: 'edit_file',
+      outcome: 'refused',
+    });
+  });
+
+  it('lists each page a person opened as a row of its own, labelled by its path, never revocable', async () => {
+    const { service } = makeService([
+      [{ ...ALICE, id: ALICE_ID }],
+      [],
+      [],
+      [
+        {
+          userId: ALICE_ID,
+          pagePath: PAGE,
+          n: 4,
+          first: new Date(NOW - DAY),
+          last: new Date(NOW - 60_000),
+          user: { ...ALICE, id: ALICE_ID },
+        },
+      ],
+    ]);
+    const rows = await service.listPrincipals({ userId: ALICE_ID });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'page',
+      id: pagePrincipalId(ALICE_ID, PAGE),
+      label: PAGE,
+      eventCount: 4,
+      createdAt: NOW - DAY,
+      lastUsedAt: NOW - 60_000,
+      revokedAt: null,
+    });
+  });
+
+  it("reads a page's events by its person and path, and owns it by that person", async () => {
+    const id = pagePrincipalId(ALICE_ID, PAGE);
+    expect(parsePagePrincipalId(id)).toEqual({ userId: ALICE_ID, path: PAGE });
+
+    const events = makeService([[], [{ total: 0 }]]);
+    await events.service.listEvents({ kind: 'page', id }, { limit: 10 });
+    expect(render(events.captured.where[0]).params).toEqual([ALICE_ID, PAGE]);
+
+    const owned = makeService([[{ id: 'e-1' }]]);
+    await expect(owned.service.ownerOf({ kind: 'page', id })).resolves.toBe(ALICE_ID);
+    const never = makeService([[]]);
+    await expect(never.service.ownerOf({ kind: 'page', id })).resolves.toBeNull();
+    // An id that names no person and path is no page, without asking the database.
+    const bogus = makeService([]);
+    await expect(bogus.service.ownerOf({ kind: 'page', id: 'not-a-page' })).resolves.toBeNull();
+    expect(bogus.counts.select).toBe(0);
   });
 });
 

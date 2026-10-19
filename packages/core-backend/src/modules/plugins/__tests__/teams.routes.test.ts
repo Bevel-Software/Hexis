@@ -4,6 +4,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { AccessControlService } from '../../access/access-control.service.js';
 import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import type { IPluginIndexService, PluginCatalogEntry } from '../plugins.contract.js';
@@ -88,6 +89,10 @@ async function harness(opts: HarnessOpts = {}) {
     canReadAsEveryoneBatch: vi.fn(async (_w: string, paths: string[]) => tableVerdict(opts.everyone, paths)),
     holdsAdminRootWrite: vi.fn(async () => opts.admin ?? true),
     groupsOfUser: vi.fn(async () => opts.memberOf ?? []),
+    // The real policy over the two stubs above: who sees which group is the
+    // resolver's one answer, not something a route (or this double) decides.
+    visibleGroups: (wsId: string, email: string, groups: readonly string[]) =>
+      AccessControlService.prototype.visibleGroups.call(accessControl, wsId, email, groups),
   } as unknown as IAccessControl;
   const index = { catalog: async () => CATALOG, invalidate: () => undefined } as IPluginIndexService;
   const skills = { listSkills: async () => SKILLS } as unknown as ISkillService;

@@ -247,6 +247,19 @@ export interface IAccessControl {
   groupsOfUser(workspaceId: string, userEmail: string): Promise<string[]>;
 
   /**
+   * Which of `groups` (names from the active group source) `userEmail` may
+   * SEE: every one for an admin, who manages them all, and only the groups
+   * they are a member of ({@link groupsOfUser}) for anyone else. A group's
+   * name is information — on a deployment that gives each client, author or
+   * customer a group of its own, the list of groups is the client list — so
+   * this ONE answer is what the Library's Groups tab lists, what the share
+   * dialog offers as a grantee, and what a grant may name; a group outside it
+   * is treated as one that does not exist. Order and spelling of `groups` are
+   * kept.
+   */
+  visibleGroups(workspaceId: string, userEmail: string, groups: readonly string[]): Promise<string[]>;
+
+  /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
    * by the input paths, with `true` / `false` for each. Reuses one config
    * load per call.
