@@ -358,7 +358,7 @@ describe('the HTML views section', () => {
     expect(ids.indexOf('html-views')).toBe(ids.indexOf('tool-manuals') + 1);
   });
 
-  it('describes the frame, the two members core puts on window.bevel, and a fragment that scrolls the page', async () => {
+  it('describes the frame, the members core puts on window.bevel, and a fragment that scrolls the page', async () => {
     const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
     expect(text).toContain('**No network.**');
     expect(text).toContain('**Inline scripts and styles only.**');
@@ -372,6 +372,27 @@ describe('the HTML views section', () => {
     // Rendered for the deployment's layout like every other section.
     const docs = section(await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }), '## HTML views');
     expect(docs).toContain('/workspace/main/Docs/Alice.md');
+  });
+
+  it('documents window.bevel.tools: its four functions, the null check, the consent rule and requireTools with its card', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    for (const member of [
+      '`window.bevel.tools.searchTools(query)`',
+      '`window.bevel.tools.toolsInfo(names)`',
+      '`window.bevel.tools.callTool(name, args)`',
+      '`window.bevel.tools.callToolChain(code)`',
+      '`window.bevel.requireTools()`',
+    ]) {
+      expect(text).toContain(member);
+    }
+    expect(text).toContain('`window.bevel.tools` is `null` wherever tools are not available');
+    expect(text).toContain('Check it before every use');
+    expect(text).toContain('**Reading runs at once; writing asks first.**');
+    expect(text).toContain('"<page name> wants to write to the knowledge base"');
+    expect(text).toContain('Allow while open and Deny');
+    expect(text).toContain('rejects the call with `denied`');
+    expect(text).toContain('"<page name> uses tools that are only available in the platform"');
+    expect(text).toContain('Continue without tools and Open in the platform');
   });
 
   it('lets a distribution replace the section or drop it', async () => {
