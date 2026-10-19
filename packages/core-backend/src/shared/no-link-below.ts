@@ -11,9 +11,13 @@ import { lstatOrNull } from './rename-no-replace.js';
  */
 export async function linkedAncestor(base: string, absolute: string): Promise<string | null> {
   const root = path.resolve(base);
+  // Below `root` means past a separator after it: `/tmp/repository` is a
+  // sibling of `/tmp/repo`, not inside it, and is never walked or stat'ed. A
+  // filesystem root already ends with its separator.
+  const inside = root.endsWith(path.sep) ? root : root + path.sep;
   let current = path.resolve(absolute);
   const ancestors: string[] = [];
-  while (current.startsWith(root) && current !== root) {
+  while (current.startsWith(inside)) {
     ancestors.push(current);
     current = path.dirname(current);
   }

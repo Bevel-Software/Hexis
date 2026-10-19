@@ -132,7 +132,7 @@ describe('history routes enforce the read model', () => {
     // Any commit a side resolves to denying the read refuses the diff — the
     // served one or the other (a grant at the served commit never outruns a
     // denial at the branch's other tip) — disclosing none of it.
-    for (const denying of ['sha-of-b', 'other-sha-of-b']) {
+    for (const denying of ['sha-of-a', 'sha-of-b', 'other-sha-of-b']) {
       h.canReadAtRef.mockImplementation(async (_w: string, ref: string) => (ref === denying ? false : true));
       const denied = await get(`/compare-file?from=a&to=b&path=${OPEN}`);
       expect(denied.status, denying).toBe(403);

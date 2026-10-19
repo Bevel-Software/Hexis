@@ -252,7 +252,9 @@ File-level write access decides how a change lands on the default branch:
   `read_file` (it is the draft's own file), `theirs` with `read_file_at` at
   `from` (the branch, not a commit — its tip is not on the draft's history
   until the merge lands), and `base` with `read_file_at` at the answer's
-  `mergeBase`. A conflicted file you may not read on one of the two
+  `mergeBase`. A side that is not text cannot be read that way (those
+  reads are text-only): settle such a file whole, with `choose` — `content`
+  is for text. A conflicted file you may not read on one of the two
   branches is left out and only counted (`withheldConflicts`): it is not
   yours to settle, so ask a person who can read it to update the draft in
   the app. Decide each
@@ -264,10 +266,15 @@ File-level write access decides how a change lands on the default branch:
   able to read the file at both commits the answer names (`ours`, the
   draft's; `theirs`, the merged-in branch's), and it takes the rule every
   save on a draft takes — you may read the file, or it is new — never a
-  write permission. It merges, commits as you and publishes. Nothing else
-  is written that way: an ordinary edit goes through the file tools. You
-  have no git command; there is never a half-done merge on disk for you to
-  finish.
+  write permission. It merges, commits as you and publishes. A publish the
+  host refuses, or a replay that conflicts because the shared branch moved
+  meanwhile, answers with the saved-locally error: the merge is committed
+  on your draft but NOT shared — `branch_status` shows it ahead. Do not
+  report the draft as shared then; the next save or `share_current_branch`
+  carries the commit, and a replay that conflicts is handed to recovery.
+  Nothing else is written that way: an ordinary edit goes through the file
+  tools. You have no git command; there is never a half-done merge on disk
+  for you to finish.
 - `merge_branch` refuses to merge a draft into the branch its open change
   request targets — it names the request; ask the user to review it in the
   app. Into a protected branch it merges only what you could commit there
@@ -276,7 +283,9 @@ File-level write access decides how a change lands on the default branch:
 - **Know where a draft stands** with `branch_status`: ahead/behind, whether
   the shared branch moved, the files written but not committed yet, the
   protected branch it was forked from, and `changedPaths` — what it changes
-  against that base, the files a change request would carry. Ask it before
+  against that base, the files a change request would carry. The list holds
+  only the files you may read; `withheldPaths` counts the rest, so when it
+  is above zero the list is not the request's whole set. Ask it before
   proposing a draft.
 - **Read history** with `list_file_changes` (a file's commits: who, when,
   subject), `read_file_at` (the file at a commit, or on another branch) and
