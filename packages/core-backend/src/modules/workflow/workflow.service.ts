@@ -2359,8 +2359,9 @@ export class WorkflowService implements IWorkflowService {
     // or the refusal — and the telling follows.
     const outcome = await this.runOnBranchPair(input.sourceBranch, input.targetBranch, async (): Promise<
       { number: number; eligible: EligibleWritersAtRef } & (
-        | { detail: ChangeRequestDetail; pushRefused: null }
-        | { detail: null; pushRefused: PushNeedsAgentResolutionError }
+        | { detail: ChangeRequestDetail; pushRefused: null; detailError: null }
+        | { detail: null; pushRefused: PushNeedsAgentResolutionError; detailError: null }
+        | { detail: null; pushRefused: null; detailError: Error }
       )
     > => {
     // Uniqueness rule — A→B blocks A→B (the spec is explicit that B→A in
@@ -2514,29 +2515,47 @@ export class WorkflowService implements IWorkflowService {
       // refused push never moved — answering the refusal is what the caller
       // needs, not a detail read that may fail on a branch the host lacks.
       this.events?.emit(opened);
-      return { number: prNumber, eligible, detail: null, pushRefused };
+      return { number: prNumber, eligible, detail: null, pushRefused, detailError: null };
     }
 
-    const detail = await this.prs.getPrDetail(prNumber, {
-      fresh: true,
-      workspaceId,
-      viewerEmail: user.email,
-    });
-    if (!detail) {
-      throw new WorkflowValidationError(
-        `Created change request #${prNumber} but could not fetch its detail`,
-      );
-    }
+    // The row exists and the push landed: every tab is told, whatever the
+    // read-back below does.
     this.events?.emit(opened);
-    return { number: prNumber, eligible, detail, pushRefused: null };
+    // Reading the detail back is the caller's answer, not the open: a read
+    // that fails is reported, but it is not allowed to cost the reviewers
+    // their message — the request stands, and a retry of the open meets the
+    // duplicate check, so there is no second chance to tell them.
+    let detail: ChangeRequestDetail | null = null;
+    let detailError: Error | null = null;
+    try {
+      detail = await this.prs.getPrDetail(prNumber, {
+        fresh: true,
+        workspaceId,
+        viewerEmail: user.email,
+      });
+    } catch (err) {
+      detailError = err instanceof Error ? err : new Error(String(err));
+    }
+    if (detail) return { number: prNumber, eligible, detail, pushRefused: null, detailError: null };
+    return {
+      number: prNumber,
+      eligible,
+      detail: null,
+      pushRefused: null,
+      detailError:
+        detailError ?? new WorkflowValidationError(`Created change request #${prNumber} but could not fetch its detail`),
+    };
     });
 
-    // The request exists either way — the listeners are told all the same
-    // when the push was refused, with `pushPending` saying so: the request
-    // is there to find, its commits reach the host with the branch's next
-    // push, and what that is worth to a reviewer is each listener's call.
+    // The request exists in every branch of the outcome — the listeners are
+    // told all the same when the push was refused (`pushPending` says so:
+    // the request is there to find, its commits reach the host with the
+    // branch's next push, and what that is worth to a reviewer is each
+    // listener's call) and when its detail could not be read back. Only
+    // then is the refusal or the failed read the caller's answer.
     const notified = await this.notifyOpened(outcome.number, input, user, outcome.eligible, outcome.pushRefused !== null);
     if (outcome.pushRefused) throw outcome.pushRefused;
+    if (outcome.detailError) throw outcome.detailError;
     return { ...outcome.detail, notified };
   }
 
