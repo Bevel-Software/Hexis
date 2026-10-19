@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronRight, KeyRound } from 'lucide-react';
+import { Bot, ChevronRight, FileCode2, KeyRound } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { Badge, Banner, Button } from '../../../shared/components';
@@ -27,6 +27,7 @@ function formatAbsolute(ts: number | null): string | undefined {
 /** What a row is, in the words the page uses: an OAuth agent, a Claude link, or a hand-made key. */
 function kindLabel(p: AuditPrincipal): string {
   if (p.kind === 'agent') return 'Agent · OAuth';
+  if (p.kind === 'page') return 'Page';
   return p.keyKind === GITHUB_LINK_KIND ? 'Claude link' : 'Connection key';
 }
 
@@ -99,8 +100,12 @@ export function AuditLogPage() {
     () => (principals ? groupByAccount(principals, { includeRevoked: showRevoked, query: isAdmin ? query : '' }) : []),
     [principals, showRevoked, query, isAdmin],
   );
-  const liveCount = principals?.filter((p) => p.revokedAt === null).length ?? 0;
-  const revokedCount = (principals?.length ?? 0) - liveCount;
+  // A page is never connected or revoked — it is a person's view of a file —
+  // so it is counted apart from the agents and keys that are.
+  const connections = principals?.filter((p) => p.kind !== 'page') ?? [];
+  const liveCount = connections.filter((p) => p.revokedAt === null).length;
+  const revokedCount = connections.length - liveCount;
+  const pageCount = (principals?.length ?? 0) - connections.length;
   const accountCount = useMemo(() => new Set(principals?.map((p) => p.user.id)).size, [principals]);
 
   const toggle = (key: string) => {
@@ -147,8 +152,8 @@ export function AuditLogPage() {
         <div className="space-y-4">
           <p className="text-xs text-ink-muted leading-snug max-w-[65ch]">
             {isAdmin
-              ? 'Every agent and connection key on this deployment, per account. Open one to see what it called and when. Revoking cuts the agent off immediately; the row stays so its history remains visible.'
-              : 'The agents and connection keys connected to your account. Open one to see what it called and when. Revoking cuts the agent off immediately; it can reconnect by signing in again.'}
+              ? 'Every agent and connection key on this deployment, and every page whose script called tools, per account. Open one to see what it called and when. Revoking cuts the agent off immediately; the row stays so its history remains visible.'
+              : 'The agents and connection keys connected to your account, and the pages whose scripts called tools as you. Open one to see what it called and when. Revoking cuts the agent off immediately; it can reconnect by signing in again.'}
           </p>
 
           {error && (
@@ -163,6 +168,7 @@ export function AuditLogPage() {
                 {isAdmin && `${accountCount} ${accountCount === 1 ? 'account' : 'accounts'} · `}
                 {liveCount} live
                 {revokedCount > 0 && ` · ${revokedCount} revoked`}
+                {pageCount > 0 && ` · ${pageCount} ${pageCount === 1 ? 'page' : 'pages'}`}
               </span>
               <div className="flex flex-wrap items-center gap-3">
                 {isAdmin && (
@@ -194,18 +200,18 @@ export function AuditLogPage() {
             <div className="text-xs text-ink-muted">
               {principals.length === 0
                 ? isAdmin
-                  ? 'No agents or connection keys on this deployment.'
+                  ? 'No agents, connection keys or pages on this deployment.'
                   : 'Nothing connected to your account yet. Connect an agent from External agent access.'
                 : query.trim()
                   ? 'Nothing matches that filter.'
-                  : 'No live agents or connection keys.'}
+                  : 'No live agents, connection keys or pages.'}
             </div>
           ) : (
             <div className="space-y-5">
               {groups.map((group) => {
-                const live = group.principals.filter((p) => p.revokedAt === null).length;
+                const live = group.principals.filter((p) => p.kind !== 'page' && p.revokedAt === null).length;
                 return (
-                  <section key={group.user.id} aria-label={`Agents and keys for ${group.user.email}`}>
+                  <section key={group.user.id} aria-label={`Agents, keys and pages for ${group.user.email}`}>
                     {isAdmin && (
                       <div className="flex items-baseline gap-2 px-1 pb-1.5">
                         <span className="text-sm font-medium truncate">{group.user.name}</span>
@@ -219,7 +225,7 @@ export function AuditLogPage() {
                         const revoked = p.revokedAt !== null;
                         const open = !!expanded[key];
                         const panelId = `audit-events-${p.kind}-${p.id}`;
-                        const Icon = p.kind === 'agent' ? Bot : KeyRound;
+                        const Icon = p.kind === 'agent' ? Bot : p.kind === 'page' ? FileCode2 : KeyRound;
                         return (
                           <li key={key}>
                             {/* The WHOLE row opens the events, chevron at its far edge, the
@@ -271,7 +277,8 @@ export function AuditLogPage() {
                                   </span>
                                   <span className="block text-meta text-ink-muted">
                                     <span title={formatAbsolute(p.createdAt)}>
-                                      {p.kind === 'agent' ? 'Connected' : 'Created'} {formatRelative(p.createdAt)}
+                                      {p.kind === 'agent' ? 'Connected' : p.kind === 'page' ? 'First call' : 'Created'}{' '}
+                                      {formatRelative(p.createdAt)}
                                     </span>
                                     {' · '}
                                     <span title={formatAbsolute(p.lastUsedAt)}>Last used {formatRelative(p.lastUsedAt)}</span>
@@ -286,7 +293,8 @@ export function AuditLogPage() {
                                   </span>
                                 </span>
                               </button>
-                              {!revoked && (
+                              {/* A page has nothing to revoke: it acts only while its viewer has it open. */}
+                              {!revoked && p.kind !== 'page' && (
                                 <Button
                                   variant="danger"
                                   size="sm"

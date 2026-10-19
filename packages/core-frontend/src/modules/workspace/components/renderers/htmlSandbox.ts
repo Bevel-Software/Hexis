@@ -392,6 +392,91 @@ const NAV_BRIDGE = `
 })();
 `;
 
+/**
+ * How long a page waits for the app to answer one of its tool calls. Long,
+ * because the answer may wait on a person: the first writing call shows a
+ * card, and nothing answers until they choose. A chain runs for up to two
+ * minutes on its own.
+ */
+export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * Runtime appended after the nav bridge: `window.bevel.tools`, the viewer's own
+ * tools, and `window.bevel.requireTools()`.
+ *
+ * The frame has no network (`connect-src 'none'`), so a page reaches tools the
+ * way it reaches navigation: it posts `bevel.tool.call` `{ requestId, fn, args }`
+ * to the parent and awaits `bevel.tool.response` `{ requestId, ok, result |
+ * error, code? }`. The parent (`HtmlRenderer`, through `htmlToolBridge.ts`)
+ * answers each one over the hosted MCP server with the viewer's session —
+ * after asking the viewer, on the first call that writes. Nothing about the
+ * consent lives in the frame: the card is the app's, drawn outside it, and a
+ * page can neither see nor answer it.
+ *
+ * `tools` exists only where the app can answer it — the app's file page.
+ * Everywhere else (the embed, a skill page, any other preview) it is `null`,
+ * so a page checks `window.bevel && window.bevel.tools` before every use and
+ * renders without tools when it is null. `requireTools()` is how a page that
+ * needs them asks: it posts `bevel.tools.require` and resolves with the
+ * parent's answer — `true` on the file page at once, `false` after the
+ * parent's card offered the way to the platform and the viewer chose either.
+ *
+ * Every response is matched to its request by id, and only from `parent`.
+ * The `html-views` section of the agent guide documents the members, and
+ * `htmlViewsGuide.test.ts` holds the two together.
+ */
+function toolBridgeRuntime(enabled: boolean): string {
+  return `
+;(function () {
+  var pending = {};
+  var seq = 0;
+  function request(type, payload) {
+    return new Promise(function (resolve, reject) {
+      seq += 1;
+      var requestId = 'bevel-tool-' + seq + '-' + Math.random().toString(36).slice(2);
+      var timer = setTimeout(function () {
+        delete pending[requestId];
+        reject(new Error('The app did not answer in time.'));
+      }, ${TOOL_CALL_TIMEOUT_MS});
+      pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
+      var message = { type: type, requestId: requestId };
+      for (var key in payload) message[key] = payload[key];
+      parent.postMessage(message, '*');
+    });
+  }
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('message', function (event) {
+    if (event.source !== parent) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type !== 'bevel.tool.response' && msg.type !== 'bevel.tools.require.response') return;
+    var waiting = pending[msg.requestId];
+    if (!waiting) return;
+    delete pending[msg.requestId];
+    clearTimeout(waiting.timer);
+    if (msg.ok) {
+      waiting.resolve(msg.result);
+      return;
+    }
+    var error = new Error(typeof msg.error === 'string' ? msg.error : 'The tool call failed.');
+    if (msg.code) error.code = msg.code;
+    waiting.reject(error);
+  });
+  function call(fn, args) {
+    return request('bevel.tool.call', { fn: fn, args: args });
+  }
+  globalThis.bevel.tools = ${enabled ? `Object.freeze({
+    searchTools: function (query) { return call('searchTools', [query === undefined ? '' : query]); },
+    toolsInfo: function (names) { return call('toolsInfo', [names]); },
+    callTool: function (name, args) { return call('callTool', [name, args === undefined ? {} : args]); },
+    callToolChain: function (code) { return call('callToolChain', [code]); }
+  })` : 'null'};
+  globalThis.bevel.requireTools = function () {
+    return request('bevel.tools.require', {}).then(function (answer) { return answer === true; });
+  };
+})();
+`;
+}
+
 interface BuildSandboxedHtmlOptions {
   /** Display title (rendered in the iframe doc's <title>). */
   title: string;
@@ -406,6 +491,12 @@ interface BuildSandboxedHtmlOptions {
   includeRuntime?: boolean;
   /** Sanitized agent HTML, body content only. */
   bodyHtml: string;
+  /**
+   * Give the page `window.bevel.tools`: only where the parent answers tool
+   * calls, which is the app's file page. Absent or false, the member is
+   * `null`; `requireTools()` exists either way.
+   */
+  toolBridge?: boolean;
 }
 
 /**
@@ -417,7 +508,7 @@ interface BuildSandboxedHtmlOptions {
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
   const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE);
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + toolBridgeRuntime(opts.toolBridge === true));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent
