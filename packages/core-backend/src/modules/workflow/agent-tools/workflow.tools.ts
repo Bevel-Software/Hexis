@@ -6,7 +6,7 @@ import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/agent-access.gate.js';
+import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/index.js';
 import { readablePathsAt, readableAtCommits, assertReadableAtCommits } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
