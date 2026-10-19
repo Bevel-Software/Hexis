@@ -610,22 +610,30 @@ export const oauthTokens = pgTable('oauth_tokens', {
  * which agent, when" — not "what was said".
  *
  * Exactly one principal per row (the CHECK): the connection key or the agent
- * connection the call arrived through. Both cascade, so deleting a key for
- * good, revoking-then-erasing a person, or dropping a connection takes its
- * events along — the same contract the LLM-usage rows already keep.
+ * connection the call arrived through, or the knowledge-base page whose
+ * script made the call as the person viewing it (`page_path`). Key and
+ * connection cascade, so deleting a key for good, revoking-then-erasing a
+ * person, or dropping a connection takes its events along — the same contract
+ * the LLM-usage rows already keep; a page's events go with the person.
  */
 export const agentEvents = pgTable('agent_events', {
   id: uuid('id').defaultRandom().primaryKey(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   keyId: uuid('key_id').references(() => externalApiKeys.id, { onDelete: 'cascade' }),
   connectionId: uuid('connection_id').references(() => agentConnections.id, { onDelete: 'cascade' }),
+  /** The knowledge-base path of the HTML page that made the call, for a page's calls; null otherwise. */
+  pagePath: text('page_path'),
   /** `capability` | `tool` | `skill`. */
   kind: text('kind').notNull(),
   /** The MCP server / `.tool` manual (catalog name) for a tool, the skill folder for a skill; null for a capability. */
   manual: text('manual'),
   /** The tool's bare name, or the skill's name. */
   name: text('name').notNull(),
-  /** `ok` | `error` | `denied` (denied: the caller's sign-in for the tool was missing, so nothing ran). */
+  /**
+   * `ok` | `error` | `denied` | `refused`. Denied: the caller's sign-in for the
+   * tool was missing, so nothing ran. Refused: the viewer answered a page's
+   * request to write with Deny, so nothing ran.
+   */
   outcome: text('outcome').notNull(),
   durationMs: integer('duration_ms'),
   at: timestamp('at').defaultNow().notNull(),
@@ -633,14 +641,15 @@ export const agentEvents = pgTable('agent_events', {
   // The two read paths: one principal's events, newest first.
   byKey: index('agent_events_by_key').on(t.keyId, t.at),
   byConnection: index('agent_events_by_connection').on(t.connectionId, t.at),
+  byPage: index('agent_events_by_page').on(t.userId, t.pagePath, t.at),
   // The retention prune, and per-user counts.
   byAt: index('agent_events_by_at').on(t.at),
   byUser: index('agent_events_by_user').on(t.userId),
   kindCheck: check('agent_events_kind', sql`${t.kind} IN ('capability', 'tool', 'skill')`),
-  outcomeCheck: check('agent_events_outcome', sql`${t.outcome} IN ('ok', 'error', 'denied')`),
+  outcomeCheck: check('agent_events_outcome', sql`${t.outcome} IN ('ok', 'error', 'denied', 'refused')`),
   principalCheck: check(
     'agent_events_principal',
-    sql`(${t.keyId} IS NULL) <> (${t.connectionId} IS NULL)`,
+    sql`num_nonnulls(${t.keyId}, ${t.connectionId}, ${t.pagePath}) = 1`,
   ),
 }));
 

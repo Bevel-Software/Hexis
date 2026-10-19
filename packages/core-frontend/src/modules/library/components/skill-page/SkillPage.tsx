@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { cn } from '../../../../lib/utils';
-import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../../shared/theme/header';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
@@ -677,7 +677,7 @@ export function SkillPage({
             // `title` because `truncate` hides the rest of a long skill name,
             // and a heading you cannot finish reading needs somewhere to say it.
             title={skill?.name ?? name}
-            className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+            className={`min-w-0 truncate text-display font-semibold text-ink focus:outline-none ${TITLE_INK_ROOM}`}
           >
             {skill?.name ?? name}
           </h1>
@@ -853,6 +853,16 @@ export function SkillPage({
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
+          // A page of the skill opens on the Knowledge file page, where its
+          // tools are. The URL alone would route straight back here (every
+          // file under a skill's folder IS the skill page); `rawFile` asks the
+          // item route for the file route itself, as the plugin page's file
+          // links do.
+          onOpenInPlatform={
+            fileWorkspacePath
+              ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath), { state: { rawFile: true } })
+              : undefined
+          }
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
            * `Propose changes` for EVERYONE and jump to the Knowledge editor —

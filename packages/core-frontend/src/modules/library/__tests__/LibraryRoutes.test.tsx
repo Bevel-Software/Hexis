@@ -12,6 +12,8 @@ import type { LibraryData } from '../hooks/useLibraryData';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
+import { LockedPluginView } from '../components/LockedPluginView';
 
 /**
  * The Library's routes, end to end through the layout: URL in, page + lit
@@ -200,6 +202,41 @@ describe('LibraryRoutes', () => {
     expect(within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
     expect(within(main()).getByRole('button', { name: /^GTM/ })).toBeInTheDocument();
     expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
+  });
+
+  /**
+   * Every Library page title keeps the tails of its g, y and p: the title
+   * truncates, and it and every wrapper that clips it carry the ink room
+   * (`expectTitleKeepsItsInk`). The plugin pages are the ones that group the
+   * title with its breadcrumb in an `overflow-hidden` wrapper, where a room
+   * on the title alone was not enough.
+   */
+  it.each([
+    ['Everything', '/skills-and-tools', 'Everything'],
+    ['a group', '/skills-and-tools/teams/GTM%20Team', 'GTM Team'],
+    ['a plugin', '/skills-and-tools/plugins/GTM', 'GTM'],
+    ['your own space', '/skills-and-tools/yours', TEST_PERSONAL_GROUP],
+  ])('the title of %s keeps its ink', async (_what, path, heading) => {
+    renderAt(path);
+    await screen.findByRole('heading', { name: heading, level: 1 });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
+  });
+
+  it("the title of a plugin you cannot read keeps its ink", () => {
+    render(
+      <MemoryRouter>
+        {wrap(
+          <LockedPluginView
+            plugin={{ ...PLUGINS[0]!, canRead: false, canWrite: false, isOwner: false }}
+            onRequested={() => {}}
+            onUnlocked={() => {}}
+            onManage={() => {}}
+          />,
+        )}
+      </MemoryRouter>,
+    );
+    screen.getByRole('heading', { name: 'GTM', level: 1 });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
   });
 
   it('sends the old /everything address to the root, where the same page lives', async () => {

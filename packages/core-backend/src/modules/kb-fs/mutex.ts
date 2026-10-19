@@ -1,3 +1,5 @@
+import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
+
 /**
  * Serializes async operations by key. Two `run(k, ...)` calls with the same key
  * execute sequentially in call order; different keys run independently.
@@ -63,5 +65,19 @@ export class WorkspaceMutex {
         }
       }
     }
+  }
+}
+
+/**
+ * A `WorkspaceMutex` whose keys are WORKSPACE IDS, taken in their canonical
+ * spelling: a route's Express-decoded `:id` (`alice/feature`) and a tool's
+ * `alice%2Ffeature` name the same clone and must queue on the same key — two
+ * spellings would let a route's read run beside a tool's merge of the same
+ * checkout. `canonicalWorkspaceId` collapses both to the encoded form every
+ * other keyed store (the file locks, the pending commits) already uses.
+ */
+export class WorkspaceIdMutex extends WorkspaceMutex {
+  override async runAll<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    return super.runAll(keys.map(canonicalWorkspaceId), fn);
   }
 }

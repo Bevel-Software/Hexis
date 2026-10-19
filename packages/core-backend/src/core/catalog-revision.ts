@@ -12,9 +12,9 @@ const log = logger('catalog-revision');
  * skill the default branch serves them, right now.
  *
  * It exists for a client that holds a long-lived connection and cannot be told
- * anything: the local `hexis-mcp` server. The hosted endpoint is stateless, so
- * every request there already rebuilds its surface from the live registry
- * (`mcp.routes.stateless.test.ts` pins that). A process on someone's laptop
+ * anything: the local `hexis-mcp` server. The hosted endpoint reads it too, on
+ * every request, to pick the caller's cached tool client: a new revision is a
+ * new build (`mcp.surface-cache.test.ts` pins that). A process on someone's laptop
  * registered the deployment's manual ONCE, at startup, and would otherwise
  * serve that startup's toolset until it is restarted. Polling this tells it —
  * cheaply, and without a second way for the catalogs to be read — exactly when

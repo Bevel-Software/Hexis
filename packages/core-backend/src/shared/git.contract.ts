@@ -249,6 +249,16 @@ export function isGitTimeout(err: unknown): boolean {
 }
 
 /**
+ * A full object id (SHA-1 or SHA-256, lowercase hex): what every at-ref
+ * access gate resolves its ref to before reading, and the one spelling the
+ * history tools accept for a commit — anything shorter or mixed-case is a
+ * name, which a fetch can move.
+ */
+export function isCommitSha(ref: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref);
+}
+
+/**
  * Runs one git command to completion and returns what it wrote.
  *
  * `cwd` is the directory git runs in; `args` are passed to the executable

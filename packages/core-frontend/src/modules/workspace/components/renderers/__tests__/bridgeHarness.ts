@@ -1,4 +1,5 @@
 import vm from 'node:vm';
+import { onTestFinished } from 'vitest';
 import { buildSandboxedHtml } from '../htmlSandbox';
 
 /**
@@ -28,6 +29,12 @@ export interface BridgeRun {
   scrolledTags: string[];
   /** How many times the page was scrolled to its top. */
   scrolledToTop: () => number;
+  /**
+   * Deliver a message to the frame's window, as the parent posting it
+   * (`fromParent: false` — anything else, such as the page posting to itself).
+   * Answers once the frame's handlers and the promises they settle have run.
+   */
+  deliver: (data: unknown, opts?: { fromParent?: boolean }) => Promise<void>;
 }
 
 /**
@@ -35,10 +42,13 @@ export interface BridgeRun {
  * `namedControls` are `<input name="…">` fields, which a fragment must NOT
  * scroll to — the standard's fallback is the named anchor alone.
  */
-export function runBridge(page: { ids?: string[]; names?: string[]; namedControls?: string[] } = {}): BridgeRun {
+export function runBridge(
+  page: { ids?: string[]; names?: string[]; namedControls?: string[] } = {},
+  opts: { toolBridge?: boolean } = {},
+): BridgeRun {
   // No lib sources: a vm script cannot parse an `export`. The bridge is
   // appended after the lib either way.
-  const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
+  const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '', toolBridge: opts.toolBridge });
   const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
 
   type ClickEvent = { target: { closest: () => unknown }; defaultPrevented: boolean; preventDefault: () => void };
@@ -57,7 +67,33 @@ export function runBridge(page: { ids?: string[]; names?: string[]; namedControl
   const ids = new Set(page.ids ?? []);
   const names = new Set(page.names ?? []);
   const controls = new Set(page.namedControls ?? []);
+  const messageHandlers: ((e: { source: unknown; data: unknown }) => void)[] = [];
+  const parent = { postMessage: (msg: unknown) => posted.push(msg) };
+  // The frame's request timers, cleared when the test ends: a call a test
+  // leaves unanswered must not keep the worker alive for the runtime's
+  // fifteen minutes, nor reject long after the test that made it.
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  onTestFinished(() => {
+    for (const t of timers) clearTimeout(t);
+    timers.clear();
+  });
   const ctx: Record<string, unknown> = {
+    // The frame's window: the tool bridge listens on it for the parent's answers.
+    addEventListener: (type: string, fn: (e: { source: unknown; data: unknown }) => void) => {
+      if (type === 'message') messageHandlers.push(fn);
+    },
+    setTimeout: (fn: () => void, ms?: number) => {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        fn();
+      }, ms);
+      timers.add(t);
+      return t;
+    },
+    clearTimeout: (t: ReturnType<typeof setTimeout>) => {
+      timers.delete(t);
+      clearTimeout(t);
+    },
     document: {
       addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
         if (type === 'click') handlers.push(fn);
@@ -70,7 +106,7 @@ export function runBridge(page: { ids?: string[]; names?: string[]; namedControl
         ...(names.has(name) ? [element(name, 'A')] : []),
       ],
     },
-    parent: { postMessage: (msg: unknown) => posted.push(msg) },
+    parent,
     scrollTo: () => {
       toTop += 1;
     },
@@ -95,5 +131,10 @@ export function runBridge(page: { ids?: string[]; names?: string[]; namedControl
     scrolled,
     scrolledTags,
     scrolledToTop: () => toTop,
+    deliver: async (data, deliverOpts = {}) => {
+      const source = deliverOpts.fromParent === false ? {} : parent;
+      for (const fn of messageHandlers) fn({ source, data });
+      await new Promise((r) => setTimeout(r, 0));
+    },
   };
 }

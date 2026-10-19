@@ -30,7 +30,7 @@ const require = createRequire(import.meta.url);
  * that exact form into an asset URL (`http://localhost/src/index.css`), which
  * is not a path this can read.
  */
-const APP_STYLESHEET = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../index.css');
+const APP_STYLESHEET = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../index.css');
 const TAILWIND_ROOT = path.dirname(require.resolve('tailwindcss/package.json'));
 
 /** A rule's declarations, keyed by CSS property: `{ 'max-width': '100%' }`. */

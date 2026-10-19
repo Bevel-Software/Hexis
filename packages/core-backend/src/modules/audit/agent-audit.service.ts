@@ -1,4 +1,4 @@
-import { and, count, desc, eq, isNotNull, isNull, lt, or, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, isNotNull, isNull, lt, max, min, or, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 import type { Database } from '../database/connection.js';
 import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/schema.js';
@@ -7,6 +7,8 @@ import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
   isUuid,
+  pagePrincipalId,
+  parsePagePrincipalId,
   parseRetentionWindow,
   type AgentEventInput,
   type AgentEventPage,
@@ -59,6 +61,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         userId: event.userId,
         keyId: event.principal.kind === 'key' ? event.principal.id : null,
         connectionId: event.principal.kind === 'agent' ? event.principal.id : null,
+        pagePath: event.principal.kind === 'page' ? event.principal.path : null,
         kind: event.kind,
         manual: event.manual,
         name: event.name,
@@ -93,7 +96,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
 
   async listPrincipals(scope: AuditScope): Promise<AuditPrincipal[]> {
     const mine = scope === 'all' ? null : scope.userId;
-    const [keyRows, connectionRows, countRows] = await Promise.all([
+    const [keyRows, connectionRows, countRows, pageRows] = await Promise.all([
       mine === null ? this.keys.listForDeployment() : this.keysForUser(mine),
       this.db
         .select({
@@ -111,6 +114,22 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         .from(agentEvents)
         .where(mine === null ? undefined : eq(agentEvents.userId, mine))
         .groupBy(agentEvents.keyId, agentEvents.connectionId),
+      // A page has no row of its own: it is every event recorded under one
+      // person and one path, so its "created" is its first call and its
+      // "last used" its latest.
+      this.db
+        .select({
+          userId: agentEvents.userId,
+          pagePath: agentEvents.pagePath,
+          n: count(),
+          first: min(agentEvents.at),
+          last: max(agentEvents.at),
+          user: { id: users.id, email: users.email, name: users.name },
+        })
+        .from(agentEvents)
+        .innerJoin(users, eq(agentEvents.userId, users.id))
+        .where(and(isNotNull(agentEvents.pagePath), mine === null ? undefined : eq(agentEvents.userId, mine)))
+        .groupBy(agentEvents.userId, agentEvents.pagePath, users.id, users.email, users.name),
     ]);
 
     const counts = new Map<string, number>();
@@ -144,6 +163,24 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         eventCount: counts.get(c.id) ?? 0,
         user,
       })),
+      ...pageRows.flatMap((r) =>
+        r.pagePath
+          ? [
+              {
+                kind: 'page' as const,
+                id: pagePrincipalId(r.userId, r.pagePath),
+                label: r.pagePath,
+                createdAt: toMs(r.first),
+                lastUsedAt: r.last ? toMs(r.last) : null,
+                // A page cannot be revoked: it acts only while its viewer has it open.
+                revokedAt: null,
+                revokedBy: null,
+                eventCount: Number(r.n),
+                user: r.user,
+              },
+            ]
+          : [],
+      ),
     ];
     // Per account (by email), live before revoked, most recently used first,
     // newest first among the never-used — the order the page shows without
@@ -175,6 +212,17 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
   }
 
   async ownerOf(principal: AuditPrincipalRef): Promise<string | null> {
+    if (principal.kind === 'page') {
+      // The person is in the id; the page exists for them once it has called something.
+      const page = parsePagePrincipalId(principal.id);
+      if (!page) return null;
+      const [row] = await this.db
+        .select({ id: agentEvents.id })
+        .from(agentEvents)
+        .where(and(eq(agentEvents.userId, page.userId), eq(agentEvents.pagePath, page.path)))
+        .limit(1);
+      return row ? page.userId : null;
+    }
     if (principal.kind === 'agent') {
       const [row] = await this.db
         .select({ userId: agentConnections.userId })
@@ -192,10 +240,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
     page: { before?: string; limit: number },
   ): Promise<AgentEventPage> {
     const limit = Math.max(1, Math.min(MAX_EVENT_PAGE, Math.floor(page.limit)));
-    const byPrincipal =
-      principal.kind === 'key'
-        ? eq(agentEvents.keyId, principal.id)
-        : eq(agentEvents.connectionId, principal.id);
+    const byPrincipal = principalFilter(principal);
     // Keyset on (at, id): a page boundary between two events at the same
     // instant is still a boundary, and a row inserted while the reader pages
     // never shifts what the next page returns.
@@ -340,6 +385,21 @@ function formatCursor(at: Date, id: string): string {
  * compare it with anything else) and the instant a whole number of epoch
  * milliseconds a `timestamp` can hold.
  */
+/** The events of one principal. A page id that names no page matches nothing. */
+function principalFilter(principal: AuditPrincipalRef): SQL {
+  if (principal.kind === 'key') return eq(agentEvents.keyId, principal.id);
+  if (principal.kind === 'agent') return eq(agentEvents.connectionId, principal.id);
+  const page = parsePagePrincipalId(principal.id);
+  if (!page) return isNull(agentEvents.id);
+  return and(eq(agentEvents.userId, page.userId), eq(agentEvents.pagePath, page.path))!;
+}
+
+/** An aggregate's timestamp, which a driver may hand back as a Date or as the text Postgres sent. */
+function toMs(value: Date | string | null): number {
+  if (value === null) return 0;
+  return value instanceof Date ? value.getTime() : new Date(value).getTime();
+}
+
 function parseCursor(raw: string): { at: Date; id: string } | null {
   const dot = raw.indexOf('.');
   if (dot < 0) return null;

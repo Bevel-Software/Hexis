@@ -58,9 +58,11 @@ import type {
   IWorkflowService,
   MergeBranchOutcome,
   MergeChangeRequestOutcome,
+  MergeResolution,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
+  UpdateBranchOutcome,
 } from '@bevel-software/platform-shared';
 import {
   isFolderPlaceholder,
@@ -68,6 +70,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -421,22 +424,29 @@ export class WorkflowService implements IWorkflowService {
    * opposite directions (`A -> B` and `B -> A`), and nothing is ever held
    * while waiting for the other key.
    *
-   * A PROTECTED target's key is NOT reserved. No path in the system can
-   * delete a protected branch (`git.deleteBranch` throws
+   * A PROTECTED branch's key is NOT reserved, at either end. No path in the
+   * system can delete a protected branch (`git.deleteBranch` throws
    * `ProtectedBranchError` before any lock, `retireMergedSourceBranch`
    * returns early on one), so the key would exclude nothing. It would only
-   * cost: nearly every request targets the protected default branch, so one
-   * shared key there would serialize every open on the hottest path for the
-   * duration of a fetch + merge + push + diff. The source needs no such
-   * carve-out; `openChangeRequest` refuses protected sources before locking.
+   * cost: nearly every request targets the protected default branch, and
+   * every draft refreshes FROM it (`updateBranch`, the merge tool's sync),
+   * so one shared key there would serialize every open on the hottest path for the
+   * duration of a fetch + merge + push + diff. A protected SOURCE takes no
+   * key for the same reason: `openChangeRequest` refuses protected sources
+   * before locking, and a draft refreshing from the default branch is
+   * exactly a protected source.
    */
   private runOnBranchPair<T>(
     source: string,
     target: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const keys = [`branch:${source}`];
-    if (!this.kb.isProtectedBranch(target)) keys.push(`branch:${target}`);
+    // A PROTECTED branch's key is not reserved at EITHER end (see above):
+    // nothing can delete one, so the key would exclude nothing and only
+    // serialize every draft that refreshes from the default branch behind
+    // every other. The same branch at both ends (a draft syncing its own
+    // shared state) takes its one key.
+    const keys = [...new Set([source, target].filter((b) => !this.kb.isProtectedBranch(b)).map((b) => `branch:${b}`))];
     return this.branchLifecycle.runAll(keys, fn);
   }
 
@@ -968,7 +978,17 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     opts: { preserveMerges?: boolean } = {},
   ): Promise<boolean> {
-    const { treeChanged } = await this.git.pull(workspaceId, opts);
+    return this.pullWorkspaceVia(() => this.git.pull(workspaceId, opts), workspaceId);
+  }
+
+  /**
+   * `pullWorkspace` over the pull it is given: the workspace's own
+   * (`git.pull`, which takes the workspace's reservation) or one a caller
+   * already holding that reservation hands in (a merge's publish). The
+   * announcement is the same either way.
+   */
+  private async pullWorkspaceVia(pull: () => Promise<{ treeChanged: boolean }>, workspaceId: string): Promise<boolean> {
+    const { treeChanged } = await pull();
     const defaultBranch = this.kb.defaultBranch;
     if (treeChanged && branchForWorkspaceId(workspaceId) === defaultBranch) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: defaultBranch });
@@ -1259,8 +1279,9 @@ export class WorkflowService implements IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string> {
-    return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
+    authorize: (sides: { from: string[]; to: string[] }) => Promise<void>,
+  ): Promise<{ diff: string; from: string; to: string }> {
+    return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch, authorize);
   }
 
   fileAtForkPoint(
@@ -1893,8 +1914,33 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<void> {
     // No explicit `undefined` third argument when there are no options: the
     // call shape stays the bare `push(workspaceId, user)` every caller made.
-    const push = () =>
-      opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user);
+    return this.pushWithRecoveryVia(
+      {
+        push: () => (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user)),
+        pull: () => this.pullWorkspace(workspaceId, { preserveMerges: true }),
+      },
+      workspaceId,
+      branch,
+      targetPath,
+      user,
+    );
+  }
+
+  /**
+   * `pushWithRecovery`'s policy over the two moves it is made of — the push,
+   * and the pull-rebase that keeps a stranded merge a merge — so that a
+   * caller already holding the workspace's reservation (a merge publishing
+   * itself, `updateBranch`) runs the SAME policy over its own unlocked moves,
+   * and a push the host refuses answers one way there too.
+   */
+  private async pushWithRecoveryVia(
+    ops: { push: () => Promise<void>; pull: () => Promise<unknown> },
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+  ): Promise<void> {
+    const push = ops.push;
     try {
       await push();
       this.noteGitSyncOk(workspaceId, branch);
@@ -1915,7 +1961,7 @@ export class WorkflowService implements IWorkflowService {
           // with whatever push of the branch comes next — a save, a share —
           // and a plain rebase would flatten it into cherry-picks. With no
           // merge among the local commits the two spellings replay the same.
-          await this.pullWorkspace(workspaceId, { preserveMerges: true });
+          await ops.pull();
           try {
             await push();
           } catch (retryErr) {
@@ -4182,8 +4228,8 @@ export class WorkflowService implements IWorkflowService {
     // while they are held: a bare read would let a person open the request
     // mid-merge and the agent would land its content anyway, which is the one
     // thing this tool exists to prevent. `runOnBranchPair` drops a protected
-    // target's key; the source key is held either way, and every competing
-    // request from this source takes it too.
+    // branch's key at either end; a draft source's key is held, and every
+    // competing request from this source takes it too.
     return this.runOnBranchPair(sourceBranch, targetBranch, async () => {
       // A person merges a change request. Only the request's OWN direction is
       // blocked: the target merged into the source is how a draft under review
@@ -4681,4 +4727,145 @@ export class WorkflowService implements IWorkflowService {
     return formatAffectedOwnersBlock(paths, resolved);
   }
 
+  async updateBranch(
+    workspaceId: string,
+    user: AuthUser,
+    opts: { from?: string } & (
+      | { resolutions?: undefined; validateWrite?: undefined }
+      | { resolutions: MergeResolution[]; validateWrite: (wsPath: string, content: string) => void | Promise<void> }
+    ) = {},
+  ): Promise<UpdateBranchOutcome> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const from = opts.from ?? branch;
+    // A resolution writes on the draft: it is somebody's to gate, and a
+    // caller that brings none gates nothing (closed) — the type says so for
+    // a compiled caller, this for any other.
+    if ((opts.resolutions?.length ?? 0) > 0 && typeof opts.validateWrite !== 'function') {
+      throw new Error('updateBranch: resolutions need a `validateWrite` to be asked before the merge');
+    }
+    if (this.kb.isProtectedBranch(branch)) {
+      throw new WorkflowDomainError(
+        `"${branch}" is protected: it is changed through change requests, never merged into directly.`,
+        403,
+        { kind: 'protected-update-target', branch },
+      );
+    }
+    // The one merge a person makes: a change request's. An update that would
+    // land an OPEN request from `from` into this draft is that merge by
+    // another name, and `mergeBranch`'s gate refuses it here too — asked once
+    // before waiting, and again under the locks below, where the answer
+    // counts. (The other direction, the request's target into its source, is
+    // how a draft under review stays current, and is never blocked.)
+    if (from !== branch) {
+      const openBefore = await this.openRequestBlockingMerge(from, branch);
+      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);
+    }
+    // The merge takes what the REMOTE holds of `from`, and the push publishes
+    // the branch: writes still being committed on either would be missed by
+    // the first or swept up by the second. Waited for, as `mergeBranch` waits
+    // — outside the lifecycle locks, which must not be held for seconds of
+    // waiting on a queue.
+    for (const b of from === branch ? [branch] : [from, branch]) {
+      const settled = await this.awaitPendingCommits(b);
+      if (!settled.ok) {
+        const message = settled.needsAttention
+          ? `A commit queued on "${b}" failed and needs a person: ${settled.needsAttention} ` +
+            'Nothing was merged. Tell the user; update again once it has been resolved.'
+          : `${settled.pending} write(s) on "${b}" are still being committed. Nothing was merged. Retry shortly.`;
+        return {
+          kind: 'pending-commits',
+          branch: b,
+          pending: settled.pending,
+          ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
+          message,
+        };
+      }
+    }
+    // Under the lifecycle lock of both branches, as `mergeBranch` and
+    // `openChangeRequest` run: the "no open request" answer is only sound
+    // while nobody can open one mid-merge, and a branch being merged into is
+    // not one to delete or recreate meanwhile. A protected `from` takes no
+    // key, and the branch's own shared state (from = branch) takes the one.
+    return this.runOnBranchPair(from, branch, async () => {
+      if (from !== branch) {
+        const open = await this.openRequestBlockingMerge(from, branch);
+        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
+      }
+      if (!(await this.git.remoteBranchExists(workspaceId, from))) {
+        throw new WorkflowValidationError(`No branch named "${from}" on the shared repository.`);
+      }
+      const resolutions = opts.resolutions ?? [];
+      const subject = from === branch ? `Merge the shared ${branch} into the local one` : `Merge ${from} into ${branch}`;
+      const body =
+        (from === branch
+          ? `The branch had moved on the shared repository while this workspace held commits of its own; both are kept.`
+          : `Brings the latest ${from} into ${branch}.`) +
+        (resolutions.length > 0
+          ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
+          : '');
+      // Published inside the merge's own reservation: nothing lands between
+      // the merge commit and its push, and the push is EVERY workflow push's
+      // `pushWithRecovery`, run over the merge's own unlocked moves — a
+      // rejection replays the merge (kept as a merge) onto the moved branch
+      // and pushes again; a replay that conflicts or a host that refuses
+      // answers as every refused share answers, the banner noted and the
+      // typed hand-off thrown, naming the branch (no single file is at issue)
+      // and never a conflicted path. The merge commit stays local for the
+      // next push of the branch to carry.
+      return this.git.mergeIntoBranch(workspaceId, branch, from, user, {
+        subject,
+        body,
+        resolutions,
+        publish: (ops) =>
+          this.pushWithRecoveryVia(
+            { push: ops.push, pull: () => this.pullWorkspaceVia(ops.pullRebase, workspaceId) },
+            workspaceId,
+            branch,
+            branch,
+            user,
+          ),
+        // A resolution writes a file on the draft from what both branches
+        // hold of it. It is authorized inside the merge's reservation, after
+        // the fetch and before the merge touches the checkout — the draft's
+        // tree clean at its own commit, so the rules read from it are the
+        // draft's, never a rule file mid-merge: the caller must read the
+        // file at the draft's commit and at the source commit the merge is
+        // of, and may change it on the draft by the one rule every draft
+        // write takes — the change gate `acquireLock` asks, not a write
+        // permission a draft never requires.
+        authorizeResolutions: async ({ ours, theirs }) => {
+          for (const r of resolutions) {
+            const rel = r.path.startsWith(`${this.kbDirName}/`) ? r.path.slice(this.kbDirName.length + 1) : r.path;
+            // At the two COMMITS the merge is of — pinned by the merge itself,
+            // never at a ref a concurrent fetch can move between this verdict
+            // and the merge — by the one rule the tool shows a conflict by.
+            if (!(await readableAtCommits(this.accessControl, workspaceId, user.email, rel, [ours, theirs]))) {
+              throw new ReadOnBranchDeniedError(rel, from);
+            }
+            // The gate takes the WORKSPACE path, as `acquireLock` hands it
+            // one: a repository-relative path reads as outside the knowledge
+            // base there, which the gate waves through.
+            await this.changeGate.assertMayChange(workspaceId, user.email, `${this.kbDirName}/${rel}`, 'file');
+            // Content the resolution brings takes the caller's pre-disk write
+            // gate, as its file writes do before a byte lands; a side kept
+            // whole is a commit's own bytes and brings none.
+            if (r.content !== undefined && opts.validateWrite) await opts.validateWrite(`${this.kbDirName}/${rel}`, r.content);
+          }
+        },
+      });
+    });
+  }
+
+  fileAtBranch(
+    workspaceId: string,
+    path: string,
+    branch: string,
+    authorize: (commits: string[]) => Promise<void>,
+  ): Promise<{ sha: string; ref: string; content: string | null }> {
+    return this.git.readFileAtBranch(workspaceId, path, branch, authorize);
+  }
+
+  changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]> {
+    return this.git.changedPathsForPr(workspaceId, base, branch);
+  }
 }
