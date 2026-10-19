@@ -1,5 +1,5 @@
 {
-  "id": "f441faca-c448-4b60-8eb7-871f4887e4c5",
+  "id": "a36676cf-375f-4576-afe7-f833962bd4fe",
   "prevId": "67aaaca1-2386-4a16-b1fe-f29858e77560",
   "version": "7",
   "dialect": "postgresql",
@@ -1375,6 +1375,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "rotated_at": {
+          "name": "rotated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "last_used_at": {
           "name": "last_used_at",
           "type": "timestamp",
@@ -2313,60 +2319,6 @@
           "columns": [
             "session_id",
             "ontology"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.skipped_tools": {
-      "name": "skipped_tools",
-      "schema": "",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "manual": {
-          "name": "manual",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "skipped_tools_user_id_users_id_fk": {
-          "name": "skipped_tools_user_id_users_id_fk",
-          "tableFrom": "skipped_tools",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "skipped_tools_user_id_manual_pk": {
-          "name": "skipped_tools_user_id_manual_pk",
-          "columns": [
-            "user_id",
-            "manual"
           ]
         }
       },
