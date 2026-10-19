@@ -8,6 +8,7 @@ import {
   KbReferenceScanner,
   findRoleRefsInText,
   rewriteRoleTokensInText,
+  UNSHOWN_REFERENCE_REFUSAL,
   type PathVisibility,
 } from '../reference-scan.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
@@ -285,7 +286,7 @@ describe('KbReferenceScanner — references are what the resolver parses', () =>
     }
   });
 
-  it('the refusal counts a file the renaming person cannot read, never names it', async () => {
+  it('a file the renaming person cannot read gets the one refusal: no path, no count, no YAML form', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-hidden-'));
     try {
       await write(path.join(root, KB), 'Team/access.md', FLOW_ACCESS_MD);
@@ -293,8 +294,28 @@ describe('KbReferenceScanner — references are what the resolver parses', () =>
       const err = await scanner
         .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), NONE_VISIBLE)
         .catch((e: Error) => e);
-      expect((err as Error).message).toMatch(/^1 location you cannot read name the old principal/);
-      expect((err as Error).message).not.toContain('Team');
+      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a readable stranded file is named exactly as if no unreadable one stood beside it', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-mixed-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      const alone = await scanner
+        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE)
+        .catch((e: Error) => e);
+      await write(repo, 'Secret/access.md', FLOW_ACCESS_MD);
+      const onlyTeam: PathVisibility = async (paths) => new Map(paths.map((p) => [p, p.startsWith('Team/')]));
+      const beside = await scanner
+        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), onlyTeam)
+        .catch((e: Error) => e);
+      expect((beside as Error).message).toBe((alone as Error).message);
+      expect((beside as Error).message).not.toContain('Secret');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -325,7 +346,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       const scanner = new KbReferenceScanner(stubWorkspace(root), walkerWithHole(), KB);
       await expect(
         scanner.rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE),
-      ).rejects.toThrow(/Cannot list 1 folder .*rename aborted with no changes/);
+      ).rejects.toThrow(UNSHOWN_REFERENCE_REFUSAL);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -333,7 +354,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
 
   // The folder's own access.md may be as unreadable as its listing, so the
   // visibility check cannot see the rules that close it: never named.
-  it('the refusal counts the folder and never names it, even to someone who could read every path', async () => {
+  it('the refusal neither names nor counts the folder, even to someone who could read every path', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hole-hidden-'));
     try {
       await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
@@ -341,9 +362,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       const err = await scanner
         .rewriteReferences('ws-1', 'sales', 'Revenue', (m) => new Error(m), ALL_VISIBLE)
         .catch((e: Error) => e);
-      expect((err as Error).message).toBe(
-        'Cannot list 1 folder that may reference the old principal while rewriting references; rename aborted with no changes',
-      );
+      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -364,7 +383,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
     }
   });
 
-  it('a file the rewrite cannot read is counted, never named, and its fs cause stays out of the error', async () => {
+  it('a file the rewrite cannot read is neither named nor counted, and its fs cause stays out of the error', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-unreadable-'));
     try {
       const repo = path.join(root, KB);
@@ -394,9 +413,7 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
           ALL_VISIBLE,
         )
         .catch((e: Error) => e);
-      expect((err as Error).message).toBe(
-        'Cannot read a file that may reference the old principal while rewriting references; rename aborted with no changes',
-      );
+      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
       expect(causes).toEqual([undefined]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });

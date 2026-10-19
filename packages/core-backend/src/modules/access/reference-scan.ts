@@ -351,18 +351,19 @@ export interface ReferenceRewrite {
 /**
  * Which of the given repo-relative paths the person a refusal is for may
  * read — `canReadBatch` bound to that person. A path is itself a disclosure,
- * so a refusal names only these and counts the rest.
+ * so a refusal names only these and says nothing of the rest.
  */
 export type PathVisibility = (repoRelPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
 
-/** `paths` as a refusal may show them: the readable ones by name, the rest as a count. */
-async function disclosablePaths(paths: string[], visible: PathVisibility): Promise<string> {
-  const verdicts = await visible(paths);
-  const shown = paths.filter((p) => verdicts.get(p) === true).map((p) => sanitizedPath(p || '.'));
-  const hidden = paths.length - shown.length;
-  if (hidden > 0) shown.push(`${hidden} location${hidden === 1 ? '' : 's'} you cannot read`);
-  return shown.join(', ');
-}
+/**
+ * The one refusal for a rename blocked by content the renaming person may not
+ * be shown — a folder the walk cannot list, a file it cannot read, or a
+ * reference in a file they cannot read. The same words whatever the cause:
+ * no path, no count, no hint of the YAML form, since Admin status does not
+ * grant read and each of those is a disclosure. The log names the place.
+ */
+export const UNSHOWN_REFERENCE_REFUSAL =
+  'Content this rename cannot show you may reference the old principal in a way it cannot rewrite; rename aborted with no changes. The server log names where.';
 
 /**
  * The rows of `refs` whose file `readable` allows. The rest are dropped
@@ -552,7 +553,7 @@ export class KbReferenceScanner {
    * drop) — so any read failure aborts via `makeError` with nothing written.
    * Returns the writes WITH each file's original text (rollback snapshots).
    * A refusal names only the paths `visible` says the renaming person may
-   * read; the rest are counted, never named.
+   * read; anything else gets `UNSHOWN_REFERENCE_REFUSAL`, never named nor counted.
    */
   async rewriteReferences(
     workspaceId: string,
@@ -566,14 +567,12 @@ export class KbReferenceScanner {
     const writes: ReferenceRewrite[] = [];
     const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
     // A folder we cannot list might hold references to the old token — same
-    // fail-closed rule as an unreadable file below, and counted, never named,
-    // for the same reason: its own access.md may be just as unreadable, so
-    // `visible` could not see the rules that close it.
+    // fail-closed rule as an unreadable file below, and never named nor
+    // counted, for the same reason: its own access.md may be just as
+    // unreadable, so `visible` could not see the rules that close it.
     if (holes.length > 0) {
       log.warn(`reference rewrite: cannot list ${holes.map((h) => printable(h || '.')).join(', ')}`);
-      throw makeError(
-        `Cannot list ${holes.length} folder${holes.length === 1 ? '' : 's'} that may reference the old principal while rewriting references; rename aborted with no changes`,
-      );
+      throw makeError(UNSHOWN_REFERENCE_REFUSAL);
     }
     const texts = await Promise.all(
       candidates.map(async (repoRel) => {
@@ -591,9 +590,7 @@ export class KbReferenceScanner {
         // an inherited grant would then disclose a path its own rules may
         // close. The fs cause carries the path too, so it stays in the log.
         log.warn(`reference rewrite: cannot read ${printable(t.repoRel)}`, { cause: t.cause });
-        throw makeError(
-          'Cannot read a file that may reference the old principal while rewriting references; rename aborted with no changes',
-        );
+        throw makeError(UNSHOWN_REFERENCE_REFUSAL);
       }
     }
     // Old tokens the rename must leave no reference to (the new name's own
@@ -620,8 +617,18 @@ export class KbReferenceScanner {
       }
     });
     if (stranded.length > 0) {
+      // The readable ones are named with how to fix them. The rest add
+      // nothing to that refusal — it reads the same with or without them —
+      // and alone they get the one refusal that says nothing of them.
+      const verdicts = await visible(stranded);
+      const shown = stranded.filter((p) => verdicts.get(p) === true);
+      const unshown = stranded.filter((p) => verdicts.get(p) !== true);
+      if (unshown.length > 0) {
+        log.warn(`reference rewrite: unrewritable reference in ${unshown.map((p) => printable(p || '.')).join(', ')}`);
+      }
+      if (shown.length === 0) throw makeError(UNSHOWN_REFERENCE_REFUSAL);
       throw makeError(
-        `${await disclosablePaths(stranded, visible)} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
+        `${shown.map((p) => sanitizedPath(p || '.')).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
       );
     }
     return writes;
