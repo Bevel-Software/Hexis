@@ -321,8 +321,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * By workspace and path, the number of the latest-issued read whose bytes
    * became the open tab's saved content (`applyReadBytes`, the
-   * `file-changed` handler), or of a write of this tab's that completed
-   * (`markWritten`). A read issued before it answers late with older bytes,
+   * `file-changed` handler, the reads of `addTab` and `hydrateTabs` that
+   * opened it), or of a write that completed (`markWritten`: a save of ours,
+   * a reverted or an accepted agent change). A read issued before it answers late with older bytes,
    * and must not replace what that newer read or write brought. A read that
    * left the tab alone (unsaved edits, a pending preview) does not count: the
    * `file-changed` read after it still has to merge its bytes into the edits.
@@ -708,6 +709,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return true;
     }
     const requestId = ++addRequestIdRef.current;
+    // Numbered like a refresh read: once its bytes open the tab, a refresh
+    // read issued before it (for a tab since closed) lands on nothing.
+    const seq = ++existenceReadSeqRef.current;
     try {
       const content = await readFile(workspaceId, relativePath);
       // A read that outlived its workspace belongs to another branch's tab
@@ -734,9 +738,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       };
       // Race-safe append: a parallel addTab for the same path may have inserted
       // the tab between the dedup check above and this setter.
-      setOpenTabs((prev) => (
-        prev.some((t) => t.path === relativePath) ? prev : [...prev, newTab]
-      ));
+      setOpenTabs((prev) => {
+        if (prev.some((t) => t.path === relativePath)) return prev;
+        markLanded(workspaceId, relativePath, seq);
+        return [...prev, newTab];
+      });
       if (isLatest) setActiveTabPath(relativePath);
       return true;
     } catch (err) {
@@ -752,7 +758,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       console.error('Failed to read file:', err);
       throw err;
     }
-  }, [workspaceId, activateTab]);
+  }, [workspaceId, activateTab, markLanded]);
 
   const closeTab = useCallback(async (
     tab: OpenTab,
@@ -855,6 +861,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // retry loop — but reported separately so a denied DEEPLINK can surface an
     // access message instead of "file not found". Other errors throw so the
     // caller can show "file-load-failed".
+    // Numbered like refresh reads, so one issued before them lands on nothing
+    // once these bytes open the tabs.
+    const seqs = uniqPaths.map(() => ++existenceReadSeqRef.current);
     const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
     // The strip is no longer this hydration's to write: the workspace moved to
     // another branch, or a newer restore started while these reads were in
@@ -868,6 +877,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const outranked = requestId !== addRequestIdRef.current;
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
+    const survivingSeqs: number[] = [];
     const dropped: string[] = [];
     const denied: string[] = [];
     for (let i = 0; i < uniqPaths.length; i++) {
@@ -882,6 +892,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           pendingFileContent: null,
         });
         surviving.push(path);
+        survivingSeqs.push(seqs[i]);
       } else {
         const err = res.reason;
         if (err instanceof WorkspaceApiError && err.status === 404) {
@@ -900,6 +911,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
       return { surviving, dropped, denied, superseded: true };
     }
+
+    surviving.forEach((path, i) => markLanded(workspaceId, path, survivingSeqs[i]));
 
     if (outranked) {
       // Merge instead of replace: the newer open's tab stays (it may not even
@@ -925,7 +938,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setActiveTabPath(requested);
     hydratedKeyRef.current = hydratedKey;
     return { surviving, dropped, denied, superseded: false };
-  }, [workspaceId, workspaceBranch]);
+  }, [workspaceId, workspaceBranch, markLanded]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 
@@ -1700,6 +1713,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, []);
 
   const acceptPendingContent = useCallback(async () => {
+    if (!workspaceId) return;
     const path = activeTabPathRef.current;
     if (!path) return;
     const active = openTabsRef.current.find((t) => t.path === path);
@@ -1707,12 +1721,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const content = active.pendingFileContent;
     // The agent's bytes were already flushed to disk by its tool call, so
     // accepting means: align both `content` and `savedContent` with that.
+    // A read issued before the agent wrote may still answer with the bytes
+    // from before; the accepted write orders it out like a save of ours.
+    markWritten(workspaceId, path);
     setOpenTabs((prev) => prev.map((t) => (
       t.path === path
         ? { ...t, content, savedContent: content, pendingFileContent: null, isDirty: false }
         : t
     )));
-  }, []);
+  }, [workspaceId, markWritten]);
 
   const rejectPendingContent = useCallback(async () => {
     if (!workspaceId) return;

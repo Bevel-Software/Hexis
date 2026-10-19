@@ -1142,6 +1142,61 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.isDirty).toBe(false);
   });
 
+  /** Hold the next read of the path; `answer` resolves it with the bytes the disk had when it was issued. */
+  function holdNextRead() {
+    const read: { answer: () => void } = { answer: () => { throw new Error('Held read was not started'); } };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile.mockImplementationOnce((_ws: string, path: string) => {
+      const before = disk.get(path);
+      return new Promise((resolve) => { read.answer = () => resolve(before); });
+    });
+    return read;
+  }
+
+  it("a reload issued before an agent's change was accepted does not replace the accepted text with the bytes it read before", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+
+    const read = holdNextRead();
+    let reloading!: Promise<void>;
+    act(() => { reloading = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    // The agent's tool call writes the file; the person accepts its change.
+    disk.set('KB/Draft.md', '# Draft\n\nThe agent rewrote this.');
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+    await act(async () => { await result.current.acceptPendingContent(); });
+    expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nThe agent rewrote this.');
+
+    await act(async () => { read.answer(); await reloading; });
+    await settle();
+
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nThe agent rewrote this.');
+    expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nThe agent rewrote this.');
+    expect(result.current.activeTab?.isDirty).toBe(false);
+  });
+
+  it('a reload issued before the tab was closed and opened again does not replace the bytes the new open read', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+
+    const read = holdNextRead();
+    let reloading!: Promise<void>;
+    act(() => { reloading = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    await act(async () => { await result.current.closeTab(result.current.activeTab!, { skipConfirm: true }); });
+    disk.set('KB/Draft.md', '# Draft\n\nChanged since.');
+    await open(result, 'KB/Draft.md');
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nChanged since.');
+
+    await act(async () => { read.answer(); await reloading; });
+    await settle();
+
+    expect(result.current.activeTab?.content).toBe('# Draft\n\nChanged since.');
+    expect(result.current.activeTab?.savedContent).toBe('# Draft\n\nChanged since.');
+  });
+
   it('Close (closeTab without asking) removes the marked tab and names the tab that is left', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
