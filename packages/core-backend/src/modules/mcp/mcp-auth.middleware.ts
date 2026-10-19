@@ -12,6 +12,23 @@ import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
 import '../audit/index.js'; // Express Request augmentation (req.agentConnectionId)
 
+/** Which of the four credentials below an MCP request was authenticated with. */
+export type McpCallerKind = 'key' | 'oauth' | 'internal' | 'session';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      /**
+       * The kind of credential the MCP auth middleware admitted the request
+       * with. Only a `session` — the person signed in to the app — may name
+       * the page its call comes from (`X-Bevel-Page`).
+       */
+      mcpCallerKind?: McpCallerKind;
+    }
+  }
+}
+
 /**
  * Auth middleware for the MCP endpoint. Accepts any of:
  *
@@ -94,6 +111,7 @@ export function createMcpAuthMiddleware(
         req.userId = resolved.user.id;
         req.userEmail = resolved.user.email;
         req.externalApiKeyId = resolved.tokenId;
+        req.mcpCallerKind = 'key';
         next();
         return;
       } catch (err) {
@@ -136,6 +154,7 @@ export function createMcpAuthMiddleware(
       // Outside the try so a synchronous throw from a downstream handler isn't
       // misclassified as a token-verification failure (and doesn't try to write
       // a second response).
+      req.mcpCallerKind = 'oauth';
       next();
       return;
     }
@@ -215,6 +234,7 @@ export function createMcpAuthMiddleware(
         oauthProvider.noteConnectionUse(claim.connectionId);
         req.agentConnectionId = claim.connectionId;
       }
+      req.mcpCallerKind = 'internal';
       next();
       return;
     }
@@ -236,6 +256,7 @@ export function createMcpAuthMiddleware(
     }
     req.userId = session.userId;
     req.userEmail = session.email;
+    req.mcpCallerKind = 'session';
     next();
   };
 }

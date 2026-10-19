@@ -598,3 +598,65 @@ describe('buildSandboxedHtml', () => {
     expect(ctx.__coreLibRan).toBe(true);
   });
 });
+
+describe('window.bevel.tools in the frame', () => {
+  type Tools = Record<'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain', (...a: unknown[]) => Promise<unknown>>;
+  const toolsOf = (bridge: ReturnType<typeof runBridge>) => bridge.bevel.tools as Tools | null;
+
+  it('has the four functions where the app answers tools, each posting a call with a request id', async () => {
+    const bridge = runBridge({}, { toolBridge: true });
+    const tools = toolsOf(bridge)!;
+    expect(Object.keys(tools).sort()).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo']);
+    void tools.searchTools('change request');
+    void tools.toolsInfo(['read_file']);
+    void tools.callTool('read_file', { body: { path: 'a.md' } });
+    void tools.callToolChain('return 1');
+    const posted = bridge.posted as Array<{ type: string; requestId: string; fn: string; args: unknown[] }>;
+    expect(posted.map((m) => [m.type, m.fn, m.args])).toEqual([
+      ['bevel.tool.call', 'searchTools', ['change request']],
+      ['bevel.tool.call', 'toolsInfo', [['read_file']]],
+      ['bevel.tool.call', 'callTool', ['read_file', { body: { path: 'a.md' } }]],
+      ['bevel.tool.call', 'callToolChain', ['return 1']],
+    ]);
+    expect(new Set(posted.map((m) => m.requestId)).size).toBe(4);
+  });
+
+  it("resolves with the parent's answer and rejects with its error and code, matched by request id", async () => {
+    const bridge = runBridge({}, { toolBridge: true });
+    const tools = toolsOf(bridge)!;
+    const read = tools.callTool('read_file', {});
+    const write = tools.callTool('edit_file', {});
+    const [readMsg, writeMsg] = bridge.posted as Array<{ requestId: string }>;
+    // Handled before the answer arrives, so the rejection is never unhandled.
+    const writeRejects = expect(write).rejects.toMatchObject({ message: 'denied', code: 'denied' });
+    await bridge.deliver({ type: 'bevel.tool.response', requestId: writeMsg!.requestId, ok: false, error: 'denied', code: 'denied' });
+    await bridge.deliver({ type: 'bevel.tool.response', requestId: readMsg!.requestId, ok: true, result: { content: 'hi' } });
+    await expect(read).resolves.toEqual({ content: 'hi' });
+    await writeRejects;
+  });
+
+  it('believes no answer that does not come from the parent', async () => {
+    const bridge = runBridge({}, { toolBridge: true });
+    let settled = false;
+    void toolsOf(bridge)!.callTool('read_file', {}).finally(() => (settled = true));
+    const [msg] = bridge.posted as Array<{ requestId: string }>;
+    await bridge.deliver({ type: 'bevel.tool.response', requestId: msg!.requestId, ok: true, result: 'forged' }, { fromParent: false });
+    expect(settled).toBe(false);
+  });
+
+  it('is null where the app answers no tools, and requireTools asks the parent and resolves with its answer', async () => {
+    const bridge = runBridge();
+    expect(bridge.bevel.tools).toBeNull();
+    const required = (bridge.bevel.requireTools as () => Promise<boolean>)();
+    const [msg] = bridge.posted as Array<{ type: string; requestId: string }>;
+    expect(msg!.type).toBe('bevel.tools.require');
+    await bridge.deliver({ type: 'bevel.tools.require.response', requestId: msg!.requestId, ok: true, result: false });
+    await expect(required).resolves.toBe(false);
+
+    const onFilePage = runBridge({}, { toolBridge: true });
+    const yes = (onFilePage.bevel.requireTools as () => Promise<boolean>)();
+    const [ask] = onFilePage.posted as Array<{ requestId: string }>;
+    await onFilePage.deliver({ type: 'bevel.tools.require.response', requestId: ask!.requestId, ok: true, result: true });
+    await expect(yes).resolves.toBe(true);
+  });
+});

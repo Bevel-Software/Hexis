@@ -31,6 +31,7 @@ const OUTCOME: Record<AgentEventOutcome, { tone: 'ok' | 'danger' | 'wait'; label
   ok: { tone: 'ok', label: 'ok' },
   error: { tone: 'danger', label: 'error' },
   denied: { tone: 'wait', label: 'needs sign-in' },
+  refused: { tone: 'danger', label: 'refused' },
 };
 
 type TypeFilter = 'all' | AgentEventKind;
@@ -198,7 +199,7 @@ export function AuditEventsPanel({
   if (events.length === 0) {
     return (
       <div className="text-detail text-ink-muted text-center py-3">
-        Nothing called yet. Events appear here the first time this {kind === 'agent' ? 'agent' : 'key'} uses a
+        Nothing called yet. Events appear here the first time this {kind === 'agent' ? 'agent' : kind === 'page' ? 'page' : 'key'} uses a
         tool, a skill, or a Hexis capability.
       </div>
     );
