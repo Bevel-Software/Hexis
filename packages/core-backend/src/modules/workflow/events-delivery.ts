@@ -153,11 +153,23 @@ export class EventDelivery {
 
   constructor(private readonly access: EventAccess) {}
 
+  /** Whether `viewer` is an admin; never rejects, a failure being a no. */
+  async isAdmin(viewer: EventViewer): Promise<boolean> {
+    if (!viewer.email) return false;
+    try {
+      return await this.access.isAdmin(viewer.email);
+    } catch (err) {
+      log.warn(`admin resolution failed for user=${viewer.userId}; treated as not admin`, { err });
+      return false;
+    }
+  }
+
   judge(event: WorkflowEvent, viewer: EventViewer): Promise<WorkflowEvent | null> {
     const key = `${event.id}\u0000${event.ts}\u0000${viewer.userId}`;
     const pending = this.inFlight.get(key);
     if (pending) return pending;
-    // `deliveryFor` never rejects: a verdict it cannot reach withholds.
+    // `deliveryFor` never rejects: a verdict it cannot reach withholds the
+    // event, or for `git-sync-failed` redacts it.
     const verdict = deliveryFor(event, viewer, this.access).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, verdict);
     return verdict;

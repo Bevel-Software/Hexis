@@ -179,7 +179,9 @@ export class WorkflowEventBus {
         log.warn(`dispatch to session ${sub.sessionId} threw:`, { err });
       }
     }
-    log.info(`EMIT id=${event.id} kind=${event.kind} → delivered=${matched} skipped=${skipped}`);
+    // `pushed`, not delivered: the events route's delivery rule may still
+    // withhold the event from a session it was pushed to.
+    log.info(`EMIT id=${event.id} kind=${event.kind} → pushed=${matched} skipped=${skipped}`);
     return event;
   }
 

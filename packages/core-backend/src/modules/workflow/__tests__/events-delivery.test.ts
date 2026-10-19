@@ -291,9 +291,18 @@ describe('events route — delivery rule', () => {
     const bob = await open(base, 'bob', 's-bob');
     await focus(base, 'bob', 's-bob');
     const before = bus.emit(SENTINEL);
-    // Kinds the focus list does not scope, so the replay reaches the rule.
-    await emitAndSettle(bus, [opened(FINANCE_REQUEST), approval(FINANCE_REQUEST, FINANCE)], bob);
-    expect(kinds(bob)).toEqual([`change-request-opened:${FINANCE_REQUEST}`, `approval-changed:${FINANCE}`]);
+    // Kinds the focus list does not scope, so the replay reaches the rule. The
+    // public request is the control: Bob keeps it, so the replay did run.
+    await emitAndSettle(
+      bus,
+      [opened(FINANCE_REQUEST), approval(FINANCE_REQUEST, FINANCE), opened(PUBLIC_REQUEST)],
+      bob,
+    );
+    expect(kinds(bob)).toEqual([
+      `change-request-opened:${FINANCE_REQUEST}`,
+      `approval-changed:${FINANCE}`,
+      `change-request-opened:${PUBLIC_REQUEST}`,
+    ]);
 
     access.revokeBob();
     const again = await open(base, 'bob', 's-bob', before.id);
@@ -301,7 +310,7 @@ describe('events route — delivery rule', () => {
     const last = bus.emit(SENTINEL);
     await again.until((e) => e.id === last.id);
 
-    expect(kinds(again)).toEqual([]);
+    expect(kinds(again)).toEqual([`change-request-opened:${PUBLIC_REQUEST}`]);
   });
 
   it("an agent's tool call reaches its own person and admins through the route, nobody else", async () => {
@@ -324,6 +333,22 @@ describe('events route — delivery rule', () => {
     expect(toolCalls(alice)).toHaveLength(1);
     expect(toolCalls(root)).toHaveLength(1);
     expect(toolCalls(bob)).toEqual([]);
+  });
+
+  it("asks once per session whether its person is an admin, not once per other person's tool call", async () => {
+    const bus = new WorkflowEventBus();
+    const base0 = fakeAccess();
+    const asked: string[] = [];
+    const access: EventAccess = { ...base0, isAdmin: async (email) => (asked.push(email), base0.isAdmin(email)) };
+    const base = listen(bus, access);
+    const bob = await open(base, 'bob', 's-bob');
+    await focus(base, 'bob', 's-bob');
+
+    const call = (n: number): WorkflowEventPayload => ({ kind: 'agent-tool-call', forUserId: 'alice', threadId: 't', tool: 'write_file', summary: `call ${n}` });
+    await emitAndSettle(bus, [call(1), call(2), call(3)], bob);
+
+    expect(bob.events.filter((e) => e.kind === 'agent-tool-call')).toEqual([]);
+    expect(asked).toEqual([USERS.bob!.email]);
   });
 
   it('fans one event out to 100 sessions through the route, each getting what it may read', async () => {
