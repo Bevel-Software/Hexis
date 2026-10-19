@@ -60,6 +60,10 @@ function makeFakeDb(queue: any[]) {
     // The mint-time prune of expired token rows; nothing here queues for it.
     delete: vi.fn(() => nextChain()),
   } as unknown as Database;
+  // A transaction is the same fake, so the queue is consumed in statement
+  // order whether or not a statement ran inside one; what ran inside one is
+  // pinned by the call count.
+  (db as unknown as { transaction: unknown }).transaction = vi.fn(async (fn: (tx: Database) => Promise<unknown>) => fn(db));
 
   return { db, captured };
 }
@@ -296,13 +300,15 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured, db } = makeProvider([
       [oldRow] /* the row behind the hash, for this client */,
       [{ id: 'conn-1' }] /* the token's connection, still live */,
-      [oldRow] /* retire.returning */,
-      [] /* the (throttled) use stamp's first-use claim: stamped before */,
+      [oldRow] /* retire.returning — inside the transaction with the mint */,
       undefined, undefined, /* prunes */
       undefined /* token insert */,
+      [] /* the (throttled) use stamp's first-use claim, after the commit: stamped before */,
       undefined /* the ordinary use stamp */,
     ]);
     const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp']);
+    // The consume and the mint landed in one transaction.
+    expect((db as any).transaction).toHaveBeenCalledTimes(1);
     expect(tokens.scope).toBe('mcp');
     // Read by hash AND client first, judged, and only then consumed.
     expect(render(captured.where[0]).sql).toMatch(/"oauth_tokens"."refresh_token_hash" = .* and "oauth_tokens"."client_id" = /);
@@ -366,9 +372,9 @@ describe('BevelOAuthProvider', () => {
       [{ id: 'conn-1' }] /* its connection, live */,
       [] /* the retire matches nothing: rotated under this request */,
       [{ ...oldRow, rotatedAt: new Date() }] /* the replay consumes it */,
-      [] /* first-use claim */,
       undefined, undefined, /* prunes */
       undefined /* token insert */,
+      [] /* first-use claim, after the commit */,
       undefined /* the ordinary use stamp */,
     ]);
     try {
@@ -422,10 +428,10 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured } = makeProvider([
       [rotatedRow(10_000)] /* the row behind the hash: retired 10 s ago */,
       [{ id: 'conn-1' }] /* its connection, live */,
-      [rotatedRow(10_000)] /* the replay consumes it */,
-      [] /* first-use claim */,
+      [rotatedRow(10_000)] /* the replay consumes it — inside the transaction with the mint */,
       undefined, undefined, /* prunes */
       undefined /* token insert */,
+      [] /* first-use claim, after the commit */,
       undefined /* the ordinary use stamp */,
     ]);
     try {
@@ -511,11 +517,12 @@ describe('BevelOAuthProvider', () => {
     };
     const { provider, captured } = makeProvider([
       [oldRow] /* the row behind the hash: no connection to check */,
-      [oldRow] /* retire.returning */,
-      undefined, undefined, /* prunes */
+      // Placed under a connection BEFORE the transaction, as a first mint would place it.
       [{ clientName: 'Claude' }],
       [] /* no live connection */,
       [{ id: 'conn-new' }] /* connection insert.returning */,
+      [oldRow] /* retire.returning */,
+      undefined, undefined, /* prunes */
       undefined /* token insert */,
     ]);
     await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');

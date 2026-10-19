@@ -32,6 +32,9 @@ import { signAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 // (`<tenant>-int_`).
 const TOKEN_BYTES = 32;
 
+/** A transaction's handle, for the statements a refresh must land together. */
+type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+
 const ACCESS_TTL_MS = 60 * 60_000; // 1 hour
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60_000; // 30 days, rotated on use
 const CODE_TTL_MS = 60_000; // exchanged within seconds of Finish
@@ -350,32 +353,45 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // so a third presentation, or two replays racing, find nothing. That does
     // end the retired pair's access token: the runner that replayed holds the
     // fresh pair from here, and the rotation's winner holds its own.
-    let consumed = rotatedAgoMs === null ? await this.retireFresh(hash, clientId, now) : undefined;
-    let replayed = rotatedAgoMs !== null;
-    if (!consumed) {
-      // Either a retired token within the grace, or a fresh one that lost
-      // its rotation to a concurrent refresh between the read above and the
-      // retire — which makes it the loser of a double refresh, and so
-      // replayable now.
-      consumed = await this.replayRetired(hash, clientId, now);
-      replayed = true;
-    }
-    if (!consumed) {
-      return this.refuseRefresh('refresh token rotated or revoked by a concurrent request', 'Invalid or revoked refresh token', seen);
-    }
+    //
+    // The consume and the mint are ONE transaction: a token is retired or
+    // replayed only in the same commit that hands its holder the new pair, so
+    // a mint that fails leaves the token exactly as it was — never spent with
+    // nothing to show for it, which for a replayed token would be the lockout
+    // this whole path exists to prevent. A token from before connections
+    // existed is placed under one first, outside the transaction, as a first
+    // mint would place it: finding or making a connection is idempotent.
+    const connectionId = seen.connectionId ?? (await this.ensureConnection(seen.userId, seen.clientId));
+    const { consumed, tokens, replayed } = await this.deps.db.transaction(async (tx) => {
+      let row = rotatedAgoMs === null ? await this.retireFresh(tx, hash, clientId, now) : undefined;
+      let replayed = rotatedAgoMs !== null;
+      if (!row) {
+        // Either a retired token within the grace, or a fresh one that lost
+        // its rotation to a concurrent refresh between the read above and the
+        // retire — which makes it the loser of a double refresh, and so
+        // replayable now.
+        row = await this.replayRetired(tx, hash, clientId, now);
+        replayed = true;
+      }
+      if (!row) {
+        return this.refuseRefresh('refresh token rotated or revoked by a concurrent request', 'Invalid or revoked refresh token', seen);
+      }
+      const tokens = await this.mintTokens(row.userId, row.clientId, scope, row.resource, connectionId, tx);
+      return { consumed: row, tokens, replayed };
+    });
     if (replayed) {
       log.info(
         `refresh replayed ${Math.round((now.getTime() - consumed.rotatedAt!.getTime()) / 1000)} s after its rotation, within the reuse grace; a fresh pair is minted`,
-        { clientId, connectionId: consumed.connectionId, userId: consumed.userId },
+        { clientId, connectionId, userId: consumed.userId },
       );
     }
-    if (consumed.connectionId) this.noteConnectionUse(consumed.connectionId);
-    return this.mintTokens(consumed.userId, consumed.clientId, scope, consumed.resource, consumed.connectionId ?? undefined);
+    this.noteConnectionUse(connectionId);
+    return tokens;
   }
 
   /** Retire a fresh refresh token: the one statement that wins a rotation. */
-  private async retireFresh(hash: string, clientId: string, now: Date) {
-    const [row] = await this.deps.db
+  private async retireFresh(tx: Tx, hash: string, clientId: string, now: Date) {
+    const [row] = await tx
       .update(oauthTokens)
       .set({ rotatedAt: now })
       .where(
@@ -391,9 +407,9 @@ export class BevelOAuthProvider implements OAuthServerProvider {
   }
 
   /** Consume a retired refresh token's one replay: revoked in the statement that admits it, within the grace only. */
-  private async replayRetired(hash: string, clientId: string, now: Date) {
+  private async replayRetired(tx: Tx, hash: string, clientId: string, now: Date) {
     const since = new Date(now.getTime() - REFRESH_REUSE_GRACE_MS);
-    const [row] = await this.deps.db
+    const [row] = await tx
       .update(oauthTokens)
       .set({ revokedAt: now })
       .where(
@@ -547,6 +563,10 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * @param connectionId The agent connection the pair belongs to, when the
    *   caller already holds one (a refresh: the consumed token's). Absent on a
    *   first mint, which finds or makes the live connection for (user, client).
+   * @param tx The transaction the insert belongs to, when the mint must land
+   *   with the statement that consumed the token it replaces (a refresh).
+   *   The prune stays on the pool, outside it: a best-effort statement that
+   *   fails inside a transaction would abort the mint it is meant to spare.
    */
   private async mintTokens(
     userId: string,
@@ -554,6 +574,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     scope: string | null,
     resource: string | null,
     connectionId?: string,
+    tx: Tx | Database = this.deps.db,
   ): Promise<OAuthTokens> {
     const accessToken = this.deps.tokenPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const refreshToken = this.refreshPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
@@ -581,7 +602,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       log.warn('token-table prune failed (non-fatal):', { err });
     }
     const boundTo = connectionId ?? (await this.ensureConnection(userId, clientId));
-    await this.deps.db.insert(oauthTokens).values({
+    await tx.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),
       refreshTokenHash: hashToken(refreshToken),
       clientId,
