@@ -70,12 +70,17 @@ export function kbFileUrl(branch: string, relativePath: string = ''): string {
  * tab; a page opened in a NEW tab — the embed's "Open in the platform" —
  * carries nothing but its URL, so the ask has to ride in it.
  */
-export const FILE_PAGE_PARAM = 'as';
-export const FILE_PAGE_VALUE = 'file';
+const FILE_PAGE_PARAM = 'as';
+const FILE_PAGE_VALUE = 'file';
 
 /** `kbFileUrl`, asking for the file page itself (see `FILE_PAGE_PARAM`). */
 export function kbFilePageUrl(branch: string, relativePath: string): string {
   return `${kbFileUrl(branch, relativePath)}?${FILE_PAGE_PARAM}=${FILE_PAGE_VALUE}`;
+}
+
+/** Whether a location's query is `kbFilePageUrl`'s ask for the file page. */
+export function asksForFilePage(searchParams: URLSearchParams): boolean {
+  return searchParams.get(FILE_PAGE_PARAM) === FILE_PAGE_VALUE;
 }
 
 /**

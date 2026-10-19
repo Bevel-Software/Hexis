@@ -1,7 +1,8 @@
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { FILE_PAGE_PARAM, FILE_PAGE_VALUE, safeDecode } from '../../workspace/routing/kb-routes';
+import { safeDecode } from '../../workspace/routing/kb-routes';
+import { asksForFilePage } from '../../workspace';
 import { useLibrary } from '../state/library-data';
 import type { PluginSummary } from '../services/plugins.api';
 import { pluginHoldingPath } from '../utils/plugin-summary';
@@ -101,7 +102,7 @@ export function WorkspaceItemRoute() {
   // query is the same ask from a NEW tab, which has no router state — the
   // embed's "Open in the platform" for a page inside a skill's folder.
   if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return fileView();
-  if (searchParams.get(FILE_PAGE_PARAM) === FILE_PAGE_VALUE) return fileView();
+  if (asksForFilePage(searchParams)) return fileView();
 
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the

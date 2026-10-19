@@ -19,7 +19,8 @@
  *  - `kbFileUrl` and `resolveKbHref`: the app's address for a file on a
  *    branch, and what a link in a page resolves to there, which a link out
  *    of such a mount has to name; `kbFilePageUrl`, the file page's address
- *    even for a file a skill's page would otherwise claim.
+ *    even for a file a skill's page would otherwise claim, and
+ *    `asksForFilePage`, whether a location's query makes that ask.
  *  - `OpenPageInPlatformContext`: how an HTML page mounted there is taken
  *    to the file page when it needs tools and the viewer picks Open in the
  *    platform (a skill page provides it; without it the renderer opens the
@@ -35,5 +36,5 @@ export {
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
-export { kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
+export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
 export { OpenPageInPlatformContext } from './components/renderers/htmlToolBridge';
