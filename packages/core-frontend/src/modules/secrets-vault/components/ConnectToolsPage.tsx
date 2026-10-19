@@ -412,7 +412,7 @@ export function ConnectToolsPage() {
                       called a provider, so every row above is stored-but-untested.
                       The banner has to make the same claim its rows do. */}
                   {anySkipped
-                    ? 'The tools you kept are set up and work in your agent. The ones you skipped stay out of it until you include them.'
+                    ? 'The tools you kept are set up. The ones you skipped stay out of your agent until you include them.'
                     : 'Everything is set up. You can use your tools in your agent.'}
                 </Banner>
               )}

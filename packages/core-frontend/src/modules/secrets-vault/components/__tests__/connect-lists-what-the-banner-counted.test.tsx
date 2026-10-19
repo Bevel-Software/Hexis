@@ -427,9 +427,11 @@ describe('a tool the reader skipped stays skipped', () => {
     expect(within(clay).getByText('Skipped by you')).toBeInTheDocument();
     expect(within(clay).getByRole('button', { name: 'Include' })).toBeInTheDocument();
     expect(screen.queryByText(/Everything is set up/)).not.toBeInTheDocument();
+    // It claims only what the page knows: stored setup, not a working call.
     expect(screen.getByRole('status')).toHaveTextContent(
-      'The ones you skipped stay out of it until you include them.',
+      'The tools you kept are set up. The ones you skipped stay out of your agent until you include them.',
     );
+    expect(screen.getByRole('status')).not.toHaveTextContent(/work in your agent/);
 
     fireEvent.click(within(clay).getByRole('button', { name: 'Include' }));
     await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('clay', false));
