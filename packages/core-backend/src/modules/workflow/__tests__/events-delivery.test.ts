@@ -34,13 +34,16 @@ const USERS: Record<string, { email: string; admin: boolean }> = {
 };
 
 /** Fake of the access service the file routes use, and of the change-request scope the tools use. */
-function fakeAccess(): EventAccess & { grantBob: () => void } {
+function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => void } {
   let bobReadsFinance = false;
   const reads = (email: string, path: string) =>
     email !== USERS.bob!.email || bobReadsFinance || !path.includes('Finance/');
   return {
     grantBob: () => {
       bobReadsFinance = true;
+    },
+    revokeBob: () => {
+      bobReadsFinance = false;
     },
     mayReadPath: async (_ws, email, path) => reads(email, path),
     mayReadRoot: async (_ws, email) => email !== USERS.bob!.email,
@@ -280,7 +283,50 @@ describe('events route — delivery rule', () => {
     expect(kinds(bob)).toEqual([`file-changed:${FINANCE}`]);
   });
 
-  it('fans one event out to 100 sessions through the route in under 50 ms', async () => {
+  it('replay after a reconnect asks again: a revocation since the event was first delivered withholds it', async () => {
+    const bus = new WorkflowEventBus();
+    const access = fakeAccess();
+    access.grantBob();
+    const base = listen(bus, access);
+    const bob = await open(base, 'bob', 's-bob');
+    await focus(base, 'bob', 's-bob');
+    const before = bus.emit(SENTINEL);
+    // Kinds the focus list does not scope, so the replay reaches the rule.
+    await emitAndSettle(bus, [opened(FINANCE_REQUEST), approval(FINANCE_REQUEST, FINANCE)], bob);
+    expect(kinds(bob)).toEqual([`change-request-opened:${FINANCE_REQUEST}`, `approval-changed:${FINANCE}`]);
+
+    access.revokeBob();
+    const again = await open(base, 'bob', 's-bob', before.id);
+    await focus(base, 'bob', 's-bob');
+    const last = bus.emit(SENTINEL);
+    await again.until((e) => e.id === last.id);
+
+    expect(kinds(again)).toEqual([]);
+  });
+
+  it("an agent's tool call reaches its own person and admins through the route, nobody else", async () => {
+    const bus = new WorkflowEventBus();
+    const base = listen(bus, fakeAccess());
+    const alice = await open(base, 'alice', 's-alice');
+    const bob = await open(base, 'bob', 's-bob');
+    const root = await open(base, 'root', 's-root');
+    for (const [user, s] of [['alice', 's-alice'], ['bob', 's-bob'], ['root', 's-root']] as const) await focus(base, user, s);
+
+    await emitAndSettle(
+      bus,
+      [{ kind: 'agent-tool-call', forUserId: 'alice', threadId: 't', tool: 'write_file', summary: `writing ${FINANCE}` }],
+      alice,
+      bob,
+      root,
+    );
+
+    const toolCalls = (s: Stream) => s.events.filter((e) => e.kind === 'agent-tool-call');
+    expect(toolCalls(alice)).toHaveLength(1);
+    expect(toolCalls(root)).toHaveLength(1);
+    expect(toolCalls(bob)).toEqual([]);
+  });
+
+  it('fans one event out to 100 sessions through the route, each getting what it may read', async () => {
     const bus = new WorkflowEventBus();
     const base = listen(bus, fakeAccess());
     const sessions = await Promise.all(
@@ -299,11 +345,12 @@ describe('events route — delivery rule', () => {
       await emitAndSettle(bus, [fileChanged(FINANCE)], ...sessions);
       samples.push(performance.now() - start);
     }
-    // The median, not the max: a test runner sharing the machine with the rest
-    // of the suite stalls now and then, and one stall is not the check's cost.
+    // Measured and reported, not asserted: this times HTTP writes and the
+    // test client's parsing as well as the check, and under a loaded suite
+    // that is noise. The check's own 50 ms budget is pinned in `deliveryFor`
+    // below, without a socket in the way.
     const { median, max } = spread(samples);
     console.log(`100-session fan-out through the route: median ${median.toFixed(2)} ms, max ${max.toFixed(2)} ms per event`);
-    expect(median).toBeLessThan(50);
     expect(sessions.filter((s) => s.events.some((e) => e.kind === 'file-changed'))).toHaveLength(50);
   });
 
@@ -396,6 +443,17 @@ describe('deliveryFor', () => {
     expect(calls).toBe(1);
     await delivery.judge(stamp(fileChanged(PUBLIC), 2), viewer);
     expect(calls).toBe(2);
+  });
+
+  it('never reuses a settled verdict: judging the same event again asks again', async () => {
+    const access = fakeAccess();
+    access.grantBob();
+    const delivery = new EventDelivery(access);
+    const event = stamp(fileChanged(FINANCE));
+    const bob = { userId: 'bob', email: USERS.bob!.email };
+    expect(await delivery.judge(event, bob)).toBe(event);
+    access.revokeBob();
+    expect(await delivery.judge(event, bob)).toBeNull();
   });
 });
 

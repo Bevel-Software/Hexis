@@ -142,28 +142,24 @@ function redactGitSyncFailed(event: Extract<WorkflowEvent, { kind: 'git-sync-fai
 }
 
 /**
- * The rule with a memo per (event, person): a person with three tabs open is
- * judged once per event, not three times, and so is a replay that repeats an
- * event the live fan-out already judged. Verdicts are never reused across
- * events, so a grant or a revocation shows on the very next event.
+ * The rule, shared per (event, person) while it is being judged: a person with
+ * three tabs open is judged once per event, not three times. A verdict is
+ * dropped the moment it settles and never reused, so a replay after a
+ * reconnect asks again, and a grant or a revocation since the event was first
+ * delivered decides what the replay carries.
  */
 export class EventDelivery {
-  /** Bounded by insertion order; an event's verdicts are wanted for the moment of its fan-out and its replays. */
-  private static readonly MEMO_CAPACITY = 2_000;
-  private readonly memo = new Map<string, Promise<WorkflowEvent | null>>();
+  private readonly inFlight = new Map<string, Promise<WorkflowEvent | null>>();
 
   constructor(private readonly access: EventAccess) {}
 
   judge(event: WorkflowEvent, viewer: EventViewer): Promise<WorkflowEvent | null> {
     const key = `${event.id}\u0000${event.ts}\u0000${viewer.userId}`;
-    const known = this.memo.get(key);
-    if (known) return known;
-    const verdict = deliveryFor(event, viewer, this.access);
-    this.memo.set(key, verdict);
-    if (this.memo.size > EventDelivery.MEMO_CAPACITY) {
-      const oldest = this.memo.keys().next().value;
-      if (oldest !== undefined) this.memo.delete(oldest);
-    }
+    const pending = this.inFlight.get(key);
+    if (pending) return pending;
+    // `deliveryFor` never rejects: a verdict it cannot reach withholds.
+    const verdict = deliveryFor(event, viewer, this.access).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, verdict);
     return verdict;
   }
 }

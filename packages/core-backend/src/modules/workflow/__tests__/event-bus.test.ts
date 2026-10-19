@@ -134,6 +134,19 @@ describe('WorkflowEventBus', () => {
       bus.subscribe(onAlice);
       bus.subscribe(onBob);
 
+      bus.emit({ kind: 'agent-connected', forUserId: 'u-alice', client: 'claude', agentKind: 'agent', at: '2026-10-19T00:00:00.000Z' });
+
+      expect(onAlice.push).toHaveBeenCalledTimes(1);
+      expect(onBob.push).not.toHaveBeenCalled();
+    });
+
+    it('passes agent-tool-call to every session, for the events route to narrow to its person and admins', () => {
+      const bus = new WorkflowEventBus();
+      const onAlice = makeSubscriber('s-alice', 'u-alice');
+      const onBob = makeSubscriber('s-bob', 'u-bob');
+      bus.subscribe(onAlice);
+      bus.subscribe(onBob);
+
       bus.emit({
         kind: 'agent-tool-call',
         forUserId: 'u-alice',
@@ -143,7 +156,7 @@ describe('WorkflowEventBus', () => {
       });
 
       expect(onAlice.push).toHaveBeenCalledTimes(1);
-      expect(onBob.push).not.toHaveBeenCalled();
+      expect(onBob.push).toHaveBeenCalledTimes(1);
     });
 
     it('delivers change-request-merge-failed only to the user who triggered the merge', () => {
