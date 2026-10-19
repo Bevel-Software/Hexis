@@ -5,7 +5,7 @@ import { logger } from '../../shared/logging.js';
 import type { DeploymentSettingsService } from '../settings/deployment-settings.service.js';
 import { GitHubAppClient, GitHubAppError } from './github-app.client.js';
 import { repositoriesAsSetting, type GitHubAppConnection } from './github-app.connection.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 const log = logger('github-app');
 

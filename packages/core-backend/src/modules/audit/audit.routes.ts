@@ -11,7 +11,7 @@ import {
   type IAgentAuditService,
 } from './audit.contract.js';
 import { MAX_EVENT_PAGE } from './agent-audit.service.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 const log = logger('audit');
 

@@ -55,14 +55,14 @@ import {
   type ForcedRefreshOutcome,
   type ISecretsVaultService,
 } from '../secrets-vault/secrets-vault.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
 import type { SpillStore } from '../workspace/spill-store.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
-import type { IAgentEventRecorder } from '../audit/audit.contract.js';
-import { RequestAudit } from '../audit/request-audit.js';
+import type { IAgentEventRecorder } from '../audit/index.js';
+import { RequestAudit } from '../audit/index.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';

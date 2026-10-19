@@ -1,9 +1,9 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry } from '../tool-registry/tool.contract.js';
-import { ToolError } from '../tool-helpers/tool.contract.js';
-import { toolDef } from '../tool-helpers/tool-def.js';
+import { ToolError } from '../tool-helpers/index.js';
+import { toolDef } from '../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../tool-helpers/tool.contract.js';
+import type { ToolContext } from '../tool-helpers/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ReadForTool } from '../workspace/workspace.tools.js';
 import type { IEmbedService } from './embed.interface.js';

@@ -10,8 +10,8 @@ import {
 } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ISkillService } from '../skills/skills.contract.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
+import type { ISkillService } from '../skills/index.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
 import type { IPluginIndexService, PluginCatalogEntry } from './plugins.contract.js';
 
 /**

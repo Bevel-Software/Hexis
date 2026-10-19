@@ -3,7 +3,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IStarterPackService } from './onboarding.contract.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId)
+import '../auth/index.js'; // Express Request augmentation (req.userId)
 
 const log = logger('starter-packs');
 
