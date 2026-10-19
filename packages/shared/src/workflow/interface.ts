@@ -764,21 +764,21 @@ export interface IWorkflowService {
    *     kept on the branch, unpublished, the checkout clean.
    *
    * Per-file read access to what a `conflicts` answer carries is the
-   * CALLER's to check and withhold, as for `fileAtBranch`. `validateWrite`
-   * is the caller's pre-disk write gate (what its file writes take before a
-   * byte lands — a `roles.yaml` that must parse, say): asked with the
-   * workspace path and the content of every resolution that brings content,
-   * inside the merge's reservation before the merge runs; its throw refuses
-   * the update. A side kept whole brings no new content and is not asked.
+   * CALLER's to check and withhold, as for `fileAtBranch`. Resolutions come
+   * with `validateWrite`, the caller's pre-disk write gate (what its file
+   * writes take before a byte lands — a `roles.yaml` that must parse, say):
+   * required with them, refused without; asked with the workspace path and
+   * the content of every resolution that brings content, inside the merge's
+   * reservation before the merge runs; its throw refuses the update. A side
+   * kept whole brings no new content and is not asked.
    */
   updateBranch(
     workspaceId: string,
     user: AuthUser,
-    opts?: {
-      from?: string;
-      resolutions?: MergeResolution[];
-      validateWrite?: (wsPath: string, content: string) => void | Promise<void>;
-    },
+    opts?: { from?: string } & (
+      | { resolutions?: undefined; validateWrite?: undefined }
+      | { resolutions: MergeResolution[]; validateWrite: (wsPath: string, content: string) => void | Promise<void> }
+    ),
   ): Promise<UpdateBranchOutcome>;
   /**
    * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).

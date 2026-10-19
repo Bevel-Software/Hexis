@@ -375,7 +375,7 @@ describe('WorkflowService.updateBranch', () => {
     const git = gitThatMerges({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
     const svc = build(git);
     const resolutions = [{ path: 'A.md', content: 'resolved\n' }];
-    const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions });
+    const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions, validateWrite: async () => {} });
     expect(outcome).toEqual({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
     const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
     expect(merge).toHaveBeenCalledWith(

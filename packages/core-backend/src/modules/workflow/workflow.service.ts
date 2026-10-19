@@ -4730,14 +4730,19 @@ export class WorkflowService implements IWorkflowService {
   async updateBranch(
     workspaceId: string,
     user: AuthUser,
-    opts: {
-      from?: string;
-      resolutions?: MergeResolution[];
-      validateWrite?: (wsPath: string, content: string) => void | Promise<void>;
-    } = {},
+    opts: { from?: string } & (
+      | { resolutions?: undefined; validateWrite?: undefined }
+      | { resolutions: MergeResolution[]; validateWrite: (wsPath: string, content: string) => void | Promise<void> }
+    ) = {},
   ): Promise<UpdateBranchOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const from = opts.from ?? branch;
+    // A resolution writes on the draft: it is somebody's to gate, and a
+    // caller that brings none gates nothing (closed) — the type says so for
+    // a compiled caller, this for any other.
+    if ((opts.resolutions?.length ?? 0) > 0 && typeof opts.validateWrite !== 'function') {
+      throw new Error('updateBranch: resolutions need a `validateWrite` to be asked before the merge');
+    }
     if (this.kb.isProtectedBranch(branch)) {
       throw new WorkflowDomainError(
         `"${branch}" is protected: it is changed through change requests, never merged into directly.`,

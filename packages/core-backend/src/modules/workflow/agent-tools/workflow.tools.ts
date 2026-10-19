@@ -1181,12 +1181,14 @@ export function registerWorkflowTools(
       // file tools' filesystem: it takes the same pre-disk gate that
       // filesystem runs (`roles.yaml` must parse, no new role, no unknown
       // group), handed to the service to ask before the merge.
-      const validateWrite = resolutions?.some((r) => r.content !== undefined) ? await ctx.getWriteValidator(branch) : undefined;
-      const outcome = await ctx.workflowService.updateBranch(workspaceId, ctx.user, {
-        ...(from !== undefined ? { from } : {}),
-        ...(resolutions !== undefined ? { resolutions } : {}),
-        ...(validateWrite ? { validateWrite } : {}),
-      });
+      const outcome =
+        resolutions !== undefined
+          ? await ctx.workflowService.updateBranch(workspaceId, ctx.user, {
+              ...(from !== undefined ? { from } : {}),
+              resolutions,
+              validateWrite: await ctx.getWriteValidator(branch),
+            })
+          : await ctx.workflowService.updateBranch(workspaceId, ctx.user, from !== undefined ? { from } : {});
       if (outcome.kind !== 'conflicts') return outcome;
       // A conflict answer carries the file on both branches, and a path's
       // name is information too: a file the caller may not read on both is
