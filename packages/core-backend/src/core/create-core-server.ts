@@ -14,6 +14,7 @@ import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
+import { createEventAccess, EventDelivery } from '../modules/workflow/events-delivery.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
@@ -666,7 +667,18 @@ export async function createCoreServer(
   // cookie — the cookie path is what makes EventSource work, since the
   // browser API can't set headers). Mounted as its own app.use so it
   // doesn't share an outer middleware chain with the JSON routes above.
-  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware));
+  // Every event passes the delivery rule on its way to a session: the file
+  // routes' read verdict, and the change-request tools' own visibility.
+  const crScope = changeRequestScope(core.accessControl, core.kb);
+  const eventDelivery = new EventDelivery(createEventAccess({
+    accessControl: core.accessControl,
+    adminAccess: core.adminAccess,
+    kbDirName: core.kbDirName,
+    scopedDetail: crScope.scopedDetail,
+    maySee: crScope.maySee,
+    services: { workspaceService: core.workspaceService, workflowService: core.workflowService },
+  }));
+  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware, eventDelivery));
   app.use('/api', core.authMiddleware, createDiffRoutes(
     core.diffService,
     core.authService,

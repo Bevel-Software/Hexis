@@ -653,6 +653,16 @@ export interface ScopedDetail {
 }
 
 /**
+ * What the scope reads of its caller: who they are, and the two services the
+ * detail is read through. A `ToolContext` is one; so is the events route's
+ * viewer, which judges `change-request-opened` and `approval-changed` by the
+ * same rule the tools answer 404 by.
+ */
+export type ScopeCaller = Pick<ToolContext, 'workspaceService' | 'workflowService'> & {
+  user: Pick<ToolContext['user'], 'email'>;
+};
+
+/**
  * The access scope of one change request, as every by-number read tool sees
  * it — and as `delete_branch` does, so a deletion's preview or refusal never
  * names a request `get_change_request` answers as not found.
@@ -666,15 +676,15 @@ export function changeRequestScope(
    * every verdict here is read at `origin/<base>`, so any existing one answers
    * identically — reusing one avoids cloning a branch just to read a ref.
    */
-  const repoGlobalWorkspaceId = async (ctx: ToolContext): Promise<string> =>
+  const repoGlobalWorkspaceId = async (ctx: ScopeCaller): Promise<string> =>
     (await ctx.workspaceService.findAnyWorkspaceId()) ?? kb.defaultWorkspaceId();
 
   /** What the caller MAY read of `paths` at `origin/<base>` — the one rule, `readablePathsAt`. */
-  const readablePaths = (ctx: ToolContext, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> =>
+  const readablePaths = (ctx: ScopeCaller, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> =>
     readablePathsAt(accessControl, workspaceId, ctx.user.email, base, paths);
 
   const scopedDetail = async (
-    ctx: ToolContext,
+    ctx: ScopeCaller,
     number: number,
     opts: { patches: boolean },
   ): Promise<ScopedDetail> => {
@@ -727,7 +737,7 @@ export function changeRequestScope(
     new ToolError(`Change request #${number} not found.`, 404);
 
   /** Whether the caller may see request `number` at all: what `scopedDetail` answers 404 for, as a no. */
-  const maySee = async (ctx: ToolContext, number: number): Promise<boolean> => {
+  const maySee = async (ctx: ScopeCaller, number: number): Promise<boolean> => {
     try {
       await scopedDetail(ctx, number, { patches: false });
       return true;

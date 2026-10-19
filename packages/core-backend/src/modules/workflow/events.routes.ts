@@ -27,6 +27,13 @@
  * has evicted past `n`, the route emits `{ kind: 'resync' }` so the
  * client refetches state from scratch.
  *
+ * **Who receives what** — the bus picks the sessions that HEAR about an
+ * event (focus for workspace events, owner for user events); before writing
+ * it, the route asks `EventDelivery` whether this session's person may have
+ * it, and in what form (`events-delivery.ts`). Live fan-out and replay go
+ * through the same rule, and through one ordered queue per session, so a
+ * slow verdict never reorders a session's stream.
+ *
  * **Heartbeat** — every 25 s the route writes an SSE comment (`:\n\n`).
  * Keeps proxies (nginx, Coolify's Traefik, Cloudflare) from killing the
  * connection as idle. Cheap (~15 bytes), eliminates a whole class of bug.
@@ -39,6 +46,7 @@ const log = logger('events');
 import express from 'express';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
+import type { EventDelivery } from './events-delivery.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /** Interval between SSE keep-alive comments (ms). 25 s sits comfortably under
@@ -73,15 +81,16 @@ interface ActiveSession {
    * suggestion branch got no `file-changed` for the images on screen and kept
    * showing a screenshot a teammate had already replaced.
    *
-   * The client declares the list; this is a delivery filter, not an access
-   * check. It always was — a session could name any workspace as its focus —
-   * and the events it selects carry no file contents, only paths. Whether the
-   * reader may open what changed is settled by the routes that serve it.
+   * The client declares the list, and may name any workspace in it: this is
+   * a delivery filter, not an access check. The access check is the
+   * `EventDelivery` rule every event passes on its way to the session.
    */
   focusedWorkspaceIds: string[];
   /** Set when the SSE connection closes. Used by the focus POST so a
    *  request that arrives after the connection drops 404s cleanly. */
   closed: boolean;
+  /** Tail of this session's writes: each event waits for its verdict, in arrival order. */
+  queue: Promise<void>;
   /** The Express response stream backing this session. Stored so a
    *  same-id reconnect can `end()` the old response and close its TCP
    *  socket immediately, rather than leaving a dangling connection that
@@ -97,6 +106,7 @@ interface ActiveSession {
 export function createEventsRoutes(
   bus: WorkflowEventBus,
   authMiddleware: express.RequestHandler,
+  delivery: EventDelivery,
 ): express.Router {
   const router = express.Router();
 
@@ -114,6 +124,7 @@ export function createEventsRoutes(
       return;
     }
     const userId = req.userId!;
+    const viewer = { userId, email: req.userEmail };
 
     // SSE headers. `X-Accel-Buffering: no` tells nginx not to buffer the
     // response (would batch events behind a flush boundary, killing
@@ -158,15 +169,24 @@ export function createEventsRoutes(
       userId,
       focusedWorkspaceIds: [],
       closed: false,
+      queue: Promise.resolve(),
       res,
       // Filled in below once `unsubscribe` + `heartbeat` exist.
       cleanup: () => {},
     };
     sessions.set(sessionId, session);
 
+    // Every event this session hears goes through the delivery rule, in the
+    // order it arrived: the verdict is async, the stream must not reorder.
     const push = (event: WorkflowEvent): void => {
       if (session.closed) return;
-      writeSseEvent(res, event);
+      const verdict = delivery.judge(event, viewer);
+      session.queue = session.queue.then(async () => {
+        const deliverable = await verdict;
+        if (deliverable && !session.closed) writeSseEvent(res, deliverable);
+      }).catch((err: unknown) => {
+        log.warn(`write to session=${sessionId} failed:`, { err });
+      });
     };
 
     const unsubscribe = bus.subscribe({
@@ -196,7 +216,8 @@ export function createEventsRoutes(
           reason: 'last-event-id too old; ring buffer evicted',
         });
       } else {
-        for (const event of replay) writeSseEvent(res, event);
+        // The same rule as live delivery, queued ahead of anything live.
+        for (const event of replay) push(event);
       }
     }
 
