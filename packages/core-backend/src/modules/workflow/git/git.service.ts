@@ -55,7 +55,6 @@ import {
 import {
   GitRunError,
   assertOneSpecPerLine,
-  isGitTimeout,
   redactGitToken,
   type GitCredentials,
   type GitRunOptions,
@@ -2440,15 +2439,23 @@ export class GitService implements IGitService {
     return stdout.trim().length > 0;
   }
 
-  /** `git rev-parse --verify` that answers null for a rev that does not resolve (an unborn HEAD). */
+  /**
+   * `git rev-parse --verify --quiet`: the commit `rev` names, or null when
+   * the rev is ABSENT (an unborn HEAD, a ref nobody made) — and nothing
+   * else. Git says "absent" with exit 1 and an empty stderr; a lookup that
+   * fails any other way (a corrupt repository, a deadline) throws, because
+   * every caller reads null as a fact about the repository — "unborn",
+   * "no such tip", "nothing to authorize at" — and a failure dressed as that
+   * fact would make a sync reset an unborn clone or a verdict list lose a
+   * commit.
+   */
   private async revParseOrNull(cwd: string, rev: string): Promise<string | null> {
     try {
       const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
       return stdout.trim() || null;
     } catch (err) {
-      // Null is "no such rev"; a deadline is not that answer (see GitRunError).
-      if (isGitTimeout(err)) throw err;
-      return null;
+      if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1 && (err.stderr ?? '').trim() === '') return null;
+      throw err;
     }
   }
 
@@ -4173,27 +4180,12 @@ export class GitService implements IGitService {
   private async branchCommits(cwd: string, branch: string, served: string): Promise<string[]> {
     const commits = [served];
     for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
-      const sha = await this.refCommitOrAbsent(cwd, ref);
+      // Null is ABSENT and nothing else (`revParseOrNull`): a lookup that
+      // fails otherwise throws, so this list never quietly loses a commit.
+      const sha = await this.revParseOrNull(cwd, ref);
       if (sha && !commits.includes(sha)) commits.push(sha);
     }
     return commits;
-  }
-
-  /**
-   * The commit `ref` names, or null when the ref is ABSENT — and nothing
-   * else: a lookup that fails for any other reason (a corrupt repository, a
-   * deadline) throws, because a verdict list this feeds must not quietly
-   * lose a commit. `git rev-parse --verify --quiet` says "absent" with exit
-   * 1 and an empty stderr.
-   */
-  private async refCommitOrAbsent(cwd: string, ref: string): Promise<string | null> {
-    try {
-      const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
-      return stdout.trim() || null;
-    } catch (err) {
-      if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1 && (err.stderr ?? '').trim() === '') return null;
-      throw err;
-    }
   }
 
   /**

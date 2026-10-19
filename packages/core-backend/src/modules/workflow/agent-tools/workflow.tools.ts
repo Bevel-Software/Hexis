@@ -993,6 +993,11 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const branch = args.branch as string;
       const workspaceId = await workspaceOf(ctx, branch);
+      // Each read below takes the workspace's reservation on its own: this
+      // is a REPORT of independent facts, not a range measured across steps,
+      // and a save or sync landing between two of them is tolerated — the
+      // next call reports it. (The one answer that must be exact, what a
+      // merge is of, is taken under one reservation by `update_branch`.)
       const [status, branches, pending, forkBase] = await Promise.all([
         ctx.workflowService.branchStatus(workspaceId),
         ctx.workflowService.listBranches(workspaceId),
