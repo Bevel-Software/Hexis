@@ -247,7 +247,13 @@ describe('the platform card where there are no tools', () => {
 });
 
 describe('a call whose view ended before it was decided', () => {
-  it('is answered closed in the same frame, shows no card and runs nothing when the document changes under it', async () => {
+  // A rebuilt document is a new frame window here, so what the old view's
+  // call is answered reaches nobody — `closed` itself is pinned through the
+  // controller's own suite, whose frame keeps its window. What this renderer
+  // must show is the rest: no card in the new view, and nothing run.
+  const settled = () => new Promise((r) => setTimeout(r, 50));
+
+  it('shows no card and runs nothing when the document changes under it while the lookup is in flight', async () => {
     const server = stubServer({ holdManual: true });
     const page = onFilePage();
     const iframe = await frameOf(page.container);
@@ -257,20 +263,13 @@ describe('a call whose view ended before it was decided', () => {
     // The lookup of whether edit_file writes is still in flight when the page's document is replaced.
     page.receive('<h1>Roadmap, v2</h1>');
     await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('Roadmap, v2'));
-    expect(page.container.querySelector('iframe')).toBe(iframe);
+    const changed = frameChannel(iframe);
     server.releaseManual();
+    await settled();
 
-    await waitFor(() =>
-      expect(frame.replies.at(-1)).toEqual({
-        type: 'bevel.tool.response',
-        requestId: 'w1',
-        ok: false,
-        error: 'The page was closed before the viewer answered.',
-        code: 'closed',
-      }),
-    );
     expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
     expect(server.mcp).toEqual([]);
+    expect(changed.replies).toEqual([]);
   });
 
   it('does not run on an Allow the ended view gave', async () => {
@@ -287,8 +286,8 @@ describe('a call whose view ended before it was decided', () => {
     page.receive('<h1>Roadmap, v2</h1>');
     await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('Roadmap, v2'));
     server.releaseManual();
+    await settled();
 
-    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: false, code: 'closed' }));
     expect(server.mcp).toEqual(['call_tool_chain']);
   });
 
@@ -305,7 +304,7 @@ describe('a call whose view ended before it was decided', () => {
       return el;
     }));
     server.releaseManual();
-    await new Promise((r) => setTimeout(r, 20));
+    await settled();
 
     expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
     expect(server.mcp).toEqual([]);
