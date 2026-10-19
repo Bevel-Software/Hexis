@@ -146,6 +146,36 @@ describe.skipIf(!PG_ADMIN_URL)('refresh-token rotation, on a real Postgres', () 
     await expect(provider.exchangeRefreshToken(client, winnerNext.refresh_token!)).resolves.toMatchObject({ token_type: 'Bearer' });
   }, PG_TEST_TIMEOUT);
 
+  it('three refreshes of one token at the same instant: exactly two pairs, the third refused — the row lock decides', async () => {
+    // What a client refreshing from several places at once actually sends.
+    // All three read the token fresh; the row lock serialises their retires,
+    // so one wins and the other two find it rotated under them; of those,
+    // the replay statement admits exactly one, and the last finds the row
+    // revoked. Nothing here is mocked: the database's own locking is the
+    // mechanism, and this is the one place it is exercised.
+    const { client, refresh } = await seed('race');
+    const outcomes = await Promise.allSettled([
+      provider.exchangeRefreshToken(client, refresh),
+      provider.exchangeRefreshToken(client, refresh),
+      provider.exchangeRefreshToken(client, refresh),
+    ]);
+    const fulfilled = outcomes.filter((o): o is PromiseFulfilledResult<Awaited<ReturnType<typeof provider.exchangeRefreshToken>>> => o.status === 'fulfilled');
+    const rejected = outcomes.filter((o): o is PromiseRejectedResult => o.status === 'rejected');
+    expect(fulfilled).toHaveLength(2);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBeInstanceOf(InvalidGrantError);
+    // Two distinct pairs, both live.
+    const [a, b] = fulfilled.map((o) => o.value.refresh_token!);
+    expect(a).not.toBe(b);
+    await expect(provider.exchangeRefreshToken(client, a)).resolves.toMatchObject({ token_type: 'Bearer' });
+    await expect(provider.exchangeRefreshToken(client, b)).resolves.toMatchObject({ token_type: 'Bearer' });
+    // The original is spent for good: retired by the winner, revoked by the replay.
+    const row = await rowOf(refresh);
+    expect(row?.rotatedAt).toBeInstanceOf(Date);
+    expect(row?.revokedAt).toBeInstanceOf(Date);
+    await expect(provider.exchangeRefreshToken(client, refresh)).rejects.toBeInstanceOf(InvalidGrantError);
+  }, PG_TEST_TIMEOUT);
+
   it("a revoke ends a retired pair's access token at once, hour or no hour", async () => {
     const { client, access, refresh } = await seed('revoke');
     await provider.exchangeRefreshToken(client, refresh);
