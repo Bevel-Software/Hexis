@@ -1,6 +1,6 @@
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { logger } from '../../shared/logging.js';
-import type { AgentEventOutcome, AuditPrincipalRef, IAgentEventRecorder } from './audit.contract.js';
+import type { AgentEventOutcome, IAgentEventRecorder, RecordedPrincipal } from './audit.contract.js';
 import {
   classifyToolCall,
   skillReadPath,
@@ -13,11 +13,11 @@ const log = logger('audit');
 
 /**
  * The Audit log's view of ONE MCP request: who is calling (the user and the
- * key or agent connection the request arrived through), and how to name what
- * they call. The MCP proxy creates one per request that has a principal and
- * routes every call through it; a request with none (a browser JWT, an
- * internal token minted before connections existed) gets no instance and
- * records nothing.
+ * key, agent connection or page the request arrived through), and how to name
+ * what they call. The MCP proxy creates one per request that has a principal
+ * and routes every call through it; a request with none (a browser JWT that
+ * names no page, an internal token minted before connections existed) gets no
+ * instance and records nothing.
  *
  * Holds nothing that outlives the request. The skill catalog it may need to
  * tell a skill read from a file read is fetched at most once, and only when
@@ -29,7 +29,7 @@ export class RequestAudit {
   constructor(
     private readonly recorder: IAgentEventRecorder,
     private readonly userId: string,
-    private readonly principal: AuditPrincipalRef,
+    private readonly principal: RecordedPrincipal,
     private readonly ctx: {
       kbManualName: string;
       /** Read at classification time — the surface (and its catalog names) is built lazily. */
@@ -93,9 +93,13 @@ export class RequestAudit {
     }
   }
 
-  /** A call refused before it ran, because the caller's sign-in for its manual is missing. */
-  async denied(utcpName: string, args: Record<string, unknown>): Promise<void> {
-    this.emit(await this.classify(utcpName, args), 'denied', null);
+  /**
+   * A call refused before it ran: `denied` when the caller's sign-in for its
+   * manual is missing, `refused` when the person viewing a page answered its
+   * request to write with Deny.
+   */
+  async denied(utcpName: string, args: Record<string, unknown>, outcome: 'denied' | 'refused' = 'denied'): Promise<void> {
+    this.emit(await this.classify(utcpName, args), outcome, null);
   }
 
   /**
@@ -106,11 +110,22 @@ export class RequestAudit {
    * The direct MCP path (`callToolStreaming`) is deliberately NOT wrapped —
    * the proxy's tool handler records those itself, with the result's
    * `isError` in hand.
+   *
+   * Installed ONCE, when the client is built, because the client is shared by
+   * every request of its person: `current` names the request a call belongs
+   * to, at call time, and a call outside any request (or in one attributed to
+   * nothing) is recorded nowhere. Rebinding the client per request instead
+   * would hand one request's calls to another's audit, and stack a wrapper
+   * per request.
    */
-  instrumentChainCalls(client: CodeModeUtcpClient): void {
+  static instrumentChainCalls(client: CodeModeUtcpClient, current: () => RequestAudit | null | undefined): void {
     const callTool = client.callTool.bind(client);
-    client.callTool = (toolName: string, toolArgs: Record<string, unknown>) =>
-      this.call(toolName, toolArgs, () => callTool(toolName, toolArgs), isErrorShaped);
+    client.callTool = (toolName: string, toolArgs: Record<string, unknown>) => {
+      const audit = current();
+      return audit
+        ? audit.call(toolName, toolArgs, () => callTool(toolName, toolArgs), isErrorShaped)
+        : callTool(toolName, toolArgs);
+    };
   }
 
   private skillCatalog(): Promise<readonly SkillFolder[] | null> {

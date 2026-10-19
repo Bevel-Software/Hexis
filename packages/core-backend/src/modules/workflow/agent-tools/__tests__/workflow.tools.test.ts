@@ -8,9 +8,9 @@ import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middlewar
 import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
 import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
-import { ToolError } from '../../../tool-helpers/tool.contract.js';
+import { ToolError } from '../../../tool-helpers/index.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
-import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/agent-access.gate.js';
+import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/index.js';
 import { registerWorkflowTools } from '../workflow.tools.js';
 import {
   BranchAuthorshipError,

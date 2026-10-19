@@ -1,5 +1,5 @@
 {
-  "id": "8164e450-9e60-4f1a-99a3-39530dbbd6c5",
+  "id": "67aaaca1-2386-4a16-b1fe-f29858e77560",
   "prevId": "af9563ed-cb9e-46d7-a62b-2df4520df6d7",
   "version": "7",
   "dialect": "postgresql",
@@ -167,6 +167,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "page_path": {
+          "name": "page_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "kind": {
           "name": "kind",
           "type": "text",
@@ -232,6 +238,33 @@
           "columns": [
             {
               "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_events_by_page": {
+          "name": "agent_events_by_page",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "page_path",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -330,11 +363,11 @@
         },
         "agent_events_outcome": {
           "name": "agent_events_outcome",
-          "value": "\"agent_events\".\"outcome\" IN ('ok', 'error', 'denied')"
+          "value": "\"agent_events\".\"outcome\" IN ('ok', 'error', 'denied', 'refused')"
         },
         "agent_events_principal": {
           "name": "agent_events_principal",
-          "value": "(\"agent_events\".\"key_id\" IS NULL) <> (\"agent_events\".\"connection_id\" IS NULL)"
+          "value": "num_nonnulls(\"agent_events\".\"key_id\", \"agent_events\".\"connection_id\", \"agent_events\".\"page_path\") = 1"
         }
       },
       "isRLSEnabled": false
@@ -1338,12 +1371,6 @@
         },
         "revoked_at": {
           "name": "revoked_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "rotated_at": {
-          "name": "rotated_at",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false

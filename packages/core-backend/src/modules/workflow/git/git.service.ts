@@ -25,7 +25,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
-import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { WorkspaceIdMutex, type WorkspaceMutex } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
@@ -332,7 +332,10 @@ export class GitService implements IGitService {
      */
     private readonly hooks: WorkflowHooks,
     private readonly kb: KbContext,
-    private readonly mutex: WorkspaceMutex = new WorkspaceMutex(),
+    // Keyed by the CANONICAL workspace id: a route's Express-decoded `:id`
+    // (`alice/feature`) and a tool's `alice%2Ffeature` name one clone, and
+    // must take one reservation.
+    private readonly mutex: WorkspaceMutex = new WorkspaceIdMutex(),
     private readonly accessControl: IAccessControl | null = null,
     /**
      * How git is actually run — see `shared/git.contract.ts`. The composition
