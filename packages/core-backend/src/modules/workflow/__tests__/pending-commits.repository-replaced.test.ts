@@ -82,8 +82,9 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
    * Rows are stored under the encoded id, whichever spelling the caller
    * enqueued with. The predicate is rendered and read, since the stub does
    * not evaluate it: the id it compares must be the stored spelling, and it
-   * must match only the two statuses a worker could still write, `pending`
-   * and `running`.
+   * must match only the statuses a worker could still write, `pending`,
+   * `running`, and `recovering` (handed back to `pending` when the recovery
+   * agent returns).
    */
   it('looks for the working copy under the id the queue stores, and only for commits still queued', async () => {
     const wheres: SQL[] = [];
@@ -101,7 +102,7 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
 
     const { sql: text, params } = new PgDialect().sqlToQuery(wheres[0]!);
     expect(text).toContain('"workspace_id" =');
-    expect(params).toEqual(['alice%2Ffeature', 'pending', 'running']);
+    expect(params).toEqual(['alice%2Ffeature', 'pending', 'running', 'recovering']);
   });
 
   it('answers zero when nothing was queued for it', async () => {
@@ -138,6 +139,27 @@ describe('PendingCommitsService.queuedOnBranch', () => {
     const sql = new PgDialect().sqlToQuery((where.mock.calls[0] as unknown as [SQL])[0]);
     expect(sql.sql).toMatch(/"branch" = \$1/);
     expect(sql.params).toEqual(['alice/draft']);
+  });
+
+  it('does not count the row under recovery — the merge waits for every other row', async () => {
+    // The recovery agent rescues a `recovering` row by merging the shared
+    // branch in; counted, that row would refuse the agent's own merge. A save
+    // made during the run is `pending` and holds the merge as any other.
+    const only = selectDb([{ status: 'recovering', lastError: 'push rejected: conflict' }]);
+    await expect(new PendingCommitsService(only.db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 0,
+      stuck: 0,
+      needsAttention: null,
+    });
+    const withSave = selectDb([
+      { status: 'recovering', lastError: 'push rejected: conflict' },
+      { status: 'pending', lastError: null },
+    ]);
+    await expect(new PendingCommitsService(withSave.db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 1,
+      stuck: 0,
+      needsAttention: null,
+    });
   });
 
   it('reports the oldest needs_attention row\'s message alongside the count', async () => {

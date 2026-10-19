@@ -59,6 +59,7 @@ function makeService(): PendingCommitsService {
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
     markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryFinished: vi.fn().mockResolvedValue(undefined),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),
@@ -210,7 +211,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(feedback.send).not.toHaveBeenCalled();
   });
 
-  it('a recovery-agent crash does not abort the worker — the row stays pending for the next pass', async () => {
+  it('a recovery-agent crash does not abort the worker — the row goes back to pending for the next pass', async () => {
     const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
     workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push'));
@@ -222,7 +223,43 @@ describe('PendingCommitsWorker.drainOnce', () => {
     // for this attempt), so the row will hit needs_attention naturally
     // after N_RECOVERY tries.
     expect(service.markRecoveryStarted).toHaveBeenCalled();
+    expect(service.markRecoveryFinished).toHaveBeenCalledWith('row-1');
     expect(service.markNeedsAttention).not.toHaveBeenCalled();
+  });
+
+  it('holds the row in recovery for exactly as long as the agent runs, however the run ends', async () => {
+    // The row leaves `recovering` only once the agent has returned: the
+    // agent's own merge must not wait on it while it runs, and the next pass
+    // must retry it after. A run that finishes, one that exits early (resolves
+    // having changed nothing) and one that throws all end the same way.
+    for (const ending of ['finished', 'threw'] as const) {
+      vi.mocked(service.markRecoveryFinished).mockClear();
+      const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+      (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+      workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: conflict'));
+      let release!: () => void;
+      const ran = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      recoveryAgent.run.mockImplementationOnce(async () => {
+        entered();
+        await ran;
+        if (ending === 'threw') throw new Error('agent died');
+      });
+
+      const pass = worker.drainOnce();
+      await started;
+      expect(service.markRecoveryStarted).toHaveBeenCalledWith('row-1');
+      expect(service.markRecoveryFinished).not.toHaveBeenCalled();
+      release();
+      await pass;
+      expect(service.markRecoveryFinished).toHaveBeenCalledWith('row-1');
+      expect(service.markNeedsAttention).not.toHaveBeenCalled();
+    }
   });
 
   it('exhausting both budgets marks needs_attention and emits a system feedback notice', async () => {

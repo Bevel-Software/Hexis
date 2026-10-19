@@ -401,7 +401,9 @@ export class PendingCommitsWorker {
       if (row.recoveryAgentRuns < N_RECOVERY) {
         // Transient budget exhausted — hand off to the recovery agent.
         // markRecoveryStarted resets `attempts` so the post-recovery
-        // commits get a fresh transient budget.
+        // commits get a fresh transient budget, and holds the row
+        // `recovering` while the agent runs, so the merge the agent makes
+        // for it (`update_branch`) does not wait on it.
         await this.deps.service.markRecoveryStarted(row.id);
         log.warn(
           `transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
@@ -418,11 +420,18 @@ export class PendingCommitsWorker {
           // The recovery agent itself crashed (rare — would mean broken
           // codemode wiring, missing deps, etc.). Treat it the same as
           // the agent finishing without resolving the issue — the row
-          // stays `pending` and the next worker pass will hit the same
-          // underlying error or escalate after another recovery cycle.
+          // goes back to `pending` below and the next worker pass will hit
+          // the same underlying error or escalate after another recovery
+          // cycle.
           log.error(`recovery agent threw for ws=${row.workspaceId} path=${row.path}:`, {
             detail: sanitizeError(agentErr),
           });
+        } finally {
+          // However the run ended, the row is retried on the next pass. A
+          // process that dies before this line — or a database that refuses
+          // this update — leaves it `recovering` until the boot-time reset
+          // (`startupReconcile`) returns it to `pending`.
+          await this.deps.service.markRecoveryFinished(row.id);
         }
         return;
       }
