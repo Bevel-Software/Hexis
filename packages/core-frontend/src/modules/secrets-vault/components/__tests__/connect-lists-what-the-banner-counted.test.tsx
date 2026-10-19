@@ -143,7 +143,7 @@ function pendingFor(
       path: t.path,
       type: t.type,
       canWrite: t.canWrite,
-      skipped: false,
+      skipped: skippedOnServer.has(t.slug),
       variables: t.variables
         .filter((x) => !x.oauth)
         .map((x) => ({
@@ -156,7 +156,8 @@ function pendingFor(
         }))
         .filter((x) => x.scope !== 'admin' || !x.configured),
     }))
-    .filter((t) => t.variables.length > 0);
+    // A skipped tool always has something to show: its Include.
+    .filter((t) => t.variables.length > 0 || t.skipped);
   const toolOAuth: ConnectToolOAuth[] = readable.flatMap((t) =>
     t.variables
       .filter((x) => x.oauth)
@@ -170,10 +171,13 @@ function pendingFor(
         needsReauth: x.needsReauth ?? false,
         ownerConfigured: x.adminConfigured,
         ownerOnly: !x.adminConfigured && !t.canWrite,
-        skipped: false,
+        skipped: skippedOnServer.has(t.slug),
       })),
   );
-  return { tools, oauth: [], toolOAuth };
+  // …unless a sign-in row of the same tool already carries that Include.
+  const signInSlugs = new Set(toolOAuth.map((o) => o.slug));
+  const keyCards = tools.filter((t) => t.variables.length > 0 || !signInSlugs.has(t.slug));
+  return { tools: keyCards, oauth: [], toolOAuth };
 }
 
 /** The slugs the reader skipped, as `/connect/skipped/:slug` stores them. */
@@ -407,6 +411,31 @@ describe('a tool the reader skipped stays skipped', () => {
     expect(await within(back).findAllByText('Needs an owner to set ADMIN_KEY')).not.toHaveLength(0);
     // Included, it is the owner's again — nothing for the reader to opt out of.
     expect(within(back).queryByRole('checkbox')).not.toBeInTheDocument();
+  });
+
+  it('keeps a skipped tool with no variables left listed, with Include and no "Everything is set up"', async () => {
+    // Nothing on the tool is unset, so nothing is outstanding — but the agent
+    // still leaves it out, so the page must not tell the reader they can use it.
+    const catalog = [
+      tool({ slug: 'notion', variables: [v({ name: 'API_KEY', key: 'notion_API_KEY', userConfigured: true })] }),
+      tool({ slug: 'clay', variables: [] }),
+    ];
+    skippedOnServer.add('clay');
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    renderPage();
+    const clay = await rowFor('clay');
+    expect(within(clay).getByText('Skipped by you')).toBeInTheDocument();
+    expect(within(clay).getByRole('button', { name: 'Include' })).toBeInTheDocument();
+    expect(screen.queryByText(/Everything is set up/)).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'The ones you skipped stay out of it until you include them.',
+    );
+
+    fireEvent.click(within(clay).getByRole('button', { name: 'Include' }));
+    await waitFor(() => expect(connectMock.setToolSkipped).toHaveBeenCalledWith('clay', false));
+    // Included, it has nothing to show and leaves the page; now everything is.
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'Open clay' })).not.toBeInTheDocument());
+    expect(await screen.findByText(/Everything is set up/)).toBeInTheDocument();
   });
 
   it('skips a tool with a key AND a sign-in whole: skipped from one row, both rows say so', async () => {

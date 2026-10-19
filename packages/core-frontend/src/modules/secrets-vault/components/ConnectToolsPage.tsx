@@ -302,6 +302,10 @@ export function ConnectToolsPage() {
   const outstanding = outstandingCount(listing) + standaloneOutstanding(listing);
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
+  // A skipped tool with nothing left unset (one kept only for its Include has
+  // no variables at all) is not outstanding, yet the agent leaves it out. The
+  // zero-state banner must not promise the reader they can use it.
+  const anySkipped = tools.some((t) => t.skipped) || toolOAuth.some((o) => o.skipped);
 
   // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
   // scroller. The header sticks to the top of that pane, so the title and
@@ -407,7 +411,9 @@ export function ConnectToolsPage() {
                   {/* Not "everything is connected": nothing on this page has
                       called a provider, so every row above is stored-but-untested.
                       The banner has to make the same claim its rows do. */}
-                  Everything is set up. You can use your tools in your agent.
+                  {anySkipped
+                    ? 'The tools you kept are set up and work in your agent. The ones you skipped stay out of it until you include them.'
+                    : 'Everything is set up. You can use your tools in your agent.'}
                 </Banner>
               )}
 
