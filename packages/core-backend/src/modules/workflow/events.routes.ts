@@ -27,6 +27,12 @@
  * has evicted past `n`, the route emits `{ kind: 'resync' }` so the
  * client refetches state from scratch.
  *
+ * **Read-gated kinds** — an event that names a file and says something only
+ * a reader of that file may learn (`readGatedPath`: `document-unreadable`,
+ * which quotes the parser) is written to a session only after the injected
+ * read gate says that session's person may read the file. A session's events
+ * keep their order: while such a check is pending, later events wait behind it.
+ *
  * **Heartbeat** — every 25 s the route writes an SSE comment (`:\n\n`).
  * Keeps proxies (nginx, Coolify's Traefik, Cloudflare) from killing the
  * connection as idle. Cheap (~15 bytes), eliminates a whole class of bug.
@@ -37,7 +43,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('events');
 import express from 'express';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import { readGatedPath, type WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -94,11 +100,30 @@ interface ActiveSession {
   cleanup: () => void;
 }
 
+/**
+ * May `userId` read `path` in `workspaceId`? The access rules' own answer,
+ * supplied by the composition root. A route given none delivers no read-gated
+ * event at all: the rule fails closed.
+ */
+export type EventReadGate = (userId: string, workspaceId: string, path: string) => Promise<boolean>;
+
 export function createEventsRoutes(
   bus: WorkflowEventBus,
   authMiddleware: express.RequestHandler,
+  mayRead?: EventReadGate,
 ): express.Router {
   const router = express.Router();
+
+  /** The read gate's verdict; a gate that is missing or fails answers no. */
+  const readable = async (userId: string, workspaceId: string, path: string): Promise<boolean> => {
+    if (!mayRead) return false;
+    try {
+      return await mayRead(userId, workspaceId, path);
+    } catch (err) {
+      log.warn(`read check for an event failed; not delivered (user=${userId})`, { err });
+      return false;
+    }
+  };
 
   /**
    * Process-wide session registry. The same map services the SSE open
@@ -164,9 +189,25 @@ export function createEventsRoutes(
     };
     sessions.set(sessionId, session);
 
+    // Events wait behind a pending read check, so a session sees them in order.
+    let outbox: Promise<void> = Promise.resolve();
+    let checking = 0;
     const push = (event: WorkflowEvent): void => {
       if (session.closed) return;
-      writeSseEvent(res, event);
+      const gated = readGatedPath(event);
+      if (gated === undefined && checking === 0) {
+        writeSseEvent(res, event);
+        return;
+      }
+      if (gated !== undefined) checking++;
+      outbox = outbox.then(async () => {
+        try {
+          if (gated !== undefined && !(await readable(userId, gated.workspaceId, gated.path))) return;
+          if (!session.closed) writeSseEvent(res, event);
+        } finally {
+          if (gated !== undefined) checking--;
+        }
+      });
     };
 
     const unsubscribe = bus.subscribe({
@@ -196,7 +237,7 @@ export function createEventsRoutes(
           reason: 'last-event-id too old; ring buffer evicted',
         });
       } else {
-        for (const event of replay) writeSseEvent(res, event);
+        for (const event of replay) push(event);
       }
     }
 

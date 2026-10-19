@@ -22,6 +22,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AgentDownloadStore, DOWNLOAD_TOKEN_REFUSAL } from '../agent-download.store.js';
 import { attachmentDisposition, createAgentDownloadRoutes, createDownloadFetcherIdentifier } from '../agent-download.routes.js';
@@ -185,7 +186,7 @@ async function start(options: StartOptions = {}): Promise<Started> {
     fakeAuth,
     toolHandler,
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-    new DocExtractService(docCache),
+    new DocExtractService(docCache, new WorkerDocumentExtractor()),
     accessControl,
     testKbContext({ kbDirName: KB }),
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks, notes: new ToolDescriptionNotes() },

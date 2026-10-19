@@ -102,6 +102,24 @@ export interface FsTreeChangedEvent {
 }
 
 /**
+ * A document's text could not be extracted, just now: the parser refused it,
+ * or the extraction outlived its budget. Emitted once per FRESH failure —
+ * never for one answered from memory — so a person looking at the file's row
+ * in the explorer is told in place, and nothing is kept for later.
+ *
+ * `reason` follows "Could not be read:" in the explorer's notice. It names the
+ * file and quotes the parser, so unlike the other workspace-scoped kinds it is
+ * delivered only to sessions whose person may read `path` (see
+ * `readGatedPath`).
+ */
+export interface DocumentUnreadableEvent {
+  kind: 'document-unreadable';
+  workspaceId: string;
+  path: string;
+  reason: string;
+}
+
+/**
  * A commit landed locally but could not be pushed to the remote.
  *
  * Saving is deliberately not blocked on this: the commit is safe on the
@@ -341,6 +359,7 @@ export type WorkflowEventPayload =
   | LockAcquiredEvent
   | LockReleasedEvent
   | FsTreeChangedEvent
+  | DocumentUnreadableEvent
   | GitSyncFailedEvent
   | GitSyncRecoveredEvent
   | BranchSwitchedEvent
@@ -357,6 +376,16 @@ export type WorkflowEventPayload =
 
 export type WorkflowEvent = WorkflowEventEnvelope & WorkflowEventPayload;
 
+/**
+ * The file a session's person must be allowed to READ before `e` is
+ * delivered to it, or undefined when the kind carries nothing that rule
+ * protects. The delivery rule is per kind: a kind is added here when what it
+ * says about a file may only reach someone who may read that file.
+ */
+export function readGatedPath(e: WorkflowEventPayload): { workspaceId: string; path: string } | undefined {
+  return e.kind === 'document-unreadable' ? { workspaceId: e.workspaceId, path: e.path } : undefined;
+}
+
 /** True for events scoped to a workspace — the focus filter applies. */
 export function isWorkspaceScoped(
   e: WorkflowEventPayload,
@@ -366,6 +395,7 @@ export function isWorkspaceScoped(
     e.kind === 'lock-acquired' ||
     e.kind === 'lock-released' ||
     e.kind === 'fs-tree-changed' ||
+    e.kind === 'document-unreadable' ||
     e.kind === 'git-sync-failed' ||
     e.kind === 'git-sync-recovered'
   );

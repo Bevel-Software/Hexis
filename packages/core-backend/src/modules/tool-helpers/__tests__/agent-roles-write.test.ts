@@ -15,6 +15,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../../workspace/file-readers/extract-in-worker.js';
 import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
 import { loadActiveGroups } from '../../access/access-control.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -72,7 +73,7 @@ async function start(): Promise<string> {
     // The `after` half of a move's or copy's preview — allowing everything, like the gates above.
     previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
   } as never;
-  registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, testKbContext({ kbDirName: KB }), {
+  registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache, new WorkerDocumentExtractor()), allowAll, testKbContext({ kbDirName: KB }), {
     // No hook registered: the agent-access gate refuses nothing here.
     recoveryBotEmail: 'recovery-bot@bevel.local',
     hooks: new WorkflowHooks(),

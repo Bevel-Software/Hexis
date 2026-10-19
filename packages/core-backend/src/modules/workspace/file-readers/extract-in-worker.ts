@@ -1,0 +1,146 @@
+import { Worker } from 'node:worker_threads';
+import { exchange, MAX_TIMER_MS, sizingOption, WorkerPool } from '../worker-pool.js';
+import {
+  extractionTimeoutNotice,
+  type IDocumentExtractor,
+  type IsolatedExtraction,
+} from './document-extractor.contract.js';
+import type { ExtractionJob, ExtractionReply } from './extraction-worker.js';
+
+/**
+ * Extraction time one document may spend in its worker: the platform's rule,
+ * not a deployment's (decided 2026-10-19). A longer wait is too unresponsive
+ * for a read or a search; the hour a timeout is remembered for is what keeps a
+ * hanging file cheap (see `DocExtractService`).
+ */
+export const EXTRACTION_BUDGET_MS = 10_000;
+
+/** The worker script: a module that calls `serveExtractions` (see `extraction-worker.ts`). */
+export interface ExtractionWorkerEntry {
+  url: URL;
+  /** Node options for the worker thread — a TypeScript entry needs its loader. */
+  execArgv: string[];
+}
+
+export interface WorkerDocumentExtractorOptions {
+  /** Worker time one extraction may spend. Default {@link EXTRACTION_BUDGET_MS}. */
+  budgetMs?: number;
+  /** Workers kept for extractions at once; one past this waits for a worker. Default 4. */
+  poolMax?: number;
+  /**
+   * Extractions that may wait for a worker at once. A waiting extraction holds
+   * the file's bytes, so the queue is capped: past it an extraction is answered
+   * `busy`, and nothing about the file is remembered. Default 32.
+   */
+  maxWaiting?: number;
+  /**
+   * The worker script. Default: the document extractors (`extract.worker`).
+   * A composition serving other extractors — a test's misbehaving parser —
+   * names its own module calling `serveExtractions`.
+   */
+  entry?: ExtractionWorkerEntry;
+}
+
+/**
+ * The one place a document's extractor runs (see {@link IDocumentExtractor}):
+ * a pooled worker thread — the extraction worker kind of the shared
+ * {@link WorkerPool}, which `grep`'s regex matcher is the other kind of —
+ * under a budget per file.
+ *
+ * The bytes are COPIED once on the request thread and the copy transferred,
+ * so the caller's buffer (already hashed for the cache key, and possibly a
+ * slice of Node's shared pool) is never detached. Past the budget the worker is
+ * terminated, which stops a parser mid-loop, and the file answers the timeout
+ * notice. A worker that answers with a dangling rejection, raises, or dies is
+ * never reused; the pool replaces it.
+ */
+export class WorkerDocumentExtractor implements IDocumentExtractor {
+  private readonly budgetMs: number;
+  private readonly pool: WorkerPool;
+  private nextJob = 1;
+  private closing = false;
+
+  constructor(opts: WorkerDocumentExtractorOptions = {}) {
+    this.budgetMs = sizingOption('WorkerDocumentExtractor', 'budgetMs', opts.budgetMs ?? EXTRACTION_BUDGET_MS, 1, MAX_TIMER_MS);
+    const entry = opts.entry ?? defaultEntry();
+    this.pool = new WorkerPool(
+      () => new Worker(entry.url, { execArgv: entry.execArgv }),
+      {
+        // Three documents extracted at once each get a worker of their own.
+        poolMax: sizingOption('WorkerDocumentExtractor', 'poolMax', opts.poolMax ?? 4, 1),
+        maxWaiting: sizingOption('WorkerDocumentExtractor', 'maxWaiting', opts.maxWaiting ?? 32, 0),
+      },
+      () => new ExtractionBusyError(),
+    );
+  }
+
+  async extract(extension: string, bytes: Buffer): Promise<IsolatedExtraction> {
+    let w: Worker;
+    try {
+      w = await this.pool.acquire();
+    } catch {
+      return busy();
+    }
+    const copy = new Uint8Array(bytes);
+    const job: ExtractionJob = { id: this.nextJob++, extension, bytes: copy };
+    const outcome = await exchange<ExtractionReply>(w, job, this.budgetMs, [copy.buffer]);
+    if ('timeout' in outcome) {
+      this.pool.discard(w);
+      return { ok: false, failure: 'timeout', message: extractionTimeoutNotice(this.budgetMs) };
+    }
+    if ('error' in outcome) {
+      // Raised outside every guard the worker installs — its script failed to
+      // load, or it ran out of memory: a fault of the moment rather than of
+      // the bytes. The worker is ending, and the pool replaces it.
+      return { ok: false, failure: 'crashed', message: `could not be read: its extraction failed (${outcome.error.message})` };
+    }
+    if ('exited' in outcome) {
+      if (this.closing) return busy();
+      return {
+        ok: false,
+        failure: 'crashed',
+        message: `could not be read: its extraction stopped unexpectedly (exit code ${outcome.exited})`,
+      };
+    }
+    const { reply } = outcome;
+    if (reply.retire) this.pool.discard(w);
+    else this.pool.release(w);
+    return reply.ok
+      ? { ok: true, summary: reply.summary, text: reply.text }
+      : { ok: false, failure: reply.transient ? 'crashed' : 'parser', message: reply.message };
+  }
+
+  close(): Promise<void> {
+    this.closing = true;
+    return this.pool.close();
+  }
+}
+
+/** Every worker busy and the queue for one full. */
+class ExtractionBusyError extends Error {
+  constructor() {
+    super('every extraction worker is busy');
+    this.name = 'ExtractionBusyError';
+  }
+}
+
+function busy(): IsolatedExtraction {
+  return {
+    ok: false,
+    failure: 'busy',
+    message: 'could not be read: too many documents are being extracted at once; try again in a few seconds',
+  };
+}
+
+/**
+ * The document extractors' worker, beside this module. Run from the build it
+ * is plain JavaScript; run from source (the test suites) it is TypeScript,
+ * which a worker thread loads through `tsx`, as the suites themselves are.
+ */
+function defaultEntry(): ExtractionWorkerEntry {
+  const fromSource = import.meta.url.endsWith('.ts');
+  return {
+    url: new URL(fromSource ? './extract.worker.ts' : './extract.worker.js', import.meta.url),
+    execArgv: fromSource ? ['--import', 'tsx'] : [],
+  };
+}

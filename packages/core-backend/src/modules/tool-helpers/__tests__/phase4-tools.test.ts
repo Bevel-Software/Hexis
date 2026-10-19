@@ -13,6 +13,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../../workspace/file-readers/extract-in-worker.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';
@@ -65,7 +66,7 @@ async function start(): Promise<string> {
   // kb (citation) tools alongside the workspace tools. Those registrations —
   // and their web_search / submit_feedback / cite_kb_node cases — moved to
   // the enterprise repo with their modules; core registers only core tools.
-  registerWorkspaceTools(registry, router, toolAuth, th, new SpillStore('/tmp/bevel-test-spills'), new DocExtractService('/tmp/bevel-test-doc-extract'), accessControl, testKbContext(), {
+  registerWorkspaceTools(registry, router, toolAuth, th, new SpillStore('/tmp/bevel-test-spills'), new DocExtractService('/tmp/bevel-test-doc-extract', new WorkerDocumentExtractor()), accessControl, testKbContext(), {
     // No hook registered: the agent-access gate refuses nothing here.
     recoveryBotEmail: 'recovery-bot@bevel.local',
     hooks: new WorkflowHooks(),

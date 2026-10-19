@@ -14,6 +14,8 @@ import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
+import { canReadWorkspacePath } from '../modules/access-model/kb-read-filter.js';
+import { canonicalFileIdentity } from '../shared/canonical-file-identity.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
@@ -666,7 +668,21 @@ export async function createCoreServer(
   // cookie — the cookie path is what makes EventSource work, since the
   // browser API can't set headers). Mounted as its own app.use so it
   // doesn't share an outer middleware chain with the JSON routes above.
-  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware));
+  //
+  // A kind that names a file and quotes something about it reaches a session
+  // only if that session's person may read the file: the same file read gate
+  // the lock status read applies, on the canonical spelling.
+  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware, async (userId, workspaceId, path) => {
+    const user = await core.authService.getUserById(userId);
+    if (!user) return false;
+    return canReadWorkspacePath(
+      (w, e, p) => core.accessControl.canRead(w, e, p),
+      workspaceId,
+      user.email,
+      core.kbDirName,
+      canonicalFileIdentity(path),
+    );
+  }));
   app.use('/api', core.authMiddleware, createDiffRoutes(
     core.diffService,
     core.authService,

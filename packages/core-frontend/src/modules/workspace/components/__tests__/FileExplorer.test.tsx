@@ -18,6 +18,8 @@ import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.con
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { PR_STALE_EVENT } from '../../../../core/events';
+import { EventBusContext, type EventBusContextValue } from '../../../workflow/state/event-bus.context';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,
   makeRegistry,
@@ -4155,5 +4157,120 @@ describe('FileExplorer: deleting platform files', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     });
     expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Team/access.md`);
+  });
+});
+
+describe('FileExplorer: a document the server could not read', () => {
+  // Legal is open (a folder above depth 2 opens by default); Archive/Old is
+  // at depth 2 and starts closed, so its file has no row on screen until opened.
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'Legal',
+        relativePath: 'Legal',
+        type: 'directory',
+        children: [
+          { name: 'Supplier-Agreement.pdf', relativePath: 'Legal/Supplier-Agreement.pdf', type: 'file' },
+          { name: 'Terms-2026.md', relativePath: 'Legal/Terms-2026.md', type: 'file' },
+        ],
+      },
+      {
+        name: 'Archive',
+        relativePath: 'Archive',
+        type: 'directory',
+        children: [
+          {
+            name: 'Old',
+            relativePath: 'Archive/Old',
+            type: 'directory',
+            children: [{ name: 'Hidden.pdf', relativePath: 'Archive/Old/Hidden.pdf', type: 'file' }],
+          },
+        ],
+      },
+    ],
+  };
+
+  /** The app's event bus, reduced to what the tree uses: a subscription per kind, and a way to push. */
+  function fakeBus() {
+    const handlers = new Map<string, Set<(event: WorkflowEvent) => void>>();
+    const bus: EventBusContextValue = {
+      subscribe: (kind, handler) => {
+        const set = handlers.get(kind) ?? new Set();
+        set.add(handler as (event: WorkflowEvent) => void);
+        handlers.set(kind, set);
+        return () => set.delete(handler as (event: WorkflowEvent) => void);
+      },
+      setFocus: () => {},
+      watchWorkspace: () => () => {},
+    };
+    let id = 1;
+    const push = (payload: { workspaceId: string; path: string; reason: string }) =>
+      act(() => {
+        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as WorkflowEvent;
+        for (const h of handlers.get('document-unreadable') ?? []) h(event);
+      });
+    return { bus, push };
+  }
+
+  function renderWithBus() {
+    const { bus, push } = fakeBus();
+    const workspace = makeWorkspaceFixture({ fileTree: inCheckout(TREE) });
+    render(
+      <MemoryRouter>
+        <AuthContext.Provider value={makeAuth()}>
+          <WorkspaceContext.Provider value={workspace}>
+            <GitContext.Provider value={makeGit()}>
+              <EventBusContext.Provider value={bus}>
+                <FileExplorer />
+              </EventBusContext.Provider>
+            </GitContext.Provider>
+          </WorkspaceContext.Provider>
+        </AuthContext.Provider>
+      </MemoryRouter>,
+    );
+    return { push };
+  }
+
+  const damaged = kbPath('Legal/Supplier-Agreement.pdf');
+
+  it('shows the notice under the row of the file, with the reason after "Could not be read:"', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'ws-1', path: damaged, reason: "could not extract the PDF's text (Bad (uncompressed) XRef entry: 4R)" });
+    const notice = screen.getByTestId('tree-unreadable-notice');
+    expect(notice).toHaveTextContent("Could not be read: could not extract the PDF's text (Bad (uncompressed) XRef entry: 4R)");
+    // Under THAT row: the row's own element is the one right before it.
+    const row = screen.getByText('Supplier-Agreement.pdf').closest('button')!;
+    expect(row.nextElementSibling).toBe(notice);
+    // The row itself carries no marker of its own.
+    expect(within(row).queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('words a timeout as the mock does, and Dismiss removes it for good', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'ws-1', path: damaged, reason: 'extracting its text took longer than 10 seconds' });
+    expect(screen.getByTestId('tree-unreadable-notice')).toHaveTextContent(
+      'Could not be read: extracting its text took longer than 10 seconds.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss could not be read' }));
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('shows nothing for a file in another workspace, or for another file', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'someone%2Felse', path: damaged, reason: 'x' });
+    push({ workspaceId: 'ws-1', path: kbPath('Legal/Terms-2026.md.pdf'), reason: 'x' });
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('keeps nothing for a row that was not on screen when the failure was pushed', () => {
+    const { push } = renderWithBus();
+    expect(screen.queryByText('Hidden.pdf')).toBeNull();
+    push({ workspaceId: 'ws-1', path: kbPath('Archive/Old/Hidden.pdf'), reason: 'x' });
+    fireEvent.click(screen.getByText('Old'));
+    expect(screen.getByText('Hidden.pdf')).toBeInTheDocument();
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
   });
 });

@@ -6,3 +6,6 @@
  */
 export { useFileLock, type AcquireOutcome } from './hooks/useFileLock';
 export { LockApiError, SELF_HOLD_MESSAGE } from './services/lock.api';
+// The server's pushed events, for a component that shows one in place.
+export { useEventBusSubscription } from './hooks/useEventBusSubscription';
+export { canonicalizeWorkspaceId } from './state/event-bus.context';
