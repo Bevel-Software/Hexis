@@ -550,7 +550,9 @@ export const agentConnections = pgTable('agent_connections', {
  * `api_tokens`: plaintext shown only in the token response, SHA-256 hashes
  * stored, revoked-not-deleted so `last_used_at` keeps its audit value and a
  * revoked token can't be re-issued. One row per pair; refresh rotation
- * revokes the old row and inserts a new one.
+ * retires the old row (`rotated_at`) and inserts a new one, and the retired
+ * row is revoked only when it is replayed once within the reuse grace, or by
+ * a revoke.
  *
  * `connection_id` names the {@link agentConnections} row the pair belongs to,
  * so every call made with the token is attributed to that agent and revoking

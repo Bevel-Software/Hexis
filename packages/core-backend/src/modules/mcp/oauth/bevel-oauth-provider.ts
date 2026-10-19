@@ -335,37 +335,60 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * The row behind a refresh token the rotation did not match, when it may
    * be honoured once more: the same client presented it again within
    * {@link REFRESH_REUSE_GRACE_MS} of its rotation, which is what a client
-   * refreshing from two places at once looks like. The pair minted for it
-   * sits on the same connection as the winner's, so revoking the agent ends
-   * both. Anything else — a token never issued to this client, a revoked
-   * one, one rotated longer ago — is refused with the `invalid_grant` the
-   * caller earns, and the refusal is logged with its reason.
+   * refreshing from two places at once looks like. Once, not for the whole
+   * window: the replay consumes the row. The pair minted for it sits on the
+   * same connection as the winner's, so revoking the agent ends both.
+   * Anything else — a token never issued to this client, a revoked one, one
+   * already replayed, one rotated longer ago — is refused with the
+   * `invalid_grant` the caller earns, and the refusal is logged with its
+   * reason.
    */
   private async replayedWithinGrace(hash: string, clientId: string, now: Date) {
+    // Honoured ONCE: the replay revokes the retired row in the same statement
+    // that admits it, so a third presentation — a copied token tried again,
+    // or two replays racing each other — finds nothing to replay. The retired
+    // pair's access token ends here as well; the runner that replayed holds
+    // the fresh pair from this point, and the winner of the rotation holds
+    // its own.
+    const since = new Date(now.getTime() - REFRESH_REUSE_GRACE_MS);
+    const [replayed] = await this.deps.db
+      .update(oauthTokens)
+      .set({ revokedAt: now })
+      .where(
+        and(
+          eq(oauthTokens.refreshTokenHash, hash),
+          eq(oauthTokens.clientId, clientId),
+          isNull(oauthTokens.revokedAt),
+          gt(oauthTokens.rotatedAt, since),
+        ),
+      )
+      .returning();
+    if (replayed) {
+      const rotatedAgo = Math.round((now.getTime() - replayed.rotatedAt!.getTime()) / 1000);
+      log.info(`refresh replayed ${rotatedAgo} s after its rotation, within the reuse grace; a fresh pair is minted`, {
+        clientId,
+        connectionId: replayed.connectionId,
+        userId: replayed.userId,
+      });
+      return replayed;
+    }
+    // Refused. The row is read once more only to say why.
     const [seen] = await this.deps.db
       .select()
       .from(oauthTokens)
       .where(and(eq(oauthTokens.refreshTokenHash, hash), eq(oauthTokens.clientId, clientId)))
       .limit(1);
     if (!seen) return this.refuseRefresh('unknown refresh token for this client', 'Invalid or revoked refresh token', { clientId });
-    if (seen.revokedAt) return this.refuseRefresh('refresh token revoked', 'Invalid or revoked refresh token', seen);
-    // No `rotatedAt` on a row the rotation did not match is the rotation
-    // landing between the two statements: as near to "just rotated" as it gets.
-    const rotatedAgoMs = seen.rotatedAt ? now.getTime() - seen.rotatedAt.getTime() : 0;
-    const rotatedAgo = `${Math.round(rotatedAgoMs / 1000)} s ago`;
-    if (rotatedAgoMs > REFRESH_REUSE_GRACE_MS) {
-      return this.refuseRefresh(
-        `refresh token rotated ${rotatedAgo}, past the ${REFRESH_REUSE_GRACE_MS / 1000} s reuse grace`,
-        'Invalid or revoked refresh token',
-        seen,
-      );
-    }
-    log.info(`refresh replayed ${rotatedAgo}, within the reuse grace; a fresh pair is minted`, {
-      clientId,
-      connectionId: seen.connectionId,
-      userId: seen.userId,
-    });
-    return seen;
+    const rotatedAgo = seen.rotatedAt ? `${Math.round((now.getTime() - seen.rotatedAt.getTime()) / 1000)} s ago` : null;
+    const reason =
+      seen.revokedAt && rotatedAgo
+        ? `refresh token rotated ${rotatedAgo} and already replayed once, or revoked since`
+        : seen.revokedAt
+          ? 'refresh token revoked'
+          : rotatedAgo
+            ? `refresh token rotated ${rotatedAgo}, past the ${REFRESH_REUSE_GRACE_MS / 1000} s reuse grace`
+            : 'refresh token neither fresh nor rotated: it changed under this request';
+    return this.refuseRefresh(reason, 'Invalid or revoked refresh token', seen);
   }
 
   /** The one place a refresh is refused: logged with its reason, never the token, then the client's `invalid_grant`. */
