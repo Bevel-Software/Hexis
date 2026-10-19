@@ -5,7 +5,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
-import { assertOneSpecPerLine, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { assertOneSpecPerLine, isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { readRevSha } from '../kb-fs/index.js';
@@ -66,11 +66,6 @@ import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
-
-/** A full object id, which is what every at-ref gate resolves its ref to before reading. */
-function isCommitSha(ref: string): boolean {
-  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref);
-}
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
