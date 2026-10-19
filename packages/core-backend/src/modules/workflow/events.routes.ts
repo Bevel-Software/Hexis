@@ -40,7 +40,7 @@
  * connection as idle. Cheap (~15 bytes), eliminates a whole class of bug.
  */
 
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('events');
