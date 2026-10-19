@@ -89,6 +89,11 @@ import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
+import {
+  ChangeRequestHooks,
+  type ChangeRequestPerson,
+  type IChangeRequestHooks,
+} from './change-request-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
@@ -249,6 +254,40 @@ export function formatAffectedOwnersBlock(
   return out.join('\n');
 }
 
+/** What the access layer answers for the changed paths of a request, or null when it cannot. */
+type EligibleWritersAtRef = Awaited<ReturnType<IAccessControl['eligibleWritersForPathsAtRef']>>;
+
+/**
+ * The `## Affected owners` markdown block appended to the CR body, from the
+ * eligibility already resolved. The per-path list is capped (see
+ * {@link formatAffectedOwnersBlock}) so the body stays within the
+ * `gh pr create --body` arg limit on large changesets. The empty string when
+ * nothing was resolvable — keeps the body clean rather than printing a stub
+ * heading.
+ */
+function buildAffectedOwnersBlock(paths: string[], resolved: EligibleWritersAtRef): string {
+  if (!resolved || resolved.size === 0) return '';
+  return formatAffectedOwnersBlock(paths, resolved);
+}
+
+/**
+ * The built-in principal that grants anyone signed in, as the eligibility
+ * lists name it (the token `eligibleWritersForPathsAtRef` answers — see the
+ * same constant in `review-workflow.service.ts`).
+ */
+const EVERYONE_CANONICAL = 'everyone';
+
+/**
+ * The one question the open asks of accounts: which of these addresses have
+ * one. `AuthService.findUsersByEmailHash` answers it in a single read; the
+ * shape is spelled here so the workflow module imports nothing of auth's.
+ */
+export interface ApproverAccounts {
+  findUsersByEmailHash(
+    hashes: Set<string>,
+  ): Promise<Map<string, { id: string; email: string; name: string }>>;
+}
+
 /** Git commit subjects are capped at 200 characters (`GitService.commitFile`). */
 const MAX_COMMIT_SUBJECT = 200;
 
@@ -343,6 +382,19 @@ export class WorkflowService implements IWorkflowService {
      * hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
+    /**
+     * The seam a deployment's notification extends when a request is opened
+     * (see `change-request-hooks.ts`). The composition root passes the SAME
+     * instance it exposes as `changeRequestHooks`; the default registers
+     * nobody, so a test construction notifies nobody and says so.
+     */
+    private readonly changeRequestHooks: IChangeRequestHooks = new ChangeRequestHooks(),
+    /**
+     * Who turns the addresses the access model names into accounts, for the
+     * opened event's `approvers`. Absent (a harness without accounts), every
+     * approver counts as unresolved.
+     */
+    private readonly accounts?: ApproverAccounts,
   ) {
     // The type already requires it; this holds for a caller the compiler did
     // not see (plain JavaScript, a positional slip in a harness).
@@ -2270,12 +2322,16 @@ export class WorkflowService implements IWorkflowService {
    *      account, so no hidden body marker). The DB-assigned number is the CR id.
    *   6. Re-fetch the full detail via the PR service so the response shape
    *      matches every other CR endpoint.
+   *   7. Tell the deployment's change-request listeners (see
+   *      `change-request-hooks.ts`); `notified` in the answer says which
+   *      channels reached the approvers. Once per request, here, whether a
+   *      person or an agent opened it — both take this road.
    */
   async openChangeRequest(
     workspaceId: string,
     user: AuthUser,
     input: OpenChangeRequestInput,
-  ): Promise<ChangeRequestDetail> {
+  ): Promise<ChangeRequestDetail & { notified: string[] }> {
     if (!input.sourceBranch) throw new WorkflowValidationError('sourceBranch is required');
     if (!input.targetBranch) throw new WorkflowValidationError('targetBranch is required');
     if (input.sourceBranch === input.targetBranch) {
@@ -2300,7 +2356,18 @@ export class WorkflowService implements IWorkflowService {
     // its branches is retired inside the window, and holding only the source
     // left a `Y -> X` request open to X being deleted under it — the very
     // failure the widened guards exist to prevent.
-    return this.runOnBranchPair(input.sourceBranch, input.targetBranch, async () => {
+    //
+    // The deployment's listeners are told AFTER the locks are released: they
+    // are awaited (the answer's `notified` is true to what happened), and a
+    // slow mailer must hold up this answer alone, never a delete or a merge
+    // on either branch. So the locked part answers what it made — the detail,
+    // or the refusal — and the telling follows.
+    const outcome = await this.runOnBranchPair(input.sourceBranch, input.targetBranch, async (): Promise<
+      { number: number; eligible: EligibleWritersAtRef } & (
+        | { detail: ChangeRequestDetail; pushRefused: null }
+        | { detail: null; pushRefused: PushNeedsAgentResolutionError }
+      )
+    > => {
     // Uniqueness rule — A→B blocks A→B (the spec is explicit that B→A in
     // parallel is still allowed). `listOpenPrs` is cached for 30s so we
     // force-fresh to catch a CR that opened just now.
@@ -2366,11 +2433,10 @@ export class WorkflowService implements IWorkflowService {
       input.targetBranch,
       input.sourceBranch,
     );
-    const affectedOwnersBlock = await this.buildAffectedOwnersBlock(
-      workspaceId,
-      input.targetBranch,
-      touchedPaths,
-    );
+    // Resolved once: the body lists this eligibility, and the opened event
+    // hands the same people to the deployment's listeners.
+    const eligible = await this.eligibleWritersFor(workspaceId, input.targetBranch, touchedPaths);
+    const affectedOwnersBlock = buildAffectedOwnersBlock(touchedPaths, eligible);
 
     // The change request is a plain DB row now — no provider PR. Author is a
     // real column (no hidden body marker needed, since nothing runs as a shared
@@ -2453,7 +2519,7 @@ export class WorkflowService implements IWorkflowService {
       // refused push never moved — answering the refusal is what the caller
       // needs, not a detail read that may fail on a branch the host lacks.
       this.events?.emit(opened);
-      throw pushRefused;
+      return { number: prNumber, eligible, detail: null, pushRefused };
     }
 
     const detail = await this.prs.getPrDetail(prNumber, {
@@ -2467,8 +2533,82 @@ export class WorkflowService implements IWorkflowService {
       );
     }
     this.events?.emit(opened);
-    return detail;
+    return { number: prNumber, eligible, detail, pushRefused: null };
     });
+
+    // The request exists either way — the reviewers are told all the same
+    // when the push was refused: the request is theirs to find, and the
+    // branch's next push carries the commits.
+    const notified = await this.notifyOpened(outcome.number, input, user, outcome.eligible);
+    if (outcome.pushRefused) throw outcome.pushRefused;
+    return { ...outcome.detail, notified };
+  }
+
+  /**
+   * Tell the deployment's listeners the request was opened (see
+   * {@link IChangeRequestHooks}); the channels that reached the approvers.
+   * Never throws: a listener's failure is the hooks' to log, and a failed
+   * read of the approvers' accounts hands the listeners none of them, counted
+   * as unresolved.
+   */
+  private async notifyOpened(
+    number: number,
+    input: OpenChangeRequestInput,
+    user: AuthUser,
+    eligible: EligibleWritersAtRef,
+  ): Promise<string[]> {
+    const { approvers, unresolvedApprovers } = await this.resolveApprovers(eligible);
+    // Only an address a person can open from outside is handed over; the
+    // relative in-app path (no `PUBLIC_FRONTEND_URL`) is the listener's to
+    // complete.
+    const link = this.prs.linkFor(number);
+    return this.changeRequestHooks.runChangeRequestOpened({
+      number,
+      title: input.title.trim(),
+      sourceBranch: input.sourceBranch,
+      targetBranch: input.targetBranch,
+      openedBy: { id: user.id, email: user.email, name: user.name },
+      approvers,
+      unresolvedApprovers,
+      ...(link.urlNote === undefined ? { url: link.url } : {}),
+    });
+  }
+
+  /**
+   * The distinct people eligible to approve some changed path, as accounts.
+   * Each path's eligibility already expands its roles and groups to the
+   * addresses the access model names (`emails`), so a person is one address
+   * however many paths or roles name them; the addresses are looked up as
+   * accounts in one read. An address with no account, and the built-in
+   * `everyone` (anyone signed in may approve; nobody can be listed for that),
+   * are counted, not handed over.
+   */
+  private async resolveApprovers(
+    eligible: EligibleWritersAtRef,
+  ): Promise<{ approvers: ChangeRequestPerson[]; unresolvedApprovers: number }> {
+    const byHash = new Map<string, string>(); // email hash → canonical address
+    let everyone = false;
+    for (const info of eligible?.values() ?? []) {
+      for (const email of info.emails) byHash.set(hashEmail(email), canonicalEmail(email));
+      if (info.roles.includes(EVERYONE_CANONICAL)) everyone = true;
+    }
+    let accounts = new Map<string, { id: string; email: string; name: string }>();
+    if (byHash.size > 0 && this.accounts) {
+      try {
+        accounts = await this.accounts.findUsersByEmailHash(new Set(byHash.keys()));
+      } catch (err) {
+        crLog.warn('the approvers of a change request could not be read as accounts; the listeners are handed none:', { err });
+      }
+    }
+    const approvers: ChangeRequestPerson[] = [];
+    let unresolvedApprovers = everyone ? 1 : 0;
+    for (const hash of byHash.keys()) {
+      const account = accounts.get(hash);
+      if (account) approvers.push({ id: account.id, email: account.email, name: account.name });
+      else unresolvedApprovers++;
+    }
+    approvers.sort((a, b) => a.email.localeCompare(b.email));
+    return { approvers, unresolvedApprovers };
   }
 
   /**
@@ -4694,37 +4834,30 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
-   * Build the `## Affected owners` markdown block that gets appended to
-   * the CR body. Lists the eligible approvers (roles + named users) per
-   * changed path, per the access tree on `origin/<targetBranch>` — the same
-   * tree the approval gate uses server-side, so what the body advertises
-   * matches who can actually approve at merge time. The per-path list is
-   * capped (see {@link formatAffectedOwnersBlock}) so the body stays within
-   * the `gh pr create --body` arg limit on large changesets.
-   *
-   * Returns the empty string when there are no touched paths or no
-   * resolvable eligibility — keeps the body clean rather than printing
-   * a stub heading.
+   * The eligible approvers (roles + named users, and the addresses they
+   * expand to) per changed path, per the access tree on
+   * `origin/<targetBranch>` — the same tree the approval gate uses
+   * server-side, so what the body advertises and the listeners are told
+   * matches who can actually approve at merge time. Null when there are no
+   * touched paths or no resolvable eligibility: a missing affected-owners
+   * block is cosmetic, not a reason to abort the open.
    */
-  private async buildAffectedOwnersBlock(
+  private async eligibleWritersFor(
     workspaceId: string,
     targetBranch: string,
     paths: string[],
-  ): Promise<string> {
-    if (paths.length === 0) return '';
-    let resolved: Awaited<ReturnType<IAccessControl['eligibleWritersForPathsAtRef']>> = null;
+  ): Promise<EligibleWritersAtRef> {
+    if (paths.length === 0) return null;
     try {
-      resolved = await this.accessControl.eligibleWritersForPathsAtRef(
+      return await this.accessControl.eligibleWritersForPathsAtRef(
         workspaceId,
         `origin/${targetBranch}`,
         paths,
       );
     } catch (err) {
       log.warn('eligibleWritersForPathsAtRef failed:', { err });
+      return null;
     }
-    if (!resolved || resolved.size === 0) return '';
-
-    return formatAffectedOwnersBlock(paths, resolved);
   }
 
   async updateBranch(

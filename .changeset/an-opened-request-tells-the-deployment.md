@@ -1,0 +1,5 @@
+---
+'@bevel-software/platform-core-backend': minor
+---
+
+An opened change request is one seam a distribution's own notification extends. When a change request is opened — by a person in the app or by an agent through its tool, which take the one road — core runs the change-request-opened listeners the deployment registered (`changeRequestHooks.onChangeRequestOpened`), hands them the request (number, title, branches, who opened it), the distinct people eligible to approve some changed path as accounts — the eligibility the request's `## Affected owners` block lists, roles and groups expanded to their members — a count of the approvers it could not hand over as accounts (an address with no account, the built-in `everyone`), and the request's address when a public one is configured. The open's answer says `notified`: the channels that reached the approvers, as the listeners said. The listeners run once per request, after its row exists and its source branch was pushed or the push refused, and never delay or fail the open beyond their own bounded wait. Core registers nobody, so a core deployment answers as before.

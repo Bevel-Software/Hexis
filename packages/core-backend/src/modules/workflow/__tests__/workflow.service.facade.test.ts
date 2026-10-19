@@ -15,6 +15,7 @@ import { PendingCommitsService, type PendingCommit } from '../pending-commits.se
 import { PendingCommitsWorker } from '../pending-commits.worker.js';
 import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
+import type { ChangeRequestOpenedEvent, IChangeRequestHooks } from '../change-request-hooks.js';
 import {
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
@@ -225,6 +226,8 @@ function makePrs(): PullRequestService {
     getPrDetail: vi.fn(),
     invalidateDetailCache: vi.fn(),
     setDetailEnricher: vi.fn(),
+    // No public address configured: the in-app path, with its note.
+    linkFor: vi.fn((number: number) => ({ url: `/change-requests/${number}`, urlNote: 'Set PUBLIC_FRONTEND_URL to get absolute links.' })),
   } as unknown as PullRequestService;
 }
 
@@ -1637,6 +1640,197 @@ describe('WorkflowService.openChangeRequest — when the repository host refuses
     await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12 });
     expect(h.git.pull).toHaveBeenCalledWith('ali%2Fx', { preserveMerges: true });
     expect(push).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Opening a request tells the deployment's change-request listeners — once,
+ * here, whether a person or an agent opened it — and answers `notified`: the
+ * channels the listeners said reached the approvers. The approvers are the
+ * people the `## Affected owners` block lists, resolved to accounts and
+ * handed over once each; who could not be is counted.
+ */
+describe('WorkflowService.openChangeRequest — tells the change-request listeners', () => {
+  const INPUT = { sourceBranch: 'ali/x', targetBranch: 'main', title: '  Tidy the glossary  ' };
+  const PATHS = ['KnowledgeBase/Sales/Deal.md', 'KnowledgeBase/Legal/Terms.md'];
+  const ACCOUNTS: Record<string, { id: string; email: string; name: string }> = {
+    'dana@acme.test': { id: 'u-dana', email: 'dana@acme.test', name: 'Dana' },
+    'lena@acme.test': { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
+  };
+
+  function eligibility(
+    perPath: Record<string, { roles?: string[]; emails: string[] }>,
+  ): Map<string, { roles: string[]; users: { name: string; email: string }[]; emails: Set<string> }> {
+    const out = new Map<string, { roles: string[]; users: { name: string; email: string }[]; emails: Set<string> }>();
+    for (const [p, { roles = [], emails }] of Object.entries(perPath)) {
+      out.set(p, { roles, users: emails.map((email) => ({ name: '', email })), emails: new Set(emails) });
+    }
+    return out;
+  }
+
+  function makeNotifyHarness(opts: {
+    eligible?: ReturnType<typeof eligibility> | null;
+    push?: ReturnType<typeof vi.fn>;
+    accounts?: { findUsersByEmailHash: ReturnType<typeof vi.fn> } | undefined;
+    link?: { url: string; urlNote?: string };
+  } = {}) {
+    const git = Object.assign(makeGit(), {
+      mergeFromOrigin: vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false }),
+      push: opts.push ?? vi.fn().mockResolvedValue(undefined),
+      pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+    }) as unknown as GitService;
+    const prs = makePrs();
+    (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ number: 12, branch: 'ali/x', base: 'main' });
+    if (opts.link) (prs.linkFor as ReturnType<typeof vi.fn>).mockReturnValue(opts.link);
+    const access = makeAccessControl();
+    (access.eligibleWritersForPathsAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.eligible ?? null);
+    const values = vi.fn(() => ({ returning: vi.fn(async () => [{ number: 12 }]) }));
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Database;
+    const run = vi.fn<(event: ChangeRequestOpenedEvent) => Promise<string[]>>(async () => ['email']);
+    const hooks: IChangeRequestHooks = { onChangeRequestOpened: vi.fn(), runChangeRequestOpened: run };
+    const accounts =
+      'accounts' in opts
+        ? opts.accounts
+        : {
+            findUsersByEmailHash: vi.fn(async (hashes: Set<string>) => {
+              const found = new Map<string, { id: string; email: string; name: string }>();
+              for (const [email, account] of Object.entries(ACCOUNTS)) {
+                if (hashes.has(hashEmail(email))) found.set(hashEmail(email), account);
+              }
+              return found;
+            }),
+          };
+    const svc = new WorkflowService(
+      db, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access,
+      makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
+      { emit: vi.fn() } as unknown as WorkflowEventBus, undefined, undefined, hooks, accounts,
+    );
+    // The changed paths come from a `git diff` in the workspace, which no
+    // stub answers; the paths are the input here, the eligibility the
+    // access stub's.
+    (svc as unknown as { listChangedPathsBetweenBranches: unknown }).listChangedPathsBetweenBranches =
+      vi.fn().mockResolvedValue(PATHS);
+    return { svc, run, prs, access, accounts, values };
+  }
+
+  it('fires once, after the row exists, with the request, who opened it and the approvers as accounts — once each', async () => {
+    const h = makeNotifyHarness({
+      eligible: eligibility({
+        [PATHS[0]]: { roles: ['Sales'], emails: ['dana@acme.test', 'lena@acme.test'] },
+        // Lena again, by another spelling: one person.
+        [PATHS[1]]: { roles: ['Legal'], emails: ['LENA@acme.test'] },
+      }),
+    });
+    const user = makeUser({ id: 'u-ali', email: 'ali@acme.test', name: 'Ali' });
+    const answer = await h.svc.openChangeRequest('ali%2Fx', user, INPUT);
+
+    expect(h.run).toHaveBeenCalledTimes(1);
+    const [event] = h.run.mock.calls[0]!;
+    expect(event).toEqual({
+      number: 12,
+      title: 'Tidy the glossary',
+      sourceBranch: 'ali/x',
+      targetBranch: 'main',
+      openedBy: { id: 'u-ali', email: 'ali@acme.test', name: 'Ali' },
+      approvers: [
+        { id: 'u-dana', email: 'dana@acme.test', name: 'Dana' },
+        { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
+      ],
+      unresolvedApprovers: 0,
+    });
+    // No public address: no `url` at all, not a relative one.
+    expect(event).not.toHaveProperty('url');
+    // The accounts were read once, for the distinct addresses.
+    expect(h.accounts!.findUsersByEmailHash).toHaveBeenCalledTimes(1);
+    expect(h.accounts!.findUsersByEmailHash.mock.calls[0]![0]).toEqual(
+      new Set([hashEmail('dana@acme.test'), hashEmail('lena@acme.test')]),
+    );
+    // The row landed before anyone was told, and the answer says who was.
+    expect(h.values).toHaveBeenCalledTimes(1);
+    expect(h.values.mock.invocationCallOrder[0]).toBeLessThan(h.run.mock.invocationCallOrder[0]!);
+    expect(answer).toMatchObject({ number: 12, notified: ['email'] });
+  });
+
+  it('counts a person without an account and the built-in `everyone` as unresolved, and hands neither over', async () => {
+    const h = makeNotifyHarness({
+      eligible: eligibility({
+        [PATHS[0]]: { roles: ['everyone'], emails: ['dana@acme.test', 'nobody@acme.test'] },
+        [PATHS[1]]: { roles: ['everyone', 'Legal'], emails: ['dana@acme.test'] },
+      }),
+    });
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    const [event] = h.run.mock.calls[0]!;
+    expect(event.approvers).toEqual([{ id: 'u-dana', email: 'dana@acme.test', name: 'Dana' }]);
+    // `nobody@` once, `everyone` once however many paths grant it.
+    expect(event.unresolvedApprovers).toBe(2);
+  });
+
+  it('hands over the public address when one is configured', async () => {
+    const h = makeNotifyHarness({ link: { url: 'https://kb.acme.test/change-requests/12' } });
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ url: 'https://kb.acme.test/change-requests/12', approvers: [], unresolvedApprovers: 0 });
+  });
+
+  it('with no accounts to ask, or a read of them that fails, every approver is unresolved and the open goes on', async () => {
+    const eligible = eligibility({ [PATHS[0]]: { emails: ['dana@acme.test', 'lena@acme.test'] } });
+    const without = makeNotifyHarness({ eligible, accounts: undefined });
+    await without.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    expect(without.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const failing = makeNotifyHarness({
+        eligible,
+        accounts: { findUsersByEmailHash: vi.fn().mockRejectedValue(new Error('db down')) },
+      });
+      await expect(failing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ notified: ['email'] });
+      expect(failing.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('answers `notified: []` truthfully when the listeners reached nobody', async () => {
+    const h = makeNotifyHarness();
+    h.run.mockResolvedValue([]);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12, notified: [] });
+  });
+
+  it('tells the listeners even when the host refused the push: the request exists', async () => {
+    const h = makeNotifyHarness({
+      push: vi.fn().mockRejectedValue(new Error('git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)')),
+    });
+    const err = await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(h.run).toHaveBeenCalledTimes(1);
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ number: 12, sourceBranch: 'ali/x', targetBranch: 'main' });
+  });
+
+  it('tells the listeners once the branches\' lifecycle locks are released: a slow mailer holds up the answer, not a delete or a merge', async () => {
+    const h = makeNotifyHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    h.run.mockImplementation(async () => { await gate; return ['email']; });
+    const opening = h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    await vi.waitFor(() => { expect(h.run).toHaveBeenCalledTimes(1); });
+    // The source branch's lifecycle key — what `deleteBranch` and `mergeBranch`
+    // reserve — is free while the listener is still waiting.
+    const lifecycle = (h.svc as unknown as { branchLifecycle: { runAll(keys: string[], fn: () => Promise<string>): Promise<string> } }).branchLifecycle;
+    const free = await Promise.race([
+      lifecycle.runAll(['branch:ali/x'], async () => 'free'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('held'), 300)),
+    ]);
+    expect(free).toBe('free');
+    release();
+    await expect(opening).resolves.toMatchObject({ number: 12, notified: ['email'] });
+  });
+
+  it('a refused open (a duplicate, say) tells nobody', async () => {
+    const h = makeNotifyHarness();
+    (h.prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([{ number: 3, branch: 'ali/x', base: 'main' }]);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toThrow();
+    expect(h.run).not.toHaveBeenCalled();
   });
 });
 
