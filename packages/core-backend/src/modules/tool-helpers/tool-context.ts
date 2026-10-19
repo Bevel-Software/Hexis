@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
-import { LockingFilesystem, type WriteValidator } from '../kb-fs/locking-filesystem.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
 import {
   makeAgentRolesYamlWriteValidator,
