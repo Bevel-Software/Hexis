@@ -440,17 +440,30 @@ describe('WorkflowService.updateBranch', () => {
       asked.push(args);
     };
     const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), testKbContext(), gate);
-    await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions: [{ path: 'knowledge-base/A.md', content: 'x' }] });
+    const validated: unknown[][] = [];
+    const validateWrite = vi.fn(async (...args: unknown[]) => { validated.push(args); });
+    await svc.updateBranch('ada%2Fdraft', user, {
+      from: 'target-company-state',
+      resolutions: [{ path: 'knowledge-base/A.md', content: 'x' }, { path: 'B.md', choose: 'theirs' }],
+      validateWrite,
+    });
     const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
     const opts = (merge.mock.calls[0] as unknown[])[4] as { authorizeResolutions: (m: unknown) => Promise<void> };
     await opts.authorizeResolutions({ ours: 'o', theirs: 't' });
+    // The caller's pre-disk write gate is asked with the workspace path and
+    // the content a resolution brings; a side kept whole brings none.
+    expect(validated).toEqual([['knowledge-base/A.md', 'x']]);
     // Read at the two COMMITS the merge is of — never at a branch ref — then the change gate.
     expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 'o', 'ada@x.io', 'A.md');
     expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 't', 'ada@x.io', 'A.md');
     expect((access.canReadAtRef as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).not.toContain('origin/target-company-state');
     // The gate takes the workspace path, as every save hands it one — a
     // repository-relative path would read as outside the knowledge base.
-    expect(asked).toEqual([['ada%2Fdraft', 'ada@x.io', 'knowledge-base/A.md', 'file']]);
+    expect(asked).toEqual([['ada%2Fdraft', 'ada@x.io', 'knowledge-base/A.md', 'file'], ['ada%2Fdraft', 'ada@x.io', 'knowledge-base/B.md', 'file']]);
+
+    // The write gate's refusal refuses the update (a roles.yaml that would not parse, say).
+    validateWrite.mockRejectedValueOnce(new WorkflowDomainError('roles.yaml would be invalid', 422));
+    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toMatchObject({ status: 422 });
 
     // Not readable at the draft's commit: refused before the change gate is asked.
     (access.canReadAtRef as ReturnType<typeof vi.fn>).mockImplementation(async (_ws: string, ref: string) => ref !== 'o');

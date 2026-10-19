@@ -4730,7 +4730,11 @@ export class WorkflowService implements IWorkflowService {
   async updateBranch(
     workspaceId: string,
     user: AuthUser,
-    opts: { from?: string; resolutions?: MergeResolution[] } = {},
+    opts: {
+      from?: string;
+      resolutions?: MergeResolution[];
+      validateWrite?: (wsPath: string, content: string) => void | Promise<void>;
+    } = {},
   ): Promise<UpdateBranchOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const from = opts.from ?? branch;
@@ -4837,6 +4841,10 @@ export class WorkflowService implements IWorkflowService {
             // one: a repository-relative path reads as outside the knowledge
             // base there, which the gate waves through.
             await this.changeGate.assertMayChange(workspaceId, user.email, `${this.kbDirName}/${rel}`, 'file');
+            // Content the resolution brings takes the caller's pre-disk write
+            // gate, as its file writes do before a byte lands; a side kept
+            // whole is a commit's own bytes and brings none.
+            if (r.content !== undefined && opts.validateWrite) await opts.validateWrite(`${this.kbDirName}/${rel}`, r.content);
           }
         },
       });

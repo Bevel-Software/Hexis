@@ -1,6 +1,7 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
-import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
+import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
+import { isCommitSha } from '../../../shared/git.contract.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
@@ -809,8 +810,6 @@ export function registerWorkflowTools(
   const readableAt = (ctx: ToolContext, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> =>
     readablePathsAt(accessControl, workspaceId, ctx.user.email, base, paths);
 
-  /** A full object id, as the ref access gate takes one: anything shorter or mixed-case is a name. */
-  const isCommitSha = (s: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s);
 
   mount({
     name: 'list_file_changes',
@@ -1137,8 +1136,6 @@ export function registerWorkflowTools(
         });
       }
       const workspaceId = await workspaceOf(ctx, branch);
-      /** A hook's own refusal (it carries a status); anything else is a failure of the hook, not an answer. */
-      const isRefusal = (err: unknown): boolean => typeof (err as { status?: unknown })?.status === 'number';
       /**
        * Whether the caller may read `rel` on both sides of this merge — at
        * the two COMMITS the answer says the merge was of, which is what its
@@ -1152,7 +1149,8 @@ export function registerWorkflowTools(
         try {
           await notifyAgentRead(agentAccessGate, ctx, branch, `${kbDirName}/${rel}`);
         } catch (err) {
-          if (isRefusal(err)) return false;
+          // A hook's own refusal carries a status; anything else is a failure of the hook, not an answer.
+          if (hasHttpStatus(err)) return false;
           throw err;
         }
         return readableAtCommits(accessControl, workspaceId, ctx.user.email, rel, [at.ours, at.theirs]);
@@ -1169,7 +1167,7 @@ export function registerWorkflowTools(
         try {
           await notifyAgentRead(agentAccessGate, ctx, branch, wsPath);
         } catch (err) {
-          if (isRefusal(err)) {
+          if (hasHttpStatus(err)) {
             throw new ToolError(`You may not read "${stripKbDir(r.path, kbDirName)}" here, so it is not yours to settle.`, 403, {
               kind: 'read-denied',
               path: stripKbDir(r.path, kbDirName),
@@ -1179,9 +1177,15 @@ export function registerWorkflowTools(
         }
         await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsPath);
       }
+      // A resolution's content lands on the draft by the merge, not by the
+      // file tools' filesystem: it takes the same pre-disk gate that
+      // filesystem runs (`roles.yaml` must parse, no new role, no unknown
+      // group), handed to the service to ask before the merge.
+      const validateWrite = resolutions?.some((r) => r.content !== undefined) ? await ctx.getWriteValidator(branch) : undefined;
       const outcome = await ctx.workflowService.updateBranch(workspaceId, ctx.user, {
         ...(from !== undefined ? { from } : {}),
         ...(resolutions !== undefined ? { resolutions } : {}),
+        ...(validateWrite ? { validateWrite } : {}),
       });
       if (outcome.kind !== 'conflicts') return outcome;
       // A conflict answer carries the file on both branches, and a path's

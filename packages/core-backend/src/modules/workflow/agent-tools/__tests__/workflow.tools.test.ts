@@ -228,8 +228,14 @@ const workflowService = {
     calls.push(['changedPathsBetweenBranches', ws, base, branch]);
     return ['KnowledgeBase/Changed.md'];
   },
-  updateBranch: async (ws: string, user: { id: string }, opts: { from?: string; resolutions?: { path: string }[] }) => {
+  updateBranch: async (
+    ws: string,
+    user: { id: string },
+    opts: { from?: string; resolutions?: { path: string; content?: string }[]; validateWrite?: (wsPath: string, content: string) => Promise<void> },
+  ) => {
     calls.push(['updateBranch', ws, user.id, opts]);
+    // As the service: the caller's write gate is asked for every resolution that brings content.
+    for (const r of opts.resolutions ?? []) if (r.content !== undefined && opts.validateWrite) await opts.validateWrite(`knowledge-base/${r.path}`, r.content);
     if (opts.from === 'me/conflicting' && opts.resolutions?.length) {
       return { kind: 'merged', sha: 'resolved-sha', from: 'me/conflicting', resolvedPaths: opts.resolutions.map((r) => r.path) };
     }
@@ -1203,11 +1209,16 @@ describe('history and syncing tools', () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ kind: 'merged', sha: 'merge-sha', from: 'main', resolvedPaths: [] });
+    // Handed as given, plus the agent's write gate for the content one brings.
     expect(calls).toContainEqual([
       'updateBranch',
       DRAFT_WS,
       'user-A',
-      { from: 'main', resolutions: [{ path: 'KnowledgeBase/Foo.md', content: 'resolved\n' }, { path: 'KnowledgeBase/Bar.md', choose: 'theirs' }] },
+      expect.objectContaining({
+        from: 'main',
+        resolutions: [{ path: 'KnowledgeBase/Foo.md', content: 'resolved\n' }, { path: 'KnowledgeBase/Bar.md', choose: 'theirs' }],
+        validateWrite: expect.any(Function),
+      }),
     ]);
 
     calls = [];
@@ -1303,6 +1314,25 @@ describe('history and syncing tools', () => {
     expect(side.status).toBe(200);
     expect(await side.json()).toEqual({ kind: 'merged', sha: 'resolved-sha', from: 'me/conflicting', resolvedPaths: ['KnowledgeBase/Open.md'] });
     expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', { from: 'me/conflicting', resolutions: [{ path: 'KnowledgeBase/Open.md', choose: 'theirs' }] }]);
+  });
+
+  it("update_branch takes the agent's pre-disk write gate for a resolution's content: a roles.yaml that creates a role is refused as the file tools refuse it", async () => {
+    const base = await start();
+    const res = await post(tool(base, 'update_branch'), writeTok(), {
+      branch: DRAFT,
+      from: 'me/conflicting',
+      // Well-formed, and declaring a role the draft's (absent) roles.yaml does not: the agent gate's new-role refusal.
+      resolutions: [{ path: 'roles.yaml', content: 'roles:\n  Admin:\n    - a@x.eu\n' }],
+    });
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: string }).error).toMatch(/never create app roles/);
+    // The gate travelled with the call; a side kept whole needs none.
+    const call = calls.find((c) => c[0] === 'updateBranch') as unknown[] | undefined;
+    expect(typeof (call?.[3] as { validateWrite?: unknown })?.validateWrite).toBe('function');
+    calls = [];
+    const side = await post(tool(base, 'update_branch'), writeTok(), { branch: DRAFT, from: 'me/conflicting', resolutions: [{ path: 'roles.yaml', choose: 'theirs' }] });
+    expect(side.status).toBe(200);
+    expect(calls).toContainEqual(['updateBranch', DRAFT_WS, 'user-A', { from: 'me/conflicting', resolutions: [{ path: 'roles.yaml', choose: 'theirs' }] }]);
   });
 
   it("update_branch asks the deployment's hooks for a resolution as for any read and any write", async () => {
