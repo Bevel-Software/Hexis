@@ -28,9 +28,10 @@
  * client refetches state from scratch.
  *
  * **Who receives what** — the bus picks the sessions that HEAR about an
- * event (focus for workspace events, owner for user events); before writing
- * it, the route asks `EventDelivery` whether this session's person may have
- * it, and in what form (`events-delivery.ts`). Live fan-out and replay go
+ * event (focus for workspace events, owner for user events, and every
+ * session for an agent's tool calls); before writing it, the route asks the
+ * delivery rule (`IEventDelivery`) whether this session's person may have it,
+ * and in what form (`events-delivery.ts`). Live fan-out and replay go
  * through the same rule, and through one ordered queue per session, so a
  * slow verdict never reorders a session's stream.
  *
@@ -46,7 +47,7 @@ const log = logger('events');
 import express from 'express';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
-import type { EventDelivery } from './events-delivery.js';
+import type { IEventDelivery } from './events-delivery.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /** Interval between SSE keep-alive comments (ms). 25 s sits comfortably under
@@ -83,7 +84,7 @@ interface ActiveSession {
    *
    * The client declares the list, and may name any workspace in it: this is
    * a delivery filter, not an access check. The access check is the
-   * `EventDelivery` rule every event passes on its way to the session.
+   * delivery rule (`IEventDelivery`) every event passes on its way to the session.
    */
   focusedWorkspaceIds: string[];
   /** Set when the SSE connection closes. Used by the focus POST so a
@@ -106,7 +107,7 @@ interface ActiveSession {
 export function createEventsRoutes(
   bus: WorkflowEventBus,
   authMiddleware: express.RequestHandler,
-  delivery: EventDelivery,
+  delivery: IEventDelivery,
 ): express.Router {
   const router = express.Router();
 

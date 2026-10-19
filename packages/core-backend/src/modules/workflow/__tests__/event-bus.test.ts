@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
-import { WorkflowEventBus } from '../event-bus.js';
+import { WorkflowEventBus } from '../index.js';
 
 /**
  * Make a `Subscriber`-compatible spy. Returns the spy + a getter for

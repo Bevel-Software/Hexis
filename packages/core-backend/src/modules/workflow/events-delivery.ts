@@ -16,28 +16,32 @@
  *     change-request tools judge it.
  *   - `change-request-opened`: the person may see the request, as
  *     `get_change_request` and the request list judge it.
- *   - `git-sync-failed`: a person who may not read the workspace's root gets
- *     the event with git's words replaced by a fixed sentence.
+ *   - `git-sync-failed`: the event names the workspace's root and, for a sync
+ *     conflict, each conflicted file (its `reason` quotes them too). The person
+ *     gets the paths they may read; git's words reach only a person who may
+ *     read the root and every path the conflict names, and everyone else gets
+ *     a fixed sentence.
  *   - `agent-tool-call`: the person whose agent made the call, and admins.
  *
  * Every other kind is delivered as it is. A verdict that cannot be reached
- * (the access tree fails to load, the request cannot be read) withholds:
- * failing closed costs a live refresh, failing open names a file.
+ * (the access tree fails to load, the request cannot be read) withholds, or
+ * for `git-sync-failed` redacts: failing closed costs a live refresh, failing
+ * open names a file.
  *
  * Nothing here changes what publishers emit; the rule only reads the event.
  */
 
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
-import { canReadWorkspacePath } from '../access-model/kb-read-filter.js';
+import type { IAccessControl } from '../access/index.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import { canReadWorkspacePath } from '../access-model/index.js';
 import type { ScopeCaller, ScopedDetail } from './agent-tools/change-request-read.tools.js';
 
 const log = logger('events');
 
-/** What a `git-sync-failed` says to a person who may not read the workspace's root. */
-export const GIT_SYNC_FAILED_REDACTED_REASON = 'The last push did not land.';
+/** What a `git-sync-failed` says in place of git's words. */
+const GIT_SYNC_FAILED_REDACTED_REASON = 'The last push did not land.';
 
 /** The person behind a session, as the auth middleware named them. */
 export interface EventViewer {
@@ -53,13 +57,24 @@ export interface EventViewer {
 export interface EventAccess {
   /** May `email` read the workspace-relative `wsPath` on `workspaceId` — the file routes' verdict. */
   mayReadPath(workspaceId: string, email: string, wsPath: string): Promise<boolean>;
-  /** May `email` read the root of `workspaceId`. */
-  mayReadRoot(workspaceId: string, email: string): Promise<boolean>;
+  /** May `email` read the KB-repo-relative `repoPath` on `workspaceId`; `''` is the root. */
+  mayReadRepoPath(workspaceId: string, email: string, repoPath: string): Promise<boolean>;
   /** May `email` see change request `number` at all — what `get_change_request` answers 404 for, as a no. */
   maySeeChangeRequest(number: number, email: string): Promise<boolean>;
   /** May request `number` name `path` to `email` — its approvals and comments are shown on the same rule. */
   mayShowChangeRequestPath(number: number, email: string, path: string): Promise<boolean>;
   isAdmin(email: string): Promise<boolean>;
+}
+
+/**
+ * What the events route asks of the rule. The route depends on this, never on
+ * `EventDelivery`, so the rule can be substituted behind it.
+ */
+export interface IEventDelivery {
+  /** The event as `viewer` may receive it: itself, a redacted copy, or null. Never rejects. */
+  judge(event: WorkflowEvent, viewer: EventViewer): Promise<WorkflowEvent | null>;
+  /** Whether `viewer` is an admin. Never rejects; a failure is a no. */
+  isAdmin(viewer: EventViewer): Promise<boolean>;
 }
 
 /** The deployment's `EventAccess`: the access service the file routes use, and the change-request scope the tools use. */
@@ -83,7 +98,7 @@ export function createEventAccess(deps: {
         deps.kbDirName,
         wsPath,
       ),
-    mayReadRoot: (workspaceId, email) => deps.accessControl.canRead(workspaceId, email, ''),
+    mayReadRepoPath: (workspaceId, email, repoPath) => deps.accessControl.canRead(workspaceId, email, repoPath),
     maySeeChangeRequest: (number, email) => deps.maySee(caller(email), number),
     mayShowChangeRequestPath: async (number, email, path) => {
       // `scopedDetail` answers a request the person may not see with a 404,
@@ -99,7 +114,7 @@ export function createEventAccess(deps: {
  * The event as `viewer` may receive it: the event itself, a redacted copy, or
  * null for nothing at all.
  */
-export async function deliveryFor(
+async function deliveryFor(
   event: WorkflowEvent,
   viewer: EventViewer,
   access: EventAccess,
@@ -112,7 +127,7 @@ export async function deliveryFor(
       case 'change-request-opened':
         return email && (await access.maySeeChangeRequest(event.number, email)) ? event : null;
       case 'git-sync-failed':
-        return email && (await access.mayReadRoot(event.workspaceId, email)) ? event : redactGitSyncFailed(event);
+        return email ? await gitSyncFailedFor(event, email, access) : redactGitSyncFailed(event, []);
       case 'agent-tool-call':
         return viewer.userId === event.forUserId || (email && (await access.isAdmin(email))) ? event : null;
     }
@@ -123,8 +138,26 @@ export async function deliveryFor(
     return event;
   } catch (err) {
     log.warn(`delivery verdict failed for event id=${event.id} kind=${event.kind} user=${viewer.userId}; withheld`, { err });
-    return event.kind === 'git-sync-failed' ? redactGitSyncFailed(event) : null;
+    return event.kind === 'git-sync-failed' ? redactGitSyncFailed(event, []) : null;
   }
+}
+
+type GitSyncFailed = Extract<WorkflowEvent, { kind: 'git-sync-failed' }>;
+
+/**
+ * Every path the event names is judged: the root, which git's words are about,
+ * and each conflicted file, which a conflict's `reason` also quotes. Git's
+ * words go out only when every one of them is readable; otherwise the person
+ * keeps the conflicted files they may read and a fixed sentence.
+ */
+async function gitSyncFailedFor(event: GitSyncFailed, email: string, access: EventAccess): Promise<WorkflowEvent> {
+  const conflicted = event.conflictedPaths ?? [];
+  const [root, ...each] = await Promise.all([
+    access.mayReadRepoPath(event.workspaceId, email, ''),
+    ...conflicted.map((p) => access.mayReadRepoPath(event.workspaceId, email, p)),
+  ]);
+  const readable = conflicted.filter((_, i) => each[i]);
+  return root && readable.length === conflicted.length ? event : redactGitSyncFailed(event, readable);
 }
 
 function pathOnWorkspace(event: WorkflowEvent): { workspaceId: string; path: string } | null {
@@ -134,10 +167,14 @@ function pathOnWorkspace(event: WorkflowEvent): { workspaceId: string; path: str
     : null;
 }
 
-/** Same shape, so a client parses it as before; git's words and the paths a conflict names are gone. */
-function redactGitSyncFailed(event: Extract<WorkflowEvent, { kind: 'git-sync-failed' }>): WorkflowEvent {
-  const redacted = { ...event, reason: GIT_SYNC_FAILED_REDACTED_REASON };
-  delete redacted.conflictedPaths;
+/**
+ * Same shape, so a client parses it as before: git's words are gone, and of
+ * the conflicted files only `readable` remain (none, the key absent).
+ */
+function redactGitSyncFailed(event: GitSyncFailed, readable: string[]): WorkflowEvent {
+  const redacted: GitSyncFailed = { ...event, reason: GIT_SYNC_FAILED_REDACTED_REASON };
+  if (readable.length > 0) redacted.conflictedPaths = readable;
+  else delete redacted.conflictedPaths;
   return redacted;
 }
 
@@ -148,7 +185,7 @@ function redactGitSyncFailed(event: Extract<WorkflowEvent, { kind: 'git-sync-fai
  * reconnect asks again, and a grant or a revocation since the event was first
  * delivered decides what the replay carries.
  */
-export class EventDelivery {
+export class EventDelivery implements IEventDelivery {
   private readonly inFlight = new Map<string, Promise<WorkflowEvent | null>>();
 
   constructor(private readonly access: EventAccess) {}

@@ -13,8 +13,7 @@ import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
-import { createEventsRoutes } from '../modules/workflow/events.routes.js';
-import { createEventAccess, EventDelivery } from '../modules/workflow/events-delivery.js';
+import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/workflow/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';

@@ -3,16 +3,17 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WorkflowEvent, WorkflowEventPayload } from '@bevel-software/platform-shared';
-import { WorkflowEventBus } from '../event-bus.js';
-import { createEventsRoutes } from '../events.routes.js';
 import {
+  WorkflowEventBus,
+  createEventsRoutes,
   EventDelivery,
   createEventAccess,
-  GIT_SYNC_FAILED_REDACTED_REASON,
-  deliveryFor,
   type EventAccess,
-} from '../events-delivery.js';
-import type { ScopeCaller, ScopedDetail } from '../agent-tools/change-request-read.tools.js';
+  type EventViewer,
+} from '../index.js';
+
+/** What a `git-sync-failed` says in place of git's words. */
+const REDACTED_REASON = 'The last push did not land.';
 
 /**
  * The events route writes an event to a session only when the session's
@@ -31,13 +32,15 @@ const USERS: Record<string, { email: string; admin: boolean }> = {
   alice: { email: 'alice@example.com', admin: false },
   bob: { email: 'bob@example.com', admin: false },
   root: { email: 'root@example.com', admin: true },
+  /** Reads the root, like Alice, but not `Finance/`: a folder denied below a readable root. */
+  carol: { email: 'carol@example.com', admin: false },
 };
 
 /** Fake of the access service the file routes use, and of the change-request scope the tools use. */
 function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => void } {
   let bobReadsFinance = false;
   const reads = (email: string, path: string) =>
-    email !== USERS.bob!.email || bobReadsFinance || !path.includes('Finance/');
+    !path.includes('Finance/') || (email === USERS.bob!.email ? bobReadsFinance : email !== USERS.carol!.email);
   return {
     grantBob: () => {
       bobReadsFinance = true;
@@ -46,7 +49,8 @@ function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => vo
       bobReadsFinance = false;
     },
     mayReadPath: async (_ws, email, path) => reads(email, path),
-    mayReadRoot: async (_ws, email) => email !== USERS.bob!.email,
+    mayReadRepoPath: async (_ws, email, repoPath) =>
+      repoPath === '' ? email !== USERS.bob!.email : reads(email, `knowledge-base/${repoPath}`),
     maySeeChangeRequest: async (number, email) =>
       reads(email, number === FINANCE_REQUEST ? FINANCE : PUBLIC),
     mayShowChangeRequestPath: async (number, email, path) =>
@@ -372,67 +376,92 @@ describe('events route — delivery rule', () => {
     }
     // Measured and reported, not asserted: this times HTTP writes and the
     // test client's parsing as well as the check, and under a loaded suite
-    // that is noise. The check's own 50 ms budget is pinned in `deliveryFor`
+    // that is noise. The check's own 50 ms budget is pinned in `EventDelivery`
     // below, without a socket in the way.
     const { median, max } = spread(samples);
     console.log(`100-session fan-out through the route: median ${median.toFixed(2)} ms, max ${max.toFixed(2)} ms per event`);
     expect(sessions.filter((s) => s.events.some((e) => e.kind === 'file-changed'))).toHaveLength(50);
   });
 
-  it("git-sync-failed carries git's words only to who may read the root", async () => {
+  it("git-sync-failed carries git's words only to who may read the root and every conflicted file", async () => {
     const bus = new WorkflowEventBus();
     const base = listen(bus, fakeAccess());
-    const alice = await open(base, 'alice', 's-alice');
-    const bob = await open(base, 'bob', 's-bob');
-    await focus(base, 'alice', 's-alice');
-    await focus(base, 'bob', 's-bob');
+    const people = ['alice', 'bob', 'carol'] as const;
+    const [alice, bob, carol] = await Promise.all(people.map((u) => open(base, u, `s-${u}`)));
+    for (const u of people) await focus(base, u, `s-${u}`);
 
+    // A sync conflict's reason quotes its files, as `syncConflictMessage` does;
+    // `conflictedPaths` are KB-repo-relative.
+    const reason = 'main is not in sync yet: Finance/Budget.md, Public/Notes.md changed both in Hexis and on the git host.';
     await emitAndSettle(
       bus,
-      [{ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: 'conflict in Finance/Budget.md', conflictedPaths: [FINANCE] }],
-      alice,
-      bob,
+      [{ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason, conflictedPaths: ['Finance/Budget.md', 'Public/Notes.md'] }],
+      alice!,
+      bob!,
+      carol!,
     );
 
-    const forAlice = alice.events.find((e) => e.kind === 'git-sync-failed');
+    const failure = (s: Stream) => s.events.find((e) => e.kind === 'git-sync-failed');
+    expect(failure(alice!)).toMatchObject({ reason, conflictedPaths: ['Finance/Budget.md', 'Public/Notes.md'] });
+    // Carol reads the root but not `Finance/`: the reason would name its file.
+    expect(failure(carol!)).toEqual(
+      expect.objectContaining({ workspaceId: WS, branch: WS, reason: REDACTED_REASON, conflictedPaths: ['Public/Notes.md'] }),
+    );
+    // Bob may not read the root: never git's words, and only the files he may read.
+    expect(failure(bob!)).toEqual(
+      expect.objectContaining({ workspaceId: WS, branch: WS, reason: REDACTED_REASON, conflictedPaths: ['Public/Notes.md'] }),
+    );
+  });
+
+  it('git-sync-failed with no conflict keeps its sentence for a root reader and redacts it for the rest', async () => {
+    const bus = new WorkflowEventBus();
+    const base = listen(bus, fakeAccess());
+    const carol = await open(base, 'carol', 's-carol');
+    const bob = await open(base, 'bob', 's-bob');
+    await focus(base, 'carol', 's-carol');
+    await focus(base, 'bob', 's-bob');
+
+    await emitAndSettle(bus, [{ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: 'The host refused the push.' }], carol, bob);
+
+    expect(carol.events.find((e) => e.kind === 'git-sync-failed')).toMatchObject({ reason: 'The host refused the push.' });
     const forBob = bob.events.find((e) => e.kind === 'git-sync-failed');
-    expect(forAlice).toMatchObject({ reason: 'conflict in Finance/Budget.md', conflictedPaths: [FINANCE] });
-    expect(forBob).toMatchObject({ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: GIT_SYNC_FAILED_REDACTED_REASON });
+    expect(forBob).toMatchObject({ reason: REDACTED_REASON });
     expect(forBob).not.toHaveProperty('conflictedPaths');
   });
 });
 
-describe('deliveryFor', () => {
+describe('EventDelivery', () => {
+  const judge = (event: WorkflowEvent, viewer: EventViewer, access: EventAccess) => new EventDelivery(access).judge(event, viewer);
   const stamp = (p: WorkflowEventPayload, id = 1): WorkflowEvent => ({ id, ts: '2026-10-19T00:00:00.000Z', ...p }) as WorkflowEvent;
   const toolCall = stamp({ kind: 'agent-tool-call', forUserId: 'alice', threadId: 't', tool: 'write_file', summary: `writing ${FINANCE}` });
 
   it('agent-tool-call reaches the person whose agent made the call, and admins, nobody else', async () => {
     const access = fakeAccess();
-    expect(await deliveryFor(toolCall, { userId: 'alice', email: USERS.alice!.email }, access)).toBe(toolCall);
-    expect(await deliveryFor(toolCall, { userId: 'root', email: USERS.root!.email }, access)).toBe(toolCall);
-    expect(await deliveryFor(toolCall, { userId: 'bob', email: USERS.bob!.email }, access)).toBeNull();
+    expect(await judge(toolCall, { userId: 'alice', email: USERS.alice!.email }, access)).toBe(toolCall);
+    expect(await judge(toolCall, { userId: 'root', email: USERS.root!.email }, access)).toBe(toolCall);
+    expect(await judge(toolCall, { userId: 'bob', email: USERS.bob!.email }, access)).toBeNull();
   });
 
   it('withholds when a verdict cannot be reached', async () => {
     const failing: EventAccess = {
       ...fakeAccess(),
       mayReadPath: () => Promise.reject(new Error('access tree unreadable')),
-      mayReadRoot: () => Promise.reject(new Error('access tree unreadable')),
+      mayReadRepoPath: () => Promise.reject(new Error('access tree unreadable')),
     };
     const viewer = { userId: 'alice', email: USERS.alice!.email };
-    expect(await deliveryFor(stamp(fileChanged(PUBLIC)), viewer, failing)).toBeNull();
+    expect(await judge(stamp(fileChanged(PUBLIC)), viewer, failing)).toBeNull();
     expect(
-      await deliveryFor(stamp({ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: 'git said' }), viewer, failing),
-    ).toMatchObject({ reason: GIT_SYNC_FAILED_REDACTED_REASON });
+      await judge(stamp({ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: 'git said' }), viewer, failing),
+    ).toMatchObject({ reason: REDACTED_REASON });
   });
 
   it('withholds a named thing from a session with no email', async () => {
-    expect(await deliveryFor(stamp(fileChanged(PUBLIC)), { userId: 'x', email: undefined }, fakeAccess())).toBeNull();
+    expect(await judge(stamp(fileChanged(PUBLIC)), { userId: 'x', email: undefined }, fakeAccess())).toBeNull();
   });
 
   it('delivers kinds that name nothing as they are', async () => {
     const merged = stamp({ kind: 'change-request-merged', number: FINANCE_REQUEST });
-    expect(await deliveryFor(merged, { userId: 'bob', email: USERS.bob!.email }, fakeAccess())).toBe(merged);
+    expect(await judge(merged, { userId: 'bob', email: USERS.bob!.email }, fakeAccess())).toBe(merged);
   });
 
   it('judges a 100-session fan-out in under 50 ms per event', async () => {
@@ -483,6 +512,7 @@ describe('deliveryFor', () => {
 });
 
 describe('createEventAccess', () => {
+  type Deps = Parameters<typeof createEventAccess>[0];
   const calls: string[] = [];
   const access = createEventAccess({
     accessControl: {
@@ -492,18 +522,19 @@ describe('createEventAccess', () => {
     kbDirName: 'knowledge-base',
     scopedDetail: async (caller, number) => {
       if (number === FINANCE_REQUEST && caller.user.email === USERS.bob!.email) throw new Error('404');
-      return { mayShow: (path: string) => path !== 'hidden.md' } as ScopedDetail;
+      return { mayShow: (path: string) => path !== 'hidden.md' } as Awaited<ReturnType<Deps['scopedDetail']>>;
     },
     maySee: async (caller, number) => !(number === FINANCE_REQUEST && caller.user.email === USERS.bob!.email),
-    services: {} as Omit<ScopeCaller, 'user'>,
+    services: {} as Deps['services'],
   });
 
   it('judges a path as the file routes do: repo-relative inside the KB, open outside it', async () => {
     expect(await access.mayReadPath(WS, 'a@x', FINANCE)).toBe(false);
     expect(await access.mayReadPath(WS, 'a@x', PUBLIC)).toBe(true);
     expect(await access.mayReadPath(WS, 'a@x', '.hexis/state.json')).toBe(true);
-    expect(await access.mayReadRoot(WS, 'a@x')).toBe(true);
-    expect(calls).toEqual([`${WS}|a@x|Finance/Budget.md`, `${WS}|a@x|Public/Notes.md`, `${WS}|a@x|`]);
+    expect(await access.mayReadRepoPath(WS, 'a@x', '')).toBe(true);
+    expect(await access.mayReadRepoPath(WS, 'a@x', 'Finance/Budget.md')).toBe(false);
+    expect(calls).toEqual([`${WS}|a@x|Finance/Budget.md`, `${WS}|a@x|Public/Notes.md`, `${WS}|a@x|`, `${WS}|a@x|Finance/Budget.md`]);
   });
 
   it("judges a request's path by the tools' scope, a hidden request refusing", async () => {
