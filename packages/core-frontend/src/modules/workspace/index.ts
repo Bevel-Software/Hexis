@@ -25,16 +25,25 @@
  *    to the file page when it needs tools and the viewer picks Open in the
  *    platform (a skill page provides it; without it the renderer opens the
  *    file's own address).
+ *  - `useHtmlToolBridge`, `PageToolsContext` and their types: the page
+ *    tool bridge a distribution's own HTML renderer calls to answer a page's
+ *    `window.bevel.tools` exactly as the app's renderer does, and the
+ *    file page's provider its tests mount it under.
  */
 export {
   CanDownloadContext,
   isViewOnlyFile,
+  OpenPageInPlatformContext,
+  PageToolsContext,
   pickFileRenderer,
   RendererSurfaceContext,
+  useHtmlToolBridge,
   useKbGraphLoader,
   useRendererSurface,
+  type HtmlToolBridgeOptions,
+  type HtmlToolBridgeResult,
+  type PageTools,
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
 export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
-export { OpenPageInPlatformContext } from './components/renderers/htmlToolBridge';

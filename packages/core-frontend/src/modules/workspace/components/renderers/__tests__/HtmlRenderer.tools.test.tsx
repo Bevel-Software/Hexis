@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
-import { OpenPageInPlatformContext, PageToolsContext } from '../htmlToolBridge';
+import { OpenPageInPlatformContext, PageToolsContext, RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
 import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
+import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
  * `window.bevel.tools` as the app gives it: present on the file page, `null`
@@ -20,19 +20,25 @@ const PAGE = 'Dashboards/Roadmap.html';
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 
-/** The page on the app's file page: in the app, with the file page's provider. */
+/**
+ * The page on the app's file page: in the app, with the file page's provider.
+ * `receive` is the file's content changing under the open page (a teammate's
+ * save arriving): the same frame, a new document in it.
+ */
 function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
-  return render(
+  const tree = (content: string) => (
     <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
       <WorkspaceContext.Provider value={workspace}>
         <GitContext.Provider value={git}>
           <PageToolsContext.Provider value={{ pagePath: PAGE }}>
-            <HtmlRenderer content="<h1>Roadmap</h1>" filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
+            <HtmlRenderer content={content} filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
           </PageToolsContext.Provider>
         </GitContext.Provider>
       </WorkspaceContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const result = render(tree('<h1>Roadmap</h1>'));
+  return { ...result, receive: (content: string) => result.rerender(tree(content)) };
 }
 
 /** The page in the app but not on the file page — a skill page, a history preview. */
@@ -78,37 +84,6 @@ async function frameOf(container: HTMLElement): Promise<HTMLIFrameElement> {
     if (!el) throw new Error('no frame yet');
     return el;
   });
-}
-
-/** Post `data` as the frame would, and collect what the app posts back to it. */
-function frameChannel(iframe: HTMLIFrameElement) {
-  const win = iframe.contentWindow!;
-  const replies: Array<Record<string, unknown>> = [];
-  vi.spyOn(win, 'postMessage').mockImplementation(((msg: Record<string, unknown>) => void replies.push(msg)) as never);
-  return {
-    replies,
-    post: (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: win })),
-  };
-}
-
-/** The hosted server and the manual, as the app's fetch sees them. */
-function stubServer() {
-  const mcp: string[] = [];
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === '/api/agent/utcp') return Response.json({ tools: [{ name: 'read_file', tags: [] }, { name: 'edit_file', tags: ['write'] }] });
-      if (url === '/api/mcp/page-refusals') return new Response(null, { status: 204 });
-      const body = JSON.parse(String(init!.body)) as { id: number; params: { name: string } };
-      mcp.push(body.params.name);
-      return Response.json({
-        jsonrpc: '2.0',
-        id: body.id,
-        result: { content: [{ type: 'text', text: JSON.stringify({ ran: body.params.name }) }] },
-      });
-    }),
-  );
-  return { mcp };
 }
 
 afterEach(() => {
@@ -268,5 +243,74 @@ describe('the platform card where there are no tools', () => {
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'bevel.tools.require', requestId: 'x' }, source: window }));
     await new Promise((r) => setTimeout(r, 10));
     expect(screen.queryByText(/only available in the platform/)).toBeNull();
+  });
+});
+
+describe('a call whose view ended before it was decided', () => {
+  it('is answered closed in the same frame, shows no card and runs nothing when the document changes under it', async () => {
+    const server = stubServer({ holdManual: true });
+    const page = onFilePage();
+    const iframe = await frameOf(page.container);
+    const frame = frameChannel(iframe);
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
+
+    // The lookup of whether edit_file writes is still in flight when the page's document is replaced.
+    page.receive('<h1>Roadmap, v2</h1>');
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('Roadmap, v2'));
+    expect(page.container.querySelector('iframe')).toBe(iframe);
+    server.releaseManual();
+
+    await waitFor(() =>
+      expect(frame.replies.at(-1)).toEqual({
+        type: 'bevel.tool.response',
+        requestId: 'w1',
+        ok: false,
+        error: 'The page was closed before the viewer answered.',
+        code: 'closed',
+      }),
+    );
+    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(server.mcp).toEqual([]);
+  });
+
+  it('does not run on an Allow the ended view gave', async () => {
+    const server = stubServer({ holdManual: true });
+    const page = onFilePage();
+    const iframe = await frameOf(page.container);
+    const frame = frameChannel(iframe);
+    // A chain asks without the manual: Allow it, so the view holds an Allow.
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callToolChain', args: ['return 1'] });
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+
+    frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
+    page.receive('<h1>Roadmap, v2</h1>');
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('Roadmap, v2'));
+    server.releaseManual();
+
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: false, code: 'closed' }));
+    expect(server.mcp).toEqual(['call_tool_chain']);
+  });
+
+  it('opens no card in the reloaded view and sends the server nothing when the viewer reloads first', async () => {
+    const server = stubServer({ holdManual: true });
+    const { container } = onFilePage();
+    const frame = frameChannel(await frameOf(container));
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
+
+    fireEvent.click(screen.getByTitle('Reload preview'));
+    const reloaded = frameChannel(await waitFor(() => {
+      const el = container.querySelector('iframe')!;
+      if (el.contentWindow === null) throw new Error('not yet');
+      return el;
+    }));
+    server.releaseManual();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(server.mcp).toEqual([]);
+    // Neither document hears an answer meant for a view that is gone.
+    expect(frame.replies).toEqual([]);
+    expect(reloaded.replies).toEqual([]);
   });
 });

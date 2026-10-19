@@ -407,7 +407,7 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * The frame has no network (`connect-src 'none'`), so a page reaches tools the
  * way it reaches navigation: it posts `bevel.tool.call` `{ requestId, fn, args }`
  * to the parent and awaits `bevel.tool.response` `{ requestId, ok, result |
- * error, code? }`. The parent (`HtmlRenderer`, through `htmlToolBridge.ts`)
+ * error, code? }`. The parent (an HTML renderer, through `useHtmlToolBridge`)
  * answers each one over the hosted MCP server with the viewer's session —
  * after asking the viewer, on the first call that writes. Nothing about the
  * consent lives in the frame: the card is the app's, drawn outside it, and a

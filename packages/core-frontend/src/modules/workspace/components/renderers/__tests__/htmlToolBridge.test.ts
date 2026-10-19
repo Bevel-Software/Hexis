@@ -214,6 +214,31 @@ describe('answering a page: reads at once, the first write asks', () => {
     expect(ask).toHaveBeenCalledTimes(1);
     answer(true);
   });
+
+  it('answers `closed` and runs nothing once the view is closed — asked for nothing, Allow or no Allow', async () => {
+    const { client, consent, ask, answer, server } = setup();
+    const allowed = answerToolCall(call('callToolChain', 'return 1'), client, consent);
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    answer(true);
+    expect(await allowed).toMatchObject({ ok: true });
+
+    consent.close();
+    for (const late of [call('callTool', 'edit_file', {}), call('callTool', 'read_file', {}), call('callToolChain', 'return 2')]) {
+      expect(await answerToolCall(late, client, consent)).toMatchObject({ ok: false, code: 'closed' });
+    }
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(server.mcpCalls()).toEqual(['call_tool_chain']);
+  });
+
+  it('answers `closed` when the view closes while its card is still open, whatever the card later says', async () => {
+    const { client, consent, ask, answer, server } = setup();
+    const pending = answerToolCall(call('callTool', 'edit_file', {}), client, consent);
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    consent.close();
+    answer(true);
+    expect(await pending).toMatchObject({ ok: false, code: 'closed' });
+    expect(server.mcpCalls()).toEqual([]);
+  });
 });
 
 describe('the frame messages the app reads', () => {
