@@ -308,7 +308,7 @@ describe('BevelOAuthProvider', () => {
     ]);
     const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp']);
     // The consume and the mint landed in one transaction.
-    expect((db as any).transaction).toHaveBeenCalledTimes(1);
+    expect((db as unknown as { transaction: ReturnType<typeof vi.fn> }).transaction).toHaveBeenCalledTimes(1);
     expect(tokens.scope).toBe('mcp');
     // Read by hash AND client first, judged, and only then consumed.
     expect(render(captured.where[0]).sql).toMatch(/"oauth_tokens"."refresh_token_hash" = .* and "oauth_tokens"."client_id" = /);
