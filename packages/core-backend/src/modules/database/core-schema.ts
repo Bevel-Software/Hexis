@@ -569,6 +569,16 @@ export const oauthTokens = pgTable('oauth_tokens', {
   expiresAt: timestamp('expires_at').notNull(),
   refreshExpiresAt: timestamp('refresh_expires_at'),
   revokedAt: timestamp('revoked_at'),
+  /**
+   * When a refresh of this row's refresh token minted its successor. Set by
+   * rotation and never by a revoke, so the two are told apart: a rotated
+   * row's access token still verifies until its own expiry, and its refresh
+   * token is honoured once more within the reuse grace (see
+   * `exchangeRefreshToken`); a revoked row does neither. Null on a row whose
+   * refresh token has not been used, and on rows from before the column
+   * existed, which rotation then marks as it does any other.
+   */
+  rotatedAt: timestamp('rotated_at'),
   lastUsedAt: timestamp('last_used_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => ({

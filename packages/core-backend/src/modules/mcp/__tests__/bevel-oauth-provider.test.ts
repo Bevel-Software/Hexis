@@ -288,13 +288,13 @@ describe('BevelOAuthProvider', () => {
     ).rejects.toBeInstanceOf(InvalidGrantError);
   });
 
-  it('exchangeRefreshToken rotates (revokes old row, mints new pair) and only narrows scope', async () => {
+  it('exchangeRefreshToken rotates (retires the old row, mints a new pair) and only narrows scope', async () => {
     const oldRow = {
       clientId: 'client-1', userId: 'user-1', connectionId: 'conn-1', scope: 'mcp extra', resource: null,
       refreshExpiresAt: new Date(Date.now() + 60_000),
     };
     const { provider, captured, db } = makeProvider([
-      [oldRow] /* revoke.returning */,
+      [oldRow] /* rotate.returning */,
       [{ id: 'conn-1' }] /* the token's connection, still live */,
       [] /* the (throttled) use stamp's first-use claim: stamped before */,
       undefined, undefined, /* prunes */
@@ -303,6 +303,12 @@ describe('BevelOAuthProvider', () => {
     ]);
     const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp']);
     expect(tokens.scope).toBe('mcp');
+    // The old row is RETIRED, not revoked: its access token keeps working for
+    // its own hour, so a runner still holding it is not cut off by a refresh
+    // another runner made. Only a fresh row is retired — one already rotated
+    // or revoked is the replay path's business.
+    expect(Object.keys(captured.set[0])).toEqual(['rotatedAt']);
+    expect(render(captured.where[0]).sql).toMatch(/"oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" is null/);
     // A refresh STAYS on its token's connection: one connection spans every
     // token the agent holds, nothing is looked up by (user, agent) and no
     // second row is inserted for it.
@@ -322,11 +328,61 @@ describe('BevelOAuthProvider', () => {
     await expect(
       makeProvider([[oldRow]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp', 'admin']),
     ).rejects.toBeInstanceOf(InvalidScopeError);
+  });
 
-    // Unknown/already-rotated refresh token.
-    await expect(
-      makeProvider([[]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_gone'),
-    ).rejects.toBeInstanceOf(InvalidGrantError);
+  /** A row the rotation did not match, as the replay path then reads it. */
+  const rotatedRow = (ago: number) => ({
+    clientId: 'client-1', userId: 'user-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+    refreshExpiresAt: new Date(Date.now() + 60_000),
+    revokedAt: null,
+    rotatedAt: new Date(Date.now() - ago),
+  });
+
+  it('exchangeRefreshToken honours a refresh token rotated within the reuse grace once more — the loser of a double refresh gets a pair too', async () => {
+    // Claude's hosted apps refresh proactively and reactively, and a
+    // scheduled task refreshes beside the chat that shares its connector:
+    // the same token arrives twice. The second arrival, 10 s after the first
+    // rotated it, is answered with a fresh pair on the same connection rather
+    // than the invalid_grant a client reads as "re-authorize".
+    const info = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { provider, captured } = makeProvider([
+      [] /* the rotate matches nothing: not a fresh token */,
+      [rotatedRow(10_000)] /* the row behind the hash, for this client */,
+      [{ id: 'conn-1' }] /* its connection, live */,
+      [] /* first-use claim */,
+      undefined, undefined, /* prunes */
+      undefined /* token insert */,
+      undefined /* the ordinary use stamp */,
+    ]);
+    try {
+      const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');
+      expect(tokens.refresh_token).toMatch(/^bevel-mcp_r_/);
+      expect(captured.values).toHaveLength(1);
+      expect(captured.values[0]).toMatchObject({ connectionId: 'conn-1', userId: 'user-1' });
+      // Looked up by hash AND client: another client's token is never honoured.
+      expect(render(captured.where[1]).sql).toMatch(/"oauth_tokens"."refresh_token_hash" = .* and "oauth_tokens"."client_id" = /);
+      expect(info).toHaveBeenCalledWith(expect.stringMatching(/refresh replayed 10 s ago, within the reuse grace/), expect.anything());
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it.each([
+    ['unknown to this client', [], /refresh refused: unknown refresh token for this client/],
+    ['revoked', [{ ...rotatedRow(10_000), rotatedAt: null, revokedAt: new Date() }], /refresh refused: refresh token revoked/],
+    ['rotated past the grace', [rotatedRow(120_000)], /refresh refused: refresh token rotated 120 s ago, past the 60 s reuse grace/],
+  ])('exchangeRefreshToken refuses a refresh token that is %s, mints nothing, and says why in the log', async (_what, seen, said) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { provider, captured } = makeProvider([[] /* not fresh */, seen /* what the hash resolves to */]);
+      await expect(provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old')).rejects.toBeInstanceOf(InvalidGrantError);
+      expect(captured.values).toHaveLength(0);
+      // The reason is in the log, never the token.
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(said), expect.anything());
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('bevel-mcp_r_old');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('exchangeRefreshToken refuses a token whose agent connection was revoked, minting nothing', async () => {
