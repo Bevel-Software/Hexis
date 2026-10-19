@@ -9,6 +9,8 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
 import { WorkflowValidationError, BranchNameError } from '../../../../shared/domain-errors.js';
+import { GitRunError, type IGitRunner } from '../../../../shared/git.contract.js';
+import { NodeGitRunner } from '../node-git-runner.js';
 
 const execFileAsync = promisify(execFile);
 const PROCESS_MAP_DIR = 'knowledge-base';
@@ -107,7 +109,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
     await commitFile(repo, 'Knowledge/Foo.md', 'line one\nline two\n', 'add line two');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'current-company-state',
@@ -115,6 +117,69 @@ describe('GitService.diffFileBetweenBranches', () => {
     );
     expect(diff).toContain('diff --git a/Knowledge/Foo.md b/Knowledge/Foo.md');
     expect(diff).toContain('+line two');
+  });
+
+  it('asks the caller\'s verdict at the two commits served, before the path is described at either', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext());
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\n', 'base');
+    await commitFile(repo, 'Docs/a.md', 'a\n', 'a folder');
+    const base = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+    await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\nline two\n', 'add line two');
+    const tip = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+
+    const asked: unknown[] = [];
+    // Local branches only: each side resolves to the one commit it was served from.
+    const sides = { from: [base], to: [tip] };
+    const { diff } = await svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', async (s) => {
+      asked.push(s);
+    });
+    expect(diff).toContain('+line two');
+    expect(asked).toEqual([sides]);
+
+    // A folder the caller may not read is refused as unreadable, never as a folder.
+    const refuse = async (s: unknown): Promise<void> => {
+      asked.push(s);
+      throw new WorkflowValidationError('not yours to read');
+    };
+    await expect(svc.diffFileBetweenBranches(workspaceId, 'Docs', 'current-company-state', 'alice/edit-foo', refuse)).rejects.toThrow(/not yours to read/);
+    expect(asked).toEqual([sides, sides]);
+  });
+
+  it('fails closed when a lookup of a side\'s other tip fails for any reason but absence: no diff, the verdict never asked', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\n', 'base');
+    await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
+    await commitFile(repo, 'Knowledge/Foo.md', 'line one\nline two\n', 'add line two');
+    const inner = new NodeGitRunner();
+    // The secondary lookup (`refs/remotes/origin/alice/edit-foo`, absent in
+    // this local-only repository) fails the way a corrupt repository or a
+    // deadline fails — not the way an absent ref answers.
+    let failure: GitRunError | null = null;
+    const gitRunner = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (failure && args[0] === 'rev-parse' && args.includes('refs/remotes/origin/alice/edit-foo')) throw failure;
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext(), undefined, null, gitRunner);
+    const asked: unknown[] = [];
+    const authorize = async (s: unknown): Promise<void> => { asked.push(s); };
+    for (const f of [
+      new GitRunError('git rev-parse failed', { exitCode: 128, stderr: 'fatal: bad object' }),
+      new GitRunError('git rev-parse timed out', { timedOut: true }),
+    ]) {
+      failure = f;
+      await expect(svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', authorize)).rejects.toBe(f);
+    }
+    expect(asked).toEqual([]);
+    // An absent ref is the one answer that is "no such commit": the diff goes on.
+    failure = null;
+    expect((await svc.diffFileBetweenBranches(workspaceId, 'Knowledge/Foo.md', 'current-company-state', 'alice/edit-foo', authorize)).diff).toContain('+line two');
+    expect(asked).toHaveLength(1);
   });
 
   it('returns the empty string when the file is identical on both branches', async () => {
@@ -130,7 +195,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // no edits to Same.md on the new branch
     await commitFile(repo, 'Knowledge/Other.md', 'sidecar\n', 'unrelated edit');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Same.md',
       'current-company-state',
@@ -151,7 +216,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/cleanup']);
     await deleteFileCommit(repo, 'Knowledge/Old.md', 'remove Old.md');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Old.md',
       'current-company-state',
@@ -173,7 +238,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/add-new']);
     await commitFile(repo, 'Knowledge/New.md', 'brand new\n', 'add New.md');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/New.md',
       'current-company-state',
@@ -211,7 +276,7 @@ describe('GitService.diffFileBetweenBranches', () => {
       testKbContext(),
     );
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'current-company-state',
@@ -240,7 +305,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/edit-foo']);
     await commitFile(repo, 'Knowledge/Foo.md', 'baseline\nedit\n', 'edit');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'knowledge-base/Knowledge/Foo.md',
       'current-company-state',
@@ -267,7 +332,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // and pressing save before sharing.
     await writeFile(repo, 'Knowledge/Foo.md', 'baseline\nfresh edit\n');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'current-company-state',
@@ -291,7 +356,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // Brand-new file, never committed — only on disk.
     await writeFile(repo, 'Knowledge/Brandnew.md', 'fresh content\n');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Brandnew.md',
       'current-company-state',
@@ -313,7 +378,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await runGit(repo, ['checkout', '-b', 'alice/draft']);
     await writeFile(repo, 'Knowledge/Brandnew.md', 'fresh content\n');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Brandnew.md',
       'alice/draft',
@@ -339,7 +404,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     // side. Lines added on current-company-state — i.e. the *removal* of
     // "draft edit" — should appear as `+` on the to side, and "draft edit"
     // should appear as `-`.
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       'Knowledge/Foo.md',
       'alice/edit-foo',
@@ -443,7 +508,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     await writeFile(repo, relPath, 'base content\nfeature edit\n');
     await svc.commitFile(workspaceId, user, relPath, 'feature edit');
 
-    const diff = await svc.diffFileBetweenBranches(
+    const { diff } = await svc.diffFileBetweenBranches(
       workspaceId,
       relPath,
       'current-company-state',

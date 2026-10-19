@@ -5,3 +5,4 @@
  */
 export type { WriteValidator } from './locking-filesystem.js';
 export { readRefSha, readRevSha, type RefFileAnswer } from './ref-files.js';
+export { gitDirOf, readGitfile } from './git-dir.js';

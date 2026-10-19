@@ -52,6 +52,7 @@ import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
+import { linkedAncestor } from '../../shared/no-link-below.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
@@ -644,18 +645,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
   private async assertNoLinkBelowBase(inputPath: string): Promise<void> {
     const absolute = this.resolveAbsolutePath(inputPath);
     if (!absolute) return;
-    const base = path.resolve(this.basePath);
-    let current = path.resolve(absolute);
-    const ancestors: string[] = [];
-    while (current.startsWith(base) && current !== base) {
-      ancestors.push(current);
-      current = path.dirname(current);
-    }
-    for (const ancestor of ancestors) {
-      const stat = await lstatOrNull(ancestor);
-      if (stat?.isSymbolicLink()) {
-        throw new Error(`"${inputPath}" is reached through a link, so nothing was moved.`);
-      }
+    if ((await linkedAncestor(this.basePath, absolute)) !== null) {
+      throw new Error(`"${inputPath}" is reached through a link, so nothing was moved.`);
     }
   }
 

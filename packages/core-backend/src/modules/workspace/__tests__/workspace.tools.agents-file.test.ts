@@ -1,5 +1,5 @@
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, afterAll } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
@@ -16,6 +16,11 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { WorkerPatternMatcher } from '../bounded-matcher.js';
+
+/** The grep matcher this file's harness wires, closed once the file is done. */
+const patternMatcher = new WorkerPatternMatcher();
+afterAll(() => patternMatcher.close());
 
 /**
  * What the platform TELLS AN AGENT about the guide.
@@ -52,6 +57,15 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     },
     new RoutineWritePolicyService(),
     {} as never,
+    // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    patternMatcher,
   );
   return listed(registry);
 }

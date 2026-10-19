@@ -6,6 +6,7 @@ import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * A rename never overwrites.
@@ -55,7 +56,7 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     // The inner `.git` is what lets `resolveWorkspaceDir` accept the workspace
     // without trying to clone.
     await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-    svc = new WorkspaceService(
+    svc = newWorkspaceService(
       root,
       'https://github.com/Bevel-Software/knowledge-base.git',
       testKbContext({ kbDirName: KB }),
