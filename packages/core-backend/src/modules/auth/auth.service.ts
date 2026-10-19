@@ -863,9 +863,9 @@ export class AuthService implements IAccountSwitchGuard {
   }
 
   /**
-   * Resolve a set of `authorId` hashes back to the app users that produced
-   * them. Used by the PR list to display the human who triggered each PR
-   * instead of the shared GitHub service account.
+   * The live accounts behind a set of addresses — the approvers of a change
+   * request just opened, which the workflow module hands to the deployment's
+   * notification listeners as people with accounts (`ApproverAccounts`).
    *
    * One indexed read through the email's blind index, never a scan of every
    * account: this is asked on every change request opened, and a deployment
