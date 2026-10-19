@@ -550,9 +550,10 @@ export const agentConnections = pgTable('agent_connections', {
  * `api_tokens`: plaintext shown only in the token response, SHA-256 hashes
  * stored, revoked-not-deleted so `last_used_at` keeps its audit value and a
  * revoked token can't be re-issued. One row per pair; refresh rotation
- * retires the old row (`rotated_at`) and inserts a new one, and the retired
- * row is revoked only when it is replayed once within the reuse grace, or by
- * a revoke.
+ * retires the old row (`rotated_at`) and inserts a new one. A retired row's
+ * access token still verifies until its own expiry, unless the row is then
+ * revoked: by a revoke, a sign-out, or its refresh token's one allowed replay
+ * within the reuse grace, which revokes it in the statement that admits it.
  *
  * `connection_id` names the {@link agentConnections} row the pair belongs to,
  * so every call made with the token is attributed to that agent and revoking
@@ -576,9 +577,11 @@ export const oauthTokens = pgTable('oauth_tokens', {
    * rotation and never by a revoke, so the two are told apart: a rotated
    * row's access token still verifies until its own expiry, and its refresh
    * token is honoured once more within the reuse grace (see
-   * `exchangeRefreshToken`); a revoked row does neither. Null on a row whose
-   * refresh token has not been used, and on rows from before the column
-   * existed, which rotation then marks as it does any other.
+   * `exchangeRefreshToken`), a replay that revokes the row — access token
+   * included — in the statement that admits it; a revoked row does neither.
+   * Null on a row whose refresh token has not been used, and on rows from
+   * before the column existed, which rotation then marks as it does any
+   * other.
    */
   rotatedAt: timestamp('rotated_at'),
   lastUsedAt: timestamp('last_used_at'),

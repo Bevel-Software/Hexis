@@ -277,46 +277,51 @@ export class BevelOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const now = new Date();
     const hash = hashToken(refreshToken);
-    // Rotation: atomically retire the presented refresh token; the winner of
-    // a concurrent double-refresh gets the new pair from here. Retired, not
-    // revoked: the pair's ACCESS token stays good until its own expiry, an
-    // hour at most, so a runner still holding it is not cut off mid-task by
-    // a refresh another runner made; a revoke or a sign-out still ends it at
-    // once. `clientId` is IN the predicate so a caller presenting a valid
-    // refresh token under the WRONG client can't retire another client's
-    // session — the update matches nothing and their token stays live.
-    const [fresh] = await this.deps.db
-      .update(oauthTokens)
-      .set({ rotatedAt: now })
-      .where(
-        and(
-          eq(oauthTokens.refreshTokenHash, hash),
-          eq(oauthTokens.clientId, client.client_id),
-          isNull(oauthTokens.revokedAt),
-          isNull(oauthTokens.rotatedAt),
-        ),
-      )
-      .returning();
-    // Not fresh: the loser of a double refresh, or a token that is gone. See
-    // `replayedWithinGrace` — a token rotated moments ago by the same client
-    // is honoured once more; anything else is refused, and every refusal is
-    // logged with its reason so a client that keeps losing can be seen from
-    // the server rather than reasoned about.
-    const row = fresh ?? (await this.replayedWithinGrace(hash, client.client_id, now));
-    if (row.refreshExpiresAt && row.refreshExpiresAt <= now) {
-      this.refuseRefresh('refresh token expired', 'Refresh token expired', row);
+    const clientId = client.client_id;
+    // The row is READ first and judged whole, and consumed only once every
+    // check has passed: a refusal must leave a token the client could still
+    // use with a different request (a narrower scope) usable, and nothing
+    // may be minted or retired on a token that is expired, revoked, or
+    // bound to a revoked agent. Looked up by hash AND client, so a caller
+    // presenting a valid refresh token under the WRONG client learns
+    // nothing and changes nothing.
+    const [seen] = await this.deps.db
+      .select()
+      .from(oauthTokens)
+      .where(and(eq(oauthTokens.refreshTokenHash, hash), eq(oauthTokens.clientId, clientId)))
+      .limit(1);
+    if (!seen) return this.refuseRefresh('unknown refresh token for this client', 'Invalid or revoked refresh token', { clientId });
+    const rotatedAgoMs = seen.rotatedAt ? now.getTime() - seen.rotatedAt.getTime() : null;
+    const rotatedAgo = rotatedAgoMs === null ? null : `${Math.round(rotatedAgoMs / 1000)} s ago`;
+    if (seen.revokedAt) {
+      return this.refuseRefresh(
+        rotatedAgo ? `refresh token rotated ${rotatedAgo} and already replayed once, or revoked since` : 'refresh token revoked',
+        'Invalid or revoked refresh token',
+        seen,
+      );
+    }
+    if (rotatedAgoMs !== null && rotatedAgoMs > REFRESH_REUSE_GRACE_MS) {
+      return this.refuseRefresh(
+        `refresh token rotated ${rotatedAgo}, past the ${REFRESH_REUSE_GRACE_MS / 1000} s reuse grace`,
+        'Invalid or revoked refresh token',
+        seen,
+      );
+    }
+    if (seen.refreshExpiresAt && seen.refreshExpiresAt <= now) {
+      return this.refuseRefresh('refresh token expired', 'Refresh token expired', seen);
     }
     // Scope may only narrow on refresh (RFC 6749 §6).
-    let scope = row.scope;
+    let scope = seen.scope;
     if (scopes?.length) {
-      const granted = new Set((row.scope ?? '').split(' ').filter(Boolean));
+      const granted = new Set((seen.scope ?? '').split(' ').filter(Boolean));
       if (!scopes.every((s) => granted.has(s))) {
         // Refused like the others, in the log; `invalid_scope` to the client
-        // (RFC 6749 §5.2), since the token itself is fine.
+        // (RFC 6749 §5.2), since the token itself is fine — and untouched, so
+        // the same token refreshes with the scope it was granted.
         log.warn('refresh refused: requested scope exceeds the originally granted scope', {
-          clientId: row.clientId,
-          connectionId: row.connectionId ?? null,
-          userId: row.userId,
+          clientId,
+          connectionId: seen.connectionId ?? null,
+          userId: seen.userId,
         });
         throw new InvalidScopeError('Requested scope exceeds the originally granted scope');
       }
@@ -329,36 +334,66 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // mint an unrevoked pair — the revoke undone by a millisecond. A token
     // from before connections existed has none to stay on and is placed
     // under one as a first mint would be.
-    if (row.connectionId) {
-      if (!(await this.isConnectionLive(row.connectionId))) {
-        this.refuseRefresh('access for this agent was revoked', 'Access for this agent was revoked', row);
-      }
-      this.noteConnectionUse(row.connectionId);
+    if (seen.connectionId && !(await this.isConnectionLive(seen.connectionId))) {
+      return this.refuseRefresh('access for this agent was revoked', 'Access for this agent was revoked', seen);
     }
-    return this.mintTokens(row.userId, row.clientId, scope, row.resource, row.connectionId ?? undefined);
+
+    // Consume, with the state the row was judged in as the predicate, so two
+    // refreshes racing on one row have exactly one winner. A fresh token is
+    // RETIRED (`rotatedAt`), not revoked: its pair's access token stays good
+    // until its own expiry, an hour at most, so a runner still holding it is
+    // not cut off mid-task by a refresh another runner made, while a revoke
+    // or a sign-out still ends it at once. A token already retired within
+    // the reuse grace — the loser of a double refresh, which is what a client
+    // refreshing from two places at once produces — is honoured ONCE more,
+    // and the replay revokes the row in the same statement that admits it,
+    // so a third presentation, or two replays racing, find nothing. That does
+    // end the retired pair's access token: the runner that replayed holds the
+    // fresh pair from here, and the rotation's winner holds its own.
+    let consumed = rotatedAgoMs === null ? await this.retireFresh(hash, clientId, now) : undefined;
+    let replayed = rotatedAgoMs !== null;
+    if (!consumed) {
+      // Either a retired token within the grace, or a fresh one that lost
+      // its rotation to a concurrent refresh between the read above and the
+      // retire — which makes it the loser of a double refresh, and so
+      // replayable now.
+      consumed = await this.replayRetired(hash, clientId, now);
+      replayed = true;
+    }
+    if (!consumed) {
+      return this.refuseRefresh('refresh token rotated or revoked by a concurrent request', 'Invalid or revoked refresh token', seen);
+    }
+    if (replayed) {
+      log.info(
+        `refresh replayed ${Math.round((now.getTime() - consumed.rotatedAt!.getTime()) / 1000)} s after its rotation, within the reuse grace; a fresh pair is minted`,
+        { clientId, connectionId: consumed.connectionId, userId: consumed.userId },
+      );
+    }
+    if (consumed.connectionId) this.noteConnectionUse(consumed.connectionId);
+    return this.mintTokens(consumed.userId, consumed.clientId, scope, consumed.resource, consumed.connectionId ?? undefined);
   }
 
-  /**
-   * The row behind a refresh token the rotation did not match, when it may
-   * be honoured once more: the same client presented it again within
-   * {@link REFRESH_REUSE_GRACE_MS} of its rotation, which is what a client
-   * refreshing from two places at once looks like. Once, not for the whole
-   * window: the replay consumes the row. The pair minted for it sits on the
-   * same connection as the winner's, so revoking the agent ends both.
-   * Anything else — a token never issued to this client, a revoked one, one
-   * already replayed, one rotated longer ago — is refused with the
-   * `invalid_grant` the caller earns, and the refusal is logged with its
-   * reason.
-   */
-  private async replayedWithinGrace(hash: string, clientId: string, now: Date) {
-    // Honoured ONCE: the replay revokes the retired row in the same statement
-    // that admits it, so a third presentation — a copied token tried again,
-    // or two replays racing each other — finds nothing to replay. The retired
-    // pair's access token ends here as well; the runner that replayed holds
-    // the fresh pair from this point, and the winner of the rotation holds
-    // its own.
+  /** Retire a fresh refresh token: the one statement that wins a rotation. */
+  private async retireFresh(hash: string, clientId: string, now: Date) {
+    const [row] = await this.deps.db
+      .update(oauthTokens)
+      .set({ rotatedAt: now })
+      .where(
+        and(
+          eq(oauthTokens.refreshTokenHash, hash),
+          eq(oauthTokens.clientId, clientId),
+          isNull(oauthTokens.revokedAt),
+          isNull(oauthTokens.rotatedAt),
+        ),
+      )
+      .returning();
+    return row;
+  }
+
+  /** Consume a retired refresh token's one replay: revoked in the statement that admits it, within the grace only. */
+  private async replayRetired(hash: string, clientId: string, now: Date) {
     const since = new Date(now.getTime() - REFRESH_REUSE_GRACE_MS);
-    const [replayed] = await this.deps.db
+    const [row] = await this.deps.db
       .update(oauthTokens)
       .set({ revokedAt: now })
       .where(
@@ -370,32 +405,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
         ),
       )
       .returning();
-    if (replayed) {
-      const rotatedAgo = Math.round((now.getTime() - replayed.rotatedAt!.getTime()) / 1000);
-      log.info(`refresh replayed ${rotatedAgo} s after its rotation, within the reuse grace; a fresh pair is minted`, {
-        clientId,
-        connectionId: replayed.connectionId,
-        userId: replayed.userId,
-      });
-      return replayed;
-    }
-    // Refused. The row is read once more only to say why.
-    const [seen] = await this.deps.db
-      .select()
-      .from(oauthTokens)
-      .where(and(eq(oauthTokens.refreshTokenHash, hash), eq(oauthTokens.clientId, clientId)))
-      .limit(1);
-    if (!seen) return this.refuseRefresh('unknown refresh token for this client', 'Invalid or revoked refresh token', { clientId });
-    const rotatedAgo = seen.rotatedAt ? `${Math.round((now.getTime() - seen.rotatedAt.getTime()) / 1000)} s ago` : null;
-    const reason =
-      seen.revokedAt && rotatedAgo
-        ? `refresh token rotated ${rotatedAgo} and already replayed once, or revoked since`
-        : seen.revokedAt
-          ? 'refresh token revoked'
-          : rotatedAgo
-            ? `refresh token rotated ${rotatedAgo}, past the ${REFRESH_REUSE_GRACE_MS / 1000} s reuse grace`
-            : 'refresh token neither fresh nor rotated: it changed under this request';
-    return this.refuseRefresh(reason, 'Invalid or revoked refresh token', seen);
+    return row;
   }
 
   /** The one place a refresh is refused: logged with its reason, never the token, then the client's `invalid_grant`. */
