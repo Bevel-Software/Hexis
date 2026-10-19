@@ -297,6 +297,16 @@ describe('WorkflowService.updateBranch', () => {
     expect(git.push).not.toHaveBeenCalled();
   });
 
+  it('refuses resolutions that come without a write gate, before asking git anything', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
+    const err = await build(git)
+      .updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions: [{ path: 'A.md', content: 'x' }] } as never)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/validateWrite/);
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+
   it('refuses an update that would land an open change request from `from` into the draft, as the merge tool refuses it', async () => {
     const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
     const open = [{ number: 5, sourceBranch: 'target-company-state', targetBranch: 'ada/draft', state: 'open' }];
