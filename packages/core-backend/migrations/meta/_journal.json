@@ -134,6 +134,13 @@
       "when": 1792106401545,
       "tag": "0018_agent_events_page",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1792404850653,
+      "tag": "0019_oauth_token_rotated_at",
+      "breakpoints": true
     }
   ]
 }
