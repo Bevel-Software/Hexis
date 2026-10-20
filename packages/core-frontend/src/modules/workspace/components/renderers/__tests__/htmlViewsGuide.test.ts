@@ -50,6 +50,27 @@ describe('the html-views guide section agrees with the renderer', () => {
   const kept = examplesUnder('An `<a href>` in the page keeps its address only when').flat();
   const removed = examplesUnder('Every other address is removed').flat();
 
+  it('supports a functional page without a skill or template', () => {
+    expect(flat).toContain('No skill or template is required.');
+    const page = `<!doctype html>
+      <html data-ignored="yes">
+        <head>
+          <title>Ignored metadata</title>
+          <style>#status { color: green; }</style>
+        </head>
+        <body class="ignored"><p id="status">Waiting</p><script>
+          document.getElementById('status').textContent = 'Ready';
+        </script></body>
+      </html>`;
+    const out = sanitizeAgentHtml(page);
+    const doc = new DOMParser().parseFromString(out, 'text/html');
+    expect(doc.querySelector('style')?.textContent).toContain('#status');
+    expect(doc.querySelector('script')?.getAttribute('type')).toBe('module');
+    expect(doc.querySelector('#status')?.textContent).toBe('Waiting');
+    expect(out).not.toContain('Ignored metadata');
+    expect(out).not.toContain('data-ignored');
+  });
+
   it('every link it lists as surviving is kept by the sanitizer, as written', () => {
     for (const href of kept) expect(hrefAfterSanitizing(href), href).toBe(href);
   });

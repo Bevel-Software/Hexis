@@ -360,8 +360,11 @@ describe('the HTML views section', () => {
 
   it('describes the frame, the members core puts on window.bevel, and a fragment that scrolls the page', async () => {
     const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    expect(text).toContain('No skill or template is required.');
+    expect(text).toContain('This section is the platform contract');
     expect(text).toContain('**No network.**');
     expect(text).toContain('**Inline scripts and styles only.**');
+    expect(text).toContain('**The body is the page.**');
     expect(text).toContain('**Scripts run as ES modules**');
     expect(text).toContain('**No browser storage.**');
     expect(text).toContain('**No host navigation.**');
