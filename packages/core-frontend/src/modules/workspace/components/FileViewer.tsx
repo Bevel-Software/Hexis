@@ -1468,7 +1468,8 @@ export function FileViewer() {
             onShare={handleShare}
             onCopyPage={canCopyPage ? handleCopyPage : undefined}
             onCopyLink={handleCopyLink}
-            onFullScreen={shellVariant === 'full-bleed' ? enterFullScreen : undefined}
+            // Withdrawn while filling the window: the exit control replaces it.
+            onFullScreen={shellVariant === 'full-bleed' && !filling ? enterFullScreen : undefined}
           />
         }
       >
