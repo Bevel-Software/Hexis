@@ -7,7 +7,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { eq, sql } from 'drizzle-orm';
 import { closeDb, createDb, type Database } from '../connection.js';
 import { changeRequests, dataMigrations } from '../core-schema.js';
-import { LEGACY_REQUEST_BODIES_MOVED, moveLegacyRequestBodies, runCoreMigrations, runPiiEncryptionBackfill } from '../migrate.js';
+import { runCoreMigrations, runPiiEncryptionBackfill } from '../migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { IndexOnWrite, SealOnWrite } from '../../../shared/column-crypto.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
@@ -27,6 +27,9 @@ import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl
 const KEY = randomBytes(32).toString('base64');
 const open: Database[] = [];
 const folders: string[] = [];
+
+/** The `data_migrations` row the move leaves behind — the pass's one public trace besides the rows. */
+const LEDGER_ROW = '0020_change_request_body_is_the_description';
 
 const GENERATED = ['## Affected owners', '', '- `Docs/a.md` — Admin', '- `Docs/b.md` — Jane <jane@x.io>'].join('\n');
 
@@ -97,6 +100,10 @@ async function olderDeployment(): Promise<Database> {
 
 const ledgerRows = async (db: Database) =>
   (await db.select({ name: dataMigrations.name, note: dataMigrations.note }).from(dataMigrations)).map((r) => ({ name: r.name, note: r.note }));
+
+/** The ledger with its timestamps: what a second start must leave exactly as it found. */
+const ledger = async (db: Database) =>
+  (await db.select().from(dataMigrations)).map((r) => ({ name: r.name, note: r.note, appliedAt: r.appliedAt.toISOString() }));
 
 const rowsOf = async (db: Database) =>
   (await db.select().from(changeRequests).orderBy(changeRequests.sourceBranch)).map((r) => ({
@@ -178,7 +185,7 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0020 — a request body becomes its de
       expect(rita).toMatchObject({ level: 'owner', note: 'I maintain these pages now' });
       expect(rita?.body).not.toContain('<!--');
       expect(await ledgerRows(db)).toEqual([
-        { name: LEGACY_REQUEST_BODIES_MOVED, note: '2 of 3 change-request bodies moved to the description-only shape' },
+        { name: LEDGER_ROW, note: '2 of 3 change-request bodies moved to the description-only shape' },
       ]);
     },
     PG_TEST_TIMEOUT,
@@ -201,7 +208,9 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0020 — a request body becomes its de
       `);
       const before = await rowsOf(db);
 
-      await expect(moveLegacyRequestBodies(db)).rejects.toThrow();
+      // The start dies in the pass: the SQL history was already applied, so
+      // the refusal can only come from the move's own UPDATE.
+      await expect(runCoreMigrations(db, coreMigrationsDir())).rejects.toThrow(/Failed query: update "change_requests"/);
       expect(await rowsOf(db)).toEqual(before);
       expect(await ledgerRows(db)).toEqual([]);
 
@@ -210,19 +219,24 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0020 — a request body becomes its de
       const rows = await rowsOf(db);
       expect(rows.find((r) => r.branch === 'ada/draft')?.body).toBe('Please take a look.\n\n## Why now\n\nBecause.');
       expect(rows.find((r) => r.branch === 'rita/join-research')).toMatchObject({ level: 'owner', note: 'I maintain these pages now' });
-      expect((await ledgerRows(db)).map((r) => r.name)).toEqual([LEGACY_REQUEST_BODIES_MOVED]);
+      expect((await ledgerRows(db)).map((r) => r.name)).toEqual([LEDGER_ROW]);
     },
     PG_TEST_TIMEOUT,
   );
 
   it(
-    'the pass records itself with the rows it moves, and a recorded pass reads nothing',
+    'a start that finds the ledger row leaves the rows and the ledger exactly as they are',
     async () => {
       const db = await olderDeployment();
-      await migrate(db, { migrationsFolder: coreMigrationsDir(), migrationsTable: '__drizzle_migrations_core' });
-      expect(await moveLegacyRequestBodies(db)).toBe(2);
-      expect(await moveLegacyRequestBodies(db)).toBe(-1);
-      expect((await ledgerRows(db)).map((r) => r.name)).toEqual([LEGACY_REQUEST_BODIES_MOVED]);
+      await runCoreMigrations(db, coreMigrationsDir());
+      const rowsAfterFirst = await rowsOf(db);
+      const ledgerAfterFirst = await ledger(db);
+      expect(ledgerAfterFirst.map((r) => r.name)).toEqual([LEDGER_ROW]);
+
+      await runCoreMigrations(db, coreMigrationsDir());
+
+      expect(await rowsOf(db)).toEqual(rowsAfterFirst);
+      expect(await ledger(db)).toEqual(ledgerAfterFirst);
     },
     PG_TEST_TIMEOUT,
   );
@@ -233,9 +247,11 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0020 — a request body becomes its de
       const db = await handle();
       await runCoreMigrations(db, coreMigrationsDir());
       expect(await ledgerRows(db)).toEqual([
-        { name: LEGACY_REQUEST_BODIES_MOVED, note: '0 of 0 change-request bodies moved to the description-only shape' },
+        { name: LEDGER_ROW, note: '0 of 0 change-request bodies moved to the description-only shape' },
       ]);
-      expect(await moveLegacyRequestBodies(db)).toBe(-1);
+      const once = await ledger(db);
+      await runCoreMigrations(db, coreMigrationsDir());
+      expect(await ledger(db)).toEqual(once);
     },
     PG_TEST_TIMEOUT,
   );

@@ -86,7 +86,7 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
 }
 
 /** The `data_migrations` row of the body move: present exactly when the move has been committed. */
-export const LEGACY_REQUEST_BODIES_MOVED = '0020_change_request_body_is_the_description';
+const LEGACY_REQUEST_BODIES_MOVED = '0020_change_request_body_is_the_description';
 
 /**
  * The data half of migration 0020, which makes a request's body nothing but
@@ -105,23 +105,30 @@ export const LEGACY_REQUEST_BODIES_MOVED = '0020_change_request_body_is_the_desc
  * 0020 or, if that start died between drizzle's own ledger and this pass, the
  * next one — and never again: a body of the new shape is already clean, and
  * the grammar this reads is written by nothing. A start that finds the row
- * reads nothing. The rows are read `FOR UPDATE` so a writer of the old
- * version still running in a mixed-version window waits for the move rather
- * than slipping an old-shaped body in behind it.
+ * reads nothing.
+ *
+ * What the transaction does NOT do is fence the old version: its rows are
+ * read `FOR UPDATE`, which only makes an old-version edit of an existing row
+ * wait for the move, and a request the old version opens after the move has
+ * committed is stored in the old shape and never rewritten. That is why the
+ * upgrade requires the old version to be stopped before the new one starts
+ * (UPGRADING.md, "Stop the old version before the new one starts"), as the
+ * personal-data backfill of 0016 already did; this pass adds no mechanism of
+ * its own, and a rolling update across this release is not supported.
  *
  * Walked row by row rather than in one UPDATE because the column is sealed:
- * SQL can neither read the marker nor write the cleaned text.
- *
- * Returns how many bodies were moved; -1 when the pass had already been done.
+ * SQL can neither read the marker nor write the cleaned text. Reached only
+ * through {@link runCoreMigrations}, and observed through what it leaves:
+ * the rows and the ledger.
  */
-export async function moveLegacyRequestBodies(db: Database): Promise<number> {
-  return db.transaction(async (tx) => {
+async function moveLegacyRequestBodies(db: Database): Promise<void> {
+  await db.transaction(async (tx) => {
     const done = await tx
       .select({ name: dataMigrations.name })
       .from(dataMigrations)
       .where(eq(dataMigrations.name, LEGACY_REQUEST_BODIES_MOVED))
       .limit(1);
-    if (done.length > 0) return -1;
+    if (done.length > 0) return;
 
     const rows = await tx
       .select({ id: changeRequests.id, body: changeRequests.body })
@@ -147,7 +154,6 @@ export async function moveLegacyRequestBodies(db: Database): Promise<number> {
       note: `${moved} of ${rows.length} change-request bodies moved to the description-only shape`,
     });
     log.info(`Change-request bodies: ${moved} of ${rows.length} moved to the description-only shape.`);
-    return moved;
   });
 }
 
