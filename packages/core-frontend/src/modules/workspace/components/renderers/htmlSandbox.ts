@@ -413,6 +413,12 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * consent lives in the frame: the card is the app's, drawn outside it, and a
  * page can neither see nor answer it.
  *
+ * `uploadFile(file, options)` posts the `File` (or `Blob`) itself, by
+ * structured clone, beside the four options it reads (`name`, `branch`,
+ * `destination`, `mode`); the parent judges both, runs the agent upload path
+ * and posts back only `apply_file_upload`'s answer — the upload token never
+ * enters the frame.
+ *
  * `tools` exists only where the app can answer it — the app's file page.
  * Everywhere else (the embed, a skill page, any other preview) it is `null`,
  * so a page checks `window.bevel && window.bevel.tools` before every use and
@@ -468,7 +474,11 @@ function toolBridgeRuntime(enabled: boolean): string {
     searchTools: function (query) { return call('searchTools', [query === undefined ? '' : query]); },
     toolsInfo: function (names) { return call('toolsInfo', [names]); },
     callTool: function (name, args) { return call('callTool', [name, args === undefined ? {} : args]); },
-    callToolChain: function (code) { return call('callToolChain', [code]); }
+    callToolChain: function (code) { return call('callToolChain', [code]); },
+    uploadFile: function (file, options) {
+      var o = options && typeof options === 'object' ? options : {};
+      return call('uploadFile', [file, { name: o.name, branch: o.branch, destination: o.destination, mode: o.mode }]);
+    }
   })` : 'null'};
   globalThis.bevel.requireTools = function () {
     return request('bevel.tools.require', {}).then(function (answer) { return answer === true; });

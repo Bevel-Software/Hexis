@@ -600,25 +600,30 @@ describe('buildSandboxedHtml', () => {
 });
 
 describe('window.bevel.tools in the frame', () => {
-  type Tools = Record<'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain', (...a: unknown[]) => Promise<unknown>>;
+  type Tools = Record<'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain' | 'uploadFile', (...a: unknown[]) => Promise<unknown>>;
   const toolsOf = (bridge: ReturnType<typeof runBridge>) => bridge.bevel.tools as Tools | null;
 
-  it('has the four functions where the app answers tools, each posting a call with a request id', async () => {
+  it('has the five functions where the app answers tools, each posting a call with a request id', async () => {
     const bridge = runBridge({}, { toolBridge: true });
     const tools = toolsOf(bridge)!;
-    expect(Object.keys(tools).sort()).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo']);
+    expect(Object.keys(tools).sort()).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo', 'uploadFile']);
     void tools.searchTools('change request');
     void tools.toolsInfo(['read_file']);
     void tools.callTool('read_file', { body: { path: 'a.md' } });
     void tools.callToolChain('return 1');
+    const file = new Blob(['a,b\n']);
+    void tools.uploadFile(file, { name: 'Budget.csv', branch: 'main', destination: 'Data', mode: 'overwrite', all: true });
     const posted = bridge.posted as Array<{ type: string; requestId: string; fn: string; args: unknown[] }>;
     expect(posted.map((m) => [m.type, m.fn, m.args])).toEqual([
       ['bevel.tool.call', 'searchTools', ['change request']],
       ['bevel.tool.call', 'toolsInfo', [['read_file']]],
       ['bevel.tool.call', 'callTool', ['read_file', { body: { path: 'a.md' } }]],
       ['bevel.tool.call', 'callToolChain', ['return 1']],
+      // The file itself, for the parent to clone; of the options, only the four it reads.
+      ['bevel.tool.call', 'uploadFile', [file, { name: 'Budget.csv', branch: 'main', destination: 'Data', mode: 'overwrite' }]],
     ]);
-    expect(new Set(posted.map((m) => m.requestId)).size).toBe(4);
+    expect((posted[4]!.args as unknown[])[0]).toBe(file);
+    expect(new Set(posted.map((m) => m.requestId)).size).toBe(5);
   });
 
   it("resolves with the parent's answer and rejects with its error and code, matched by request id", async () => {

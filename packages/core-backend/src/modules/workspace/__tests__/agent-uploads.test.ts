@@ -535,6 +535,39 @@ describe('the upload route', () => {
     expect(await readdir(uploadsDir)).toEqual([]);
   });
 
+  it('discards a token on request, with the bytes sent against it, the token in a header', async () => {
+    const base = await start();
+    const discard = (token: string) =>
+      fetch(`${base}/api/agent/uploads`, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    const { token } = await request(base);
+    expect((await send(base, token, 'a.md', Buffer.from('a'))).status).toBe(200);
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+    expect((await discard(token)).status).toBe(204);
+    expect(await readdir(uploadsDir)).toEqual([]);
+    // Spent: neither an apply nor a second discard can use it.
+    const applied = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
+    expect(applied.ok).toBe(false);
+    expect(batches).toEqual([]);
+    const again = await discard(token);
+    expect(again.status).toBe(404);
+    expect((await json<{ error: string }>(again)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    // A token nothing was sent against goes the same way, and its slot with it.
+    const { token: unsent } = await request(base);
+    expect((await discard(unsent)).status).toBe(204);
+    expect((await send(base, unsent, 'b.md', Buffer.from('b'))).status).toBe(404);
+  });
+
+  it('refuses to discard a token an apply is holding, and leaves its bytes', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'a.md', Buffer.from('a'));
+    uploads.claim(token, 'u');
+    const res = await fetch(`${base}/api/agent/uploads`, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    expect(res.status).toBe(404);
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+    uploads.release(token);
+  });
+
   it('refuses a second upload against the same token', async () => {
     const base = await start();
     const { token } = await request(base);
