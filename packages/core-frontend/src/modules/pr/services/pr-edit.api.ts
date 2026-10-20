@@ -1,6 +1,6 @@
 import type { PullRequestSummary, UpdateChangeRequestInput } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 
 /**
  * Change an open change request's title and/or description. The server
