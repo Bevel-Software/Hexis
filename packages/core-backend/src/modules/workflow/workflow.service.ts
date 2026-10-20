@@ -113,9 +113,7 @@ import {
   WorkflowValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
-import { EVERYONE_CANONICAL } from '../access-model/access-grammar.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
