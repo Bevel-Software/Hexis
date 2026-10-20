@@ -86,8 +86,9 @@ export function runBridge(
   const ctx: Record<string, unknown> = {
     // The frame's window: the tool bridge listens on it for the parent's answers.
     addEventListener: (type: string, fn: (e: never) => void) => {
-      if (type === 'message') messageHandlers.push(fn);
-      if (type === 'keydown') keyHandlers.push(fn);
+      // One window, two event shapes: the type names which this listener takes.
+      if (type === 'message') messageHandlers.push(fn as (e: { source: unknown; data: unknown }) => void);
+      if (type === 'keydown') keyHandlers.push(fn as (e: { key: string; defaultPrevented: boolean }) => void);
     },
     setTimeout: (fn: () => void, ms?: number) => {
       const t = setTimeout(() => {
