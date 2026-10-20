@@ -1,5 +1,8 @@
 export type PullRequestState = 'open' | 'merged' | 'closed';
 
+/** The level an access request asks for: Can edit, or Owner. */
+export type AccessRequestLevel = 'write' | 'owner';
+
 export interface PullRequestAuthor {
   login: string;
   name?: string;
@@ -277,7 +280,19 @@ export interface FileApprovalState {
  * `approvals` and merge-gate fields — this shape grows incrementally.
  */
 export interface PullRequestDetail extends PullRequestSummary {
+  /**
+   * The request's description — the whole body, exactly as its author (or a
+   * later edit) left it. Hexis writes nothing of its own into it: who must
+   * approve each file is resolved live and answered per file in `approvals`,
+   * and an access request's level and note are `accessRequest`'s.
+   */
   body: string;
+  /**
+   * Set on a request the access-request flow opened: the level the person
+   * asked for, and their note when they wrote one. Absent on every other
+   * request.
+   */
+  accessRequest?: { level: AccessRequestLevel; note?: string };
   headSha: string;
   baseSha: string;
   files: PullRequestFile[];
@@ -407,14 +422,12 @@ export interface PullRequestDetail extends PullRequestSummary {
 
 /**
  * Body of `PATCH /api/workflow/change-requests/:number`. At least one field;
- * an absent field keeps its current text. `description` replaces the author's
- * part of the body only — the generated `## Affected owners` block stays.
+ * an absent field keeps its current text. `description` replaces the
+ * request's description whole — the body is nothing but the description.
  * `appendDescription` instead adds a paragraph after the description as the
  * server holds it at the moment of the write, so two appends racing each
  * other both land (never together with `description`). A title is at most
- * {@link CHANGE_REQUEST_TITLE_MAX} characters, and no description may hold a
- * line reading exactly `## Affected owners` — that heading marks the
- * generated block.
+ * {@link CHANGE_REQUEST_TITLE_MAX} characters.
  *
  * A union of the allowed shapes, so a client cannot build `{}` or a
  * `description` together with `appendDescription`. The server reads the

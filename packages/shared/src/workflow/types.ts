@@ -22,6 +22,7 @@ import type {
   WorkingTreeStatus,
 } from '../git/types.js';
 import type {
+  AccessRequestLevel,
   CancelPrResult,
   FileApprovalState,
   MergePrResult,
@@ -185,16 +186,23 @@ export interface FolderChangeRequestRemoval {
  * `targetBranch` into `sourceBranch` as part of opening, so callers don't
  * pass a head SHA — the workflow resolves the head itself.
  *
- * `title` + `description` are the change request's metadata; the description
- * is plain text (no GitHub-flavoured markdown affordances exposed at this
- * layer). The implementation may still render this as the PR body when the
- * underlying GitHub PR is created.
+ * `title` + `description` are the change request's metadata. The description
+ * is stored exactly as given and IS the request's body: Hexis appends nothing
+ * of its own to it.
  */
 export interface OpenChangeRequestInput {
   sourceBranch: string;
   targetBranch: string;
   title: string;
   description?: string;
+  /**
+   * The access-request flow's own facts about the request it opens: the level
+   * asked for and the person's note, kept on the request's row rather than in
+   * its prose. Only that flow sets it — the open route and the agent's
+   * `open_change_request` build their input field by field and never forward
+   * it.
+   */
+  accessRequest?: { level: AccessRequestLevel; note?: string };
 }
 
 /**

@@ -1,6 +1,8 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { parseLegacyChangeRequestBody } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { changeRequests } from './core-schema.js';
 
 const log = logger('database');
 import { DEFAULT_DB_SCHEMA, dbSchemaOf, piiKeysOf, type Database } from './connection.js';
@@ -69,14 +71,66 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
     AdvisoryLock.Migrations,
     async () => {
       log.info('Running core database migrations...');
+      // Decided BEFORE the history runs: whether this start is the one that
+      // applies migration 0020, whose data half follows the backfill below.
+      const bodiesStillLegacy = !(await hasColumn(db, 'change_requests', 'access_request_level'));
       await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core', migrationsSchema });
       log.info('Core migrations complete.');
       // Under the same lock, before anything reads or writes a PII column:
       // the data half of migration 0016, which SQL cannot do (see below).
       await runPiiEncryptionBackfill(db);
+      if (bodiesStillLegacy) await moveLegacyRequestBodies(db);
     },
     { tenantKey },
   );
+}
+
+/** Whether `table` in the handle's schema has `column` — a migration's own marker of having run. */
+async function hasColumn(db: Database, table: string, column: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = ${table} AND column_name = ${column}
+  `);
+  return result.rows.length > 0;
+}
+
+/**
+ * The data half of migration 0020, which makes a request's body nothing but
+ * its description. Bodies written before it carried three other things: an
+ * `## Affected owners` block `openChangeRequest` appended (a snapshot of the
+ * eligible approvers that nothing read back — they are resolved live, per
+ * file), an access request's level and note in hidden markers (which the
+ * access-request flow parsed back out of the prose), and identity markers
+ * from the time a service account opened requests for people. Every body is
+ * read once here, under the handle's key, the level and the note are moved
+ * onto their own columns, and the prose is written back without the rest.
+ * Runs on the start that applies 0020 and never again: a body of the new
+ * shape is already clean, and the grammar this reads is written by nothing.
+ *
+ * Walked row by row rather than in one UPDATE because the column is sealed:
+ * SQL can neither read the marker nor write the cleaned text.
+ */
+export async function moveLegacyRequestBodies(db: Database): Promise<number> {
+  const rows = await db
+    .select({ id: changeRequests.id, body: changeRequests.body })
+    .from(changeRequests)
+    .orderBy(changeRequests.id);
+  let moved = 0;
+  for (const row of rows) {
+    const legacy = parseLegacyChangeRequestBody(row.body);
+    if (!legacy.changed) continue;
+    await db
+      .update(changeRequests)
+      .set({
+        body: legacy.description,
+        ...(legacy.accessRequestLevel ? { accessRequestLevel: legacy.accessRequestLevel } : {}),
+        ...(legacy.accessRequestNote ? { accessRequestNote: legacy.accessRequestNote } : {}),
+      })
+      .where(eq(changeRequests.id, row.id));
+    moved += 1;
+  }
+  if (moved > 0) log.info(`Moved ${moved} change-request bod${moved === 1 ? 'y' : 'ies'} to the description-only shape.`);
+  return moved;
 }
 
 /**

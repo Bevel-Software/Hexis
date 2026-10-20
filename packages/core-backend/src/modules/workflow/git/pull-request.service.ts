@@ -915,6 +915,16 @@ export class PullRequestService implements IPullRequestService {
     const detail: PullRequestDetail = {
       ...summary,
       body: row.body,
+      // Only a request the access-request flow opened has a level; the note
+      // rides with it and never stands alone.
+      ...(row.accessRequestLevel
+        ? {
+            accessRequest: {
+              level: row.accessRequestLevel as 'write' | 'owner',
+              ...(row.accessRequestNote ? { note: row.accessRequestNote } : {}),
+            },
+          }
+        : {}),
       headSha,
       baseSha,
       files,

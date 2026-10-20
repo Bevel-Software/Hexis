@@ -1,6 +1,5 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  authorsDescription,
   DEFAULT_BRANCH,
   type FileDiffPayload,
   type PullRequestDetail,
@@ -881,9 +880,8 @@ export function ChangeRequestDialog({
   /**
    * Editing the title and description — the author's, or anyone's who may
    * merge the request (`viewerCanEdit`, the server's verdict; the PATCH route
-   * re-checks it). The description field holds what the author wrote, the
-   * same part the server replaces; the generated owners block is not offered
-   * and is kept.
+   * re-checks it). The description field holds the body whole: it is nothing
+   * but the description, and a save replaces exactly what the field showed.
    */
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
@@ -894,12 +892,10 @@ export function ChangeRequestDialog({
   // The text the form opened with. A save sends only the fields the reader
   // changed FROM it — not from `detail`, which a remote edit may refresh
   // while the form is open — so the untouched field is never written back
-  // with a stale draft. The description offered is the author's part of the
-  // body cut by the server's own `authorsDescription` (shared), not the
-  // dialog's one-line reason, which stops at the first heading of any kind.
+  // with a stale draft.
   const editBaseline = useRef({ title: '', description: '' });
   function startEditing() {
-    const baseline = { title: shownTitle, description: authorsDescription(detail?.body ?? '') };
+    const baseline = { title: shownTitle, description: detail?.body.trim() ?? '' };
     editBaseline.current = baseline;
     setDraftTitle(baseline.title);
     setDraftDescription(baseline.description);
@@ -1083,7 +1079,7 @@ export function ChangeRequestDialog({
 
   const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
-  const why = authorsReason(detail?.body);
+  const why = descriptionOf(detail?.body);
   const [whyExpanded, setWhyExpanded] = useState(false);
   /**
    * Whether the one-line view is actually hiding anything — a short reason
@@ -1608,23 +1604,14 @@ export function ChangeRequestDialog({
 }
 
 /**
- * The author's reason, or nothing.
- *
- * A change request's body is part human and part machine: the backend appends
- * an `## Affected owners` block (and hidden identity markers) to whatever the
- * author wrote, and our propose flow writes no description at all — so the body
- * is USUALLY pure machinery. Rendering it as a pull-quote under the title
- * presents a routing table as the reason someone wants this change. Everything
- * from the first generated heading on is dropped; what survives is quoted only
- * if a human actually wrote it.
+ * The request's description, or nothing. The body IS the description — the
+ * server writes nothing of its own into it — so the quote under the title is
+ * the whole of what the author wrote, and the same text the Edit control
+ * offers. Nothing when nobody wrote one (the propose flow may leave it empty).
  */
-function authorsReason(body: string | undefined): string | null {
-  if (!body) return null;
-  const human = body
-    .split(/^##\s+/m)[0]
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .trim();
-  return human.length > 0 ? human : null;
+function descriptionOf(body: string | undefined): string | null {
+  const text = body?.trim() ?? '';
+  return text.length > 0 ? text : null;
 }
 
 /**

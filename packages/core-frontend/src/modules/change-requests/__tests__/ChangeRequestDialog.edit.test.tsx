@@ -37,8 +37,6 @@ import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { GitApiError } from '../../git/services/git.api';
 
-const GENERATED = '## Affected owners\n\n- `Docs/a.md` — Admin';
-
 const CR: PullRequestSummary = {
   number: 12,
   title: 'Old title',
@@ -57,7 +55,7 @@ const CR: PullRequestSummary = {
 function detail(over: Record<string, unknown> = {}) {
   return {
     ...CR,
-    body: `Old reason.\n\n## My own section\n\nDetails.\n\n${GENERATED}`,
+    body: 'Old reason.\n\n## My own section\n\nDetails.',
     headSha: 'h',
     baseSha: 'b',
     files: [],
@@ -82,11 +80,11 @@ describe('ChangeRequestDialog: editing the title and description', () => {
   it('offers no Edit control to someone who may not edit', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detail({ viewerCanEdit: false }));
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    expect(await screen.findByText('Old reason.')).toBeInTheDocument();
+    expect(await screen.findByText(/Old reason./)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
   });
 
-  it("offers the author's whole text — own headings included, generated block left out", async () => {
+  it('offers the body whole — own headings included; it is the description and nothing else', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detail());
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
@@ -102,7 +100,7 @@ describe('ChangeRequestDialog: editing the title and description', () => {
     detailMock.fetchPrDetail.mockResolvedValueOnce(
       detail({
         title: 'New title',
-        body: `P2 - Planned\n\nNew reason.\n\n${GENERATED}`,
+        body: 'P2 - Planned\n\nNew reason.',
       }),
     );
     const stale = vi.fn();

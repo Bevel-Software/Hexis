@@ -51,7 +51,6 @@
  */
 
 import {
-  authorsDescription,
   type ChangeRequest,
   type ChangeRequestDetail,
   type ChangeRequestState,
@@ -351,7 +350,7 @@ export function toCrSummary(
   };
 }
 
-/** A detail: the row, the author's description, and the gate as this caller sees it. */
+/** A detail: the row, its description, and the gate as this caller sees it. */
 export function toCrDetail(
   detail: ChangeRequestDetail,
   counts: { readable: number; withheld: number },
@@ -365,7 +364,10 @@ export function toCrDetail(
     // read as a sha nobody can look up.
     ...(detail.headSha ? { headSha: detail.headSha } : {}),
     ...(detail.baseSha ? { baseSha: detail.baseSha } : {}),
-    body: authorsDescription(detail.body),
+    // The body is the description and nothing else — Hexis writes none of
+    // its own facts into it, so there is nothing to cut and no path in it
+    // that the author did not choose to write about.
+    body: detail.body,
     mergeable: detail.mergeableInBevel,
     mergeBlockedReasons: blockers.visible,
     withheldMergeBlockedReasons: blockers.withheld,

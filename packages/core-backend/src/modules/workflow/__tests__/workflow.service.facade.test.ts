@@ -1628,6 +1628,35 @@ describe('WorkflowService.openChangeRequest — when the repository host refuses
     return { svc, git, prs, values, emit };
   }
 
+  it('stores the description as the whole body, and an access request\'s level and note on their own columns', async () => {
+    const h = makeOpenHarness(vi.fn().mockResolvedValue(undefined));
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), { ...INPUT, description: '  Why this.  ' });
+    expect(h.values).toHaveBeenLastCalledWith(
+      expect.objectContaining({ body: 'Why this.', accessRequestLevel: null, accessRequestNote: null }),
+    );
+    // Nothing of Hexis's own is appended: the stored body is exactly the description.
+    expect((h.values.mock.calls[0] as [Record<string, unknown>])[0].body).not.toContain('Affected owners');
+
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), {
+      ...INPUT,
+      description: 'Rita asked for **Owner** on Research.',
+      accessRequest: { level: 'owner', note: '  I maintain these pages now  ' },
+    });
+    expect(h.values).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        body: 'Rita asked for **Owner** on Research.',
+        accessRequestLevel: 'owner',
+        accessRequestNote: 'I maintain these pages now',
+      }),
+    );
+
+    // A level with a blank note stores no note.
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), { ...INPUT, accessRequest: { level: 'write', note: '   ' } });
+    expect(h.values).toHaveBeenLastCalledWith(
+      expect.objectContaining({ body: '', accessRequestLevel: 'write', accessRequestNote: null }),
+    );
+  });
+
   it('creates the request, then answers 409 with the saved-locally sentence and raises the banner', async () => {
     const refused = new Error(
       'git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)',

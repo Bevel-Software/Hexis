@@ -153,7 +153,24 @@ export const changeRequests = pgTable('change_requests', {
   // is deliberately stored unencrypted (see encryptPii), so a defaulted row
   // and an app-written empty body hold the identical representation.
   title: encryptedText('title').notNull(),
+  /**
+   * The request's description, and nothing else: exactly what its author (or
+   * a later edit) wrote. Hexis keeps none of its own facts in here — who must
+   * approve each file is resolved live from the access rules, and an access
+   * request's level and note have columns of their own below. Bodies written
+   * before this release carried both as prose and hidden markers; the first
+   * start on it moves them out (`moveLegacyRequestBodies` in `migrate.ts`).
+   */
   body: encryptedText('body').notNull().default(''),
+  /**
+   * Set on a request the access-request flow opened: the level the person
+   * asked for. Null on every other request. Read back by that flow to say
+   * "Requested: Owner" from the request itself, whose row is always readable,
+   * rather than from a branch a stale clone may not see yet.
+   */
+  accessRequestLevel: text('access_request_level'),
+  /** The requester's note, when they wrote one. Encrypted: a person's own words. */
+  accessRequestNote: encryptedText('access_request_note'),
   authorEmail: encryptedText('author_email').notNull(), // lowercased at insert
   /** Blind index of `author_email` — GDPR-erasure lookup. */
   authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
@@ -207,6 +224,10 @@ export const changeRequests = pgTable('change_requests', {
   stateCheck: check(
     'change_requests_state_check',
     sql`${t.state} IN ('open', 'merged', 'closed')`,
+  ),
+  accessRequestLevelCheck: check(
+    'change_requests_access_request_level_check',
+    sql`${t.accessRequestLevel} IS NULL OR ${t.accessRequestLevel} IN ('write', 'owner')`,
   ),
 }));
 

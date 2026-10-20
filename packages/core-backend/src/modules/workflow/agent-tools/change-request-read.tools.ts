@@ -75,8 +75,8 @@ import {
  *     `withheldFiles`, never named (decision 2 on the ticket);
  *   - approvals and gate blockers naming a withheld file go the same way, with
  *     their own counts;
- *   - `body` is the author's own description, with the generated
- *     `## Affected owners` block cut off the end — see `authorsDescription`;
+ *   - `body` is the request's description, verbatim: Hexis writes nothing of
+ *     its own into it, so a path it names is one its author chose to write;
  *   - a request with no readable file and no claim of authorship answers 404,
  *     indistinguishable from a number that was never issued.
  *
@@ -351,7 +351,7 @@ export function registerChangeRequestReadTools(
       type: 'object',
       properties: {
         ...(changeRequestSchema as { properties: Record<string, JsonSchema> }).properties,
-        body: { type: 'string', description: "What the AUTHOR wrote. The generated `## Affected owners` block Hexis appends — which names every changed path — is cut off the end; read who must approve each file from `list_change_request_files`." },
+        body: { type: 'string', description: "The request's description, exactly as its author or a later edit left it. Who must approve each file is not in it; read that from `list_change_request_files`." },
         headSha: { type: 'string', description: 'The source commit this answer describes. Absent when no commit could be resolved.' },
         baseSha: { type: 'string', description: 'The target commit it is read against. Absent when no commit could be resolved.' },
         mergeable: { type: 'boolean', description: "Hexis's merge gate, which also waits on the per-file approvals. May be false while `mergeBlockedReasons` is empty, if a blocker names a file you may not read." },

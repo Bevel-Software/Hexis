@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  authorsDescription,
-  replaceAuthorsDescription,
   type ChangeRequest,
   type ChangeRequestDetail,
   type FileApproval,
@@ -17,6 +15,7 @@ import {
   pagingOf,
   pathsOf,
   statesFor,
+  toCrDetail,
   toCrViewer,
   toCrSummary,
   APPLY_FAILURE_REASON_WITHHELD,
@@ -469,84 +468,34 @@ describe('merge blockers never name a file the caller may not read', () => {
 });
 
 /**
- * The leak Local Testing caught on the first attempt: `openChangeRequest`
- * appends a generated `## Affected owners` block to the body, naming every
- * changed path and its approvers, and the detail returned the body verbatim.
+ * The body is the description and nothing else — Hexis writes none of its own
+ * facts into it — so a caller is handed it verbatim, whatever they may read:
+ * a path in it is one the author chose to write about.
  */
-describe('the body a caller is handed is the author\'s, not the machine\'s', () => {
-  const GENERATED = [
-    '## Affected owners',
-    '',
-    '- `KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md` — Admin',
-    '- `KnowledgeBase/GTM/Notes.md` — GTM Team',
-  ].join('\n');
+describe('the body a caller is handed is the stored one', () => {
+  const body = 'Lead.\n\n## Why now\n\nBecause of `Knowledge/Secret.md`.\n<!-- my own aside -->';
+  const stored = {
+    ...summary(),
+    body,
+    headSha: 'a'.repeat(40),
+    baseSha: 'b'.repeat(40),
+    files: [],
+    approvals: [],
+    mergeableInBevel: false,
+    mergeBlockedReasons: [],
+    mergeWarnings: [],
+    viewerCanBypassMerge: false,
+  } as unknown as ChangeRequestDetail;
 
-  it('drops the generated owners block, keeping what the author typed', () => {
-    expect(authorsDescription(`Please take a look.\n\n${GENERATED}`)).toBe('Please take a look.');
-    expect(authorsDescription(GENERATED)).toBe('');
+  it('is the body as stored, headings and comments included', () => {
+    const out = toCrDetail(stored, { readable: 1, withheld: 0 }, { visible: [], withheld: 0 }, toCrViewer(stored, false, []));
+    expect(out.body).toBe(body);
   });
 
-  it('names no path of the generated block, readable or not', () => {
-    const out = authorsDescription(`Why this is needed.\n\n${GENERATED}`);
-    expect(out).not.toContain('Avi-Checkin');
-    expect(out).not.toContain('KnowledgeBase');
-    expect(out).not.toContain('Affected owners');
-  });
-
-  it("strips the hidden identity markers older bodies carry, and only those — an author's own HTML comment is prose", () => {
-    expect(authorsDescription('<!-- bevel:author:abc123 -->\nMy reason.')).toBe('My reason.');
-    expect(authorsDescription('<!--hexis:access-request-level:write-->\nMy reason.')).toBe('My reason.');
-    expect(authorsDescription('My reason.\n<!-- TODO: ask Mia about the title -->')).toBe(
-      'My reason.\n<!-- TODO: ask Mia about the title -->',
-    );
-  });
-
-  it("strips both ends of a fenced Hexis passage — the closer is Hexis's too — and keeps the fenced prose", () => {
-    const body = [
-      '<!--hexis:access-request-level:write-->',
-      'Note from Ana:',
-      '',
-      '<!--hexis:access-request-note-->',
-      '> Please.',
-      '<!--/hexis:access-request-note-->',
-      '<!-- my own aside -->',
-    ].join('\n');
-    expect(authorsDescription(body)).toBe('Note from Ana:\n\n\n> Please.\n\n<!-- my own aside -->');
-  });
-
-  it('leaves a body that is only the author\'s prose alone', () => {
-    expect(authorsDescription('  A multi-line\nreason.  ')).toBe('A multi-line\nreason.');
-    expect(authorsDescription('')).toBe('');
-  });
-
-  // Razvan's review (2026-10-02): the first cut copied the app's dialog, which
-  // drops everything from the first `##` heading on. An author who writes their
-  // description in sections lost it from that heading onwards, and was never
-  // told. The cut is now the generated block and nothing else.
-  it("keeps the author's own headings, and everything under them", () => {
-    expect(authorsDescription('Lead.\n\n## My own heading\n\nmore')).toBe(
-      'Lead.\n\n## My own heading\n\nmore',
-    );
-    expect(authorsDescription(`Lead.\n\n## Why now\n\nBecause.\n\n${GENERATED}`)).toBe(
-      'Lead.\n\n## Why now\n\nBecause.',
-    );
-  });
-
-  // Hexis appends the block LAST, so the last such line is always the generated
-  // one — which is what makes an author who happens to use that heading
-  // themselves no worse off than before.
-  it('cuts the LAST such heading, so an author may use the words too', () => {
-    const out = authorsDescription(`Lead.\n\n## Affected owners\n\nI mean the GTM ones.\n\n${GENERATED}`);
-    expect(out).toBe('Lead.\n\n## Affected owners\n\nI mean the GTM ones.');
-    // Their sentence is kept; not one path of the generated block is.
-    expect(out).not.toContain('Avi-Checkin');
-    expect(out).not.toContain('KnowledgeBase');
-  });
-
-  it('cuts an author\'s own owners heading when there is no generated block', () => {
-    // Indistinguishable from the generated one with nothing after it, so it is
-    // cut — the safe direction, and the only way this can err.
-    expect(authorsDescription('Lead.\n\n## Affected owners\n\nI mean the GTM ones.')).toBe('Lead.');
+  it('does not vary by what the caller may read', () => {
+    const forReader = toCrDetail(stored, { readable: 0, withheld: 1 }, { visible: [], withheld: 1 }, toCrViewer(stored, false, []));
+    const forAuthor = toCrDetail(stored, { readable: 1, withheld: 0 }, { visible: [], withheld: 0 }, toCrViewer(stored, true, []));
+    expect(forReader.body).toBe(forAuthor.body);
   });
 });
 
@@ -575,47 +524,5 @@ describe('a renamed file is judged on both of its names', () => {
   it('offers both names for the access lookup, and one for a plain file', () => {
     expect(pathsOf(renamed)).toEqual(['Knowledge/Open.md', 'Payroll/Rates.md']);
     expect(pathsOf({ path: 'A.md' })).toEqual(['A.md']);
-  });
-});
-
-/**
- * An edit of the description replaces exactly what `get_change_request`
- * answers as `body`, and nothing else — so what the agent (or the app) writes
- * is what the next read hands back, and the machine's parts stay.
- */
-describe('an edited description replaces the author\'s part, and only that', () => {
-  const GENERATED = '## Affected owners\n\n- `KnowledgeBase/GTM/Notes.md` — GTM Team';
-
-  it('reads back as written, with the generated block still there', () => {
-    const body = replaceAuthorsDescription(`Old reason.\n\n${GENERATED}`, 'P2 - Planned\n\nNew reason.');
-    expect(body).toBe(`P2 - Planned\n\nNew reason.\n\n${GENERATED}`);
-    expect(authorsDescription(body)).toBe('P2 - Planned\n\nNew reason.');
-  });
-
-  it("keeps the author's own headings and replaces from the top, not from the first heading", () => {
-    const body = replaceAuthorsDescription(`Lead.\n\n## Why now\n\nBecause.\n\n${GENERATED}`, 'Shorter.');
-    expect(body).toBe(`Shorter.\n\n${GENERATED}`);
-  });
-
-  it("carries Hexis's markers, so an access request's level survives", () => {
-    const body = replaceAuthorsDescription('<!--hexis:access-request-level:owner-->\nAsked for Owner.', 'Edited.');
-    expect(body).toContain('<!--hexis:access-request-level:owner-->');
-    expect(authorsDescription(body)).toBe('Edited.');
-  });
-
-  it("carries a fenced note's opener and closer together, fencing nothing, and shows neither", () => {
-    const body = replaceAuthorsDescription(
-      '<!--hexis:access-request-level:write-->\n<!--hexis:access-request-note-->\n> Please.\n<!--/hexis:access-request-note-->',
-      'Edited.',
-    );
-    expect(body).toBe(
-      '<!--hexis:access-request-level:write--><!--hexis:access-request-note--><!--/hexis:access-request-note-->\n\nEdited.',
-    );
-    expect(authorsDescription(body)).toBe('Edited.');
-  });
-
-  it('an empty description leaves just the generated block', () => {
-    expect(replaceAuthorsDescription(`Old.\n\n${GENERATED}`, '  ')).toBe(GENERATED);
-    expect(replaceAuthorsDescription('Old.', '')).toBe('');
   });
 });

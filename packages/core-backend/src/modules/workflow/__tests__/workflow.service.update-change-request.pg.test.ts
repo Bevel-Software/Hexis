@@ -27,7 +27,6 @@ import { WorkflowService } from '../workflow.service.js';
  */
 const KEY = randomBytes(32).toString('base64');
 const AUTHOR = 'alice@example.com';
-const GENERATED = '## Affected owners\n\n- `Docs/a.md` — Admin';
 const alice: AuthUser = { id: 'u-alice', email: AUTHOR, name: 'Alice' };
 const open: Database[] = [];
 
@@ -41,7 +40,7 @@ async function seeded(): Promise<{ svc: WorkflowService; db: Database; number: n
       sourceBranch: 'alice/draft',
       targetBranch: 'main',
       title: 'Old title',
-      body: `Old reason.\n\n${GENERATED}`,
+      body: 'Old reason.',
       authorEmail: AUTHOR,
       authorEmailBidx: AUTHOR,
       authorName: 'Alice',
@@ -85,7 +84,7 @@ describe.skipIf(!PG_ADMIN_URL)('WorkflowService.updateChangeRequest on a real, e
       await svc.updateChangeRequest(number, alice, { title: 'New title', description: 'New reason.' });
       const [row] = await db.select().from(changeRequests).where(eq(changeRequests.number, number));
       expect(row.title).toBe('New title');
-      expect(row.body).toBe(`New reason.\n\n${GENERATED}`);
+      expect(row.body).toBe('New reason.');
     },
     PG_TEST_TIMEOUT,
   );
@@ -99,7 +98,7 @@ describe.skipIf(!PG_ADMIN_URL)('WorkflowService.updateChangeRequest on a real, e
         svc.updateChangeRequest(number, alice, { appendDescription: 'Note two.' }),
       ]);
       const [row] = await db.select().from(changeRequests).where(eq(changeRequests.number, number));
-      expect(row.body).toMatch(/^Old reason\.\n\nNote (one|two)\.\n\nNote (one|two)\.\n\n## Affected owners/);
+      expect(row.body).toMatch(/^Old reason\.\n\nNote (one|two)\.\n\nNote (one|two)\.$/);
       expect(row.body).toContain('Note one.');
       expect(row.body).toContain('Note two.');
     },

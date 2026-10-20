@@ -31,8 +31,6 @@ const mergeLog = logger('merge');
 /** Who the leftover cleanup deletes as. Its deletions skip the authorship check, and the log names them `system`. */
 const SYSTEM_ACTOR: AuthUser = { id: 'system', email: 'system', name: 'system' };
 import { promises as fs } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   AcquireLockResult,
   AuthUser,
@@ -68,10 +66,6 @@ import {
   folderPlaceholderPath,
   isPlatformRestoreShape,
   CHANGE_REQUEST_TITLE_MAX,
-  AFFECTED_OWNERS_HEADING,
-  authorsDescription,
-  holdsAffectedOwnersHeading,
-  replaceAuthorsDescription,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
@@ -115,8 +109,6 @@ import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { printable } from '../../shared/printable.js';
-
-const execFileAsync = promisify(execFile);
 
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
@@ -185,14 +177,6 @@ function redactTokens(msg: string, token: string | null | undefined): string {
 }
 
 /**
- * Cap on how many changed paths the `## Affected owners` CR-body block lists
- * individually. The block is passed to `gh pr create --body`, an argv string,
- * so an uncapped per-path list on a large changeset (hundreds/thousands of
- * files) makes the whole command exceed the OS arg limit and fail with E2BIG.
- */
-export const MAX_AFFECTED_PATHS_LISTED = 50;
-
-/**
  * Only an open request's title and description may change: an applied one is
  * history, and a closed one is no longer asking anything. A worded 409 either
  * way, so the refusal says which.
@@ -210,67 +194,6 @@ function assertEditable(state: string): void {
       409,
     );
   }
-}
-
-type EligibleWriters = Map<
-  string,
-  { roles: string[]; users: { name: string; email: string }[] }
->;
-
-const formatWriter = (u: { name: string; email: string }): string =>
-  u.name ? `${u.name} <${u.email}>` : u.email;
-
-/**
- * Render the `## Affected owners` block for the CR body: eligible approvers per
- * changed path, but only the first `maxListed` paths are listed individually;
- * the overflow is collapsed into a single deduped summary of every eligible
- * approver across the change. This keeps the body bounded regardless of how
- * many files the change touches (see {@link MAX_AFFECTED_PATHS_LISTED}).
- * Returns '' when no path has resolvable eligibility. The empty-folder
- * placeholder is never listed or counted: it is not content, and no one
- * reviews it.
- */
-export function formatAffectedOwnersBlock(
-  paths: string[],
-  resolved: EligibleWriters,
-  maxListed: number = MAX_AFFECTED_PATHS_LISTED,
-): string {
-  const listed: string[] = [];
-  const allRoles = new Set<string>();
-  const allUsers = new Map<string, string>(); // email -> display, deduped
-  let eligible = 0;
-  for (const p of paths) {
-    if (isFolderPlaceholder(p)) continue;
-    const info = resolved.get(p);
-    if (!info) continue;
-    const parts: string[] = [];
-    if (info.roles.length > 0) {
-      info.roles.forEach((r) => allRoles.add(r));
-      parts.push(info.roles.join(', '));
-    }
-    if (info.users.length > 0) {
-      info.users.forEach((u) => allUsers.set(u.email, formatWriter(u)));
-      parts.push(info.users.map(formatWriter).join(', '));
-    }
-    if (parts.length === 0) continue;
-    eligible++;
-    if (listed.length < maxListed) listed.push(`- \`${p}\` — ${parts.join('; ')}`);
-  }
-  if (eligible === 0) return '';
-
-  const out = [AFFECTED_OWNERS_HEADING, '', ...listed];
-  if (eligible > listed.length) {
-    const summary = [
-      allRoles.size > 0 ? [...allRoles].sort().join(', ') : '',
-      allUsers.size > 0 ? [...allUsers.values()].sort().join(', ') : '',
-    ].filter((s) => s.length > 0);
-    out.push(
-      '',
-      `…and ${eligible - listed.length} more changed path(s). ` +
-        `All eligible approvers across this change: ${summary.join('; ')}`,
-    );
-  }
-  return out.join('\n');
 }
 
 /** Git commit subjects are capped at 200 characters (`GitService.commitFile`). */
@@ -2377,30 +2300,12 @@ export class WorkflowService implements IWorkflowService {
       pushRefused = err;
     }
 
-    const workspacePath = await this.workspaceService.getWorkspacePath(workspaceId);
-    const cwd = path.join(workspacePath, this.kbDirName);
-
-    // Touched paths between target and source — basis for the
-    // affected-owners block we append to the CR body. We compute it
-    // ourselves rather than waiting for GitHub to expose `pr.files`
-    // (which only populates after the PR exists). Three-dot range
-    // matches what `gh pr create` will eventually show as the diff.
-    const touchedPaths = await this.listChangedPathsBetweenBranches(
-      cwd,
-      input.targetBranch,
-      input.sourceBranch,
-    );
-    const affectedOwnersBlock = await this.buildAffectedOwnersBlock(
-      workspaceId,
-      input.targetBranch,
-      touchedPaths,
-    );
-
-    // The change request is a plain DB row now — no provider PR. Author is a
-    // real column (no hidden body marker needed, since nothing runs as a shared
-    // service account anymore).
-    const description = input.description?.trim() ?? '';
-    const body = [description, affectedOwnersBlock].filter((s) => s.length > 0).join('\n\n');
+    // The change request is a DB row and nothing else: its author is a
+    // column, its description is the whole body, and an access request's
+    // level and note are columns of their own. Who must approve each file is
+    // never written down here — it is resolved live, per file, from the
+    // access rules at the target branch whenever the request is read.
+    const note = input.accessRequest?.note?.trim();
 
     let prNumber: number;
     try {
@@ -2410,10 +2315,12 @@ export class WorkflowService implements IWorkflowService {
           sourceBranch: input.sourceBranch,
           targetBranch: input.targetBranch,
           title: input.title.trim(),
-          body,
+          body: input.description?.trim() ?? '',
           authorEmail: canonicalEmail(user.email),
           authorEmailBidx: user.email,
           authorName: user.name,
+          accessRequestLevel: input.accessRequest?.level ?? null,
+          accessRequestNote: note ? note : null,
         })
         .returning({ number: changeRequests.number });
       prNumber = row.number;
@@ -3462,9 +3369,8 @@ export class WorkflowService implements IWorkflowService {
    * who may close it — `changeRequestDecisionGrant`, the one rule both verbs
    * share. What a request asks belongs to the same people who may decide it.
    *
-   * `description` replaces the author's part of the body only; the generated
-   * `## Affected owners` block and Hexis's own markers stay (see
-   * `replaceAuthorsDescription`).
+   * `description` replaces the body whole — the body is the description and
+   * nothing else; `appendDescription` adds a paragraph after it as stored.
    */
   async updateChangeRequest(
     number: number,
@@ -3488,15 +3394,6 @@ export class WorkflowService implements IWorkflowService {
         `A change request's title is at most ${CHANGE_REQUEST_TITLE_MAX} characters; this one has ${title.length}.`,
       );
     }
-    // The body's LAST `## Affected owners` line is where the generated block
-    // starts (`authorsDescription`), so the author's text may not carry one:
-    // it would cut the description short the next time it is read.
-    if ([description, appended].some((d) => d !== undefined && holdsAffectedOwnersHeading(d))) {
-      throw new WorkflowValidationError(
-        'A description cannot contain a line reading exactly "## Affected owners" — that heading marks the generated owners block. Reword the heading.',
-      );
-    }
-
     const summary = await this.prs.getPr(number);
     if (!summary) throw new WorkflowDomainError('change request not found', 404);
     assertEditable(summary.state);
@@ -3543,17 +3440,18 @@ export class WorkflowService implements IWorkflowService {
         .limit(1)
         .for('update');
       if (!row) return false;
-      const newDescription =
+      // The body IS the description: a replacement is written as given, an
+      // append goes after the text as stored. An access request's level and
+      // note live on their own columns and are never touched by an edit.
+      const body =
         appended === undefined
           ? description
-          : [authorsDescription(row.body), appended].filter((s) => s.length > 0).join('\n\n');
+          : [row.body.trim(), appended].filter((s) => s.length > 0).join('\n\n');
       const written = await tx
         .update(changeRequests)
         .set({
           ...(title !== undefined ? { title } : {}),
-          ...(newDescription !== undefined
-            ? { body: replaceAuthorsDescription(row.body, newDescription) }
-            : {}),
+          ...(body !== undefined ? { body } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
@@ -4819,67 +4717,6 @@ export class WorkflowService implements IWorkflowService {
       mergeLog.warn(`roles.yaml preservation failed for #${number}:`, { detail });
       throw new RolesYamlPreservationError(detail);
     }
-  }
-
-  /**
-   * Names of files changed between the target branch (on origin) and the
-   * source (HEAD) — the diff the CR will surface. Three-dot range so
-   * commits that exist only on origin/target but not on source don't
-   * inflate the list. Failures fall back to an empty list — a missing
-   * affected-owners block is cosmetic, not a reason to abort CR creation.
-   */
-  private async listChangedPathsBetweenBranches(
-    cwd: string,
-    targetBranch: string,
-    sourceBranch: string,
-  ): Promise<string[]> {
-    try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', cwd, 'diff', '--name-only', `origin/${targetBranch}...${sourceBranch}`],
-        { env: { ...process.env }, maxBuffer: 4 * 1024 * 1024 },
-      );
-      return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-    } catch (err) {
-      log.warn('listChangedPathsBetweenBranches failed:', {
-        detail: redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token()),
-      });
-      return [];
-    }
-  }
-
-  /**
-   * Build the `## Affected owners` markdown block that gets appended to
-   * the CR body. Lists the eligible approvers (roles + named users) per
-   * changed path, per the access tree on `origin/<targetBranch>` — the same
-   * tree the approval gate uses server-side, so what the body advertises
-   * matches who can actually approve at merge time. The per-path list is
-   * capped (see {@link formatAffectedOwnersBlock}) so the body stays within
-   * the `gh pr create --body` arg limit on large changesets.
-   *
-   * Returns the empty string when there are no touched paths or no
-   * resolvable eligibility — keeps the body clean rather than printing
-   * a stub heading.
-   */
-  private async buildAffectedOwnersBlock(
-    workspaceId: string,
-    targetBranch: string,
-    paths: string[],
-  ): Promise<string> {
-    if (paths.length === 0) return '';
-    let resolved: Awaited<ReturnType<IAccessControl['eligibleWritersForPathsAtRef']>> = null;
-    try {
-      resolved = await this.accessControl.eligibleWritersForPathsAtRef(
-        workspaceId,
-        `origin/${targetBranch}`,
-        paths,
-      );
-    } catch (err) {
-      log.warn('eligibleWritersForPathsAtRef failed:', { err });
-    }
-    if (!resolved || resolved.size === 0) return '';
-
-    return formatAffectedOwnersBlock(paths, resolved);
   }
 
   async updateBranch(

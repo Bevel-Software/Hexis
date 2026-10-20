@@ -24,7 +24,6 @@ import { WorkflowService } from '../workflow.service.js';
 
 const AUTHOR = 'alice@example.com';
 const OTHER = 'mallory@example.com';
-const GENERATED = '## Affected owners\n\n- `Docs/a.md` — Admin';
 
 const user = (email: string, name = 'Caller'): AuthUser => ({ id: `u-${email}`, email, name });
 
@@ -66,7 +65,7 @@ function harness(
     from: vi.fn(() => tx),
     where: vi.fn(() => tx),
     limit: vi.fn(() => tx),
-    for: vi.fn(async () => (state === 'open' ? [{ body: opts.body ?? `Old reason.\n\n${GENERATED}` }] : [])),
+    for: vi.fn(async () => (state === 'open' ? [{ body: opts.body ?? 'Old reason.' }] : [])),
     update: vi.fn(() => tx),
     set: vi.fn((values: Record<string, unknown>) => {
       written.push(values);
@@ -226,22 +225,6 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     expect(h.written).toHaveLength(1);
   });
 
-  it('refuses a description holding the generated block’s heading, which would cut it short on read', async () => {
-    const h = harness({ authorEmail: AUTHOR });
-    for (const input of [
-      { description: `Mine.\n\n${GENERATED}` },
-      { appendDescription: '## Affected owners\n\nme' },
-    ]) {
-      await expect(h.svc.updateChangeRequest(9, user(AUTHOR), input)).rejects.toMatchObject({
-        status: 400,
-        message: expect.stringContaining('## Affected owners'),
-      });
-    }
-    // A heading that merely mentions it is the author's own.
-    await h.svc.updateChangeRequest(9, user(AUTHOR), { description: '## Affected owners, informally\n\nMine.' });
-    expect(h.written).toHaveLength(1);
-  });
-
   it('refuses a replacement and an append together with 400', async () => {
     const h = harness({ authorEmail: AUTHOR });
     await expect(
@@ -252,14 +235,20 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
 });
 
 describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
-  it('replaces the author’s text and keeps the generated owners block', async () => {
+  it('replaces the body whole — the body is the description and nothing else', async () => {
     const h = harness({ authorEmail: AUTHOR });
     const before = Date.now();
     await h.svc.updateChangeRequest(9, user(AUTHOR, 'Alice'), { description: '  P2 - Planned\n\nNew reason.  ' });
     const [set] = h.written;
-    expect(set.body).toBe(`P2 - Planned\n\nNew reason.\n\n${GENERATED}`);
+    expect(set.body).toBe('P2 - Planned\n\nNew reason.');
     expect(set).not.toHaveProperty('title');
     expect((set.updatedAt as Date).getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("keeps the author's own headings: nothing in a body is Hexis's to cut", async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'Lead.\n\n## Affected owners\n\nI mean the GTM ones.' });
+    expect(h.written[0].body).toBe('Lead.\n\n## Affected owners\n\nI mean the GTM ones.');
   });
 
   it('changes the title alone without touching the body', async () => {
@@ -270,19 +259,25 @@ describe('WorkflowService.updateChangeRequest — what an edit writes', () => {
     expect(set).not.toHaveProperty('body');
   });
 
-  it('keeps Hexis’s own markers — an access request’s level survives an edit', async () => {
-    const h = harness({
-      authorEmail: AUTHOR,
-      body: '<!--hexis:access-request-level:owner-->\nAlice asked for **Owner** on Docs.',
-    });
+  it("never touches an access request's level or note — they are columns, not prose", async () => {
+    const h = harness({ authorEmail: AUTHOR, body: 'Alice asked for **Owner** on Docs.' });
     await h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'Please, for the Q3 review.' });
-    expect(h.written[0].body).toBe('<!--hexis:access-request-level:owner-->\n\nPlease, for the Q3 review.');
+    const [set] = h.written;
+    expect(set.body).toBe('Please, for the Q3 review.');
+    expect(set).not.toHaveProperty('accessRequestLevel');
+    expect(set).not.toHaveProperty('accessRequestNote');
   });
 
-  it('appends to the description as stored, keeping the generated owners block', async () => {
+  it('appends to the description as stored', async () => {
     const h = harness({ authorEmail: AUTHOR });
     await h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: '  Round two.  ' });
-    expect(h.written[0].body).toBe(`Old reason.\n\nRound two.\n\n${GENERATED}`);
+    expect(h.written[0].body).toBe('Old reason.\n\nRound two.');
+  });
+
+  it('an append to an empty description is the description', async () => {
+    const h = harness({ authorEmail: AUTHOR, body: '' });
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: 'P1 - High' });
+    expect(h.written[0].body).toBe('P1 - High');
   });
 
   it('reads the body under the row’s lock, in the transaction that writes it, so racing edits serialise', async () => {

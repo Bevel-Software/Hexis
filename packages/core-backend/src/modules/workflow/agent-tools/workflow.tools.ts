@@ -19,6 +19,11 @@ import {
   summarizeChangeRequest,
 } from './change-request-summary.js';
 
+/** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
+function stripKbDir(path: string, kbDirName: string): string {
+  return path.startsWith(`${kbDirName}/`) ? path.slice(kbDirName.length + 1) : path;
+}
+
 // Read at call time, not captured: the branch model is applied during boot,
 // and a value taken at registration would be the empty set that exists before it.
 const protectedInline = (kb: Pick<KbContext, 'protectedBranches'>) =>
@@ -480,8 +485,8 @@ export function registerWorkflowTools(
       'Change the title and/or the description of an OPEN change request. Allowed for its author and for anyone ' +
       'who may merge it (an admin, or someone who may approve every file it changes) — the same rule as the app\'s ' +
       'Edit control; anyone else is refused (403), and so is a merged or closed request (409), in words. ' +
-      '`description` replaces what the author wrote — the text `get_change_request` answers as `body`; the ' +
-      'generated owners block stays. Give at least one of the two; an absent one keeps its text. ' +
+      "`description` replaces the request's description whole — the text `get_change_request` answers as `body`. " +
+      'Give at least one of the two; an absent one keeps its text. ' +
       '`get_change_request` answers the new text at once. A request you may not see answers 404, as `get_change_request` does.',
     inputs: {
       type: 'object',

@@ -890,15 +890,8 @@ describe('list_change_request_reviews', () => {
  * tool surface it found them on — not just the pure mapper underneath.
  */
 describe('a mixed-access caller is never handed a path they may not read', () => {
-  /** A body exactly as `openChangeRequest` builds it: prose, then the block. */
-  const bodyWithOwnersBlock = [
-    'Please review the check-in note.',
-    '',
-    '## Affected owners',
-    '',
-    '- `KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md` — Admin',
-    '- `KnowledgeBase/GTM/Notes.md` — GTM Team',
-  ].join('\n');
+  /** A body as `openChangeRequest` stores it: the description, nothing else. */
+  const body = 'Please review the check-in note.';
 
   /** The reader of one folder of a two-folder request — john.newcomer's case. */
   function mixedAccessRequest(): void {
@@ -911,7 +904,7 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
       1,
       detail({
         number: 1,
-        body: bodyWithOwnersBlock,
+        body,
         files: [
           file('KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md'),
           file('KnowledgeBase/GTM/Notes.md'),
@@ -930,7 +923,7 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     );
   }
 
-  it('get_change_request answers the author\'s reason and names no withheld file anywhere', async () => {
+  it('get_change_request answers the description and names no withheld file anywhere', async () => {
     const base = await start();
     mixedAccessRequest();
     const { status, json } = await call(base, 'get_change_request', { number: 1 });
@@ -945,7 +938,6 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     const whole = JSON.stringify(json);
     expect(whole).not.toContain('Avi-Checkin');
     expect(whole).not.toContain('KnowledgeBase/Engineering');
-    expect(whole).not.toContain('Affected owners');
     // The file they CAN read is still named, and its blocker still readable.
     expect(whole).toContain('KnowledgeBase/GTM/Notes.md');
     expect(json).toMatchObject({ withheldMergeBlockedReasons: 1 });
@@ -972,7 +964,7 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     }
   });
 
-  it('the author sees their own body too — the cut is the same for everyone', async () => {
+  it('the author is handed the same body — one body for everyone', async () => {
     const base = await start();
     mixedAccessRequest();
     callerEmail = AUTHOR;
@@ -981,14 +973,11 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
       'KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md',
     ];
     const { json } = await call(base, 'get_change_request', { number: 1 });
-    // A caller who may read everything gets the same author text, not the
-    // machine block — one body nobody has to reason about.
     expect(json).toMatchObject({
       body: 'Please review the check-in note.',
       changedFiles: 2,
       withheldFiles: 0,
     });
-    expect(JSON.stringify(json)).not.toContain('Affected owners');
   });
 });
 
