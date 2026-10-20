@@ -51,12 +51,8 @@ import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
-import {
-  ExitFullScreenButton,
-  FULL_SCREEN_SURFACE,
-  FullScreenButton,
-  useFullScreenView,
-} from './FullScreenView';
+import { ExitFullScreenButton, FULL_SCREEN_SURFACE, FullScreenButton } from './FullScreenView';
+import { useFullScreenView } from '../hooks/useFullScreenView';
 import { DOCUMENT_COLUMN, documentSideGutters } from '../../../shared/theme/measure';
 import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
 import { useStarterPacks } from '../../onboarding/state/starter-packs';
