@@ -11,6 +11,11 @@ of `window.bevel` that this guide names. This section is the platform contract:
 a skill may add a design or authoring workflow, but it does not change how the
 page runs.
 
+**Data copied into the HTML is governed by the HTML file's access.** Graph and
+tool calls filter their answers for the current viewer; literal data embedded
+in the page does not. Anyone who may read the page receives those bytes, so do
+not copy data from a source whose read audience is narrower than the page's.
+
 ### The frame
 
 - **No network.** The page cannot fetch, load or send anything: no `fetch`, no

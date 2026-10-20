@@ -362,6 +362,8 @@ describe('the HTML views section', () => {
     const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
     expect(text).toContain('No skill or template is required.');
     expect(text).toContain('This section is the platform contract');
+    expect(text).toContain('**Data copied into the HTML is governed by the HTML file\'s access.**');
+    expect(text).toContain('literal data embedded in the page does not');
     expect(text).toContain('**No network.**');
     expect(text).toContain('**Inline scripts and styles only.**');
     expect(text).toContain('**The body is the page.**');

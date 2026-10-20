@@ -52,6 +52,10 @@ describe('the html-views guide section agrees with the renderer', () => {
 
   it('supports a functional page without a skill or template', () => {
     expect(flat).toContain('No skill or template is required.');
+    expect(flat).toContain('**Data copied into the HTML is governed by the HTML file\'s access.**');
+    expect(flat).toContain(
+      'Graph and tool calls filter their answers for the current viewer; literal data embedded in the page does not.',
+    );
     const page = `<!doctype html>
       <html data-ignored="yes">
         <head>
