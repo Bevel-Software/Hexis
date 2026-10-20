@@ -1,5 +1,5 @@
 import type { Response } from 'express';
-import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/index.js';
 
 /**
  * How every key-authenticated endpoint answers a bearer that LOOKS like a

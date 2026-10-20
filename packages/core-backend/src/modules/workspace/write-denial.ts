@@ -1,6 +1,6 @@
 import { branchAuthorLocalpart, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';

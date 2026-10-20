@@ -17,7 +17,7 @@ import { AccessMutationService, accessMdPathForFolder } from '../access/access-m
 import { pluginPrincipalKey } from '../access-model/access-grammar.js';
 import type { Principal } from '../access-model/access-splice.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import type { ISkillService } from '../skills/skills.contract.js';
+import type { ISkillService } from '../skills/index.js';
 import { logger } from '../../shared/logging.js';
 import type { ProvisionCommitDriver } from './plugin-provision.service.js';
 import type { PluginLinkIndex } from './plugin-links.js';

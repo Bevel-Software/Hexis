@@ -13,7 +13,7 @@ import {
   getFileRenderer,
   getRendererLayout,
 } from '../../workspace/components/renderers';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace';
 import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
 
 /**

@@ -40,7 +40,7 @@ import { normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';

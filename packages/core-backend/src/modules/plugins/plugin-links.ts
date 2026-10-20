@@ -6,7 +6,7 @@ import { pluginManifestName, skillUnderRoot } from '@bevel-software/platform-sha
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import type { ISkillService } from '../skills/skills.contract.js';
+import type { ISkillService } from '../skills/index.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import { canonicalRoleName, pluginPrincipalKey } from '../access-model/access-grammar.js';
 import type { PluginMembership } from './plugins.contract.js';

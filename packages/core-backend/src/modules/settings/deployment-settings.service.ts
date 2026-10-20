@@ -14,7 +14,7 @@ import {
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/repo-path.js';
-import { parseRetentionWindow } from '../audit/audit.contract.js';
+import { parseRetentionWindow } from '../audit/index.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 import { GIT_MODES, isGitMode } from './repository-source.js';
 

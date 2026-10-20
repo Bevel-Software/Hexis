@@ -6,8 +6,8 @@ import type {
   FileApproval,
 } from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
-import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';

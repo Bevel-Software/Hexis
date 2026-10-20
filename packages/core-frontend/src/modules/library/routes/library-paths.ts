@@ -7,7 +7,7 @@ import {
   isPersonalPluginFolder,
 } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace';
 import type { LibraryFilter } from '../utils/status';
 import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
 

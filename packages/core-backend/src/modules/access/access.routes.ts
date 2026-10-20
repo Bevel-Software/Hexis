@@ -53,7 +53,7 @@ import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import '../auth/auth.middleware.js';
+import '../auth/index.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
 const GRANTABLE_VERBS = new Set<string>(['read', 'write', 'owner', 'download']);

@@ -7,7 +7,7 @@ import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import type { IKbSyncService, SyncResult } from './kb-sync.interface.js';
 import { parseSyncPayload, type SyncPayloadSource } from './sync-payload.js';
 import { verifySyncCredential } from './sync-auth.js';
-import { AuthBackendError } from '../auth/account-admission.js';
+import { AuthBackendError } from '../auth/index.js';
 
 /**
  * Remote sync — a git host or a pipeline tells Hexis the repository changed.

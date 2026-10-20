@@ -27,7 +27,7 @@ import {
   extractRequestNote,
   itemNameOf,
 } from './access-requests.service.js';
-import '../auth/auth.middleware.js'; // Express Request.userId augmentation
+import '../auth/index.js'; // Express Request.userId augmentation
 
 const log = logger('access.request');
 

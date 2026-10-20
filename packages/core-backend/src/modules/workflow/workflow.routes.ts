@@ -42,7 +42,7 @@ import { assertReadableAtCommits } from './read-on-branch.js';
 import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 function toHttpError(
   err: unknown,

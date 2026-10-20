@@ -5,7 +5,7 @@ const log = logger('connection-keys');
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import { TokenNotFoundError } from './external-api-key.errors.js';
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /** Shape of the `api_tokens.id` column (any uuid version; case-insensitive). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
