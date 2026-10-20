@@ -33,12 +33,6 @@ export interface IRoutineWritePolicy {
    * always passes — so this is a no-op for every non-restricted caller.
    */
   assertPathWritable(sessionId: string | undefined, wsPath: string): void;
-  /**
-   * Throw a 403 `ToolError` when the session is restricted at all — for write
-   * tools with no single target path to check (arbitrary shell), which a
-   * restricted run must not be able to use as a write bypass.
-   */
-  assertUnrestricted(sessionId: string | undefined): void;
 }
 
 export class RoutineWritePolicyService implements IRoutineWritePolicy {
@@ -65,14 +59,5 @@ export class RoutineWritePolicyService implements IRoutineWritePolicy {
         'Knowledge-graph nodes and other files are read-only for this routine.',
       403,
     );
-  }
-
-  assertUnrestricted(sessionId: string | undefined): void {
-    if (sessionId && this.restrictions.has(sessionId)) {
-      throw new ToolError(
-        'This run is restricted to writing dashboard views only, so shell commands (which could write any file) are disabled.',
-        403,
-      );
-    }
   }
 }

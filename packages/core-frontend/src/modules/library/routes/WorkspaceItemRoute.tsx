@@ -2,6 +2,7 @@ import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-r
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
+import { asksForFilePage } from '../../workspace';
 import { useLibrary } from '../state/library-data';
 import type { PluginSummary } from '../services/plugins.api';
 import { pluginHoldingPath } from '../utils/plugin-summary';
@@ -43,7 +44,9 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  * Router state `rawFile` asks for that raw view OUTRIGHT, whatever the URL
  * would otherwise resolve to — the tool page's "Edit the tool file", the
  * plugin page's manifest button. State, not URL: a shared link never carries
- * it, so nobody lands on the editor by accident.
+ * it, so nobody lands on the editor by accident. The one URL form of the ask
+ * is `?as=file` (`kbFilePageUrl`), for a page opened on its file page in a
+ * NEW tab, which carries no state — the embed's "Open in the platform".
  *
  * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
  * declare an explicit id different from its filename); the filename is the
@@ -95,8 +98,11 @@ export function WorkspaceItemRoute() {
     </>
   );
 
-  // Asked for the raw file by name: no resolution, the editor it is.
+  // Asked for the raw file by name: no resolution, the editor it is. The
+  // query is the same ask from a NEW tab, which has no router state — the
+  // embed's "Open in the platform" for a page inside a skill's folder.
   if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return fileView();
+  if (asksForFilePage(searchParams)) return fileView();
 
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the

@@ -11,6 +11,7 @@ import { toolDef } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { readablePathsAt } from '../read-on-branch.js';
 import {
   PER_PAGE_DEFAULT,
   PER_PAGE_MAX,
@@ -602,28 +603,9 @@ export function changeRequestScope(
   const repoGlobalWorkspaceId = async (ctx: ToolContext): Promise<string> =>
     (await ctx.workspaceService.findAnyWorkspaceId()) ?? kb.defaultWorkspaceId();
 
-  /**
-   * Read verdicts for `paths` at `origin/<base>`, as a membership set of what
-   * the caller MAY read. A null answer (the ref or its `roles.yaml` does not
-   * resolve) withholds everything, which is the same reading the app's
-   * fork-point route gives it.
-   */
-  const readablePaths = async (
-    ctx: ToolContext,
-    workspaceId: string,
-    base: string,
-    paths: string[],
-  ): Promise<Set<string>> => {
-    if (paths.length === 0) return new Set();
-    const verdicts = await accessControl.canReadBatchAtRef(
-      workspaceId,
-      `origin/${base}`,
-      ctx.user.email,
-      [...new Set(paths)],
-    );
-    if (!verdicts) return new Set();
-    return new Set([...verdicts].filter(([, allowed]) => allowed).map(([p]) => p));
-  };
+  /** What the caller MAY read of `paths` at `origin/<base>` — the one rule, `readablePathsAt`. */
+  const readablePaths = (ctx: ToolContext, workspaceId: string, base: string, paths: string[]): Promise<Set<string>> =>
+    readablePathsAt(accessControl, workspaceId, ctx.user.email, base, paths);
 
   const scopedDetail = async (
     ctx: ToolContext,

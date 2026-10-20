@@ -1,5 +1,5 @@
 {
-  "id": "410b5c1a-0490-49af-bdc7-5e46a429131d",
+  "id": "67aaaca1-2386-4a16-b1fe-f29858e77560",
   "prevId": "af9563ed-cb9e-46d7-a62b-2df4520df6d7",
   "version": "7",
   "dialect": "postgresql",
@@ -167,6 +167,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "page_path": {
+          "name": "page_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "kind": {
           "name": "kind",
           "type": "text",
@@ -232,6 +238,33 @@
           "columns": [
             {
               "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_events_by_page": {
+          "name": "agent_events_by_page",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "page_path",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -330,11 +363,11 @@
         },
         "agent_events_outcome": {
           "name": "agent_events_outcome",
-          "value": "\"agent_events\".\"outcome\" IN ('ok', 'error', 'denied')"
+          "value": "\"agent_events\".\"outcome\" IN ('ok', 'error', 'denied', 'refused')"
         },
         "agent_events_principal": {
           "name": "agent_events_principal",
-          "value": "(\"agent_events\".\"key_id\" IS NULL) <> (\"agent_events\".\"connection_id\" IS NULL)"
+          "value": "num_nonnulls(\"agent_events\".\"key_id\", \"agent_events\".\"connection_id\", \"agent_events\".\"page_path\") = 1"
         }
       },
       "isRLSEnabled": false
@@ -1753,6 +1786,136 @@
           "value": "\"plugin_join_requests\".\"status\" IN ('pending', 'opened', 'failed')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.pr_comments": {
+      "name": "pr_comments",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "pr_number": {
+          "name": "pr_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "author_email": {
+          "name": "author_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "author_email_bidx": {
+          "name": "author_email_bidx",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "author_name": {
+          "name": "author_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "line": {
+          "name": "line",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "head_sha": {
+          "name": "head_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "pr_comments_by_pr": {
+          "name": "pr_comments_by_pr",
+          "columns": [
+            {
+              "expression": "pr_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "pr_comments_by_thread": {
+          "name": "pr_comments_by_thread",
+          "columns": [
+            {
+              "expression": "pr_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "path",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "line",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.pr_file_approvals": {

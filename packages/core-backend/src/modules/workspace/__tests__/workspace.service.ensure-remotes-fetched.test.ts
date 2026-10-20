@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../workspace.service.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * `ensureRemotesFetched` is one `git fetch --prune origin` for a whole clone,
@@ -42,7 +42,7 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
   });
 
   const service = () =>
-    new WorkspaceService(
+    newWorkspaceService(
       root,
       'https://example.test/kb.git',
       testKbContext(),

@@ -241,18 +241,62 @@ File-level write access decides how a change lands on the default branch:
 - **Edit** an open request's title or description with `update_change_request`
   — its author, or anyone who may merge it (an Admin, or someone who may
   approve every file it changes); anyone else is refused, and so is a merged or
-  closed request. `description` replaces what the author wrote (the `body`
-  `get_change_request` answers); the generated owners block stays, and readers
-  see the new text at once.
-- **Sync** a draft with `merge_branch`, `source` = the branch the request
-  targets, `target` = the draft. This is allowed while the draft's request is
-  open, and is how you bring it up to date or surface conflicts to resolve on
-  the draft.
+  closed request. `description` replaces the request's description (the `body`
+  `get_change_request` answers) whole; readers see the new text at once.
+- **Sync** a draft with `update_branch` on the draft, `from` = the branch the
+  request targets. This is allowed while the draft's request is open, and is
+  how you bring it up to date. Left out, `from` is the draft's own shared
+  state: for when it moved while your workspace held commits of its own
+  (`branch_status` says `behindRemote`). `merge_branch` (`source` = the
+  target, `target` = the draft) does the same without conflict handling.
+- **Resolve conflicts** where `update_branch` answers `conflicts`: for every
+  conflicted path it carries the file at the merge base, on your side and on
+  theirs, and the working copy with git's markers — and it has left the draft
+  exactly as it was. A side is null when that side has no file, or when
+  `truncated` names it (too large, or not text): then read `ours` with
+  `read_file` (it is the draft's own file), `theirs` with `read_file_at` at
+  `from` (the branch, not a commit — its tip is not on the draft's history
+  until the merge lands), and `base` with `read_file_at` at the answer's
+  `mergeBase`. A side that is not text cannot be read that way (those
+  reads are text-only): settle such a file whole, with `choose` — `content`
+  is for text. A conflicted file you may not read on one of the two
+  branches is left out and only counted (`withheldConflicts`): it is not
+  yours to settle, so ask a person who can read it to update the draft in
+  the app. Decide each
+  file shown (keep both sides' information unless one is clearly stale;
+  `list_file_changes` says who changed what and why), then call
+  `update_branch` again **with the same `from`** and `resolutions`, one per
+  conflicted path: `content`, the resolved text, or `choose` (`ours`,
+  `theirs`, `delete`). A resolution is a write on your draft: you must be
+  able to read the file at both commits the answer names (`ours`, the
+  draft's; `theirs`, the merged-in branch's), and it takes the rule every
+  save on a draft takes — you may read the file, or it is new — never a
+  write permission. It merges, commits as you and publishes. A publish the
+  host refuses, or a replay that conflicts because the shared branch moved
+  meanwhile, answers with the saved-locally error: the merge is committed
+  on your draft but NOT shared — `branch_status` shows it ahead. Do not
+  report the draft as shared then; the next save or `share_current_branch`
+  carries the commit, and a replay that conflicts is handed to recovery.
+  Nothing else is written that way: an ordinary edit goes through the file
+  tools. You have no git command; there is never a half-done merge on disk
+  for you to finish.
 - `merge_branch` refuses to merge a draft into the branch its open change
   request targets — it names the request; ask the user to review it in the
   app. Into a protected branch it merges only what you could commit there
   directly, under the rule above — and never a change to `roles.yaml`, whoever
   you are: roles are changed in the app, not merged in from a draft.
+- **Know where a draft stands** with `branch_status`: ahead/behind, whether
+  the shared branch moved, the files written but not committed yet, the
+  protected branch it was forked from, and `changedPaths` — what it changes
+  against that base, the files a change request would carry. The list holds
+  only the files you may read; `withheldPaths` counts the rest, so when it
+  is above zero the list is not the request's whole set. Ask it before
+  proposing a draft.
+- **Read history** with `list_file_changes` (a file's commits: who, when,
+  subject), `read_file_at` (the file at a commit, or on another branch) and
+  `compare_file` (the diff of a commit, or between two branches). Each takes
+  the read the file itself takes. To put an earlier version back, read it
+  with `read_file_at` and write it with `write_file`.
 - **Delete** a draft with `delete_branch`, which removes it for everyone. Only
   its author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an
   Admin may. Preview with `dryRun: true` first: it changes nothing and says
