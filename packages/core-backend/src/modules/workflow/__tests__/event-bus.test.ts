@@ -191,7 +191,6 @@ describe('WorkflowEventBus', () => {
         source: 'feat',
         target: 'target-company-state',
         authorIdHash: 'h',
-        title: 'Add Foo',
       });
 
       expect(onA.push).toHaveBeenCalledTimes(1);

@@ -12,10 +12,12 @@
  *   - An event that names a path on a workspace (`file-changed`, the two lock
  *     events, and any later kind that carries `workspaceId` and `path`): the
  *     person may read the path on that branch, as the file routes judge it.
- *   - `approval-changed`: the request may name that path to the person, as the
- *     change-request tools judge it.
- *   - `change-request-opened`: the person may see the request, as
- *     `get_change_request` and the request list judge it.
+ *   - `approval-changed`: the person may read the approved path at the
+ *     request's target branch — the verdict the request's own detail and the
+ *     merge gate are scoped by. Judged on the path alone, from the access
+ *     tree at `origin/<target>`, which is cached by commit: never by reading
+ *     the request's detail, which diffs the branch pair with several git
+ *     subprocesses per person per event.
  *   - `git-sync-failed`: the event names the workspace's root and, for a sync
  *     conflict, each conflicted file (its `reason` quotes them too). The person
  *     gets the paths they may read; git's words reach only a person who may
@@ -23,10 +25,13 @@
  *     a fixed sentence.
  *   - `agent-tool-call`: the person whose agent made the call, and admins.
  *
- * Every other kind is delivered as it is. A verdict that cannot be reached
- * (the access tree fails to load, the request cannot be read) withholds, or
- * for `git-sync-failed` redacts: failing closed costs a live refresh, failing
- * open names a file.
+ * Every other kind is delivered as it is. That includes the change-request
+ * lifecycle kinds (`change-request-opened`, `-merged`, `-rejected`,
+ * `-apply-failed`): they carry a number and branch names, no title and no
+ * paths, so there is nothing in them a person may not read, and every tab
+ * refetches the lists it may see. A verdict that cannot be reached (the
+ * access tree fails to load) withholds, or for `git-sync-failed` redacts:
+ * failing closed costs a live refresh, failing open names a file.
  *
  * Nothing here changes what publishers emit; the rule only reads the event.
  */
@@ -36,7 +41,6 @@ import { logger } from '../../shared/logging.js';
 import type { IAccessControl } from '../access/index.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
-import type { ScopeCaller, ScopedDetail } from './agent-tools/change-request-read.tools.js';
 
 const log = logger('events');
 
@@ -59,10 +63,11 @@ export interface EventAccess {
   mayReadPath(workspaceId: string, email: string, wsPath: string): Promise<boolean>;
   /** May `email` read the KB-repo-relative `repoPath` on `workspaceId`; `''` is the root. */
   mayReadRepoPath(workspaceId: string, email: string, repoPath: string): Promise<boolean>;
-  /** May `email` see change request `number` at all — what `get_change_request` answers 404 for, as a no. */
-  maySeeChangeRequest(number: number, email: string): Promise<boolean>;
-  /** May request `number` name `path` to `email` — its approvals and comments are shown on the same rule. */
-  mayShowChangeRequestPath(number: number, email: string, path: string): Promise<boolean>;
+  /**
+   * May `email` read the KB-repo-relative `repoPath` at the published tip of
+   * `targetBranch` — what a request into that branch is scoped by.
+   */
+  mayReadAtTarget(targetBranch: string, email: string, repoPath: string): Promise<boolean>;
   isAdmin(email: string): Promise<boolean>;
 }
 
@@ -77,18 +82,18 @@ export interface IEventDelivery {
   isAdmin(viewer: EventViewer): Promise<boolean>;
 }
 
-/** The deployment's `EventAccess`: the access service the file routes use, and the change-request scope the tools use. */
+/** The deployment's `EventAccess`: the access service the file routes and the request tools use. */
 export function createEventAccess(deps: {
-  accessControl: Pick<IAccessControl, 'canRead'>;
+  accessControl: Pick<IAccessControl, 'canRead' | 'canReadBatchAtRef'>;
   adminAccess: IAdminAccessService;
   kbDirName: string;
-  /** `changeRequestScope(...).scopedDetail`, the tools' own read of a request. */
-  scopedDetail: (caller: ScopeCaller, number: number, opts: { patches: boolean }) => Promise<ScopedDetail>;
-  /** `changeRequestScope(...).maySee`. */
-  maySee: (caller: ScopeCaller, number: number) => Promise<boolean>;
-  services: Omit<ScopeCaller, 'user'>;
+  /**
+   * A workspace to read a published ref in. Every verdict at `origin/<branch>`
+   * is the same from any clone of the repository, so any existing one serves;
+   * the composition root answers with one that exists.
+   */
+  anyWorkspaceId: () => Promise<string>;
 }): EventAccess {
-  const caller = (email: string): ScopeCaller => ({ ...deps.services, user: { email } });
   return {
     mayReadPath: (workspaceId, email, wsPath) =>
       canReadWorkspacePath(
@@ -99,12 +104,15 @@ export function createEventAccess(deps: {
         wsPath,
       ),
     mayReadRepoPath: (workspaceId, email, repoPath) => deps.accessControl.canRead(workspaceId, email, repoPath),
-    maySeeChangeRequest: (number, email) => deps.maySee(caller(email), number),
-    mayShowChangeRequestPath: async (number, email, path) => {
-      // `scopedDetail` answers a request the person may not see with a 404,
-      // which is a no here like any other failure.
-      const scoped = await deps.scopedDetail(caller(email), number, { patches: false });
-      return scoped.mayShow(path);
+    mayReadAtTarget: async (targetBranch, email, repoPath) => {
+      const verdicts = await deps.accessControl.canReadBatchAtRef(
+        await deps.anyWorkspaceId(),
+        `origin/${targetBranch}`,
+        email,
+        [repoPath],
+      );
+      // A ref that cannot be resolved answers null: nothing is granted on it.
+      return verdicts?.get(repoPath) === true;
     },
     isAdmin: (email) => deps.adminAccess.isAdmin(email),
   };
@@ -123,9 +131,7 @@ async function deliveryFor(
   try {
     switch (event.kind) {
       case 'approval-changed':
-        return email && (await access.mayShowChangeRequestPath(event.number, email, event.path)) ? event : null;
-      case 'change-request-opened':
-        return email && (await access.maySeeChangeRequest(event.number, email)) ? event : null;
+        return email && (await access.mayReadAtTarget(event.targetBranch, email, event.path)) ? event : null;
       case 'git-sync-failed':
         return email ? await gitSyncFailedFor(event, email, access) : redactGitSyncFailed(event, []);
       case 'agent-tool-call':

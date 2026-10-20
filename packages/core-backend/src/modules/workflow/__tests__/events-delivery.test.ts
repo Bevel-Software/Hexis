@@ -24,6 +24,9 @@ const REDACTED_REASON = 'The last push did not land.';
 const WS = 'main';
 const FINANCE = 'knowledge-base/Finance/Budget.md';
 const PUBLIC = 'knowledge-base/Public/Notes.md';
+/** The same two files as a request names them: KB-repo-relative. */
+const FINANCE_REPO = 'Finance/Budget.md';
+const PUBLIC_REPO = 'Public/Notes.md';
 /** Request #7 changes only `Finance/`; #8 changes `Public/`. */
 const FINANCE_REQUEST = 7;
 const PUBLIC_REQUEST = 8;
@@ -51,10 +54,7 @@ function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => vo
     mayReadPath: async (_ws, email, path) => reads(email, path),
     mayReadRepoPath: async (_ws, email, repoPath) =>
       repoPath === '' ? email !== USERS.bob!.email : reads(email, `knowledge-base/${repoPath}`),
-    maySeeChangeRequest: async (number, email) =>
-      reads(email, number === FINANCE_REQUEST ? FINANCE : PUBLIC),
-    mayShowChangeRequestPath: async (number, email, path) =>
-      reads(email, number === FINANCE_REQUEST ? FINANCE : PUBLIC) && reads(email, path),
+    mayReadAtTarget: async (_target, email, repoPath) => reads(email, `knowledge-base/${repoPath}`),
     isAdmin: async (email) => Object.values(USERS).some((u) => u.email === email && u.admin),
   };
 }
@@ -164,6 +164,7 @@ const approval = (number: number, path: string): WorkflowEventPayload => ({
   kind: 'approval-changed',
   number,
   path,
+  targetBranch: 'main',
   approverUserId: 'alice',
   change: 'added',
 });
@@ -173,7 +174,6 @@ const opened = (number: number): WorkflowEventPayload => ({
   source: 'alice/draft',
   target: 'main',
   authorIdHash: null,
-  title: `Request ${number}`,
 });
 /** Something everybody on the workspace may have; once it arrives, everything emitted before it was judged. */
 const SENTINEL: WorkflowEventPayload = { kind: 'fs-tree-changed', workspaceId: WS, branch: WS };
@@ -199,7 +199,7 @@ describe('events route — delivery rule', () => {
 
     await emitAndSettle(
       bus,
-      [fileChanged(FINANCE), lockAcquired(FINANCE), lockReleased(FINANCE), approval(FINANCE_REQUEST, FINANCE)],
+      [fileChanged(FINANCE), lockAcquired(FINANCE), lockReleased(FINANCE), approval(FINANCE_REQUEST, FINANCE_REPO)],
       alice,
       bob,
     );
@@ -208,7 +208,7 @@ describe('events route — delivery rule', () => {
       `file-changed:${FINANCE}`,
       `lock-acquired:${FINANCE}`,
       `lock-released:${FINANCE}`,
-      `approval-changed:${FINANCE}`,
+      `approval-changed:${FINANCE_REPO}`,
     ]);
     expect(kinds(bob)).toEqual([]);
   });
@@ -219,13 +219,13 @@ describe('events route — delivery rule', () => {
     const bob = await open(base, 'bob', 's-bob');
     await focus(base, 'bob', 's-bob');
 
-    const sent = [fileChanged(PUBLIC), lockAcquired(PUBLIC), lockReleased(PUBLIC), approval(PUBLIC_REQUEST, PUBLIC)];
+    const sent = [fileChanged(PUBLIC), lockAcquired(PUBLIC), lockReleased(PUBLIC), approval(PUBLIC_REQUEST, PUBLIC_REPO)];
     await emitAndSettle(bus, sent, bob);
 
     expect(bob.events.filter((e) => !isSentinel(e))).toEqual(sent.map((p) => expect.objectContaining(p)));
   });
 
-  it('a request the person may not see produces no change-request-opened for them', async () => {
+  it('a new request is announced to everyone, and says nothing a person may not read: a number and branches, no title, no paths', async () => {
     const bus = new WorkflowEventBus();
     const base = listen(bus, fakeAccess());
     const alice = await open(base, 'alice', 's-alice');
@@ -236,7 +236,10 @@ describe('events route — delivery rule', () => {
     await emitAndSettle(bus, [opened(FINANCE_REQUEST), opened(PUBLIC_REQUEST)], alice, bob);
 
     expect(kinds(alice)).toEqual([`change-request-opened:${FINANCE_REQUEST}`, `change-request-opened:${PUBLIC_REQUEST}`]);
-    expect(kinds(bob)).toEqual([`change-request-opened:${PUBLIC_REQUEST}`]);
+    expect(kinds(bob)).toEqual([`change-request-opened:${FINANCE_REQUEST}`, `change-request-opened:${PUBLIC_REQUEST}`]);
+    // What Bob, who may not read `Finance/`, was handed of the request into it.
+    const announced = bob.events.find((e) => e.kind === 'change-request-opened' && e.number === FINANCE_REQUEST)!;
+    expect(Object.keys(announced).sort()).toEqual(['authorIdHash', 'id', 'kind', 'number', 'source', 'target', 'ts']);
   });
 
   it('replay after a reconnect obeys the same rule', async () => {
@@ -244,9 +247,9 @@ describe('events route — delivery rule', () => {
     const base = listen(bus, fakeAccess());
     const before = bus.emit(SENTINEL);
     bus.emit(opened(FINANCE_REQUEST));
-    bus.emit(approval(FINANCE_REQUEST, FINANCE));
+    bus.emit(approval(FINANCE_REQUEST, FINANCE_REPO));
     bus.emit(opened(PUBLIC_REQUEST));
-    const last = bus.emit(approval(PUBLIC_REQUEST, PUBLIC));
+    const last = bus.emit(approval(PUBLIC_REQUEST, PUBLIC_REPO));
 
     const alice = await open(base, 'alice', 's-alice', before.id);
     const bob = await open(base, 'bob', 's-bob', before.id);
@@ -254,11 +257,16 @@ describe('events route — delivery rule', () => {
 
     expect(kinds(alice)).toEqual([
       `change-request-opened:${FINANCE_REQUEST}`,
-      `approval-changed:${FINANCE}`,
+      `approval-changed:${FINANCE_REPO}`,
       `change-request-opened:${PUBLIC_REQUEST}`,
-      `approval-changed:${PUBLIC}`,
+      `approval-changed:${PUBLIC_REPO}`,
     ]);
-    expect(kinds(bob)).toEqual([`change-request-opened:${PUBLIC_REQUEST}`, `approval-changed:${PUBLIC}`]);
+    // The announcements reach Bob; the approval of a file he may not read does not.
+    expect(kinds(bob)).toEqual([
+      `change-request-opened:${FINANCE_REQUEST}`,
+      `change-request-opened:${PUBLIC_REQUEST}`,
+      `approval-changed:${PUBLIC_REPO}`,
+    ]);
   });
 
   it('the focus list still decides which workspaces a session hears about', async () => {
@@ -296,15 +304,14 @@ describe('events route — delivery rule', () => {
     await focus(base, 'bob', 's-bob');
     const before = bus.emit(SENTINEL);
     // Kinds the focus list does not scope, so the replay reaches the rule. The
-    // public request is the control: Bob keeps it, so the replay did run.
+    // announcement is the control: Bob keeps it, so the replay did run.
     await emitAndSettle(
       bus,
-      [opened(FINANCE_REQUEST), approval(FINANCE_REQUEST, FINANCE), opened(PUBLIC_REQUEST)],
+      [approval(FINANCE_REQUEST, FINANCE_REPO), opened(PUBLIC_REQUEST)],
       bob,
     );
     expect(kinds(bob)).toEqual([
-      `change-request-opened:${FINANCE_REQUEST}`,
-      `approval-changed:${FINANCE}`,
+      `approval-changed:${FINANCE_REPO}`,
       `change-request-opened:${PUBLIC_REQUEST}`,
     ]);
 
@@ -512,20 +519,20 @@ describe('EventDelivery', () => {
 });
 
 describe('createEventAccess', () => {
-  type Deps = Parameters<typeof createEventAccess>[0];
   const calls: string[] = [];
+  const atRef: string[] = [];
   const access = createEventAccess({
     accessControl: {
       canRead: async (ws, email, rel) => (calls.push(`${ws}|${email}|${rel}`), !rel.startsWith('Finance/')),
+      canReadBatchAtRef: async (ws, ref, email, paths) => {
+        atRef.push(`${ws}|${ref}|${email}|${paths.join(',')}`);
+        if (ref === 'origin/gone') return null;
+        return new Map(paths.map((p) => [p, !p.startsWith('Finance/')]));
+      },
     },
     adminAccess: { isAdmin: async (email) => email === USERS.root!.email },
     kbDirName: 'knowledge-base',
-    scopedDetail: async (caller, number) => {
-      if (number === FINANCE_REQUEST && caller.user.email === USERS.bob!.email) throw new Error('404');
-      return { mayShow: (path: string) => path !== 'hidden.md' } as Awaited<ReturnType<Deps['scopedDetail']>>;
-    },
-    maySee: async (caller, number) => !(number === FINANCE_REQUEST && caller.user.email === USERS.bob!.email),
-    services: {} as Deps['services'],
+    anyWorkspaceId: async () => WS,
   });
 
   it('judges a path as the file routes do: repo-relative inside the KB, open outside it', async () => {
@@ -537,11 +544,15 @@ describe('createEventAccess', () => {
     expect(calls).toEqual([`${WS}|a@x|Finance/Budget.md`, `${WS}|a@x|Public/Notes.md`, `${WS}|a@x|`, `${WS}|a@x|Finance/Budget.md`]);
   });
 
-  it("judges a request's path by the tools' scope, a hidden request refusing", async () => {
-    expect(await access.mayShowChangeRequestPath(PUBLIC_REQUEST, USERS.bob!.email, PUBLIC)).toBe(true);
-    expect(await access.mayShowChangeRequestPath(PUBLIC_REQUEST, USERS.bob!.email, 'hidden.md')).toBe(false);
-    await expect(access.mayShowChangeRequestPath(FINANCE_REQUEST, USERS.bob!.email, FINANCE)).rejects.toThrow();
-    expect(await access.maySeeChangeRequest(FINANCE_REQUEST, USERS.bob!.email)).toBe(false);
+  it("judges an approved path at the request's target, in any clone, as the request's detail is scoped — and grants nothing on a ref that does not resolve", async () => {
+    expect(await access.mayReadAtTarget('main', 'a@x', PUBLIC_REPO)).toBe(true);
+    expect(await access.mayReadAtTarget('main', 'a@x', FINANCE_REPO)).toBe(false);
+    expect(await access.mayReadAtTarget('gone', 'a@x', PUBLIC_REPO)).toBe(false);
+    expect(atRef).toEqual([
+      `${WS}|origin/main|a@x|${PUBLIC_REPO}`,
+      `${WS}|origin/main|a@x|${FINANCE_REPO}`,
+      `${WS}|origin/gone|a@x|${PUBLIC_REPO}`,
+    ]);
   });
 });
 
