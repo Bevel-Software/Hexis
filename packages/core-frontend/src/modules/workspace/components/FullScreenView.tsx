@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, type RefObject } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { IconButton, useModalLayer, useLatestRef } from '../../../shared/components';
 
@@ -19,8 +19,22 @@ export function FullScreenButton({ onEnter }: { onEnter(): void }) {
  * own content nor an HTML page's iframe can scroll it away or cover it.
  * Escape goes through the modal layer stack: a dialog opened on top of the
  * view registers after it, so it is the topmost layer and takes Escape first.
+ *
+ * An Escape pressed inside a page's frame never reaches this document, so the
+ * frame posts it instead (`bevel.key`, see `htmlSandbox.ts`). One that comes
+ * from a frame inside `surface` is pressed here again, on the document, so it
+ * meets every Escape listener the app has — the same modal layer order, a
+ * card over the page first — exactly as a key pressed outside the frame would.
+ * Any other window's message is not the view's to act on.
  */
-export function ExitFullScreenButton({ onExit }: { onExit(): void }) {
+export function ExitFullScreenButton({
+  onExit,
+  surface,
+}: {
+  onExit(): void;
+  /** The element filling the window; only frames inside it are heard. */
+  surface: RefObject<HTMLElement | null>;
+}) {
   const isTopLayer = useModalLayer(true);
   const onExitRef = useLatestRef(onExit);
   useEffect(() => {
@@ -29,9 +43,20 @@ export function ExitFullScreenButton({ onExit }: { onExit(): void }) {
       e.stopPropagation();
       onExitRef.current();
     }
+    function onFrameKey(e: MessageEvent) {
+      const msg = e.data as { type?: unknown; key?: unknown } | null;
+      if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.key' || msg.key !== 'Escape') return;
+      const frames = surface.current?.querySelectorAll('iframe') ?? [];
+      if (!e.source || !Array.from(frames).some((f) => f.contentWindow === e.source)) return;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    }
     document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [isTopLayer, onExitRef]);
+    window.addEventListener('message', onFrameKey);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('message', onFrameKey);
+    };
+  }, [isTopLayer, onExitRef, surface]);
 
   return (
     <IconButton

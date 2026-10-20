@@ -2030,6 +2030,7 @@ describe('FileViewer full screen', () => {
         <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="Stub dialog">
           A dialog over the view
         </Dialog>
+        <iframe title="Stub page" />
       </div>
     );
   }
@@ -2236,10 +2237,10 @@ describe('FileViewer full screen', () => {
       />,
     );
     await user.click(screen.getByRole('button', { name: 'Open stub dialog' }));
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Stub dialog' })).toBeInTheDocument();
 
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Stub dialog' })).toBeNull();
     expect(screen.getByTestId('location-search').textContent).toBe('?fullscreen=1');
     expect(readPane()).toHaveAttribute('data-full-screen');
 
@@ -2247,5 +2248,88 @@ describe('FileViewer full screen', () => {
     expect(screen.getByTestId('location-search').textContent).toBe('');
     expect(readPane()).not.toHaveAttribute('data-full-screen');
     expect(mounts.count).toBe(1);
+  });
+});
+
+// An Escape pressed with focus inside a page's frame never reaches the app;
+// the frame posts it (`bevel.key`, see `htmlSandbox.ts`) and the view treats
+// it as the key it is — through the same modal layer order.
+describe('FileViewer full screen: Escape from inside a page', () => {
+  function StubPage() {
+    const [dialogOpen, setDialogOpen] = useState(false);
+    return (
+      <div data-testid="stub-renderer">
+        <button type="button" onClick={() => setDialogOpen(true)}>
+          Open stub dialog
+        </button>
+        <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="Stub dialog">
+          A card over the page
+        </Dialog>
+        <iframe title="Stub page" />
+      </div>
+    );
+  }
+
+  const renderFilling = () =>
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={[{ extensions: ['.html'], Component: StubPage }]}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+  const frameWindow = () => (screen.getByTitle('Stub page') as HTMLIFrameElement).contentWindow!;
+  const postFrom = (source: MessageEventSource | null, data: unknown = { type: 'bevel.key', key: 'Escape' }) =>
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data, source }));
+    });
+  const search = () => screen.getByTestId('location-search').textContent;
+
+  it('leaves on an Escape the page hands up', () => {
+    renderFilling();
+    postFrom(frameWindow());
+    expect(search()).toBe('');
+  });
+
+  it('lets a card over the page take the handed-up Escape first, then leaves on the next', async () => {
+    const user = userEvent.setup();
+    renderFilling();
+    await user.click(screen.getByRole('button', { name: 'Open stub dialog' }));
+
+    postFrom(frameWindow());
+    expect(screen.queryByRole('dialog', { name: 'Stub dialog' })).toBeNull();
+    expect(search()).toBe('?fullscreen=1');
+
+    postFrom(frameWindow());
+    expect(search()).toBe('');
+  });
+
+  it('ignores the message from a window that is not a frame in the view, and any other key', () => {
+    renderFilling();
+    const stranger = document.createElement('iframe');
+    document.body.appendChild(stranger);
+    try {
+      postFrom(stranger.contentWindow);
+      postFrom(null);
+      postFrom(frameWindow(), { type: 'bevel.key', key: 'Enter' });
+      postFrom(frameWindow(), { type: 'bevel.navigate', href: 'Escape' });
+      expect(search()).toBe('?fullscreen=1');
+    } finally {
+      stranger.remove();
+    }
+  });
+
+  // The command menu and the single-key commands refuse to open while a modal
+  // is up (`[aria-modal="true"]`); the filling view is one, so Ctrl+K cannot
+  // open the menu unseen in the covered header.
+  it('is modal while it fills the window, and only then', async () => {
+    const user = userEvent.setup();
+    renderFilling();
+    const pane = screen.getByTestId('stub-renderer').closest('[data-read-pane]');
+    expect(document.querySelector('[aria-modal="true"]')).toBe(pane);
+    expect(screen.getByRole('dialog', { name: 'Roadmap.html, full screen' })).toBe(pane);
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(document.querySelector('[aria-modal="true"]')).toBeNull();
   });
 });

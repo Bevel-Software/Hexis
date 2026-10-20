@@ -1707,11 +1707,18 @@ export function FileViewer() {
               tree: fixed over the whole viewport, above the app's chrome, on
               the page background. A full-bleed renderer takes the viewport's
               definite height; a prose one keeps its reading column, centred,
-              with its card's edges and bar withdrawn. */}
+              with its card's edges and bar withdrawn. While it fills the window
+              it is modal, and says so: everything else of the app is covered,
+              so the shortcuts that open something in that chrome (the command
+              menu, the single-key commands) stand down, as they do for a
+              dialog, rather than open it unseen behind this surface. */}
           <div
             {...READ_PANE}
             ref={readPaneRef}
             data-full-screen={filling ? '' : undefined}
+            role={filling ? 'dialog' : undefined}
+            aria-modal={filling ? true : undefined}
+            aria-label={filling ? `${fileBaseName}, full screen` : undefined}
             className={
               shellVariant === 'full-bleed'
                 ? filling
@@ -1767,7 +1774,7 @@ export function FileViewer() {
             ) : (
               rendererElement
             )}
-            {filling && <ExitFullScreenButton onExit={leaveFullScreen} />}
+            {filling && <ExitFullScreenButton onExit={leaveFullScreen} surface={readPaneRef} />}
           </div>
         </>
       )}

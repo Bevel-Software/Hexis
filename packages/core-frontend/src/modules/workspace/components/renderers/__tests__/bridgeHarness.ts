@@ -35,6 +35,11 @@ export interface BridgeRun {
    * Answers once the frame's handlers and the promises they settle have run.
    */
   deliver: (data: unknown, opts?: { fromParent?: boolean }) => Promise<void>;
+  /**
+   * Press `key` with focus inside the frame, as it reaches the window after
+   * the page's own handlers; `alreadyPrevented` is one a handler cancelled.
+   */
+  press: (key: string, opts?: { alreadyPrevented?: boolean }) => void;
 }
 
 /**
@@ -68,6 +73,7 @@ export function runBridge(
   const names = new Set(page.names ?? []);
   const controls = new Set(page.namedControls ?? []);
   const messageHandlers: ((e: { source: unknown; data: unknown }) => void)[] = [];
+  const keyHandlers: ((e: { key: string; defaultPrevented: boolean }) => void)[] = [];
   const parent = { postMessage: (msg: unknown) => posted.push(msg) };
   // The frame's request timers, cleared when the test ends: a call a test
   // leaves unanswered must not keep the worker alive for the runtime's
@@ -79,8 +85,9 @@ export function runBridge(
   });
   const ctx: Record<string, unknown> = {
     // The frame's window: the tool bridge listens on it for the parent's answers.
-    addEventListener: (type: string, fn: (e: { source: unknown; data: unknown }) => void) => {
+    addEventListener: (type: string, fn: (e: never) => void) => {
       if (type === 'message') messageHandlers.push(fn);
+      if (type === 'keydown') keyHandlers.push(fn);
     },
     setTimeout: (fn: () => void, ms?: number) => {
       const t = setTimeout(() => {
@@ -135,6 +142,9 @@ export function runBridge(
       const source = deliverOpts.fromParent === false ? {} : parent;
       for (const fn of messageHandlers) fn({ source, data });
       await new Promise((r) => setTimeout(r, 0));
+    },
+    press: (key, pressOpts = {}) => {
+      for (const fn of keyHandlers) fn({ key, defaultPrevented: pressOpts.alreadyPrevented ?? false });
     },
   };
 }

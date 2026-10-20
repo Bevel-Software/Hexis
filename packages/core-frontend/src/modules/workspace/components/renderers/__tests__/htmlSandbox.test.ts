@@ -424,6 +424,24 @@ describe('buildSandboxedHtml', () => {
     expect(out).toContain('jumpTo(href)');
   });
 
+  // A key pressed inside the frame never reaches the app, so the app's
+  // Escape (a card's close, leaving full screen) would go deaf once the
+  // reader clicked into the page. The frame hands the parent an Escape the
+  // page did not use, and nothing else.
+  it('hands the parent an Escape the page left alone, and no other key', () => {
+    const bridge = runBridge();
+    bridge.press('Escape');
+    bridge.press('a');
+    bridge.press('Enter');
+    expect(bridge.posted).toEqual([{ type: 'bevel.key', key: 'Escape' }]);
+  });
+
+  it('keeps an Escape the page cancelled to the page', () => {
+    const bridge = runBridge();
+    bridge.press('Escape', { alreadyPrevented: true });
+    expect(bridge.posted).toEqual([]);
+  });
+
   it('injects no height reporter: the frame tells its parent where a link goes, never how tall it is', () => {
     // The frame's height is the reader's (`frameResizeHandle.ts`), never
     // read off the page: a page laid out in the frame and measured there
