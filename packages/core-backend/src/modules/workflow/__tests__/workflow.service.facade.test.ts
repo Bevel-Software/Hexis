@@ -1847,6 +1847,9 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
     // The row landed before anyone was told, and the answer says who was.
     expect(h.values).toHaveBeenCalledTimes(1);
     expect(h.values.mock.invocationCallOrder[0]).toBeLessThan(h.run.mock.invocationCallOrder[0]!);
+    // The approvers the listeners hear of are never written into the request:
+    // with no description, the stored body is empty.
+    expect((h.values.mock.calls[0] as unknown as [Record<string, unknown>])[0].body).toBe('');
     expect(answer).toMatchObject({ number: 12, notified: ['email'] });
   });
 

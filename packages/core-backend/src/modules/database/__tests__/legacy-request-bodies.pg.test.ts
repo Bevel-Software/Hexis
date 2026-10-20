@@ -185,6 +185,37 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0020 — a request body becomes its de
   );
 
   it(
+    'a pass that fails midway leaves no body moved and no ledger row, and the next start does the whole of it',
+    async () => {
+      const db = await olderDeployment();
+      await migrate(db, { migrationsFolder: coreMigrationsDir(), migrationsTable: '__drizzle_migrations_core' });
+      // The second body the pass rewrites (in id order) is refused, after the
+      // first one was written.
+      await db.execute(sql`
+        create function refuse_rita() returns trigger language plpgsql as $refuse$
+        begin raise exception 'the start died here'; end $refuse$
+      `);
+      await db.execute(sql`
+        create trigger refuse_rita before update on change_requests
+        for each row when (old.source_branch = 'rita/join-research') execute function refuse_rita()
+      `);
+      const before = await rowsOf(db);
+
+      await expect(moveLegacyRequestBodies(db)).rejects.toThrow();
+      expect(await rowsOf(db)).toEqual(before);
+      expect(await ledgerRows(db)).toEqual([]);
+
+      await db.execute(sql`drop trigger refuse_rita on change_requests`);
+      await runCoreMigrations(db, coreMigrationsDir());
+      const rows = await rowsOf(db);
+      expect(rows.find((r) => r.branch === 'ada/draft')?.body).toBe('Please take a look.\n\n## Why now\n\nBecause.');
+      expect(rows.find((r) => r.branch === 'rita/join-research')).toMatchObject({ level: 'owner', note: 'I maintain these pages now' });
+      expect((await ledgerRows(db)).map((r) => r.name)).toEqual([LEGACY_REQUEST_BODIES_MOVED]);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
     'the pass records itself with the rows it moves, and a recorded pass reads nothing',
     async () => {
       const db = await olderDeployment();
