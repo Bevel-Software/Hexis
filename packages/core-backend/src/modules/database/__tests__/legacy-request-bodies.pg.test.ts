@@ -6,8 +6,8 @@ import path from 'node:path';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { eq, sql } from 'drizzle-orm';
 import { closeDb, createDb, type Database } from '../connection.js';
-import { changeRequests } from '../core-schema.js';
-import { moveLegacyRequestBodies, runCoreMigrations } from '../migrate.js';
+import { changeRequests, dataMigrations } from '../core-schema.js';
+import { LEGACY_REQUEST_BODIES_MOVED, moveLegacyRequestBodies, runCoreMigrations, runPiiEncryptionBackfill } from '../migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { IndexOnWrite, SealOnWrite } from '../../../shared/column-crypto.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
@@ -45,13 +45,15 @@ const ACCESS_REQUEST_BODY = [
   GENERATED,
 ].join('\n');
 
-/** The core history as it stood BEFORE 0020: the packaged folder minus that migration, in a folder of this test's own. */
+/** The core history as it stood BEFORE 0020: the packaged folder minus 0020 and its ledger table (0021), in a folder of this test's own. */
 function historyBefore0020(): string {
   const folder = mkdtempSync(path.join(tmpdir(), 'hexis-core-before-0020-'));
   folders.push(folder);
   cpSync(coreMigrationsDir(), folder, { recursive: true });
   rmSync(path.join(folder, '0020_change_request_body_is_the_description.sql'));
   rmSync(path.join(folder, 'meta', '0020_snapshot.json'));
+  rmSync(path.join(folder, '0021_data_migrations_ledger.sql'));
+  rmSync(path.join(folder, 'meta', '0021_snapshot.json'));
   const journalPath = path.join(folder, 'meta', '_journal.json');
   const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { entries: { idx: number }[] };
   journal.entries = journal.entries.filter((e) => e.idx < 20);
@@ -74,7 +76,9 @@ async function handle(): Promise<Database> {
  */
 async function olderDeployment(): Promise<Database> {
   const db = await handle();
-  await runCoreMigrations(db, historyBefore0020());
+  // As that version's start did it: its SQL history, then its PII backfill.
+  await migrate(db, { migrationsFolder: historyBefore0020(), migrationsTable: '__drizzle_migrations_core' });
+  await runPiiEncryptionBackfill(db);
   // Sealed by the handle's own connection, as every write through it is —
   // the marks the column codecs hand it — so what the pass reads back is
   // exactly what the older version wrote.
@@ -90,6 +94,9 @@ async function olderDeployment(): Promise<Database> {
   `);
   return db;
 }
+
+const ledgerRows = async (db: Database) =>
+  (await db.select({ name: dataMigrations.name, note: dataMigrations.note }).from(dataMigrations)).map((r) => ({ name: r.name, note: r.note }));
 
 const rowsOf = async (db: Database) =>
   (await db.select().from(changeRequests).orderBy(changeRequests.sourceBranch)).map((r) => ({
@@ -157,22 +164,47 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0020 — a request body becomes its de
   );
 
   it(
-    'the pass itself is idempotent, and reports how many bodies it moved',
+    'a start that died between the SQL history and the pass is finished by the next start',
     async () => {
+      // The SQL history applied (drizzle's ledger has 0020 and 0021) but no
+      // `data_migrations` row: exactly what a crash in between leaves behind.
       const db = await olderDeployment();
       await migrate(db, { migrationsFolder: coreMigrationsDir(), migrationsTable: '__drizzle_migrations_core' });
-      expect(await moveLegacyRequestBodies(db)).toBe(2);
-      expect(await moveLegacyRequestBodies(db)).toBe(0);
+      expect(await ledgerRows(db)).toEqual([]);
+
+      await runCoreMigrations(db, coreMigrationsDir());
+
+      const rita = (await rowsOf(db)).find((r) => r.branch === 'rita/join-research');
+      expect(rita).toMatchObject({ level: 'owner', note: 'I maintain these pages now' });
+      expect(rita?.body).not.toContain('<!--');
+      expect(await ledgerRows(db)).toEqual([
+        { name: LEGACY_REQUEST_BODIES_MOVED, note: '2 of 3 change-request bodies moved to the description-only shape' },
+      ]);
     },
     PG_TEST_TIMEOUT,
   );
 
   it(
-    'a fresh database has nothing to move',
+    'the pass records itself with the rows it moves, and a recorded pass reads nothing',
+    async () => {
+      const db = await olderDeployment();
+      await migrate(db, { migrationsFolder: coreMigrationsDir(), migrationsTable: '__drizzle_migrations_core' });
+      expect(await moveLegacyRequestBodies(db)).toBe(2);
+      expect(await moveLegacyRequestBodies(db)).toBe(-1);
+      expect((await ledgerRows(db)).map((r) => r.name)).toEqual([LEGACY_REQUEST_BODIES_MOVED]);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'a fresh database has nothing to move, and records that too',
     async () => {
       const db = await handle();
       await runCoreMigrations(db, coreMigrationsDir());
-      expect(await moveLegacyRequestBodies(db)).toBe(0);
+      expect(await ledgerRows(db)).toEqual([
+        { name: LEGACY_REQUEST_BODIES_MOVED, note: '0 of 0 change-request bodies moved to the description-only shape' },
+      ]);
+      expect(await moveLegacyRequestBodies(db)).toBe(-1);
     },
     PG_TEST_TIMEOUT,
   );

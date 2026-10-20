@@ -151,3 +151,10 @@ export {
   type AgentReadHook,
   type PreWriteHook,
 } from './modules/workflow/workflow-hooks.js';
+export {
+  ChangeRequestHooks,
+  type ChangeRequestOpenedEvent,
+  type ChangeRequestOpenedHook,
+  type ChangeRequestPerson,
+  type IChangeRequestHooks,
+} from './modules/workflow/change-request-hooks.js';

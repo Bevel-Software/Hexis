@@ -2,7 +2,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { eq, sql } from 'drizzle-orm';
 import { parseLegacyChangeRequestBody } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import { changeRequests } from './core-schema.js';
+import { changeRequests, dataMigrations } from './core-schema.js';
 
 const log = logger('database');
 import { DEFAULT_DB_SCHEMA, dbSchemaOf, piiKeysOf, type Database } from './connection.js';
@@ -71,28 +71,22 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
     AdvisoryLock.Migrations,
     async () => {
       log.info('Running core database migrations...');
-      // Decided BEFORE the history runs: whether this start is the one that
-      // applies migration 0020, whose data half follows the backfill below.
-      const bodiesStillLegacy = !(await hasColumn(db, 'change_requests', 'access_request_level'));
       await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core', migrationsSchema });
       log.info('Core migrations complete.');
       // Under the same lock, before anything reads or writes a PII column:
       // the data half of migration 0016, which SQL cannot do (see below).
       await runPiiEncryptionBackfill(db);
-      if (bodiesStillLegacy) await moveLegacyRequestBodies(db);
+      // And the data half of 0020, recorded in `data_migrations` by the
+      // transaction that does it: a start that crashed between the SQL
+      // history's ledger and this pass finds no row and runs it.
+      await moveLegacyRequestBodies(db);
     },
     { tenantKey },
   );
 }
 
-/** Whether `table` in the handle's schema has `column` — a migration's own marker of having run. */
-async function hasColumn(db: Database, table: string, column: string): Promise<boolean> {
-  const result = await db.execute(sql`
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = current_schema() AND table_name = ${table} AND column_name = ${column}
-  `);
-  return result.rows.length > 0;
-}
+/** The `data_migrations` row of the body move: present exactly when the move has been committed. */
+export const LEGACY_REQUEST_BODIES_MOVED = '0020_change_request_body_is_the_description';
 
 /**
  * The data half of migration 0020, which makes a request's body nothing but
@@ -104,33 +98,57 @@ async function hasColumn(db: Database, table: string, column: string): Promise<b
  * from the time a service account opened requests for people. Every body is
  * read once here, under the handle's key, the level and the note are moved
  * onto their own columns, and the prose is written back without the rest.
- * Runs on the start that applies 0020 and never again: a body of the new
- * shape is already clean, and the grammar this reads is written by nothing.
+ *
+ * ONE transaction: the rows it rewrites and the `data_migrations` row that
+ * records it commit together, or not at all. So the pass runs exactly once —
+ * on the start that first finds no ledger row, which is the start that applies
+ * 0020 or, if that start died between drizzle's own ledger and this pass, the
+ * next one — and never again: a body of the new shape is already clean, and
+ * the grammar this reads is written by nothing. A start that finds the row
+ * reads nothing. The rows are read `FOR UPDATE` so a writer of the old
+ * version still running in a mixed-version window waits for the move rather
+ * than slipping an old-shaped body in behind it.
  *
  * Walked row by row rather than in one UPDATE because the column is sealed:
  * SQL can neither read the marker nor write the cleaned text.
+ *
+ * Returns how many bodies were moved; -1 when the pass had already been done.
  */
 export async function moveLegacyRequestBodies(db: Database): Promise<number> {
-  const rows = await db
-    .select({ id: changeRequests.id, body: changeRequests.body })
-    .from(changeRequests)
-    .orderBy(changeRequests.id);
-  let moved = 0;
-  for (const row of rows) {
-    const legacy = parseLegacyChangeRequestBody(row.body);
-    if (!legacy.changed) continue;
-    await db
-      .update(changeRequests)
-      .set({
-        body: legacy.description,
-        ...(legacy.accessRequestLevel ? { accessRequestLevel: legacy.accessRequestLevel } : {}),
-        ...(legacy.accessRequestNote ? { accessRequestNote: legacy.accessRequestNote } : {}),
-      })
-      .where(eq(changeRequests.id, row.id));
-    moved += 1;
-  }
-  if (moved > 0) log.info(`Moved ${moved} change-request bod${moved === 1 ? 'y' : 'ies'} to the description-only shape.`);
-  return moved;
+  return db.transaction(async (tx) => {
+    const done = await tx
+      .select({ name: dataMigrations.name })
+      .from(dataMigrations)
+      .where(eq(dataMigrations.name, LEGACY_REQUEST_BODIES_MOVED))
+      .limit(1);
+    if (done.length > 0) return -1;
+
+    const rows = await tx
+      .select({ id: changeRequests.id, body: changeRequests.body })
+      .from(changeRequests)
+      .orderBy(changeRequests.id)
+      .for('update');
+    let moved = 0;
+    for (const row of rows) {
+      const legacy = parseLegacyChangeRequestBody(row.body);
+      if (!legacy.changed) continue;
+      await tx
+        .update(changeRequests)
+        .set({
+          body: legacy.description,
+          ...(legacy.accessRequestLevel ? { accessRequestLevel: legacy.accessRequestLevel } : {}),
+          ...(legacy.accessRequestNote ? { accessRequestNote: legacy.accessRequestNote } : {}),
+        })
+        .where(eq(changeRequests.id, row.id));
+      moved += 1;
+    }
+    await tx.insert(dataMigrations).values({
+      name: LEGACY_REQUEST_BODIES_MOVED,
+      note: `${moved} of ${rows.length} change-request bodies moved to the description-only shape`,
+    });
+    log.info(`Change-request bodies: ${moved} of ${rows.length} moved to the description-only shape.`);
+    return moved;
+  });
 }
 
 /**

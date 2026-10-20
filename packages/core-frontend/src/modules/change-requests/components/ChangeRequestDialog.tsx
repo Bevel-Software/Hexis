@@ -12,12 +12,16 @@ import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { AuthContext } from '../../auth/state/auth.context';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useEventBus } from '../../workflow/state/event-bus.context';
-import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
-import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
-import { updateChangeRequest } from '../../pr/services/pr-edit.api';
-import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
+import {
+  approvePrFile,
+  deleteChangeRequest,
+  fetchPrDetail,
+  refreshChangeRequestFromTarget,
+  revertPrFile,
+  unapprovePrFile,
+  updateChangeRequest,
+} from '../../pr';
 import { GitApiError } from '../../git/services/git.api';
 import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';

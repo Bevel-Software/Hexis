@@ -131,6 +131,12 @@ const changeRequestSummarySchema: JsonSchema = {
       description: `The changed paths with their kind of change, cut to ${CHANGE_REQUEST_PATH_LIMIT}; \`include: ["all-paths"]\` lists them all.`,
     },
     totalFiles: { type: 'integer', description: 'How many files the request changes in total, cut or not.' },
+    notified: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'On the answer to an open only: the channels that reached the approvers ("email", say), as the deployment\'s listeners said; empty when nobody was told and the request waits to be found in the app.',
+    },
   },
   required: ['url', 'number', 'title', 'state', 'sourceBranch', 'targetBranch', 'approvals', 'mergeBlockedReasons', 'files', 'totalFiles'],
 };
@@ -485,8 +491,9 @@ export function registerWorkflowTools(
       'Change the title and/or the description of an OPEN change request. Allowed for its author and for anyone ' +
       'who may merge it (an admin, or someone who may approve every file it changes) — the same rule as the app\'s ' +
       'Edit control; anyone else is refused (403), and so is a merged or closed request (409), in words. ' +
-      "`description` replaces the request's description whole — the text `get_change_request` answers as `body`. " +
-      'Give at least one of the two; an absent one keeps its text. ' +
+      "`description` replaces the request's description whole — the text `get_change_request` answers as `body`; " +
+      '`appendDescription` instead adds a paragraph after the description as it stands when the write happens, so two ' +
+      'notes racing each other both land (never together with `description`). Give at least one field; an absent one keeps its text. ' +
       '`get_change_request` answers the new text at once. A request you may not see answers 404, as `get_change_request` does.',
     inputs: {
       type: 'object',
@@ -494,6 +501,7 @@ export function registerWorkflowTools(
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'The new title (≤256 chars).' },
         description: { type: 'string', description: 'The new description (Markdown); an empty string clears it.' },
+        appendDescription: { type: 'string', description: 'A paragraph (Markdown) added after the description as stored at the moment of the write. Not together with `description`.' },
       },
       required: ['number'],
       additionalProperties: false,
@@ -515,8 +523,9 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const title = typeof args.title === 'string' ? args.title : undefined;
       const description = typeof args.description === 'string' ? args.description : undefined;
-      if (title === undefined && description === undefined) {
-        throw new ToolError('Give a new `title`, a new `description`, or both.', 400);
+      const appendDescription = typeof args.appendDescription === 'string' ? args.appendDescription : undefined;
+      if (title === undefined && description === undefined && appendDescription === undefined) {
+        throw new ToolError('Give a new `title`, a new `description`, or an `appendDescription`.', 400);
       }
       // A request the caller may not read is not found — never a 403 or a
       // state-specific 409, which would tell a probe that it exists.
@@ -527,6 +536,7 @@ export function registerWorkflowTools(
       const updated = await ctx.workflowService.updateChangeRequest(number, ctx.user, {
         title,
         description,
+        appendDescription,
       });
       return {
         ...linkOf(updated),

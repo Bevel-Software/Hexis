@@ -8,8 +8,7 @@ import {
   writeFile,
   type SkillToolWarning,
 } from '../../workspace/services/workspace.api';
-import { openChangeRequest } from '../../pr/services/pr-open.api';
-import { updateChangeRequest } from '../../pr/services/pr-edit.api';
+import { openChangeRequest, updateChangeRequest } from '../../pr';
 import { branchSegment } from '../../change-requests/services/propose.api';
 import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
 

@@ -870,3 +870,23 @@ export const atlassianAccountLinks = pgTable('atlassian_account_links', {
 }, (t) => ({
   byUser: index('atlassian_account_links_by_user').on(t.userId),
 }));
+
+/**
+ * The ledger of the DATA halves of migrations: the rewrites SQL cannot do
+ * because they read sealed columns, run by the application right after the
+ * SQL history under the same lock (`migrate.ts`). One row per pass, written
+ * in the SAME transaction as the rows it rewrote, so a pass is recorded done
+ * exactly when its work is — a crash between the SQL history's own ledger
+ * and the pass leaves no row here, and the next start runs the pass. Drizzle's
+ * `__drizzle_migrations_core` ledger records only the SQL.
+ *
+ * The PII backfill of migration 0016 predates this table and keeps its own
+ * marker (the nullability of the blind-index columns it finalises).
+ */
+export const dataMigrations = pgTable('data_migrations', {
+  /** The pass, named after the migration whose data half it is: `0020_change_request_body_is_the_description`. */
+  name: text('name').primaryKey(),
+  appliedAt: timestamp('applied_at').defaultNow().notNull(),
+  /** What the pass did, for an operator reading the ledger: rows moved, say. */
+  note: text('note'),
+});

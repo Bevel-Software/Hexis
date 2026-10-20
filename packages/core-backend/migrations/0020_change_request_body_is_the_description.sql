@@ -8,10 +8,11 @@
 --
 -- An access request's level and note become columns of the request. Until
 -- now the body carried them in hidden markers (and an `## Affected owners`
--- block nothing read back); the first start on this release moves what the
--- old bodies held onto these columns and leaves the prose
--- (`moveLegacyRequestBodies` in `migrate.ts` — SQL cannot, the column is
--- sealed).
+-- block nothing read back); the start that applies this moves what the old
+-- bodies held onto these columns and leaves the prose, once, in application
+-- code (`moveLegacyRequestBodies` in `migrate.ts`: the column is sealed, SQL
+-- cannot read it), recorded in `data_migrations` (0021) by the transaction
+-- that does it.
 ALTER TABLE "pr_comments" DISABLE ROW LEVEL SECURITY;--> statement-breakpoint
 DROP TABLE "pr_comments" CASCADE;--> statement-breakpoint
 ALTER TABLE "change_requests" ADD COLUMN "access_request_level" text;--> statement-breakpoint

@@ -96,6 +96,13 @@ export interface ChangeRequestSummary {
   files: ChangeRequestSummaryFile[];
   /** How many files the request changes in total, cut or not. */
   totalFiles: number;
+  /**
+   * The channels that reached the approvers as the request was opened
+   * (`['email']`, say), as the deployment's listeners said; empty when nobody
+   * was told. Only on the answer to an open — a request read later has no
+   * such moment to report.
+   */
+  notified?: string[];
 }
 
 /**
@@ -157,7 +164,7 @@ function summaryFileOf(file: ChangedFile, withPatch: boolean): ChangeRequestSumm
  * by that: `mergeBlockedReasons` names every missing approval, cut or not.
  */
 export function summarizeChangeRequest(
-  detail: ChangeRequestDetail,
+  detail: ChangeRequestDetail & { notified?: string[] },
   include: readonly ChangeRequestInclude[] = [],
 ): ChangeRequestSummary {
   const all = detail.files ?? [];
@@ -176,6 +183,8 @@ export function summarizeChangeRequest(
     mergeBlockedReasons: detail.mergeBlockedReasons ?? [],
     files: listed.map((f) => summaryFileOf(f, withPatch)),
     totalFiles: all.length,
+    // Only an open carries it; a read of a request later has none to report.
+    ...(detail.notified ? { notified: detail.notified } : {}),
   };
 }
 

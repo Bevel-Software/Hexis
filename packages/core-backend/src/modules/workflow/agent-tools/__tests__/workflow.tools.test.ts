@@ -597,6 +597,16 @@ describe('registerWorkflowTools', () => {
       expect(files.every((f) => !('patch' in f))).toBe(true);
     });
 
+    it('says who was notified when the service does, and nothing of it otherwise', async () => {
+      const base = await start();
+      // A read of a request later has no `notified` to report: the key is absent, not empty.
+      expect(await open(base)).not.toHaveProperty('notified');
+      opened = { ...BIG(), notified: ['email'] };
+      expect(await open(base)).toMatchObject({ number: 7, notified: ['email'] });
+      opened = { ...BIG(), notified: [] };
+      expect((await open(base)).notified).toEqual([]);
+    });
+
     it('keeps the 27-file answer under 10,000 characters', async () => {
       const base = await start();
       const body = await open(base);

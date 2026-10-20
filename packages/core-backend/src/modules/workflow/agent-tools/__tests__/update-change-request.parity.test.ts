@@ -163,6 +163,25 @@ describe('update_change_request ⇔ PATCH /workflow/change-requests/:number', ()
     ]);
   });
 
+  it('an append reaches the service as an append, from both — the tool offers the field the route takes', async () => {
+    const base = await start();
+    expect((await viaRoute(base, { appendDescription: 'Round two.' })).status).toBe(200);
+    expect((await viaTool(base, { appendDescription: 'Round two.' })).status).toBe(200);
+    expect(calls).toEqual([
+      ['updateChangeRequest', 9, CALLER.id, { title: undefined, description: undefined, appendDescription: 'Round two.' }],
+      ['updateChangeRequest', 9, CALLER.id, { title: undefined, description: undefined, appendDescription: 'Round two.' }],
+    ]);
+  });
+
+  it("the tool's input schema names every field the route takes", async () => {
+    await start();
+    const tool = (await registry.listInternal()).find((t) => t.name === 'update_change_request');
+    // The catalog nests a tool's arguments under `body`.
+    const top = (tool?.inputs as { properties: Record<string, { properties?: Record<string, unknown> }> }).properties;
+    const props = top.body?.properties ?? top;
+    expect(Object.keys(props).sort()).toEqual(['appendDescription', 'description', 'number', 'title']);
+  });
+
   const refusals: [string, () => never][] = [
     [
       'neither the author nor someone who may merge it (403)',
