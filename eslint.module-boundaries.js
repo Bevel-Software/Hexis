@@ -16,6 +16,14 @@ import { join } from 'node:path'
 
 const PACKAGES = ['packages/core-backend', 'packages/core-frontend']
 const DEEPEST = 6
+/**
+ * Packages whose files OUTSIDE `src/modules/` are held to the rule too. The
+ * core frontend's shell (`core/`) and package entry (`index.ts`) mount the
+ * modules through their indexes like any module does. The backend is not
+ * listed: its composition root (`core/create-core-services.ts`) is the one
+ * place the Module Map lets know every module's implementations at once.
+ */
+const SHELLS_HELD = ['packages/core-frontend']
 const INDEX = '(?:index(?:\\.(?:js|jsx|ts|tsx))?$)'
 
 /** Tests may reach into another module's internals for fixtures; the rule is about shipped code. */
@@ -27,6 +35,20 @@ function modulesOf(root, pkg) {
 }
 
 const ups = (n) => `(?:\\.\\./){${n}}`
+
+/**
+ * One pattern per target module, for specifiers that start with one of the
+ * `leads` (alternatives, as regex source) into `modules/`.
+ */
+function boundaryPatterns(targets, leads) {
+  return targets.map((other) => ({
+    regex: `^(?:${leads})${other}/(?!${INDEX})`,
+    caseSensitive: true,
+    message:
+      `Modular Domain-Driven Design: reach another module through its index — import from ` +
+      `modules/${other}/index.ts, not its internals (export what you need from that index).`,
+  }))
+}
 
 /**
  * The flat-config blocks that enforce the rule. `paths` is merged into every
@@ -41,15 +63,10 @@ export function moduleBoundaries({ root, exceptions = {}, paths = {} }) {
     const modules = modulesOf(root, pkg)
     for (const own of modules) {
       for (let depth = 0; depth <= DEEPEST; depth++) {
-        const patterns = modules
-          .filter((other) => other !== own)
-          .map((other) => ({
-            regex: `^(?:${ups(depth + 1)}|${ups(depth + 2)}modules/|${ups(depth + 3)}src/modules/)${other}/(?!${INDEX})`,
-            caseSensitive: true,
-            message:
-              `Modular Domain-Driven Design: reach another module through its index — import from ` +
-              `modules/${other}/index.ts, not its internals (export what you need from that index).`,
-          }))
+        const patterns = boundaryPatterns(
+          modules.filter((other) => other !== own),
+          `${ups(depth + 1)}|${ups(depth + 2)}modules/|${ups(depth + 3)}src/modules/`,
+        )
         blocks.push({
           name: `module-boundaries/${pkg.split('/')[1]}/${own}/depth-${depth}`,
           files: [`${pkg}/src/modules/${own}/${'*/'.repeat(depth)}*.{ts,tsx}`],
@@ -59,6 +76,23 @@ export function moduleBoundaries({ root, exceptions = {}, paths = {} }) {
           },
         })
       }
+    }
+    if (!SHELLS_HELD.includes(pkg)) continue
+    // The package's own files outside `modules/` (its shell, its entry): at
+    // depth d below `src/`, d `../` (or `./` at the top) lead to `modules/`.
+    for (let depth = 0; depth <= DEEPEST; depth++) {
+      const patterns = boundaryPatterns(
+        modules,
+        `${depth === 0 ? '\\./' : ups(depth)}modules/|${ups(depth + 1)}src/modules/`,
+      )
+      blocks.push({
+        name: `module-boundaries/${pkg.split('/')[1]}/outside-modules/depth-${depth}`,
+        files: [`${pkg}/src/${'*/'.repeat(depth)}*.{ts,tsx}`],
+        ignores: [`${pkg}/src/modules/**`, ...MODULE_BOUNDARY_TEST_FILES, ...Object.keys(exceptions)],
+        rules: {
+          'no-restricted-imports': ['error', { paths: paths[pkg] ?? [], patterns }],
+        },
+      })
     }
   }
   return blocks
@@ -335,234 +369,4 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'access has no index.ts; access-model has no index.ts; kb-fs/index.ts does not export GitGuardedFilesystem, LockingFilesystem, MoveLockedError and 7 more; tool-auth has no index.ts; tool-helpers/index.ts does not export ToolHandlerFactory; tool-registry has no index.ts',
   'packages/core-backend/src/modules/workspace/write-denial.ts':
     'access has no index.ts; access-model has no index.ts',
-  'packages/core-frontend/src/modules/access/api.ts':
-    'git/index.ts does not export GitApiError, handleApiResponse',
-  'packages/core-frontend/src/modules/access/components/ManageAccessDialog.tsx':
-    'admin has no index.ts; auth has no index.ts; onboarding has no index.ts; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/access/hooks/useAccessRequests.ts':
-    'pr has no index.ts',
-  'packages/core-frontend/src/modules/access/hooks/useFileAccess.ts':
-    'workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/access/requests.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/admin/components/AddMemberInput.tsx':
-    'access has no index.ts',
-  'packages/core-frontend/src/modules/admin/components/UserAccountsPage.tsx':
-    'auth has no index.ts; onboarding has no index.ts',
-  'packages/core-frontend/src/modules/admin/state/admin.context.tsx':
-    'auth has no index.ts',
-  'packages/core-frontend/src/modules/audit/components/AuditEventsPanel.tsx':
-    'library/index.ts does not export pathForSkill',
-  'packages/core-frontend/src/modules/audit/components/AuditLogPage.tsx':
-    'admin has no index.ts; auth has no index.ts',
-  'packages/core-frontend/src/modules/change-requests/components/BranchFilePreview.tsx':
-    'access has no index.ts; workspace/index.ts does not export DownloadFileButton, FilePaneCard, READ_PANE and 4 more',
-  'packages/core-frontend/src/modules/change-requests/components/ChangeRequestDialog.tsx':
-    'auth has no index.ts; git/index.ts does not export GitApiError, GitSyncFailedBanner, friendlyGitError and 1 more; pr has no index.ts; review has no index.ts; workflow/index.ts does not export useEventBus; workspace/index.ts does not export WorkspaceApiError, hasFileViewer, isBinaryFile and 1 more',
-  'packages/core-frontend/src/modules/change-requests/components/ChangeRequestLink.tsx':
-    'git/index.ts does not export GitApiError, getPullRequest; workspace/index.ts does not export KB_ROUTE_PREFIX',
-  'packages/core-frontend/src/modules/change-requests/components/CrFileTree.tsx':
-    'workspace/index.ts does not export displayFileName',
-  'packages/core-frontend/src/modules/change-requests/components/FileChangeBoxes.tsx':
-    'pr has no index.ts; workspace/index.ts does not export displayFileName, fileNameTooltip, isBinaryFile and 1 more',
-  'packages/core-frontend/src/modules/change-requests/hooks/useApplyChangeRequest.ts':
-    'git/index.ts does not export friendlyGitError, friendlyGitMessage; pr has no index.ts; workflow/index.ts does not export useEventBus',
-  'packages/core-frontend/src/modules/change-requests/hooks/useCrFileDiffs.ts':
-    'workspace/index.ts does not export WorkspaceApiError, isBinaryFile',
-  'packages/core-frontend/src/modules/change-requests/services/change-requests.api.ts':
-    'git/index.ts does not export handleApiResponse; workspace/index.ts does not export getOrCreateWorkspace, readFile',
-  'packages/core-frontend/src/modules/change-requests/services/denied-file.api.ts':
-    'access has no index.ts; workspace/index.ts does not export getOrCreateWorkspace',
-  'packages/core-frontend/src/modules/change-requests/services/propose.api.ts':
-    'git/index.ts does not export GitApiError, createBranch, deleteBranch; pr has no index.ts; workspace/index.ts does not export getOrCreateWorkspace, writeFile',
-  'packages/core-frontend/src/modules/change-requests/utils/diff.ts':
-    'workspace/index.ts does not export computeDiff',
-  'packages/core-frontend/src/modules/change-requests/utils/readFailure.ts':
-    'access has no index.ts',
-  'packages/core-frontend/src/modules/embed/components/EmbedLinkPage.tsx':
-    'auth has no index.ts',
-  'packages/core-frontend/src/modules/git/components/BranchSwitcher.tsx':
-    'access has no index.ts; auth has no index.ts; workspace/index.ts does not export KB_ROUTE_PREFIX, useWorkspace',
-  'packages/core-frontend/src/modules/git/components/FileHistoryPanel.tsx':
-    'review has no index.ts; workflow/index.ts does not export canonicalizeWorkspaceId, useEventBus; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/git/components/GitSyncFailedBanner.tsx':
-    'workflow/index.ts does not export canonicalizeWorkspaceId, useEventBusSubscription; workspace/index.ts does not export WorkspaceContext, useFileNav, useWorkspace',
-  'packages/core-frontend/src/modules/git/components/HistoryVersionPreview.tsx':
-    'access has no index.ts; workspace/index.ts does not export DownloadFileButton, FilePaneCard, READ_PANE and 10 more',
-  'packages/core-frontend/src/modules/git/components/PullNeededBanner.tsx':
-    'workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/git/components/PullRequestsForMe.tsx':
-    'change-requests has no index.ts; layout has no index.ts',
-  'packages/core-frontend/src/modules/git/hooks/useAutoPullUpdates.ts':
-    'workspace/index.ts does not export WorkspaceContextValue',
-  'packages/core-frontend/src/modules/layout/components/MobileChatLayout.tsx':
-    'workspace/index.ts does not export KB_ROUTE_PREFIX',
-  'packages/core-frontend/src/modules/library/components/AddToPluginDialog.tsx':
-    'admin has no index.ts',
-  'packages/core-frontend/src/modules/library/components/ChangeRequestDock.tsx':
-    'change-requests has no index.ts',
-  'packages/core-frontend/src/modules/library/components/IntegrationsSetupReminder.tsx':
-    'layout has no index.ts',
-  'packages/core-frontend/src/modules/library/components/LibraryLayout.tsx':
-    'admin has no index.ts; git/index.ts does not export PullRequestsForMe; layout has no index.ts; onboarding has no index.ts',
-  'packages/core-frontend/src/modules/library/components/LibraryPage.tsx':
-    'access has no index.ts; admin has no index.ts; onboarding has no index.ts; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/library/components/ManagedPluginRequests.tsx':
-    'access has no index.ts; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/library/components/NewSkillPanel.tsx':
-    'auth has no index.ts',
-  'packages/core-frontend/src/modules/library/components/PendingItemReview.tsx':
-    'change-requests has no index.ts',
-  'packages/core-frontend/src/modules/library/components/PersonalAddDialog.tsx':
-    'admin has no index.ts',
-  'packages/core-frontend/src/modules/library/components/PersonalPluginPage.tsx':
-    'access has no index.ts; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/library/components/PluginExtras.tsx':
-    'workspace/index.ts does not export checkoutRoot, listFiles, readFile and 1 more',
-  'packages/core-frontend/src/modules/library/components/PluginJoinRequests.tsx':
-    'access has no index.ts',
-  'packages/core-frontend/src/modules/library/components/PluginPage.tsx':
-    'access has no index.ts; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/library/components/PluginRows.tsx':
-    'admin has no index.ts',
-  'packages/core-frontend/src/modules/library/components/PluginsSidebar.tsx':
-    'layout has no index.ts',
-  'packages/core-frontend/src/modules/library/components/SkillsTree.tsx':
-    'workspace/index.ts does not export EmptyTreeNotice, FileTreeNode, KB_ROUTE_PREFIX and 9 more',
-  'packages/core-frontend/src/modules/library/components/plugin-page-parts.tsx':
-    'admin has no index.ts',
-  'packages/core-frontend/src/modules/library/components/skill-page/SkillFilePane.tsx':
-    'change-requests has no index.ts; workspace/index.ts does not export FilePaneCard, HtmlRenderer, KbImageResolver and 1 more',
-  'packages/core-frontend/src/modules/library/components/skill-page/SkillPage.tsx':
-    'access has no index.ts; auth has no index.ts; change-requests has no index.ts; git/index.ts does not export FileHistoryPanel, useGit; pr has no index.ts; workspace/index.ts does not export SkillToolWarning, getOrCreateWorkspace, isBinaryFile and 5 more',
-  'packages/core-frontend/src/modules/library/components/tool-page/ToolConnectionSection.tsx':
-    'secrets-vault/index.ts does not export ToolSecrets, useSavedKeyProbe; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/library/components/tool-page/ToolVarRow.tsx':
-    'secrets-vault/index.ts does not export ToolVarStatus, deleteAdminVar, setAdminVar and 3 more',
-  'packages/core-frontend/src/modules/library/hooks/useJoinRequests.ts':
-    'access has no index.ts',
-  'packages/core-frontend/src/modules/library/hooks/useLibraryData.ts':
-    'access has no index.ts; change-requests has no index.ts; secrets-vault/index.ts does not export ToolSecrets, listToolSecrets',
-  'packages/core-frontend/src/modules/library/hooks/useToolPage.ts':
-    'secrets-vault/index.ts does not export ToolSecrets, listToolSecrets',
-  'packages/core-frontend/src/modules/library/hooks/useToolSource.ts':
-    'change-requests has no index.ts',
-  'packages/core-frontend/src/modules/library/routes/LibraryRoutes.tsx':
-    'onboarding has no index.ts; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/library/routes/WorkspaceItemRoute.tsx':
-    'workspace/index.ts does not export FileRoute, safeDecode, useWorkspace',
-  'packages/core-frontend/src/modules/library/services/library.api.ts':
-    'change-requests has no index.ts; git/index.ts does not export createBranch, handleApiResponse; pr has no index.ts; workspace/index.ts does not export SkillToolWarning, deleteFile, getOrCreateWorkspace and 1 more',
-  'packages/core-frontend/src/modules/library/services/plugins.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/library/services/teams.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/library/utils/status.ts':
-    'secrets-vault/index.ts does not export ProbeVerdict, ToolSecrets, ToolVarStatus and 1 more',
-  'packages/core-frontend/src/modules/onboarding/components/ConnectAgentPill.tsx':
-    'library/index.ts does not export useLibraryToast',
-  'packages/core-frontend/src/modules/onboarding/components/CreatorWelcomePage.tsx':
-    'auth has no index.ts; library/index.ts does not export NewPluginDialog, NewSkillPanel, displayFirstName and 1 more',
-  'packages/core-frontend/src/modules/onboarding/components/GetStartedColumn.tsx':
-    'admin has no index.ts; auth has no index.ts; layout has no index.ts; library/index.ts does not export LIBRARY_ROOT, PluginSummary, isLibraryLocation and 2 more; toolbar has no index.ts; workspace/index.ts does not export findEntryByPath, pathExistsInTree, useCreatePage and 3 more',
-  'packages/core-frontend/src/modules/onboarding/components/InviteButton.tsx':
-    'access has no index.ts; admin has no index.ts',
-  'packages/core-frontend/src/modules/onboarding/components/InviteDialog.tsx':
-    'admin has no index.ts; auth has no index.ts; library/index.ts does not export copyToClipboard',
-  'packages/core-frontend/src/modules/onboarding/components/RootLanding.tsx':
-    'auth has no index.ts; workspace/index.ts does not export KB_ROUTE_PREFIX',
-  'packages/core-frontend/src/modules/onboarding/components/StarterPackCard.tsx':
-    'workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/onboarding/components/WelcomePage.tsx':
-    'auth has no index.ts; library/index.ts does not export COPY_FAILED_TOAST, copyToClipboard, displayFirstName and 2 more',
-  'packages/core-frontend/src/modules/onboarding/paths.ts':
-    'library/index.ts does not export LIBRARY_ROOT',
-  'packages/core-frontend/src/modules/onboarding/state/agent-connection.ts':
-    'auth has no index.ts; workflow/index.ts does not export useEventBus',
-  'packages/core-frontend/src/modules/onboarding/state/onboarding.ts':
-    'auth has no index.ts',
-  'packages/core-frontend/src/modules/onboarding/state/starter-packs.ts':
-    'auth has no index.ts',
-  'packages/core-frontend/src/modules/pr/components/OpenChangeRequestDialog.tsx':
-    'git/index.ts does not export useGit',
-  'packages/core-frontend/src/modules/pr/services/pr-approvals.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-cancel.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-comments.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-detail.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-merge.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-open.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/review/components/DiffViewer.tsx':
-    'workspace/index.ts does not export DiffLine, computeDiff',
-  'packages/core-frontend/src/modules/review/components/MarkdownDiffViewer.tsx':
-    'workspace/index.ts does not export DiffLine, FrontmatterData, KB_DIFF_REHYPE_PLUGINS and 6 more',
-  'packages/core-frontend/src/modules/review/components/ReviewPanel.tsx':
-    'workspace/index.ts does not export stripJunkBeforeKbDir, useFileNav, useNodeIdNav and 2 more',
-  'packages/core-frontend/src/modules/review/state/ReviewProvider.tsx':
-    'git/index.ts does not export useGit; workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/settings/components/DeploymentPage.tsx':
-    'admin has no index.ts; setup has no index.ts',
-  'packages/core-frontend/src/modules/settings/components/MarketplaceSection.tsx':
-    'toolbar has no index.ts',
-  'packages/core-frontend/src/modules/settings/components/SettingsLayout.tsx':
-    'admin has no index.ts; layout has no index.ts',
-  'packages/core-frontend/src/modules/setup/components/FirstRunStorage.tsx':
-    'workspace/index.ts does not export KB_ROUTE_PREFIX',
-  'packages/core-frontend/src/modules/setup/components/SetupScreen.tsx':
-    'settings has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/commands/actions.tsx':
-    'onboarding has no index.ts; settings has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/commands/useCommandActions.ts':
-    'admin has no index.ts; auth has no index.ts; onboarding has no index.ts; settings has no index.ts; workspace/index.ts does not export useCreatePage, useEditablePage, useFileNav and 1 more',
-  'packages/core-frontend/src/modules/toolbar/components/AgentInstructionsCard.tsx':
-    'admin has no index.ts; workspace/index.ts does not export WorkspaceContext',
-  'packages/core-frontend/src/modules/toolbar/components/AppSwitcher.tsx':
-    'layout has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/components/ClaudeRegistrationSteps.tsx':
-    'settings has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/components/CoworkSetupSteps.tsx':
-    'settings has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/components/ExternalAgentAccessPage.tsx':
-    'admin has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/components/ProfileMenu.tsx':
-    'admin has no index.ts; auth has no index.ts; settings has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/components/SearchPalette.tsx':
-    'library/index.ts does not export listPlugins, listSkills; onboarding has no index.ts; secrets-vault/index.ts does not export listToolSecrets; workspace/index.ts does not export knowledgeFiles, useFileNav, useMergedWorkspaceTree and 1 more',
-  'packages/core-frontend/src/modules/toolbar/components/Toolbar.tsx':
-    'layout has no index.ts; onboarding has no index.ts; settings has no index.ts',
-  'packages/core-frontend/src/modules/toolbar/search/sources.ts':
-    'library/index.ts does not export LibrarySkillSummary, PERSONAL_PLUGIN_NAME, PluginSummary and 4 more; secrets-vault/index.ts does not export ToolSecrets; workspace/index.ts does not export displayFileName',
-  'packages/core-frontend/src/modules/toolbar/services/agent-instructions.api.ts':
-    'workspace/index.ts does not export WorkspaceApiError, getOrCreateWorkspace, readFile and 1 more',
-  'packages/core-frontend/src/modules/workflow/state/EventBusFocusBinder.tsx':
-    'workspace/index.ts does not export useWorkspace',
-  'packages/core-frontend/src/modules/workspace/components/FileExplorer.tsx':
-    'access has no index.ts; admin has no index.ts; change-requests has no index.ts; pr has no index.ts',
-  'packages/core-frontend/src/modules/workspace/components/FileRoute.tsx':
-    'git/index.ts does not export useGit',
-  'packages/core-frontend/src/modules/workspace/components/FileViewer.tsx':
-    'access has no index.ts; auth has no index.ts; change-requests has no index.ts; git/index.ts does not export FileComparisonPanel, FileHistoryPanel, GitSyncFailedBanner and 2 more; layout has no index.ts; onboarding has no index.ts',
-  'packages/core-frontend/src/modules/workspace/components/KbFileRail.tsx':
-    'access has no index.ts',
-  'packages/core-frontend/src/modules/workspace/components/renderers/ToolRenderer.tsx':
-    'secrets-vault/index.ts does not export ToolSecrets, ToolSecretsPanel, listToolSecrets',
-  'packages/core-frontend/src/modules/workspace/hooks/useImageRevision.ts':
-    'workflow/index.ts does not export canonicalizeWorkspaceId, useEventBus',
-  'packages/core-frontend/src/modules/workspace/hooks/useKnowledgeWriteTarget.ts':
-    'access has no index.ts',
-  'packages/core-frontend/src/modules/workspace/hooks/useLastCommit.ts':
-    'git/index.ts does not export useGit',
-  'packages/core-frontend/src/modules/workspace/hooks/useWorkspaceState.ts':
-    'access has no index.ts; auth has no index.ts; change-requests has no index.ts; workflow/index.ts does not export canonicalizeWorkspaceId, useEventBus',
-  'packages/core-frontend/src/modules/workspace/routing/kb-routes.ts':
-    'git/index.ts does not export GitContext',
-  'packages/core-frontend/src/modules/workspace/state/open-change-requests.tsx':
-    'change-requests has no index.ts',
-  'packages/core-frontend/src/modules/workspace/utils/treeConfirm.ts':
-    'access has no index.ts',
 }

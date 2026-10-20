@@ -6,13 +6,17 @@ import {
   pluginOfPath,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
-import type { LibrarySkillSummary } from '../../library/services/library.api';
-import type { PluginSummary } from '../../library/services/plugins.api';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
-import { pathForPlugin, urlForLibraryItem } from '../../library/routes/library-paths';
-import { pluginLabel, pluginNameForPath } from '../../library/utils/plugin-summary';
-import { PERSONAL_PLUGIN_NAME } from '../../library/utils/personal-plugin';
-import { displayFileName } from '../../workspace/utils/display-file-name';
+import {
+  type LibrarySkillSummary,
+  pathForPlugin,
+  PERSONAL_PLUGIN_NAME,
+  pluginLabel,
+  pluginNameForPath,
+  type PluginSummary,
+  urlForLibraryItem,
+} from '../../library';
+import type { ToolSecrets } from '../../secrets-vault';
+import { displayFileName } from '../../workspace';
 
 /**
  * What the search palette lists, flattened out of the two places it reads:

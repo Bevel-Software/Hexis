@@ -11,18 +11,24 @@ import {
 import { Button, IconButton, buttonClasses } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { copyToClipboard } from '../../../lib/clipboard';
-import { useAdmin } from '../../admin/state/admin.context';
-import { listAccounts } from '../../auth/services/account.api';
-import { listPlugins, type PluginSummary } from '../../library/services/plugins.api';
-import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-paths';
-import { usePluginsRevision } from '../../library/state/plugins-revision';
-import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
-import { SETUP_COLUMN_HIDDEN_QUERY } from '../../layout/breakpoints';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
-import { useFileNav } from '../../workspace/routing/kb-routes';
-import { useCreatePage } from '../../workspace/hooks/useCreatePage';
-import { findEntryByPath, pathExistsInTree } from '../../workspace/utils/fileTree';
+import { useAdmin } from '../../admin';
+import { listAccounts } from '../../auth';
+import {
+  isLibraryLocation,
+  LIBRARY_ROOT,
+  listPlugins,
+  type PluginSummary,
+  usePluginsRevision,
+} from '../../library';
+import { SETUP_COLUMN_HIDDEN_QUERY, useMediaQuery } from '../../layout';
+import {
+  findEntryByPath,
+  pathExistsInTree,
+  useCreatePage,
+  useFileNav,
+  useMergedWorkspaceTree,
+  useWorkspace,
+} from '../../workspace';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
 import {
@@ -35,7 +41,7 @@ import {
 import { useStarterPacks } from '../state/starter-packs';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
-import { COMMAND_MENU_SHORTCUT_LABEL, openCommandMenu } from '../../toolbar/commands/command-menu';
+import { COMMAND_MENU_SHORTCUT_LABEL, openCommandMenu } from '../../toolbar';
 
 /** The starter page every new knowledge base is seeded with (`kb-template/`). */
 const GUIDE_FILE = 'How to get started.md';

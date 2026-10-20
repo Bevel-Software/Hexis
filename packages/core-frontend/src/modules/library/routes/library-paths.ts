@@ -1,3 +1,6 @@
+// First, so the root is set before the imports below lead round a cycle
+// back to a file that reads it (see `library-root.ts`).
+import { LIBRARY_ROOT } from './library-root';
 import {
   DEFAULT_BRANCH,
   PLUGINS_DIR,
@@ -20,8 +23,7 @@ import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
  * trip auditable — a path that maps to a filter must map back to itself.
  */
 
-/** The Library's mount point inside the shell (`CORE_APPS` `skills-tools`). */
-export const LIBRARY_ROOT = '/skills-and-tools';
+export { LIBRARY_ROOT };
 
 /**
  * "Connect your tools" — a Skills & Tools page, inside `LibraryLayout` like the

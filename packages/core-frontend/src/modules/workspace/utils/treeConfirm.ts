@@ -9,12 +9,12 @@ import {
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import {
-  parsePluginPrincipalToken,
-  pluginPrincipalLabel,
   type AccessPrincipalRef,
+  parsePluginPrincipalToken,
   type PathPrincipals,
+  pluginPrincipalLabel,
   type ProspectiveAccess,
-} from '../../access/api';
+} from '../../access';
 import { KB_ROOT_DIRS } from './fileTree';
 
 // What the tree's delete and move confirmations say — see

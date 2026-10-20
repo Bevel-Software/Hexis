@@ -1,15 +1,18 @@
 import { useMemo } from 'react';
 import Markdown from 'react-markdown';
 import { isFrontmatterFence, type FileDiffPayload } from '@bevel-software/platform-shared';
-import { computeDiff, type DiffLine } from '../../workspace/utils/diff';
-import { parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace/utils/frontmatter';
-import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
 import {
-  KB_REMARK_PLUGINS,
+  computeDiff,
+  type DiffLine,
+  type FrontmatterData,
   KB_DIFF_REHYPE_PLUGINS,
-  useKbMarkdownComponents,
+  KB_REMARK_PLUGINS,
   type KbImageResolver,
-} from '../../workspace/components/renderers/kbMarkdownPipeline';
+  labelFor,
+  parseFrontmatter,
+  useKbMarkdownComponents,
+} from '../../workspace';
+import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
 
 const MAX_RENDERED_LINES = 5000;
 

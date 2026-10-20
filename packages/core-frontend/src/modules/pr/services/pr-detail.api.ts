@@ -1,6 +1,6 @@
 import type { PullRequestDetail } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 
 /**
  * Fetch the full PR detail (metadata + file diffs). `fresh` bypasses the

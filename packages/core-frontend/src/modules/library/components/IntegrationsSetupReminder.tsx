@@ -1,5 +1,5 @@
 import { cn } from '../../../lib/utils';
-import { SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
+import { SIDEBAR_ROW_INSET } from '../../layout';
 
 /**
  * "2 integrations need setup. Finish now" — the Library's footer reminder.

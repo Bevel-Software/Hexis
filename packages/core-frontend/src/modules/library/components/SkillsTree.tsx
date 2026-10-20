@@ -1,19 +1,22 @@
 import { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { libraryUploadTarget, useWorkspace } from '../../workspace/state/workspace.context';
-import { checkoutRoot } from '../../workspace/utils/fileTree';
-import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
-import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
-import { Puzzle } from 'lucide-react';
 import {
+  checkoutRoot,
   EmptyTreeNotice,
   FileTreeNode,
+  KB_ROUTE_PREFIX,
+  kbFileUrl,
+  libraryUploadTarget,
+  safeDecode,
   TreeChrome,
-  UploadNotices,
   type TreeMenuItem,
   type TreeNav,
-} from '../../workspace/components/FileExplorer';
+  UploadNotices,
+  useMergedWorkspaceTree,
+  useWorkspace,
+} from '../../workspace';
+import { Puzzle } from 'lucide-react';
 
 /**
  * One of the Library's two reserved roots — `Skills/` or `Plugins/` — as a

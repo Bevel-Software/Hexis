@@ -8,58 +8,62 @@ import {
   type ReactNode,
 } from 'react';
 import { BrowserRouter, Navigate, Routes, Route, useLocation } from 'react-router-dom';
-import { AuthContext } from '../modules/auth/state/auth.context';
-import { useAuthState } from '../modules/auth/hooks/useAuthState';
-import { LoginScreen } from '../modules/auth/components/LoginScreen';
-import { SetupGate } from '../modules/setup/components/SetupGate';
-import { WorkspaceContext } from '../modules/workspace/state/workspace.context';
-import { useWorkspaceState } from '../modules/workspace/hooks/useWorkspaceState';
-import { GitContext } from '../modules/git/state/git.context';
-import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
-import { useGitState } from '../modules/git/hooks/useGitState';
-import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
-import { EventBusProvider } from '../modules/workflow/state/EventBusProvider';
-import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
-import { ChangeRequestStaleBinder } from '../modules/workflow/state/ChangeRequestStaleBinder';
-import { Toolbar } from '../modules/toolbar/components/Toolbar';
-import { DemoBanner } from '../modules/layout/components/DemoBanner';
-import { ReadOnlyBanner } from '../modules/layout/components/ReadOnlyBanner';
-import { FileExplorer } from '../modules/workspace/components/FileExplorer';
-import { FileViewer } from '../modules/workspace/components/FileViewer';
-import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
-import { FileRoute } from '../modules/workspace/components/FileRoute';
-import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
-import { CONNECT_TOOLS_PATH } from '../modules/library';
-import { AppLayout } from '../modules/layout/components/AppLayout';
+import { AccountPage, AuthContext, LoginScreen, useAuthState } from '../modules/auth';
+import { SetupGate } from '../modules/setup';
 import {
+  FileExplorer,
+  FileRoute,
+  FileViewer,
+  KB_ROUTE_PREFIX,
+  OpenChangeRequestsProvider,
+  useWorkspaceState,
+  WorkspaceContext,
+} from '../modules/workspace';
+import {
+  AutoUpdateContext,
+  GitContext,
+  PullRequestsForMe,
+  useAutoPullUpdates,
+  useGitState,
+} from '../modules/git';
+import {
+  ChangeRequestStaleBinder,
+  EventBusFocusBinder,
+  EventBusProvider,
+} from '../modules/workflow';
+import { ExternalAgentAccessPage, Toolbar } from '../modules/toolbar';
+import {
+  AppLayout,
+  DemoBanner,
   LayoutContext,
-  NO_PANES_LAYOUT,
   type LayoutController,
-} from '../modules/layout/state/layout.context';
-import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
-import { AdminProvider } from '../modules/admin/state/admin.context';
-import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
-import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
-import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
-import { AccountPage } from '../modules/auth/components/AccountPage';
-import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
-import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
-import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
-import { DirectoryGroupsPage } from '../modules/admin/components/DirectoryGroupsPage';
-import { AuditLogPage } from '../modules/audit/components/AuditLogPage';
-import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
-import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
-import { RootLanding } from '../modules/onboarding/components/RootLanding';
-import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
-import { GetStartedColumn } from '../modules/onboarding/components/GetStartedColumn';
-import { InviteDialogProvider } from '../modules/onboarding/state/invite-dialog';
-import { PullRequestsForMe } from '../modules/git/components/PullRequestsForMe';
-import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
-import { ChangeRequestLink } from '../modules/change-requests/components/ChangeRequestLink';
-import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
-import { NARROW_QUERY } from '../modules/layout/breakpoints';
-import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
+  MaintenanceOverlay,
+  NARROW_QUERY,
+  NO_PANES_LAYOUT,
+  ReadOnlyBanner,
+  setSidebarCollapsed,
+  useMediaQuery,
+} from '../modules/layout';
+import { CONNECT_TOOLS_PATH, isLibraryLocation, LibraryRoutes } from '../modules/library';
+import {
+  AdminProvider,
+  AdminRolesPage,
+  DirectoryGroupsPage,
+  RolesCorruptedBanner,
+  UserAccountsPage,
+} from '../modules/admin';
+import { DeploymentPage, SettingsLayout } from '../modules/settings';
+import { SecretsPage } from '../modules/secrets-vault';
+import { AuditLogPage } from '../modules/audit';
+import { ToolsExplorerPage } from '../modules/tools';
+import {
+  ConnectAgentPill,
+  GetStartedColumn,
+  InviteDialogProvider,
+  RootLanding,
+} from '../modules/onboarding';
+import { OpenChangeRequestDialog } from '../modules/pr';
+import { ChangeRequestLink } from '../modules/change-requests';
 import {
   activeAppId,
   ActiveAppIdContext,
@@ -77,9 +81,7 @@ import {
   type PaneDef,
 } from './registry';
 import { withCoreModuleContributions } from './core-contributions';
-import { isLibraryLocation } from '../modules/library/routes/library-paths';
-import { EmbedView } from '../modules/embed/components/EmbedView';
-import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
+import { EmbedLinkPage, EmbedView } from '../modules/embed';
 import { ConfirmProvider } from '../shared/components';
 
 /**

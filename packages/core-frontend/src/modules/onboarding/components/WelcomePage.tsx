@@ -3,12 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Button, IconButton } from '../../../shared/components';
-import { useAuth } from '../../auth/state/auth.context';
-import { useLibraryToast } from '../../library/state/toast.context';
-import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
-import { pathForLibraryFilter } from '../../library/routes/library-paths';
+import { useAuth } from '../../auth';
+import {
+  COPY_FAILED_TOAST,
+  copyToClipboard,
+  displayFirstName,
+  pathForLibraryFilter,
+  useLibraryToast,
+} from '../../library';
 import { useAppRegistry } from '../../../core/registry';
-import { displayFirstName } from '../../library/utils/personal-plugin';
 import { ChatGptInstallLink, ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
 import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';

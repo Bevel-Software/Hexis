@@ -18,8 +18,8 @@ import {
   type ReactNode,
 } from 'react';
 import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
-import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
-import type { CommandAction } from '../modules/toolbar/commands/actions';
+import type { FileRendererProps } from '../modules/workspace';
+import type { CommandAction } from '../modules/toolbar';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */
 export interface RouteDef {

@@ -16,3 +16,19 @@ export const GIT_MENU_ITEMS: readonly AdminMenuItem[] = [BRANCH_DELETE_CONFIRM_M
 
 /** The branch state a page reads (`useGit`), and the context a test provides it through. */
 export { GitContext, useGit, type GitContextValue } from './state/git.context';
+
+/**
+ * The rest of what the shell and other modules use from git, grouped by
+ * the file that defines it.
+ */
+export { FileComparisonPanel } from './components/FileComparisonPanel';
+export { FileHistoryPanel } from './components/FileHistoryPanel';
+export { GitSyncFailedBanner } from './components/GitSyncFailedBanner';
+export { PullNeededBanner } from './components/PullNeededBanner';
+export { PullRequestsForMe } from './components/PullRequestsForMe';
+export { useAutoPullUpdates } from './hooks/useAutoPullUpdates';
+export { useGitState } from './hooks/useGitState';
+export { friendlyGitError, friendlyGitMessage } from './services/error-messages';
+export { createBranch, deleteBranch, GitApiError, handleApiResponse } from './services/git.api';
+export { getPullRequest } from './services/pr.api';
+export { AutoUpdateContext } from './state/auto-update.context';

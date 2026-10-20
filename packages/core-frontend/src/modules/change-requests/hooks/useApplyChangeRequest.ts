@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { useEventBus } from '../../workflow/state/event-bus.context';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { approvePrFile } from '../../pr/services/pr-approvals.api';
-import { mergePullRequest } from '../../pr/services/pr-merge.api';
-import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
+import { useEventBus } from '../../workflow';
+import { approvePrFile, fetchPrDetail, mergePullRequest } from '../../pr';
+import { friendlyGitError, friendlyGitMessage } from '../../git';
 
 /**
  * Safety net for the async apply: if neither a `change-request-merged` nor a

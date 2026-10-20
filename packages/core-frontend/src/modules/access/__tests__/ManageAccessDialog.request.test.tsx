@@ -46,7 +46,8 @@ const cancelPullRequest = vi.hoisted(() => vi.fn());
 vi.mock('../../pr/services/pr-cancel.api', () => ({ cancelPullRequest }));
 
 const workspace = vi.hoisted(() => ({ workspaceId: 'target-company-state' }));
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace/state/workspace.context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace/state/workspace.context')>()),
   useWorkspace: () => ({ workspaceId: workspace.workspaceId, kbDirName: 'knowledge-base' }),
 }));
 vi.mock('../../auth/state/auth.context', () => ({

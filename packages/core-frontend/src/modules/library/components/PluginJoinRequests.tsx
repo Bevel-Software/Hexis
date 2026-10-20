@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect } from 'react';
 import { useJoinRequests } from '../hooks/useJoinRequests';
-import { AccessRequestsBanner } from '../../access/components/AccessRequestsBanner';
+import { AccessRequestsBanner } from '../../access';
 
 /**
  * One plugin's join requests, fetching their own data.

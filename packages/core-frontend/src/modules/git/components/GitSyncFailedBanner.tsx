@@ -1,9 +1,7 @@
 import { useCallback, useContext, useState } from 'react';
 import { AlertTriangle, CloudOff } from 'lucide-react';
-import { useEventBusSubscription } from '../../workflow/hooks/useEventBusSubscription';
-import { canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
-import { useWorkspace, WorkspaceContext } from '../../workspace/state/workspace.context';
-import { useFileNav } from '../../workspace/routing/kb-routes';
+import { canonicalizeWorkspaceId, useEventBusSubscription } from '../../workflow';
+import { useFileNav, useWorkspace, WorkspaceContext } from '../../workspace';
 
 /**
  * The files a remote sync could not reconcile, each a link that opens it.

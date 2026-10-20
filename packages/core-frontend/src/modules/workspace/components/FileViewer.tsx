@@ -13,35 +13,33 @@ import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
 import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useGit } from '../../git/state/git.context';
-import { LayoutContext } from '../../layout/state/layout.context';
+import { formatEligible, ManageAccessDialog, useFileAccess } from '../../access';
+import {
+  FileComparisonPanel,
+  FileHistoryPanel,
+  GitSyncFailedBanner,
+  PullNeededBanner,
+  useGit,
+} from '../../git';
+import { LayoutContext } from '../../layout';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
-import { PullNeededBanner } from '../../git/components/PullNeededBanner';
-import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
-import { useFileAccess } from '../../access/hooks/useFileAccess';
-import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
-import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
   OPEN_COMPARISON_EVENT,
   type OpenComparisonDetail,
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
 import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../workflow';
-import { useAuth } from '../../auth/state/auth.context';
+import { useAuth } from '../../auth';
 import {
+  ChangeRequestDialog,
+  FileChangeBoxes,
   knowledgeSuggestionBranchFor,
-  proposeKnowledgeChange,
-} from '../../change-requests/services/propose.api';
-import {
   listMyChangeRequests,
+  othersPendingBesides,
+  proposeKnowledgeChange,
   readFileOnBranch,
-} from '../../change-requests/services/change-requests.api';
-import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
-import { othersPendingBesides } from '../../change-requests/utils/author';
-import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
-import { formatEligible } from '../../access/hooks/useFileAccess';
+} from '../../change-requests';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
 import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
@@ -51,8 +49,7 @@ import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
-import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
-import { useStarterPacks } from '../../onboarding/state/starter-packs';
+import { StarterPackCard, useStarterPacks } from '../../onboarding';
 
 /**
  * How many pages the empty viewer offers. Enough to look like a starting

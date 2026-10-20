@@ -1,4 +1,4 @@
-import { ClaudeConnectionCard } from '../../settings/components/ClaudeConnectionCard';
+import { ClaudeConnectionCard } from '../../settings';
 import { SetupCarousel, type CarouselSlide } from './SetupCarousel';
 import { connectorSlide } from './claude-connector-slide';
 import { Out, Prose } from './setup-step-parts';

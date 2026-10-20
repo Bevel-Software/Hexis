@@ -1,17 +1,20 @@
 import { useCallback, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { Banner, Button } from '../../../shared/components';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
-import { useOpenChangeRequests } from '../../workspace/hooks/useOpenChangeRequests';
+import { cancelPullRequest } from '../../pr';
+import {
+  displayFileName,
+  fileNameTooltip,
+  isBinaryFile,
+  useOpenChangeRequests,
+} from '../../workspace';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
-import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
-import { displayFileName, fileNameTooltip } from '../../workspace/utils/display-file-name';
 
 export interface FileChangeBoxesProps {
   /** Repo-root-relative path of the open file (kbDirName stripped). */

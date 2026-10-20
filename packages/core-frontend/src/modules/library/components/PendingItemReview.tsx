@@ -1,5 +1,5 @@
 import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
-import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
+import { ChangeRequestDialog } from '../../change-requests';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 
 /**

@@ -9,7 +9,7 @@ import { copyToClipboard } from '../../../lib/clipboard';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
 import { forgetDraft, keepDraft, keptDraft } from '../utils/kept-draft';
 import { useAppRegistry } from '../../../core/registry';
-import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
+import { MarketplaceSection } from '../../settings';
 import { ConnectionProbeFailed, useConnectionProbe } from '../hooks/useConnectionProbe';
 import {
   saveSettings,

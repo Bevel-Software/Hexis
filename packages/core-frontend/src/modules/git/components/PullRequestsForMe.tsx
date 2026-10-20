@@ -3,11 +3,11 @@ import { ChevronRight, Check, X, Clock } from 'lucide-react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { Badge } from '../../../shared/components';
-import { SIDEBAR_CHILD_INDENT, SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
+import { SIDEBAR_CHILD_INDENT, SIDEBAR_ROW_INSET } from '../../layout';
 import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';
-import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
+import { ChangeRequestDialog } from '../../change-requests';
 import { PR_STALE_EVENT, PR_STALE_FALLBACK_MS, subscribePrStale } from '../../../core/events';
 
 const POLL_INTERVAL_MS = PR_STALE_FALLBACK_MS;

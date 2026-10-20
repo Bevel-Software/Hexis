@@ -1,13 +1,13 @@
 import { useState, type ReactNode } from 'react';
 import { Badge, Button, ListRow, TextField } from '../../../../shared/components';
-import { startToolOAuth } from '../../../secrets-vault/services/connect.api';
 import {
   deleteAdminVar,
   setAdminVar,
   setOAuthClientSecret,
   setUserVar,
+  startToolOAuth,
   type ToolVarStatus,
-} from '../../../secrets-vault/services/tool-secrets.api';
+} from '../../../secrets-vault';
 import { navigateExternal } from '../../utils/navigate-external';
 
 /**

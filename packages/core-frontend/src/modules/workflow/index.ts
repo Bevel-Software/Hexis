@@ -6,3 +6,13 @@
  */
 export { useFileLock, type AcquireOutcome } from './hooks/useFileLock';
 export { LockApiError, SELF_HOLD_MESSAGE } from './services/lock.api';
+
+/**
+ * The rest of what the shell and other modules use from workflow, grouped by
+ * the file that defines it.
+ */
+export { useEventBusSubscription } from './hooks/useEventBusSubscription';
+export { ChangeRequestStaleBinder } from './state/ChangeRequestStaleBinder';
+export { EventBusFocusBinder } from './state/EventBusFocusBinder';
+export { EventBusProvider } from './state/EventBusProvider';
+export { canonicalizeWorkspaceId, useEventBus } from './state/event-bus.context';

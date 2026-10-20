@@ -19,9 +19,9 @@ import { joinNames } from '../utils/names';
 import { repairPluginLinks, type LinkRepairReport, type UnrepairedLink } from '../services/plugins.api';
 import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { ManifestButton, ClientExtensionsSection, ManifestSection } from './PluginExtras';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { ManageAccessDialog } from '../../access';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { BandControls, EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
   RemoveLibraryItemDialog,

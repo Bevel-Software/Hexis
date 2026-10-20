@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
-import { takePostLoginRedirect } from '../../auth/services/sso';
+import { KB_ROUTE_PREFIX } from '../../workspace';
+import { takePostLoginRedirect } from '../../auth';
 
 /**
  * Where `/` lands: Knowledge, for everyone, brand-new accounts included.

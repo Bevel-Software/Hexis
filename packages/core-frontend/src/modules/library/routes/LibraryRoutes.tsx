@@ -1,13 +1,13 @@
 import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { LibraryToastProvider } from '../state/toast';
 import { LibraryProvider, useLibrary } from '../state/library-data';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
 import { PluginPage } from '../components/PluginPage';
 import { PersonalPluginPage } from '../components/PersonalPluginPage';
 import { TeamRoute } from '../components/TeamRoute';
-import { WelcomePage } from '../../onboarding/components/WelcomePage';
+import { WelcomePage } from '../../onboarding';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
 import { ConnectToolsPage } from '../../secrets-vault';
 import {

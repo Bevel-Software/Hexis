@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import { Check, ChevronDown } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { activeAppId, useActiveAppId, useAppRegistry, type AppDef } from '../../../core/registry';
-import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
-import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
+import { TOOLBAR_STACK_QUERY, useMediaQuery } from '../../layout';
 import { cn } from '../../../lib/utils';
 import { PRODUCT_NAME, ProductName } from '../../../core/ProductName';
 import { useMakerLinkLabel, useMakerUrl } from '../../../core/maker-url';

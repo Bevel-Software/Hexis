@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  listToolSecrets,
-  type ToolSecrets,
-} from '../../secrets-vault/services/tool-secrets.api';
+import { listToolSecrets, type ToolSecrets } from '../../secrets-vault';
 import { getSkill, listSkills, type LibrarySkillSummary } from '../services/library.api';
 import { getToolDetail, type ToolManualDetail } from '../services/tools.api';
 import { neededToolsFor } from '../utils/status';

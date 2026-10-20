@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { urlForLibraryItem } from '../routes/library-paths';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { personalPluginName } from '../utils/personal-plugin';
 import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
   RemoveLibraryItemDialog,
@@ -15,7 +15,7 @@ import { PendingItemReview } from './PendingItemReview';
 import { cn } from '../../../lib/utils';
 import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { PersonalAddDialog } from './PersonalAddDialog';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { ManageAccessDialog } from '../../access';
 import { copyToClipboard } from '../utils/clipboard';
 
 /**

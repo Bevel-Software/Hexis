@@ -171,8 +171,26 @@ describe('lint: module boundaries', () => {
     }
   });
 
+  it("holds core-frontend's own files outside modules to the rule: the shell and the package entry", async () => {
+    for (const [path, spec] of [
+      [`${FE}/core/__lint_fixture__.tsx`, '../modules/workspace/components/FileExplorer'],
+      [`${FE}/__lint_fixture__.ts`, './modules/embed/mount'],
+      [`${FE}/shared/components/__lint_fixture__.tsx`, '../../modules/auth/state/auth.context'],
+    ]) {
+      const messages = await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`);
+      expect(boundaryHits(messages), `${path} importing ${spec}`).toHaveLength(1);
+    }
+    for (const [path, spec] of [
+      [`${FE}/core/__lint_fixture__.tsx`, '../modules/workspace'],
+      [`${FE}/__lint_fixture__.ts`, './modules/embed/index'],
+      [`${FE}/core/__lint_fixture__.tsx`, './registry'],
+    ]) {
+      expect(await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`), `${path} importing ${spec}`).toEqual([]);
+    }
+  });
+
   it('finds no deep import in any module file outside the exception list', async () => {
-    const files = [...moduleSources(join(BACKEND, 'modules')), ...moduleSources(join(FRONTEND, 'modules'))];
+    const files = [...moduleSources(join(BACKEND, 'modules')), ...moduleSources(FRONTEND)];
     expect(files.length).toBeGreaterThan(100);
     const results = await eslint().lintFiles(files);
     const hits = results.flatMap((r) =>

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Users } from 'lucide-react';
 import { Button, IconButton, MenuPanel, buttonClasses, useDismissableMenu } from '../../../shared/components';
-import { useAdmin } from '../../admin/state/admin.context';
-import { fetchAdmins, type AdminContact } from '../../access/api';
+import { useAdmin } from '../../admin';
+import { type AdminContact, fetchAdmins } from '../../access';
 import { useInviteDialog } from '../state/invite-dialog.context';
 
 /**

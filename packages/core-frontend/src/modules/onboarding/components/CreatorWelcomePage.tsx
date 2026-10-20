@@ -1,11 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Sparkles, Users } from 'lucide-react';
 import { Button, Dialog, Surface } from '../../../shared/components';
-import { useAuth } from '../../auth/state/auth.context';
-import { NewPluginDialog } from '../../library/components/NewPluginDialog';
-import { NewSkillPanel } from '../../library/components/NewSkillPanel';
-import { useLibrary } from '../../library/state/library-data';
-import { displayFirstName } from '../../library/utils/personal-plugin';
+import { useAuth } from '../../auth';
+import { displayFirstName, NewPluginDialog, NewSkillPanel, useLibrary } from '../../library';
 
 /**
  * The first useful screen in an empty deployment: Skills & Tools' empty state

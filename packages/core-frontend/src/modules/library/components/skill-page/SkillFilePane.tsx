@@ -1,11 +1,15 @@
 import type { ReactNode } from 'react';
-import '../../../change-requests/change-requests.css';
-import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
-import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
-import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
-import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
-import { OpenPageInPlatformContext } from '../../../workspace';
-import type { DiffLine } from '../../../change-requests/utils/diff';
+// The suggestion's diff colours (`.lib-sug`) come with change-requests' entry,
+// which loads its stylesheet; `DiffLine` below is a type and loads nothing.
+import '../../../change-requests';
+import {
+  FilePaneCard,
+  HtmlRenderer,
+  type KbImageResolver,
+  KbMarkdownView,
+  OpenPageInPlatformContext,
+} from '../../../workspace';
+import type { DiffLine } from '../../../change-requests';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
 const NOOP_SAVE = async () => {};

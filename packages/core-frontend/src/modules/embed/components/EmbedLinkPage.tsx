@@ -1,8 +1,6 @@
 import { useCallback, useState, type ReactNode } from 'react';
 import { Button } from '../../../shared/components';
-import { AuthContext } from '../../auth/state/auth.context';
-import { useAuthState } from '../../auth/hooks/useAuthState';
-import { LoginScreen } from '../../auth/components/LoginScreen';
+import { AuthContext, LoginScreen, useAuthState } from '../../auth';
 import { getToken } from '../../../lib/api';
 import { linkEmbedAccount } from '../services/embed.api';
 import { outsideAccountOf } from '../services/embed-token';

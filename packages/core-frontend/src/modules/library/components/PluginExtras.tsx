@@ -4,10 +4,7 @@ import { ChevronRight } from 'lucide-react';
 import { DEFAULT_BRANCH, PLUGINS_DIR, PLUGIN_MANIFEST_FILE, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { Button } from '../../../shared/components';
-import { listFiles, readFile } from '../../workspace/services/workspace.api';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { checkoutRoot } from '../../workspace/utils/fileTree';
-import { kbFileUrl } from '../../workspace';
+import { checkoutRoot, kbFileUrl, listFiles, readFile, useWorkspace } from '../../workspace';
 
 /**
  * The plugin page's two smallest sections, both pure REUSE of the Knowledge

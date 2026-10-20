@@ -3,19 +3,19 @@ import { Users } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
-import { useAuth } from '../../auth/state/auth.context';
-import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
-import { useLatestRequest } from '../../../lib/latest-request';
 import {
+  type AccountReferences,
+  type AccountSummary,
   createAccount,
   deactivateAccount,
   deleteAccount,
   getAccountReferences,
   listAccounts,
   reactivateAccount,
-  type AccountReferences,
-  type AccountSummary,
-} from '../../auth/services/account.api';
+  useAuth,
+} from '../../auth';
+import { useInviteDialog } from '../../onboarding';
+import { useLatestRequest } from '../../../lib/latest-request';
 
 /**
  * How an account signs in, in the words this page uses everywhere (the row and

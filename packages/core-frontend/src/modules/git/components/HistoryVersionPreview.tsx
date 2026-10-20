@@ -6,24 +6,23 @@ import { formatRelativeTime } from '../../../lib/utils';
 import { useGit } from '../state/git.context';
 import { friendlyGitError } from '../services/error-messages';
 import { UnifiedDiffView } from './UnifiedDiffView';
-import { useFileAccess } from '../../access/hooks/useFileAccess';
-import { FilePaneCard } from '../../workspace/components/FilePaneCard';
+import { useFileAccess } from '../../access';
 import {
   CanDownloadContext,
+  displayFileName,
   DownloadFileButton,
-} from '../../workspace/components/renderers/DownloadFileButton';
-import { RetryReadButton } from '../../workspace/components/renderers/RetryReadButton';
-import { READ_PANE } from '../../workspace/components/renderers/readPane';
-import {
-  RendererWorkspaceContext,
+  fileNameTooltip,
+  FilePaneCard,
   getFileRenderer,
   getRendererLayout,
   hasFileViewer,
   isBinaryFile,
+  READ_PANE,
   type RendererFileRef,
-} from '../../workspace/components/renderers';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { displayFileName, fileNameTooltip } from '../../workspace/utils/display-file-name';
+  RendererWorkspaceContext,
+  RetryReadButton,
+  useWorkspace,
+} from '../../workspace';
 
 /**
  * One past save of a file, shown the way the FILE PAGE shows that file.

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { useLatestRef } from '../../../shared/components';
 import { grantAccess } from '../api';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
+import { cancelPullRequest } from '../../pr';
 import type { AccessProposal, AccessRequestRow } from '../requests.api';
 
 /**

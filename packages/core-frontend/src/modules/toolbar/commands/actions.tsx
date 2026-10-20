@@ -2,9 +2,8 @@ import type { ReactNode } from 'react';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { ArrowRight, FilePlus, Pencil, Plug, Settings, UserPlus } from 'lucide-react';
 import type { AdminMenuItem, AppDef } from '../../../core/registry';
-import type { MenuSections } from '../../settings/settings-nav-items';
-import type { InviteDialogController } from '../../onboarding/state/invite-dialog.context';
-import { WELCOME_PATH } from '../../onboarding/paths';
+import type { MenuSections } from '../../settings';
+import { type InviteDialogController, WELCOME_PATH } from '../../onboarding';
 
 /**
  * The commands the toolbar's menu can run, beside the pages and items it

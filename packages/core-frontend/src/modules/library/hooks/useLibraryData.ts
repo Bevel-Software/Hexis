@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { fetchFileAccessBatch } from '../../access/api';
-import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import { fetchFileAccessBatch } from '../../access';
+import { listToolSecrets, type ToolSecrets } from '../../secrets-vault';
 import { listPendingTools, type PendingToolSummary } from '../services/tools.api';
 import {
   defaultWorkspaceId,
@@ -11,10 +11,7 @@ import {
   type LibrarySkillSummary,
   type PendingSkillSummary,
 } from '../services/library.api';
-import {
-  listMyChangeRequests,
-  listOpenChangeRequests,
-} from '../../change-requests/services/change-requests.api';
+import { listMyChangeRequests, listOpenChangeRequests } from '../../change-requests';
 
 /**
  * All the list-level data the Library gallery needs, loaded in parallel:

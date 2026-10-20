@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Banner, Button, Surface } from '../../../shared/components';
-import { ClaudeRegistrationSteps } from '../../toolbar/components/ClaudeRegistrationSteps';
+import { ClaudeRegistrationSteps } from '../../toolbar';
 import {
   fetchMarketplaceRegistration,
   setMarketplaceRegistration,

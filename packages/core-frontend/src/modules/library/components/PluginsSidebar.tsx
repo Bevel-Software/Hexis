@@ -1,6 +1,6 @@
 import { useState, type MouseEvent, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
-import { SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
+import { SIDEBAR_ROW_INSET } from '../../layout';
 import type { LibraryFilter } from '../utils/status';
 
 /**

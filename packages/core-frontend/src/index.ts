@@ -23,7 +23,12 @@ export { CoreAppShell, AuthGate } from './core/CoreAppShell';
 // The embed, mounted OUTSIDE the app: what a deployment's `embed` entry calls
 // when the MCP App view loads it into a chat host's sandbox (see
 // `modules/embed/mount.tsx`).
-export { mountEmbed, type MountEmbedOptions } from './modules/embed/mount';
-export { readEmbedHandoff, EMBED_HANDOFF_GLOBAL, type EmbedHandoff } from './modules/embed/embed-config';
+export {
+  EMBED_HANDOFF_GLOBAL,
+  type EmbedHandoff,
+  mountEmbed,
+  type MountEmbedOptions,
+  readEmbedHandoff,
+} from './modules/embed';
 export * from './core/registry';
 export * from './core/events';

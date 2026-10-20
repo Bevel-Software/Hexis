@@ -10,18 +10,20 @@ import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { AuthContext } from '../../auth/state/auth.context';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { useEventBus } from '../../workflow/state/event-bus.context';
-import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
-import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
-import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
-import { GitApiError } from '../../git/services/git.api';
-import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
-import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
+import { AuthContext } from '../../auth';
+import {
+  approvePrFile,
+  deleteChangeRequest,
+  fetchPrDetail,
+  refreshChangeRequestFromTarget,
+  revertPrFile,
+  unapprovePrFile,
+} from '../../pr';
+import { useEventBus } from '../../workflow';
+import { friendlyGitError, friendlyGitMessage, GitApiError, GitSyncFailedBanner } from '../../git';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { hasFileViewer, isBinaryFile, rendersAsText, WorkspaceApiError } from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -30,9 +32,8 @@ import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { useForkPointFileRead } from '../hooks/useForkPointFile';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
-import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
+import { MarkdownDiffViewer } from '../../review';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
 import { hasOwnApproval } from '../utils/approval';
 

@@ -22,8 +22,11 @@ vi.mock('../services/library.api', async (importOriginal) => ({
   requestSkillAccess: api.requestSkillAccess,
 }));
 
-import { NeedsSkillWriteError } from '../services/plugins.api';
+// The component before the API: loading it walks an import cycle (through
+// the git and Library indexes) back to `plugins.api`, and the component must
+// meet the mock there, not the original the factory is still importing.
 import { LinkSkillPanel } from '../components/LinkSkillPanel';
+import { NeedsSkillWriteError } from '../services/plugins.api';
 
 const OK = { state: 'ok' as const, text: 'Ready' };
 const items: LibraryItem[] = [

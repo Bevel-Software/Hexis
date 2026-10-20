@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useLibrary } from '../state/library-data';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { useWorkspace } from '../../workspace';
+import { ManageAccessDialog } from '../../access';
 import { PluginJoinRequests } from './PluginJoinRequests';
 
 /**

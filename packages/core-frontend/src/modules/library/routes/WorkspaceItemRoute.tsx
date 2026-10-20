@@ -1,12 +1,9 @@
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { safeDecode } from '../../workspace/routing/kb-routes';
-import { asksForFilePage } from '../../workspace';
+import { asksForFilePage, FileRoute, safeDecode, useWorkspace } from '../../workspace';
 import { useLibrary } from '../state/library-data';
 import type { PluginSummary } from '../services/plugins.api';
 import { pluginHoldingPath } from '../utils/plugin-summary';
-import { FileRoute } from '../../workspace/components/FileRoute';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT, pathForPlugin } from './library-paths';

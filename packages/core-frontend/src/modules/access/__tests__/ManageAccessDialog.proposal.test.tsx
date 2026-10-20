@@ -14,7 +14,8 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace/state/workspace.context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace/state/workspace.context')>()),
   useWorkspace: () => ({ workspaceId: 'main', kbDirName: 'knowledge-base' }),
 }));
 vi.mock('../../auth/state/auth.context', () => ({
