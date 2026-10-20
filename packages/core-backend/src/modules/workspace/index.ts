@@ -24,3 +24,14 @@ export {
   type WorkingCopyShape,
 } from './kb-repository.js';
 export type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
+// The agent-access gate: what a module's agent tools take to tell the
+// deployment's hooks of a read or a write, and the session input they declare.
+export {
+  assertAgentWriteAllowed,
+  notifyAgentRead,
+  SESSION_ID_DESCRIPTION,
+  SESSION_ID_INPUT,
+  ToolDescriptionNotes,
+  type AgentAccessGate,
+} from './agent-access.gate.js';
+export { SpillStore } from './spill-store.js';

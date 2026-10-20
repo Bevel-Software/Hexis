@@ -25,10 +25,17 @@ import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
  * shows up as `db:`.
  */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[]; order: string[] } = {
+  const captured: {
+    values: Record<string, unknown>[];
+    set: Record<string, unknown>[];
+    order: string[];
+    /** Every `where` predicate, rendered to the SQL it would send. */
+    where: { sql: string; params: unknown[] }[];
+  } = {
     values: [],
     set: [],
     order: [],
+    where: [],
   };
   const dialect = new PgDialect();
   function nextChain(): unknown {
@@ -42,7 +49,10 @@ function makeFakeDb(queue: unknown[]) {
     Object.assign(chain, {
       values: passthrough((a) => captured.values.push(a)),
       set: passthrough((a) => captured.set.push(a)),
-      where: passthrough(),
+      where: passthrough((a) => {
+        const { sql, params } = dialect.sqlToQuery(a as unknown as SQL);
+        captured.where.push({ sql, params });
+      }),
       limit: passthrough(),
       from: passthrough(),
       orderBy: passthrough(),
@@ -121,6 +131,32 @@ describe('signing in with a switched-off account', () => {
     const { db } = makeFakeDb([[OFF]]);
     const svc = new AuthService(db, makeConfig());
     await expect(svc.getOrCreateByEmail('alice@example.com')).rejects.toBeInstanceOf(AccountDeactivatedError);
+  });
+});
+
+describe('the accounts a change request\'s approvers resolve to', () => {
+  it('are read in one indexed query through the email blind index, live accounts only, keyed by canonical address', async () => {
+    const { db, captured } = makeFakeDb([[{ id: 'user-1', email: 'Alice@Example.com', name: 'Alice' }]]);
+    const svc = new AuthService(db, makeConfig());
+    const found = await svc.findActiveAccountsByEmail(['ALICE@example.com', 'alice@example.com', 'bob@example.com']);
+    // One read, by the blind index, with the addresses canonicalised and
+    // deduplicated, and a switched-off account excluded in the query itself.
+    expect((db as unknown as { select: ReturnType<typeof vi.fn> }).select).toHaveBeenCalledTimes(1);
+    expect(captured.where).toHaveLength(1);
+    expect(captured.where[0]!.sql).toMatch(/"users"."email_bidx" in \(\$1, \$2\) and "users"."deactivated_at" is null/);
+    // The blind-index column hashes each address with the handle's key as
+    // the query is sent; what was asked for is the canonical plain address.
+    expect(captured.where[0]!.params.map((p) => (p as { plain: string }).plain)).toEqual(['alice@example.com', 'bob@example.com']);
+    // Keyed by the canonical address, whatever spelling the row holds.
+    expect([...found.keys()]).toEqual(['alice@example.com']);
+    expect(found.get('alice@example.com')).toEqual({ id: 'user-1', email: 'Alice@Example.com', name: 'Alice' });
+  });
+
+  it('asks nothing for no addresses', async () => {
+    const { db } = makeFakeDb([]);
+    const svc = new AuthService(db, makeConfig());
+    expect(await svc.findActiveAccountsByEmail([])).toEqual(new Map());
+    expect((db as unknown as { select: ReturnType<typeof vi.fn> }).select).not.toHaveBeenCalled();
   });
 });
 
