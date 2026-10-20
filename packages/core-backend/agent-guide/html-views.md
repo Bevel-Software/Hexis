@@ -108,7 +108,8 @@ and `destination`, the folder it lands in, are required; `mode` is `create`
 does what an agent does, as the viewer: `request_file_upload`, the bytes sent
 to the upload address, `apply_file_upload`. The file lands under its own name
 with its bytes unchanged, and a zip lands as its entries. The promise resolves
-with `apply_file_upload`'s answer, `{ destination, count, total, files }`, and
+with `apply_file_upload`'s answer, `{ destination, count, total, files }`,
+`files` naming every path (a zip's every entry) with its outcome, and
 rejects with the refusal: a file over the deployment's upload limit (the
 message names it), a destination the viewer may not write, or, when nothing
 landed, the first path's refusal, with its code in `error.code` (`exists`

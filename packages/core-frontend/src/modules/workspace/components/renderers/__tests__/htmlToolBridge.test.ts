@@ -338,8 +338,9 @@ describe('uploadFile: the agent upload path, run by the app as the viewer', () =
     expect(post.body).toBeInstanceOf(Blob);
     expect(await sha256(post.body as Blob)).toBe(await sha256(XLSX));
     expect((post.body as Blob).size).toBe(2 * 1024 * 1024);
-    // The apply names the token, the branch and the folder; `mode` is left to the tool's default, `create`.
-    expect(server.argsOf('apply_file_upload')).toEqual({ branch: 'main', token: TOKEN, destination: 'Data/Campaigns/Easter' });
+    // The apply names the token, the branch and the folder, and asks for every
+    // path's outcome; `mode` is left to the tool's default, `create`.
+    expect(server.argsOf('apply_file_upload')).toEqual({ branch: 'main', token: TOKEN, destination: 'Data/Campaigns/Easter', all: true });
   });
 
   it('names a Blob by its `name` option, and lets that option rename a File', async () => {
@@ -454,10 +455,12 @@ describe('uploadFile: the agent upload path, run by the app as the viewer', () =
     );
     expect(reply).toMatchObject({ ok: false, error: DENIED, code: DENIED });
     await vi.waitFor(() => expect(server.steps()).toEqual(['POST /api/mcp/page-refusals']));
+    // The record carries the apply's own arguments in `body` and the file's
+    // name beside them: a name is not an argument of apply_file_upload.
     expect(JSON.parse(String(server.sent.at(-1)!.body))).toEqual({
       page: PAGE,
       tool: 'apply_file_upload',
-      args: { body: { branch: 'main', destination: 'Data/Campaigns/Easter', mode: 'overwrite', name: 'Assets.xlsx' } },
+      args: { body: { branch: 'main', destination: 'Data/Campaigns/Easter', mode: 'overwrite' }, file: 'Assets.xlsx' },
     });
   });
 });

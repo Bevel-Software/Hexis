@@ -152,7 +152,8 @@ export class PageToolsClient {
    * `x-upload-token` header (never in the address, and never back to the
    * page), then `apply_file_upload` into `destination` on `branch`.
    *
-   * Resolves with what `apply_file_upload` answers. Rejects with the message
+   * Resolves with what `apply_file_upload` answers, every path listed (the
+   * apply is asked with `all: true`). Rejects with the message
    * of the step that failed: the upload endpoint's own (a file over the
    * deployment's limit is refused there, naming it, before the apply runs),
    * or the apply's — thrown whole (a destination the viewer may not write),
@@ -190,8 +191,10 @@ export class PageToolsClient {
         body: file,
       });
       if (!sent.ok) throw new PageToolError(await refusalOf(sent));
+      // `all: true`: the page gets every path's outcome, never the tool's
+      // 25-entry cut with a `truncated` flag it has no way to act on.
       answer = (await this.callTool(UPLOAD_APPLY_TOOL, {
-        body: { branch, token, destination, ...(mode !== undefined ? { mode } : {}) },
+        body: { branch, token, destination, all: true, ...(mode !== undefined ? { mode } : {}) },
       })) as { count?: unknown; files?: unknown };
     } catch (err) {
       await this.discardUpload(address, token);
@@ -483,18 +486,20 @@ export async function answerToolCall(
 /**
  * A refused call as the Audit log names it: the tool the page asked for, with
  * the arguments it would have run with. An upload is refused as the
- * `apply_file_upload` it would have ended in — without the file, and without
- * a token, since none was asked for.
+ * `apply_file_upload` it would have ended in: its `body` holds only what that
+ * tool takes (no token, since none was asked for), and the file's name — not
+ * an argument of the tool, it travels with the bytes — sits beside it as
+ * `file`, so the record says what was refused without inventing an argument.
  */
 function refusedCall(msg: ToolCallMessage): { name: string; args: unknown } {
   const [a, b] = msg.args;
   if (msg.fn === 'callToolChain') return { name: CHAIN_TOOL, args: { code: a } };
   if (msg.fn === 'uploadFile') {
     const opts = (b && typeof b === 'object' ? b : {}) as Record<string, unknown>;
-    const name = typeof opts.name === 'string' ? opts.name : a instanceof File ? a.name : undefined;
+    const file = typeof opts.name === 'string' ? opts.name : a instanceof File ? a.name : undefined;
     return {
       name: UPLOAD_APPLY_TOOL,
-      args: { body: { branch: opts.branch, destination: opts.destination, mode: opts.mode, name } },
+      args: { body: { branch: opts.branch, destination: opts.destination, mode: opts.mode }, file },
     };
   }
   return { name: String(a ?? ''), args: b };
