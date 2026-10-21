@@ -27,20 +27,12 @@
  * has evicted past `n`, the route emits `{ kind: 'resync' }` so the
  * client refetches state from scratch.
  *
-<<<<<<< HEAD
- * **Read-gated kinds** — an event that names a file and says something only
- * a reader of that file may learn (`readGatedPath`: `document-unreadable`,
- * which quotes the parser) is written to a session only after the injected
- * read gate says that session's person may read the file. A session's events
- * keep their order: while such a check is pending, later events wait behind it.
-=======
  * **Who receives what** — the bus picks the sessions that HEAR about an
  * event (focus for workspace events, owner for user events); before writing
  * it, the route asks the delivery rule (`IEventDelivery`) whether this
  * session's person may have it, and in what form (`events-delivery.ts`). Live fan-out and replay go
  * through the same rule, and through one ordered queue per session, so a
  * slow verdict never reorders a session's stream.
->>>>>>> origin/dev
  *
  * **Heartbeat** — every 25 s the route writes an SSE comment (`:\n\n`).
  * Keeps proxies (nginx, Coolify's Traefik, Cloudflare) from killing the
@@ -121,11 +113,7 @@ export type EventReadGate = (userId: string, workspaceId: string, path: string) 
 export function createEventsRoutes(
   bus: WorkflowEventBus,
   authMiddleware: express.RequestHandler,
-<<<<<<< HEAD
-  mayRead?: EventReadGate,
-=======
   delivery: IEventDelivery,
->>>>>>> origin/dev
 ): express.Router {
   const router = express.Router();
 
@@ -206,26 +194,6 @@ export function createEventsRoutes(
     };
     sessions.set(sessionId, session);
 
-<<<<<<< HEAD
-    // Events wait behind a pending read check, so a session sees them in order.
-    let outbox: Promise<void> = Promise.resolve();
-    let checking = 0;
-    const push = (event: WorkflowEvent): void => {
-      if (session.closed) return;
-      const gated = readGatedPath(event);
-      if (gated === undefined && checking === 0) {
-        writeSseEvent(res, event);
-        return;
-      }
-      if (gated !== undefined) checking++;
-      outbox = outbox.then(async () => {
-        try {
-          if (gated !== undefined && !(await readable(userId, gated.workspaceId, gated.path))) return;
-          if (!session.closed) writeSseEvent(res, event);
-        } finally {
-          if (gated !== undefined) checking--;
-        }
-=======
     // Every event this session hears goes through the delivery rule, in the
     // order it arrived: the verdict is async, the stream must not reorder.
     const push = (event: WorkflowEvent): void => {
@@ -236,7 +204,6 @@ export function createEventsRoutes(
         if (deliverable && !session.closed) writeSseEvent(res, deliverable);
       }).catch((err: unknown) => {
         log.warn(`write to session=${sessionId} failed:`, { err });
->>>>>>> origin/dev
       });
     };
 
@@ -267,10 +234,7 @@ export function createEventsRoutes(
           reason: 'last-event-id too old; ring buffer evicted',
         });
       } else {
-<<<<<<< HEAD
-=======
         // The same rule as live delivery, queued ahead of anything live.
->>>>>>> origin/dev
         for (const event of replay) push(event);
       }
     }
