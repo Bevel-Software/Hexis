@@ -25,16 +25,26 @@ import { authFetch } from '../../../../lib/api';
  * card per page view. See {@link PageConsent}.
  */
 
-/** What the file page tells the HTML renderer: that tools are answered here, and for which page. */
+/** What a host that is the platform tells the HTML renderer: that tools are answered here, and for which page. */
 export interface PageTools {
   /** The page's knowledge-base path (`Dashboards/Roadmap.html`), what the Audit log shows as the agent. */
   pagePath: string;
 }
 
 /**
- * Provided by the app's file page and nowhere else: its presence is what
- * gives a page `window.bevel.tools`. The embed, a skill page and every other
- * preview mount the renderer without it, and their pages get `null`.
+ * Its presence is what gives a page `window.bevel.tools`. The hosts that
+ * provide it — the surfaces the app itself shows a page on, and only those:
+ *
+ *   - the file page (`FileViewer.tsx`);
+ *   - the skill page's file pane (`SkillFilePane.tsx`), under the file's
+ *     knowledge-base path — the one the file page uses — never the
+ *     skill-relative tab name.
+ *
+ * Every other mount goes without, and its pages get `null`: the embed and
+ * the MCP App pane (outside the platform — they show the "only available in
+ * the platform" card), the change-request file preview and the history
+ * preview (a page shown as a version, not opened). A new host is added
+ * here, deliberately, or not at all.
  */
 export const PageToolsContext = createContext<PageTools | null>(null);
 
