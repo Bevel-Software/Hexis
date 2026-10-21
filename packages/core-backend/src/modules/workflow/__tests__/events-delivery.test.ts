@@ -324,6 +324,52 @@ describe('events route — delivery rule', () => {
     expect(kinds(again)).toEqual([`change-request-opened:${PUBLIC_REQUEST}`]);
   });
 
+  it("keeps a session's stream in emission order when a later verdict settles first, live and on replay", async () => {
+    const bus = new WorkflowEventBus();
+    const base0 = fakeAccess();
+    // The verdict on the Finance file takes a while; every other one is immediate.
+    const access: EventAccess = {
+      ...base0,
+      mayReadAtTarget: (target, email, repoPath) =>
+        repoPath === FINANCE_REPO
+          ? new Promise((resolve) => setTimeout(() => resolve(base0.mayReadAtTarget(target, email, repoPath)), 40))
+          : base0.mayReadAtTarget(target, email, repoPath),
+    };
+    const base = listen(bus, access);
+    const alice = await open(base, 'alice', 's-alice');
+    await focus(base, 'alice', 's-alice');
+    const before = bus.emit(SENTINEL);
+
+    // Kinds the focus list does not scope, so a replay from `before` carries them too.
+    const sent = [approval(FINANCE_REQUEST, FINANCE_REPO), approval(PUBLIC_REQUEST, PUBLIC_REPO), opened(PUBLIC_REQUEST)];
+    await emitAndSettle(bus, sent, alice);
+    const expected = [
+      `approval-changed:${FINANCE_REPO}`,
+      `approval-changed:${PUBLIC_REPO}`,
+      `change-request-opened:${PUBLIC_REQUEST}`,
+    ];
+    expect(kinds(alice)).toEqual(expected);
+
+    // The replay queues the same verdicts, and the slow one still goes first.
+    const again = await open(base, 'alice', 's-alice-again', before.id);
+    await focus(base, 'alice', 's-alice-again');
+    const last = bus.emit(SENTINEL);
+    await again.until((e) => e.id === last.id);
+    expect(kinds(again)).toEqual(expected);
+  });
+
+  it('an approval check that fails withholds that approval, and nothing after it', async () => {
+    const bus = new WorkflowEventBus();
+    const access: EventAccess = { ...fakeAccess(), mayReadAtTarget: () => Promise.reject(new Error('access tree unreadable')) };
+    const base = listen(bus, access);
+    const alice = await open(base, 'alice', 's-alice');
+    await focus(base, 'alice', 's-alice');
+
+    await emitAndSettle(bus, [approval(PUBLIC_REQUEST, PUBLIC_REPO), fileChanged(PUBLIC), opened(PUBLIC_REQUEST)], alice);
+
+    expect(kinds(alice)).toEqual([`file-changed:${PUBLIC}`, `change-request-opened:${PUBLIC_REQUEST}`]);
+  });
+
   it("an agent's tool call reaches its own person through the route, nobody else — an admin included", async () => {
     const bus = new WorkflowEventBus();
     const base = listen(bus, fakeAccess());
