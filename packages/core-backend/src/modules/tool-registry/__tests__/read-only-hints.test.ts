@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
-import { flattenManualTool, toListedTool } from '@bevel-software/platform-mcp-core';
+import { flattenManualTool, toListedTool, withReadOnlyOverride } from '@bevel-software/platform-mcp-core';
 import {
   TOOL_READ_ONLY_SETTING,
   ToolReadOnlyHints,
@@ -184,12 +184,17 @@ function memorySettings(initial = '') {
   };
 }
 
-/** The agent manual as the hosted MCP server lists it: flattened, then turned into listing entries. */
+/**
+ * The agent manual as the hosted MCP server lists it: flattened, the overrides
+ * read for this listing joined on, then turned into listing entries.
+ */
 async function hostedListing(registry: ToolRegistry, hints: ToolReadOnlyHints) {
-  const manual = await hints.apply(await registry.listExternal());
+  const manual = hints.apply(await registry.listExternal());
+  const overrides = await hints.overrides();
   return new Map(
     manual
-      .map((t) => toListedTool(flattenManualTool({ ...t, name: `KNOWLEDGE_BASE.${t.name}` }, 'KNOWLEDGE_BASE')))
+      .map((t) => flattenManualTool({ ...t, name: `KNOWLEDGE_BASE.${t.name}` }, 'KNOWLEDGE_BASE'))
+      .map((t) => toListedTool(withReadOnlyOverride(t, overrides)))
       .filter((e): e is NonNullable<typeof e> => e !== null)
       .map((e) => [e.name, e]),
   );
@@ -232,7 +237,7 @@ describe('the built-in hint of every platform tool', () => {
     expect((await registry.listExternal()).some((t) => t.name === 'switch_branch')).toBe(false);
     const internal = (await registry.listInternal()).find((t) => t.name === 'switch_branch');
     expect(internal?.tags).toContain('write');
-    const [applied] = await hints.apply([internal!]);
+    const [applied] = hints.apply([internal!]);
     expect(applied!.tags).not.toContain('read-only');
   });
 
@@ -257,7 +262,7 @@ describe('the built-in hint of every platform tool', () => {
   it("leaves every tool's name, description and schemas as the registry has them", async () => {
     const registry = platformRegistry();
     const before = await registry.listExternal();
-    const after = await new ToolReadOnlyHints(registry, memorySettings().port).apply(before);
+    const after = new ToolReadOnlyHints(registry, memorySettings().port).apply(before);
     const untagged = (tools: typeof before) => tools.map((t) => ({ ...t, tags: undefined }));
     expect(untagged(after)).toEqual(untagged(before));
     // And the registry's own defs are never written to.
@@ -315,7 +320,7 @@ describe('an override', () => {
     expect((await hints.hints())['__proto__']).toBe(false);
   });
 
-  it('lists the built-in hints, rather than failing the manual, when the overrides cannot be read', async () => {
+  it('reads as none when the setting cannot be read, so every listing keeps the built-in hints', async () => {
     const registry = platformRegistry();
     const { port } = memorySettings('{"read_file":false}');
     const hints = new ToolReadOnlyHints(registry, {
@@ -324,6 +329,8 @@ describe('an override', () => {
         throw new Error('connection terminated');
       },
     });
+    expect(await hints.overrides()).toEqual({});
+    expect((await hints.hints()).read_file).toBe(true);
     const listing = await hostedListing(registry, hints);
     expect(listing.get('read_file')?.annotations).toEqual({ readOnlyHint: true });
     expect(listing.get('write_file')?.annotations).toEqual({ readOnlyHint: false });
@@ -389,7 +396,8 @@ describe('the routes', () => {
       tools: Array<{ name: string; readOnly: boolean; kind: string }>;
     };
     expect(listed.canEdit).toBe(false);
-    expect(listed.tools.find((t) => t.name === 'read_file')).toMatchObject({ readOnly: true, kind: 'platform' });
+    // The effective value only: whether an admin overrode it, and what it was, is not theirs to read.
+    expect(listed.tools.find((t) => t.name === 'read_file')).toEqual({ name: 'read_file', readOnly: true, kind: 'platform' });
     expect(listed.tools.filter((t) => t.kind === 'meta').map((t) => t.name)).toEqual([
       'list_tools',
       'tools_info',
@@ -406,7 +414,8 @@ describe('the routes', () => {
     // Recorded under the admin's user id — the uuid the column holds — not their email.
     expect(settings.state.updatedBy).toBe(ADMIN_ID);
     expect(await res.json()).toMatchObject({ name: 'write_file', override: true, readOnly: true });
-    expect(await manualTags('write_file')).toContain('read-only');
+    // The manual keeps the BUILT-IN tag: a listing joins the override on itself.
+    expect(await manualTags('write_file')).not.toContain('read-only');
     const hints = (await (await fetch(`${base}/agent/tool-hints`)).json()) as { tools: Record<string, boolean> };
     expect(hints.tools.write_file).toBe(true);
 

@@ -22,8 +22,11 @@ export interface ToolReadOnlyEntry {
 export interface IToolReadOnlyHints {
   /** The overrides in effect, as the database has them now. */
   overrides(): Promise<Record<string, boolean>>;
-  /** The given manual tools, each tagged `read-only` exactly when its effective hint is true. */
-  apply(tools: UtcpTool[]): Promise<UtcpTool[]>;
+  /**
+   * The given manual tools, each tagged `read-only` exactly when its BUILT-IN
+   * hint is true. Overrides are not in it: a listing joins them on itself.
+   */
+  apply(tools: UtcpTool[]): UtcpTool[];
   /** Every platform tool, then every meta-tool, with its built-in, override and effective value. */
   describe(): Promise<ToolReadOnlyEntry[]>;
   /** Every tool's effective hint, by name. */
@@ -33,4 +36,19 @@ export interface IToolReadOnlyHints {
    * user id. Throws `UnknownToolError` for a name that is neither kind of tool.
    */
   set(name: string, readOnly: boolean | null, updatedBy: string | null): Promise<ToolReadOnlyEntry>;
+}
+
+/**
+ * Where the overrides are stored: the three operations on one deployment
+ * setting that `ToolReadOnlyHints` needs, and nothing of the settings module's
+ * own shape. `DeploymentSettingsService` is the store the composition root
+ * passes; a test passes anything with these three.
+ */
+export interface ToolReadOnlySettingsStore {
+  /** The setting's value as the database has it now, blank when nothing is set. */
+  reload(key: string): Promise<string>;
+  /** Store `value` only if nothing is stored yet; false when something was. */
+  recordIfAbsent(key: string, value: string, updatedBy: string | null): Promise<boolean>;
+  /** Replace `expected` with `next` (null removes the row); false when the stored value was not `expected`. */
+  swapIfValue(key: string, expected: string, next: string | null, updatedBy: string | null): Promise<boolean>;
 }

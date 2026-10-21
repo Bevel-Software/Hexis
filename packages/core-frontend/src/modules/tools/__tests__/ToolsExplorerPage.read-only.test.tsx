@@ -45,7 +45,7 @@ function serve(canEdit: boolean, hints: ToolHint[]) {
       const { readOnly } = JSON.parse(String(init.body)) as { readOnly: boolean | null };
       puts.push({ name, readOnly });
       const current = hints.find((h) => h.name === name)!;
-      return Response.json(hint(name, current.kind, current.builtIn, readOnly));
+      return Response.json(hint(name, current.kind, current.builtIn!, readOnly));
     }
     return new Response('{}', { status: 404 });
   });
@@ -170,13 +170,24 @@ describe('the Tools page, for an admin', () => {
 
 describe('the Tools page, for everyone else', () => {
   it('shows each effective value and no toggle or reset', async () => {
-    serve(false, [hint('read_file', 'platform', true), hint('write_file', 'platform', false, true), ...HINTS.slice(2)]);
+    // What the route sends a non-admin: the effective value, without the built-in one or the override.
+    const effectiveOnly = [hint('read_file', 'platform', true), hint('write_file', 'platform', false, true), ...HINTS.slice(2)].map(
+      ({ name, kind, readOnly }) => ({ name, kind, readOnly }),
+    );
+    serve(false, effectiveOnly);
     renderPage();
     expect(await within(await screen.findByTestId('read-only-read_file')).findByText('Read-only')).toBeInTheDocument();
     expect(within(screen.getByTestId('read-only-write_file')).getByText('Read-only')).toBeInTheDocument();
     expect(within(screen.getByTestId('read-only-call_tool_chain')).getByText('Not read-only')).toBeInTheDocument();
     expect(screen.queryAllByRole('switch')).toEqual([]);
     expect(screen.queryByRole('button', { name: /Reset/ })).toBeNull();
+  });
+
+  it('does not say a value was overridden, even when a response carries the override', async () => {
+    serve(false, [hint('read_file', 'platform', true), hint('write_file', 'platform', false, true), ...HINTS.slice(2)]);
+    renderPage();
+    expect(await within(await screen.findByTestId('read-only-write_file')).findByText('Read-only')).toBeInTheDocument();
+    expect(screen.queryByText('overridden')).toBeNull();
   });
 });
 

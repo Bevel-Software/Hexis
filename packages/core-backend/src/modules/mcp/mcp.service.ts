@@ -37,6 +37,7 @@ import {
   installSessionRecovery,
   flattenManualTool,
   toListedTool,
+  withReadOnlyOverride,
   toolError,
   retiredToolMessage,
   needsAuthorizationResult,
@@ -125,12 +126,12 @@ export interface McpProxyOptions {
   secretsScope?: string;
   /**
    * The deployment's read-only overrides, by tool name, read per listing so an
-   * admin's change on the Tools page is in the next `tools/list`. Only the
-   * code-mode meta-tools' are read from here — the KB tools' arrive as the
-   * `read-only` tag on the manual, and a cached surface built from an older
-   * manual is not reused: the overrides are part of the catalog revision the
-   * surface is keyed by (`catalog-revision.ts`). Absent, the meta-tools list
-   * their built-in hints.
+   * admin's change on the Tools page is in the next `tools/list`. Joined on
+   * here, at listing time, for the platform tools and the code-mode meta-tools
+   * alike: the platform tools' BUILT-IN hint arrives as the manual's
+   * `read-only` tag, in a surface that is cached across requests, so an
+   * override baked into it would outlive the toggle that set it. Absent, every
+   * tool lists its built-in hint.
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
 }
@@ -608,7 +609,9 @@ export class McpService {
         // place for it), so it is joined on here — the one point where a
         // discovered tool becomes a listing entry.
         const ui = apps && Object.hasOwn(apps.tools, t.mcpName) ? apps.tools[t.mcpName] : undefined;
-        const entry = toListedTool(ui ? { ...t, ui } : t); // logs its own reason on a name/schema drop
+        // An admin's override of a platform tool's hint, read for THIS listing.
+        const hinted = withReadOnlyOverride(t, readOnly);
+        const entry = toListedTool(ui ? { ...hinted, ui } : hinted); // logs its own reason on a name/schema drop
         if (!entry) {
           dropped.push(t.mcpName);
           continue;

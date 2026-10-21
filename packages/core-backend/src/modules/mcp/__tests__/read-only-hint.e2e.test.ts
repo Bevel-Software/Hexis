@@ -104,7 +104,8 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catal
   app.use('/api', createManualRoutes(registry, pass, undefined, hints));
   // The route the endpoint keys its cached tool surface by. Served, a listing
   // reuses the surface it built until the revision moves; absent (404), every
-  // request builds its own.
+  // request builds its own. An override does not move it: the hints are
+  // joined on per listing, so the cached surface never holds one.
   if (opts.catalogRevision) {
     const asCaller: RequestHandler = (req, _res, next) => {
       req.toolAuth = { userId: 'user-A' } as never;
@@ -117,7 +118,6 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catal
         skills: { listSkills: async () => [] },
         manualAuth: asCaller,
         resolveUserEmail: async () => 'a@example.test',
-        readOnlyOverrides: () => hints.overrides(),
       }),
     );
   }
@@ -189,6 +189,16 @@ describe('the hosted MCP endpoint lists the read-only hint', () => {
     listed = await annotationsOf(client);
     expect(listed.read_file).toEqual({ readOnlyHint: true });
     expect(listed.write_file).toEqual({ readOnlyHint: false });
+  });
+
+  it('does not keep an override in the cached surface: one set before the surface is built is undone by its reset', async () => {
+    const { baseUrl, hints } = await startPlatform({ catalogRevision: true });
+    await hints.set('read_file', false, '00000000-0000-4000-8000-00000000000a');
+    const client = await connect(baseUrl);
+    expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: false });
+
+    await hints.set('read_file', null, '00000000-0000-4000-8000-00000000000a');
+    expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
   });
 
   it('leaves a tool from a plugin MCP server unannotated, as before', async () => {

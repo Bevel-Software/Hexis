@@ -61,7 +61,9 @@ function ReadOnlyControl({
   busy: boolean;
   onSet: SetHint;
 }) {
-  const overridden = hint.override !== null;
+  // Whether, and from what, an admin changed the value is for admins: anyone
+  // else is shown what clients are told and nothing more (nor sent the rest).
+  const overridden = canEdit && hint.override != null;
   const builtInLabel = hint.builtIn ? 'read-only' : 'not read-only';
   return (
     <span className="flex items-center gap-2 shrink-0" data-testid={`read-only-${hint.name}`}>
@@ -100,7 +102,7 @@ function ReadOnlyControl({
           overridden
         </span>
       )}
-      {canEdit && overridden && (
+      {overridden && (
         <button
           type="button"
           disabled={busy}

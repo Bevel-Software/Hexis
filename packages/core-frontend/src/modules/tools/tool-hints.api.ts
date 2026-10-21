@@ -2,16 +2,17 @@ import { authFetch } from '../../lib/api';
 
 /**
  * What MCP clients are told about one tool's effect — `GET /api/tool-hints`.
- * Mirrors `ToolReadOnlyEntry` in the backend's `read-only-hints.contract.ts`.
+ * Mirrors `ToolReadOnlyEntry` in the backend's `read-only-hints.contract.ts`;
+ * `builtIn` and `override` are sent to an admin only.
  */
 export interface ToolHint {
   name: string;
   /** `platform`: an endpoint of this deployment. `meta`: a feature of the MCP servers. */
   kind: 'platform' | 'meta';
-  /** What the tool's own declaration makes it. */
-  builtIn: boolean;
-  /** The admin's override, or null when there is none. */
-  override: boolean | null;
+  /** What the tool's own declaration makes it. Admins only. */
+  builtIn?: boolean;
+  /** The admin's override, or null when there is none. Admins only. */
+  override?: boolean | null;
   /** What clients are told. */
   readOnly: boolean;
 }

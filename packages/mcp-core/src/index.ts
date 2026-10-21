@@ -29,6 +29,7 @@
 export {
   type ProxiedTool,
   READ_ONLY_TAG,
+  withReadOnlyOverride,
   toListedTool,
   sanitizeInputSchema,
   flattenManualTool,

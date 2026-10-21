@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Tool as UtcpTool } from '@utcp/sdk';
-import { flattenDiscoveredTool, flattenManualTool, READ_ONLY_TAG, toListedTool } from '../proxied-tool.js';
+import { flattenDiscoveredTool, flattenManualTool, READ_ONLY_TAG, toListedTool, withReadOnlyOverride } from '../proxied-tool.js';
 import { codeModeMetaTools, META_TOOL_READ_ONLY } from '../meta-tools.js';
 
 /**
  * The read-only hint MCP clients gate tool approval on (`annotations.readOnlyHint`).
  *
- * The deployment marks each platform tool whose effective hint is true with
+ * The deployment marks each platform tool whose built-in hint is true with
  * the `read-only` tag on its manual; these pin that both servers' one mapping
  * from a discovered tool to a listing entry turns that tag — and only for the
  * platform's own manual — into the hint, and leaves everything else about the
@@ -88,6 +88,35 @@ describe('the code-mode meta-tools carry the hint', () => {
     const strip = (tools: ReturnType<typeof codeModeMetaTools>) => tools.map((t) => ({ ...t, annotations: undefined }));
     expect(strip(codeModeMetaTools(KB, [], { readOnly: { call_tool_chain: true } }))).toEqual(
       strip(codeModeMetaTools(KB)),
+    );
+  });
+});
+
+describe("the deployment's override, joined on at listing time", () => {
+  const hintOf = (tool: ReturnType<typeof flattenManualTool>) => toListedTool(tool)?.annotations;
+
+  it('replaces the built-in hint of the platform tool it names, in either direction', () => {
+    const reader = flattenManualTool(utcpTool(`${KB}.read_file`, [READ_ONLY_TAG]), KB);
+    const writer = flattenManualTool(utcpTool(`${KB}.write_file`, ['write']), KB);
+    const overrides = { read_file: false, write_file: true };
+    expect(hintOf(withReadOnlyOverride(reader, overrides))).toEqual({ readOnlyHint: false });
+    expect(hintOf(withReadOnlyOverride(writer, overrides))).toEqual({ readOnlyHint: true });
+  });
+
+  it('leaves a tool it does not name, or none at all, on its built-in hint', () => {
+    const reader = flattenManualTool(utcpTool(`${KB}.read_file`, [READ_ONLY_TAG]), KB);
+    expect(hintOf(withReadOnlyOverride(reader, { write_file: true }))).toEqual({ readOnlyHint: true });
+    expect(hintOf(withReadOnlyOverride(reader, undefined))).toEqual({ readOnlyHint: true });
+    // An inherited key is no override.
+    expect(hintOf(withReadOnlyOverride(flattenManualTool(utcpTool(`${KB}.toString`, []), KB), {}))).toEqual({
+      readOnlyHint: false,
+    });
+  });
+
+  it('never annotates a tool from another manual, whatever its name', () => {
+    const plugin = flattenManualTool(utcpTool('notion.read_file', [READ_ONLY_TAG]), KB);
+    expect(toListedTool(withReadOnlyOverride(plugin, { notion_read_file: true, read_file: true }))).not.toHaveProperty(
+      'annotations',
     );
   });
 });

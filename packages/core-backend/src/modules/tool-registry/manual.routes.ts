@@ -56,7 +56,9 @@ export function createManualRoutes(
   resolveUserEmail?: ResolveUserEmail,
   /**
    * The read-only hints (`read-only-hints.ts`), put on the AGENT manual's tools
-   * as the `read-only` tag the MCP servers turn into `annotations.readOnlyHint`.
+   * as the `read-only` tag the hosted MCP endpoint turns into
+   * `annotations.readOnlyHint` — the built-in value; the endpoint joins an
+   * admin's override on at listing time.
    * Absent, the manual carries the tools' own tags only.
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
@@ -79,7 +81,7 @@ export function createManualRoutes(
 
   router.get('/agent/utcp', manualAuth, async (req, res) => {
     const tools = await registry.listExternal(await context(req));
-    res.json(toManual(readOnlyHints ? await readOnlyHints.apply(tools) : tools));
+    res.json(toManual(readOnlyHints ? readOnlyHints.apply(tools) : tools));
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
     const internal = await registry.listInternal(await context(req));

@@ -1,12 +1,13 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { META_TOOL_NAMES, META_TOOL_READ_ONLY, READ_ONLY_TAG } from '@bevel-software/platform-mcp-core';
 import { declaresWrite, type IToolRegistry, type UtcpTool } from './tool.contract.js';
-import type { IToolReadOnlyHints, ToolReadOnlyEntry } from './read-only-hints.contract.js';
+import type {
+  IToolReadOnlyHints,
+  ToolReadOnlyEntry,
+  ToolReadOnlySettingsStore,
+} from './read-only-hints.contract.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
-import {
-  parseToolReadOnlyOverrides,
-  type DeploymentSettingsService,
-} from '../settings/deployment-settings.service.js';
+import { parseToolReadOnlyOverrides } from '../settings/deployment-settings.service.js';
 import { logger } from '../../shared/logging.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId, req.userEmail), through auth's public entry
 
@@ -14,8 +15,6 @@ const log = logger('tool-read-only-hints');
 
 /** The deployment setting the overrides live in — see `CORE_SETTINGS`. */
 export const TOOL_READ_ONLY_SETTING = 'toolReadOnlyOverrides';
-
-type SettingsPort = Pick<DeploymentSettingsService, 'reload' | 'recordIfAbsent' | 'swapIfValue'>;
 
 /** A name that is neither a platform tool nor a meta-tool. */
 export class UnknownToolError extends Error {
@@ -40,22 +39,34 @@ export class UnknownToolError extends Error {
  * setting, read from the database on every use — so a change made on one
  * replica is in the next listing of every other, without a restart.
  *
- * Carried to the two MCP servers in two ways, both from here: the hosted
- * endpoint reads the `read-only` tag this puts on each tool of the agent
- * manual (`GET /agent/utcp`), and the local `hexis-mcp` — whose discovery goes
- * through the MCP endpoint, where tags do not survive — reads
- * `GET /agent/tool-hints`. Tools from the knowledge base (`.tool` manuals,
+ * Carried to the two MCP servers in two ways, both from here, and both joined
+ * on at LISTING time, never baked into anything cached: the hosted endpoint
+ * lists each platform tool with the built-in hint the agent manual's
+ * `read-only` tag carries (`GET /agent/utcp`), then applies {@link overrides}
+ * read for that very listing; the local `hexis-mcp` — whose discovery goes
+ * through the MCP endpoint, where tags do not survive — reads every effective
+ * hint from `GET /agent/tool-hints` per listing. Tools from the knowledge base (`.tool` manuals,
  * plugin MCP servers) are not the registry's and are untouched.
  */
 export class ToolReadOnlyHints implements IToolReadOnlyHints {
   constructor(
     private readonly registry: Pick<IToolRegistry, 'listExternal'>,
-    private readonly settings: SettingsPort,
+    private readonly settings: ToolReadOnlySettingsStore,
   ) {}
 
-  /** The overrides in effect, as the database has them now. An unreadable value is no override. */
+  /**
+   * The overrides in effect, as the database has them now. A value that cannot
+   * be read, or is not a map, is no override: every consumer then serves the
+   * built-in hints rather than failing its listing.
+   */
   async overrides(): Promise<Record<string, boolean>> {
-    const raw = await this.settings.reload(TOOL_READ_ONLY_SETTING);
+    let raw: string;
+    try {
+      raw = await this.settings.reload(TOOL_READ_ONLY_SETTING);
+    } catch (err) {
+      log.warn(`could not read ${TOOL_READ_ONLY_SETTING}; using the built-in hints:`, { err });
+      return {};
+    }
     const parsed = parseToolReadOnlyOverrides(raw);
     if (parsed === null) {
       log.warn(`the stored ${TOOL_READ_ONLY_SETTING} is not a map of tool names to booleans — ignoring it.`);
@@ -66,21 +77,15 @@ export class ToolReadOnlyHints implements IToolReadOnlyHints {
 
   /**
    * The agent manual's tools, each tagged `read-only` exactly when its
-   * effective hint is true. New objects: the registry's own defs are shared
-   * by every request and are never written to.
+   * BUILT-IN hint is true — its write declaration, never an override. The
+   * hosted endpoint caches the tool surface it builds from this manual, so an
+   * override in it would outlive the toggle that set it; the override is
+   * joined on per listing instead (see the class note). New objects: the
+   * registry's own defs are shared by every request and are never written to.
    */
-  async apply(tools: UtcpTool[]): Promise<UtcpTool[]> {
-    // An override that cannot be read must not cost clients the manual: the
-    // tools go out on their built-in hints, as on a deployment with none.
-    let overrides: Record<string, boolean> = {};
-    try {
-      overrides = await this.overrides();
-    } catch (err) {
-      log.warn(`could not read ${TOOL_READ_ONLY_SETTING}; listing the built-in hints:`, { err });
-    }
+  apply(tools: UtcpTool[]): UtcpTool[] {
     return tools.map((tool) => {
-      const override = Object.hasOwn(overrides, tool.name) ? overrides[tool.name] : undefined;
-      const readOnly = override ?? !declaresWrite(tool);
+      const readOnly = !declaresWrite(tool);
       const tags = (tool.tags ?? []).filter((t) => t !== READ_ONLY_TAG);
       return { ...tool, tags: readOnly ? [...tags, READ_ONLY_TAG] : tags };
     });
@@ -148,9 +153,11 @@ export class ToolReadOnlyHints implements IToolReadOnlyHints {
  *
  *   GET /agent/tool-hints     — every tool's effective hint, for `hexis-mcp`
  *                               (behind `manualAuth`, like the manual itself)
- *   GET /tool-hints           — every tool with its built-in, override and
- *                               effective value, for the Tools page; any
- *                               signed-in person, plus whether they may edit
+ *   GET /tool-hints           — every tool with its effective value, for the
+ *                               Tools page; any signed-in person, plus whether
+ *                               they may edit. The built-in value and the
+ *                               override go to an admin only: who changed what
+ *                               clients are told is the admins' business.
  *   PUT /tool-hints/:name     — `{ readOnly: true | false | null }`, admins only;
  *                               null removes the override
  *
@@ -179,7 +186,7 @@ export function createToolHintsRoutes(
   router.get('/tool-hints', async (req: Request, res) => {
     try {
       const [tools, canEdit] = await Promise.all([hints.describe(), adminAccess.isAdmin(req.userEmail)]);
-      res.json({ canEdit, tools });
+      res.json({ canEdit, tools: canEdit ? tools : tools.map(({ name, kind, readOnly }) => ({ name, kind, readOnly })) });
     } catch (err) {
       log.error('tool-hints listing failed:', { err });
       res.status(500).json({ error: 'Failed to read the tool hints' });
