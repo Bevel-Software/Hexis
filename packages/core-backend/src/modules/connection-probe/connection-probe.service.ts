@@ -9,9 +9,9 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { registerManual } from '@bevel-software/platform-mcp-core';
 import type { IToolManualService, ToolHealthCheck, ToolProbeTarget } from '../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../secrets-vault/index.js';
-// The concrete module, NOT the `secrets-vault` barrel: that barrel re-exports
-// the routes, and the routes import this module's contract — so going through
-// it would close an import cycle between the two modules.
+// Through the `secrets-vault` index, which also re-exports its routes. Those
+// routes import only a TYPE from this module (`IConnectionProbeService`), and
+// a type import is erased at compile time, so no runtime cycle closes here.
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
