@@ -6,6 +6,9 @@ import {
   type IsolatedExtraction,
 } from './document-extractor.contract.js';
 import type { ExtractionJob, ExtractionReply } from './extraction-worker.js';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('documents');
 
 /**
  * Extraction time one document may spend in its worker: the platform's rule,
@@ -119,7 +122,7 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
       // the bytes. The worker is ending, and the pool replaces it. What went
       // wrong is the server's (a module path, a heap size): logged here, and
       // the reader is told — and the hour remembers — the same words each time.
-      console.error('[documents] an extraction worker failed:', outcome.error);
+      log.error('an extraction worker failed', { err: outcome.error });
       return { ok: false, failure: 'crashed', message: EXTRACTION_WORKER_FAILED };
     }
     if ('exited' in outcome) {

@@ -1,5 +1,8 @@
 import type { ExtractResult } from './doc-extract.types.js';
 import { MAX_DOC_PART_BYTES } from './ooxml-text.js';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('documents');
 
 /**
  * Extract a PDF's TEXT LAYER page by page with pdf.js (`pdfjs-dist`,
@@ -74,7 +77,7 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
     // The reader, not the file: a later read must try this file again. Why
     // it did not load is the server's to know (a module path, a missing
     // dependency) — logged here, never quoted to the reader.
-    console.error('[documents] the PDF reader did not load:', err);
+    log.error('the PDF reader did not load', { err });
     return { ok: false, transient: true, message: READER_DID_NOT_LOAD };
   }
   let task: ReturnType<typeof openPdf>;
