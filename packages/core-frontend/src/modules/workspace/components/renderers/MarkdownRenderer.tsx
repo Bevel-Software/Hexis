@@ -63,12 +63,13 @@ export function MarkdownRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  // openLink here is the navigating version: clicking a markdown link to a file
-  // updates the URL so the route reflects what's on screen.
-  const { openLink } = useFileNav();
-  // Shared id-link resolver (resolve-id → openFile, heading preserved) — same
+  // A link out of the page opens its file in a new tab and leaves this one
+  // where it is; a section link scrolls here. The hook decides which, and
+  // `linkTarget` is the same answer for the anchor to carry.
+  const { openLink, linkTarget } = useFileNav();
+  // Shared id-link follower (the node's id URL, heading preserved) — same
   // implementation the chat citation renderer uses.
-  const { openNodeId } = useNodeIdNav();
+  const { openNodeId, nodeIdTarget } = useNodeIdNav();
   // The URL hash carries a heading slug for citation deep-links
   // (`…/Node.md#goal`); we scroll the matching heading into view once the
   // rendered content is in the DOM.
@@ -158,6 +159,10 @@ export function MarkdownRenderer({
   const handleFileLink = useCallback(
     (href: string) => openLink(href, filePath),
     [openLink, filePath],
+  );
+  const fileLinkTarget = useCallback(
+    (href: string) => linkTarget(href, filePath),
+    [linkTarget, filePath],
   );
 
   // An image in the page: the same grammar, but the bytes come from this
@@ -267,6 +272,8 @@ export function MarkdownRenderer({
           source={value}
           onOpenFile={handleFileLink}
           onOpenNodeId={openNodeId}
+          fileLinkTarget={fileLinkTarget}
+          nodeIdLinkTarget={nodeIdTarget}
           headingLink={headingLink}
           resolveImage={resolveImage}
           // On a renderer surface (the embed) EVERY outgoing link is the

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../../git/state/git.context';
@@ -15,6 +15,17 @@ vi.mock('react-router-dom', async (importActual) => ({
   ...(await importActual<typeof import('react-router-dom')>()),
   useNavigate: () => navigateMock,
 }));
+
+/** The router's location, as text — what a link inside the file must not change. */
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname + location.search + location.hash}</output>;
+}
+
+/** `window.open` answering with a tab, as a browser does when it opens one. */
+function stubWindowOpen() {
+  return vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+}
 
 function makeGit(): GitContextValue {
   return {
@@ -195,71 +206,153 @@ describe('MarkdownRenderer', () => {
 
   // --- Link rendering in preview (readOnly) mode ---
 
-  function renderPreview(content: string, filePath: string) {
+  // `at` is the address this tab is on — a file page, or the same page in
+  // full screen. The probe shows the router's location, which a link inside
+  // the file must leave as it was.
+  function renderPreview(content: string, filePath: string, at = `/workspace/alice%2Fdraft/${filePath}`) {
     return render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[at]}>
         <WorkspaceContext.Provider value={makeWorkspace()}>
           <GitContext.Provider value={makeGit()}>
             <MarkdownRenderer content={content} filePath={filePath} onSave={async () => {}} readOnly />
+            <LocationProbe />
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </MemoryRouter>,
     );
   }
 
-  it('renders a nodeType frontmatter value as a clickable link that navigates', async () => {
+  /**
+   * A link inside the file opened `url` in a new tab, and this tab went
+   * nowhere. The anchor names the same address with `target="_blank"`, so a
+   * middle-click or the context menu opens what the click opened.
+   */
+  async function expectOpensInNewTab(name: string, url: string) {
     navigateMock.mockClear();
-    const user = userEvent.setup();
+    const open = stubWindowOpen();
+    const before = screen.getByTestId('location').textContent;
+    const link = screen.getByRole('link', { name });
+    expect(link).toHaveAttribute('href', url);
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener');
+    await userEvent.setup().click(link);
+    expect(open).toHaveBeenCalledWith(url, '_blank');
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId('location').textContent).toBe(before);
+    open.mockRestore();
+  }
+
+  it('opens a nodeType frontmatter link in a new tab', async () => {
     renderPreview(
       '---\nnodeType: "[Process](../NodeTypes/Process.md)"\n---\n\n# Body',
       'Knowledge/Sub/Foo.md',
     );
-    const link = screen.getByRole('link', { name: 'Process' });
-    await user.click(link);
-    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/NodeTypes/Process.md');
+    await expectOpensInNewTab('Process', '/workspace/alice%2Fdraft/Knowledge/NodeTypes/Process.md');
   });
 
-  it('renders a bare body link whose path contains spaces as a working link', async () => {
-    navigateMock.mockClear();
-    const user = userEvent.setup();
+  it('opens a bare body link whose path contains spaces in a new tab', async () => {
     renderPreview('[Open](Some File.md)', 'Knowledge/Foo.md');
-    const link = screen.getByRole('link', { name: 'Open' });
-    await user.click(link);
-    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
+    await expectOpensInNewTab('Open', '/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
   });
 
-  it('renders an angle-bracketed body link with spaces as a working link', async () => {
-    navigateMock.mockClear();
-    const user = userEvent.setup();
+  it('opens an angle-bracketed body link with spaces in a new tab', async () => {
     renderPreview('[Open](<Some File.md>)', 'Knowledge/Foo.md');
-    const link = screen.getByRole('link', { name: 'Open' });
-    await user.click(link);
-    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
+    await expectOpensInNewTab('Open', '/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
   });
 
   // The link a paste wraps a Copy path in: root-anchored, so it opens the same
   // file however deep the linking page sits.
   it('opens a pasted root-anchored link from a file in a different folder', async () => {
-    navigateMock.mockClear();
-    const user = userEvent.setup();
     renderPreview(
       '[subfile](</knowledge-base/KnowledgeBase/File Type examples/subfile.md>)',
       'knowledge-base/KnowledgeBase/Other/Deep/parent.md',
     );
-    await user.click(screen.getByRole('link', { name: 'subfile' }));
-    expect(navigateMock).toHaveBeenCalledWith(
+    await expectOpensInNewTab(
+      'subfile',
       '/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/File%20Type%20examples/subfile.md',
     );
   });
 
   it('keeps the branch of an absolute citation URL instead of resolving it against the file', async () => {
-    navigateMock.mockClear();
-    const user = userEvent.setup();
     renderPreview('[Cited](/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status)', 'Knowledge/Foo.md');
-    await user.click(screen.getByRole('link', { name: 'Cited' }));
-    expect(navigateMock).toHaveBeenCalledWith(
-      '/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status',
-    );
+    await expectOpensInNewTab('Cited', '/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status');
+  });
+
+  // Once the hook resolves targets, a workspace link that is not a `.md` is
+  // the app's too: left to the browser it was a relative URL that replaced
+  // the page being read.
+  it('opens a link to an HTML page of the workspace in a new tab', async () => {
+    renderPreview('[Board](../Dashboards/Board.html)', 'Knowledge/Foo.md');
+    await expectOpensInNewTab('Board', '/workspace/alice%2Fdraft/Dashboards/Board.html');
+  });
+
+  it('opens an id-link in a new tab at the node URL, heading kept', async () => {
+    renderPreview('[Plan](plan-node#goal)', 'Knowledge/Foo.md');
+    await expectOpensInNewTab('Plan', '/workspace/alice%2Fdraft/plan-node#goal');
+  });
+
+  // Full screen is this tab's view, asked for by its query. The new tab gets
+  // the target's plain address, and this one keeps `?fullscreen=1`.
+  it('in full screen, opens the plain address in a new tab and stays full screen', async () => {
+    renderPreview('[Open](Other.md)', 'Knowledge/Foo.md', '/workspace/alice%2Fdraft/Knowledge/Foo.md?fullscreen=1');
+    expect(screen.getByTestId('location')).toHaveTextContent('?fullscreen=1');
+    await expectOpensInNewTab('Open', '/workspace/alice%2Fdraft/Knowledge/Other.md');
+    expect(screen.getByTestId('location')).toHaveTextContent('?fullscreen=1');
+  });
+
+  it('in full screen, opens an id-link in a new tab at the plain node URL', async () => {
+    renderPreview('[Plan](plan-node)', 'Knowledge/Foo.md', '/workspace/alice%2Fdraft/foo-node?fullscreen=1');
+    await expectOpensInNewTab('Plan', '/workspace/alice%2Fdraft/plan-node');
+  });
+
+  // A section link is the browser's: a plain fragment anchor, no new tab.
+  it('leaves a same-file anchor to scroll in place', async () => {
+    renderPreview('[Goal](#goal)', 'Knowledge/Foo.md');
+    const open = stubWindowOpen();
+    const link = screen.getByRole('link', { name: 'Goal' });
+    expect(link).toHaveAttribute('href', '#goal');
+    expect(link).not.toHaveAttribute('target');
+    await userEvent.setup().click(link);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  // The same section written as a path to this file: this tab moves by its
+  // fragment only, on its own address and query — full screen stays.
+  it('scrolls a link to a section of this file in place, keeping the address and query', async () => {
+    navigateMock.mockClear();
+    renderPreview('[Goal](Foo.md#goal)', 'Knowledge/Foo.md', '/workspace/alice%2Fdraft/foo-node?fullscreen=1');
+    const open = stubWindowOpen();
+    const link = screen.getByRole('link', { name: 'Goal' });
+    expect(link).toHaveAttribute('href', '/workspace/alice%2Fdraft/foo-node?fullscreen=1#goal');
+    expect(link).not.toHaveAttribute('target');
+    await userEvent.setup().click(link);
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/foo-node?fullscreen=1#goal');
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  // Ctrl/⌘/Shift-click on a new-tab link is the browser's to answer, as for
+  // any `target="_blank"` anchor: the app neither cancels it nor opens a tab.
+  it('leaves a modifier-click on a link to the browser', () => {
+    renderPreview('[Open](Other.md)', 'Knowledge/Foo.md');
+    const open = stubWindowOpen();
+    const link = screen.getByRole('link', { name: 'Open' });
+    // Read once the app's handlers have all had the click, then cancelled so
+    // the test DOM does not go and fetch the link itself.
+    const leftToBrowser: boolean[] = [];
+    const after = (e: Event) => {
+      leftToBrowser.push(!e.defaultPrevented);
+      e.preventDefault();
+    };
+    window.addEventListener('click', after);
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }]) {
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...modifier }));
+    }
+    window.removeEventListener('click', after);
+    expect(leftToBrowser).toEqual([true, true, true]);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 
   // --- Images in preview mode ---

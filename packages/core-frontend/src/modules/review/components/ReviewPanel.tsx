@@ -110,20 +110,24 @@ function kindLabel(kind: PendingChange['kind']): string {
 export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   const review = useReview();
   const { refreshFileTree, kbDirName, workspaceId } = useWorkspace();
-  const { openFile, openLink } = useFileNav();
+  const { openFile, openLink, linkTarget } = useFileNav();
   // Links inside a rendered diff. Both resolvers navigate relative to
   // `git.status.branch`, which is CORRECT here and only here: this panel
   // reviews the agent's uncommitted changes on the branch you are already
   // standing on, so "the diff's branch" and "the current branch" are the same
   // thing. (The change-request dialog is not in that position, which is why it
   // passes no resolvers — see the comment at its MarkdownDiffViewer call.)
-  const { openNodeId } = useNodeIdNav();
+  const { openNodeId, nodeIdTarget } = useNodeIdNav();
   const diffPath = review.fileDiff?.path ?? '';
   // Resolved against the diffed file by `openLink`: decoded, an absolute URL
   // keeping its own branch. The same grammar MarkdownRenderer uses.
   const openDiffLink = useCallback(
     (href: string) => openLink(href, diffPath),
     [openLink, diffPath],
+  );
+  const diffLinkTarget = useCallback(
+    (href: string) => linkTarget(href, diffPath),
+    [linkTarget, diffPath],
   );
   // Images inside a rendered diff, bound to the CHECKED-OUT workspace for the
   // reason above: the working tree IS the diff's new state, so an image the
@@ -374,6 +378,8 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
                   payload={fileDiff}
                   onOpenFile={openDiffLink}
                   onOpenNodeId={openNodeId}
+                  fileLinkTarget={diffLinkTarget}
+                  nodeIdLinkTarget={nodeIdTarget}
                   resolveImage={resolveDiffImage}
                   scroll={false}
                 />

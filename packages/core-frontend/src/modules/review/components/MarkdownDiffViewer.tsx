@@ -10,6 +10,7 @@ import {
   useKbMarkdownComponents,
   type KbImageResolver,
 } from '../../workspace/components/renderers/kbMarkdownPipeline';
+import type { KbLinkTarget } from '../../workspace/components/renderers/KbAppLink';
 
 const MAX_RENDERED_LINES = 5000;
 
@@ -30,6 +31,9 @@ interface MarkdownDiffViewerProps {
   onOpenFile?: (href: string) => void;
   /** Same contract as {@link onOpenFile}, for bare node-id links. */
   onOpenNodeId?: (id: string) => void;
+  /** Where each kind of link leads, for its anchor — `KbAppLink` in the pipeline. */
+  fileLinkTarget?: (href: string) => KbLinkTarget | null;
+  nodeIdLinkTarget?: (id: string) => KbLinkTarget | null;
   /**
    * Resolves a workspace image in the diff to the URL that serves it from the
    * CHECKED-OUT tree. It applies to unchanged and added fragments only; a
@@ -77,7 +81,15 @@ interface MarkdownDiffViewerProps {
  * routes, which sit outside those providers entirely. A `useNavigate()` in
  * here would be a runtime crash in all three.
  */
-export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, resolveImage, scroll = true }: MarkdownDiffViewerProps) {
+export function MarkdownDiffViewer({
+  payload,
+  onOpenFile,
+  onOpenNodeId,
+  fileLinkTarget,
+  nodeIdLinkTarget,
+  resolveImage,
+  scroll = true,
+}: MarkdownDiffViewerProps) {
   const data = useMemo(() => {
     const baseline = payload.baseline ?? '';
     const current = payload.current ?? '';
@@ -134,6 +146,8 @@ export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, resolveI
         blocks={data.bodyBlocks}
         onOpenFile={onOpenFile}
         onOpenNodeId={onOpenNodeId}
+        fileLinkTarget={fileLinkTarget}
+        nodeIdLinkTarget={nodeIdLinkTarget}
         resolveImage={resolveImage}
       />
     </div>
@@ -295,11 +309,15 @@ function DiffPreview({
   blocks,
   onOpenFile,
   onOpenNodeId,
+  fileLinkTarget,
+  nodeIdLinkTarget,
   resolveImage,
 }: {
   blocks: DisplayBlock[];
   onOpenFile?: (href: string) => void;
   onOpenNodeId?: (id: string) => void;
+  fileLinkTarget?: (href: string) => KbLinkTarget | null;
+  nodeIdLinkTarget?: (id: string) => KbLinkTarget | null;
   resolveImage?: KbImageResolver;
 }) {
   // Images, per fragment. The caller's resolver serves the CURRENT tree, which
@@ -335,12 +353,16 @@ function DiffPreview({
   const components = useKbMarkdownComponents({
     onOpenFile,
     onOpenNodeId,
+    fileLinkTarget,
+    nodeIdLinkTarget,
     onMermaidError: 'source',
     resolveImage: liveImages,
   });
   const baselineComponents = useKbMarkdownComponents({
     onOpenFile,
     onOpenNodeId,
+    fileLinkTarget,
+    nodeIdLinkTarget,
     onMermaidError: 'source',
     resolveImage: baselineImages,
   });

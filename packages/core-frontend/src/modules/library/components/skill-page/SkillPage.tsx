@@ -118,7 +118,7 @@ export function SkillPage({
   const detail = useSkillDetail(name);
   // The same id-link resolver the Knowledge renderer uses — a `[text](node-id)`
   // link inside a skill file navigates to that node, not to a dead span.
-  const { openNodeId } = useNodeIdNav();
+  const { openNodeId, nodeIdTarget } = useNodeIdNav();
 
   const [selectedState, setSelected] = useState('SKILL.md');
   const selected = activeFile ?? selectedState;
@@ -849,6 +849,7 @@ export function SkillPage({
           suggestion={null}
           onOpenLink={openLinkInEditor}
           onOpenNodeId={openNodeId}
+          nodeIdLinkTarget={nodeIdTarget}
           headingLink={headingLink}
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.

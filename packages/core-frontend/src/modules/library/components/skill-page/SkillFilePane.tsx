@@ -3,6 +3,7 @@ import '../../../change-requests/change-requests.css';
 import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
+import type { KbLinkTarget } from '../../../workspace/components/renderers/KbAppLink';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
 import { OpenPageInPlatformContext } from '../../../workspace';
 import type { DiffLine } from '../../../change-requests/utils/diff';
@@ -29,6 +30,8 @@ interface SkillFilePaneProps {
   onOpenLink?(href: string): void;
   /** Resolve a bare `[text](node-id)` link — same contract as `KbMarkdownView`. */
   onOpenNodeId?(id: string): void;
+  /** Where an id-link leads, for its anchor — same contract as `KbMarkdownView`. */
+  nodeIdLinkTarget?(id: string): KbLinkTarget | null;
   /** Heading deep-link builder; present ⇒ headings get the copy-anchor button. */
   headingLink?(slug: string): string;
   /** Image source resolver, same contract as `KbMarkdownView`; absent ⇒ plain `<img>` tags. */
@@ -60,6 +63,7 @@ export function SkillFilePane({
   notice,
   onOpenLink,
   onOpenNodeId,
+  nodeIdLinkTarget,
   headingLink,
   resolveImage,
   onOpenInPlatform,
@@ -80,6 +84,7 @@ export function SkillFilePane({
           source={raw}
           onOpenFile={(href) => onOpenLink?.(href)}
           onOpenNodeId={onOpenNodeId}
+          nodeIdLinkTarget={nodeIdLinkTarget}
           headingLink={headingLink}
           resolveImage={resolveImage}
           scroll={false}

@@ -162,8 +162,9 @@ export function HtmlRenderer({
   // node — both post a `bevel.navigate` message (the iframe sandbox can't
   // navigate the host window itself). `openLink` resolves the href the same
   // way the markdown renderer does (absolute `/workspace/…` URLs keep their
-  // branch; relative paths resolve against this file) and routes it through
-  // the in-app navigation so the URL reflects what's on screen.
+  // branch; relative paths resolve against this file) and follows it by the
+  // rule for links inside a file: another file opens in a new tab, and this
+  // page — its state, its scroll, its full-screen view — stays as it was.
   useEffect(() => {
     function onNavMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;

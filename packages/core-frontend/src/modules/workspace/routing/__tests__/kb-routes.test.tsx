@@ -1,18 +1,35 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { WorkspaceContext } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
-import { useFileNav, resolveKbHref } from '../kb-routes';
+import { useFileNav, useNodeIdNav, resolveKbHref } from '../kb-routes';
 
 // Capture what openFile navigates to, and stand in for the URL it reads the
 // branch out of.
 const navigateMock = vi.hoisted(() => vi.fn());
-const routerMock = vi.hoisted(() => ({ pathname: '/' }));
+const routerMock = vi.hoisted(() => ({ pathname: '/', search: '' }));
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigateMock,
-  useLocation: () => ({ pathname: routerMock.pathname, search: '', hash: '', state: null, key: 'k' }),
+  useLocation: () => ({ pathname: routerMock.pathname, search: routerMock.search, hash: '', state: null, key: 'k' }),
 }));
+
+// `window.open` answering with a tab, as a browser does when it opens one.
+// A link inside a file opens its target there and never navigates this tab.
+let openMock: MockInstance<typeof window.open>;
+let openedTab: { opener: unknown };
+beforeEach(() => {
+  navigateMock.mockClear();
+  routerMock.search = '';
+  openedTab = { opener: window };
+  openMock = vi.spyOn(window, 'open').mockImplementation(() => openedTab as unknown as Window);
+});
+afterEach(() => openMock.mockRestore());
+
+function expectNewTab(url: string) {
+  expect(openMock).toHaveBeenCalledWith(url, '_blank');
+  expect(navigateMock).not.toHaveBeenCalled();
+}
 
 function gitOnBranch(branch: string): GitContextValue {
   return {
@@ -42,8 +59,10 @@ function renderNav(
   branch: string,
   kbDirName: string | null = 'knowledge-base',
   pathname = '/',
+  search = '',
 ) {
   routerMock.pathname = pathname;
+  routerMock.search = search;
   return renderHook(() => useFileNav(), {
     wrapper: ({ children }) => (
       <GitContext.Provider value={gitOnBranch(branch)}>
@@ -121,11 +140,12 @@ describe('useFileNav.openFile', () => {
     );
   });
 
-  it('opens a page on its FILE PAGE by an address that asks for it — a new tab carries no router state', () => {
-    navigateMock.mockClear();
+  // A page's "Open in the platform", asked for from inside the page: a new
+  // tab, which carries no router state, so the ask rides in the address.
+  it('opens a page on its FILE PAGE in a new tab, by an address that asks for it', () => {
     const { result } = renderNav('main');
     result.current.openFilePage('knowledge-base/Skills/qa-bridge/view.html');
-    expect(navigateMock).toHaveBeenCalledWith('/workspace/main/knowledge-base/Skills/qa-bridge/view.html?as=file');
+    expectNewTab('/workspace/main/knowledge-base/Skills/qa-bridge/view.html?as=file');
   });
 
   it('opens a tree path verbatim even when a folder inside it is named like the kbDirName', () => {
@@ -292,7 +312,7 @@ describe('useFileNav.openLink', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
     result.current.openLink('Some%20File.md#goal', 'knowledge-base/Knowledge/Foo.md');
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Some%20File.md#goal',
     );
   });
@@ -305,7 +325,7 @@ describe('useFileNav.openLink', () => {
       '/workspace/target-company-state/knowledge-base/x.md',
       'knowledge-base/Knowledge/Foo.md',
     );
-    expect(navigateMock).toHaveBeenCalledWith('/workspace/target-company-state/knowledge-base/x.md');
+    expectNewTab('/workspace/target-company-state/knowledge-base/x.md');
   });
 
   // Every caller reaches `openLink` by CANCELLING the browser's navigation
@@ -359,7 +379,7 @@ describe('useFileNav.openLink', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
     result.current.openLink('Board.html', 'knowledge-base/Dashboards/a.html');
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Board.html',
     );
   });
@@ -368,7 +388,7 @@ describe('useFileNav.openLink', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
     result.current.openLink('../Reports/Q3.html#totals', 'knowledge-base/Dashboards/a.html');
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/alice%2Fdraft/knowledge-base/Reports/Q3.html#totals',
     );
   });
@@ -381,7 +401,7 @@ describe('useFileNav.openLink', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
     result.current.openLink('Missing.html', 'knowledge-base/Dashboards/a.html');
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Missing.html',
     );
   });
@@ -393,7 +413,7 @@ describe('useFileNav.openLink', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
     result.current.openLink('\n      Board.html\n    ', 'knowledge-base/Dashboards/a.html');
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Board.html',
     );
   });
@@ -405,18 +425,16 @@ describe('useFileNav.openLink', () => {
       '  /workspace/bob%2Fmain/knowledge-base/Reports/Q3.html#totals  ',
       'knowledge-base/Dashboards/a.html',
     );
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/bob%2Fmain/knowledge-base/Reports/Q3.html#totals',
     );
   });
 
   it('keeps a padded same-document anchor on the file it sits in', () => {
-    navigateMock.mockClear();
-    const { result } = renderNav('alice/draft');
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Dashboards/a.html');
     result.current.openLink('  #goal  ', 'knowledge-base/Dashboards/a.html');
-    expect(navigateMock).toHaveBeenCalledWith(
-      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/a.html#goal',
-    );
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/knowledge-base/Dashboards/a.html#goal');
+    expect(openMock).not.toHaveBeenCalled();
   });
 
   // `window.open` would strip the padding itself, but the address handed over
@@ -433,12 +451,64 @@ describe('useFileNav.openLink', () => {
 
   // A section link is a scroll, not a navigation to somewhere else.
   it('keeps a same-document anchor on the file it sits in', () => {
-    navigateMock.mockClear();
-    const { result } = renderNav('alice/draft');
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md');
     result.current.openLink('#overview', 'knowledge-base/Knowledge/Foo.md');
-    expect(navigateMock).toHaveBeenCalledWith(
-      '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md#overview',
-    );
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md#overview');
+    expect(openMock).not.toHaveBeenCalled();
+  });
+
+  // The section link moves this tab by its fragment ONLY: a node shown at its
+  // id URL stays there, and full screen (`?fullscreen=1`) stays on.
+  it('scrolls a section link in place on this tab\'s own address, query kept', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/foo-node', '?fullscreen=1');
+    result.current.openLink('Foo.md#overview', 'knowledge-base/Knowledge/Foo.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/foo-node?fullscreen=1#overview');
+    expect(openMock).not.toHaveBeenCalled();
+  });
+
+  // The same file on ANOTHER branch is another file.
+  it('opens the same path on another branch in a new tab', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md');
+    result.current.openLink('/workspace/main/knowledge-base/Knowledge/Foo.md#overview', 'knowledge-base/Knowledge/Foo.md');
+    expectNewTab('/workspace/main/knowledge-base/Knowledge/Foo.md#overview');
+  });
+
+  it('in full screen, opens another file at its plain address and leaves this tab alone', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Dashboards/a.html', '?fullscreen=1');
+    result.current.openLink('../Knowledge/Plan.md', 'knowledge-base/Dashboards/a.html');
+    expectNewTab('/workspace/alice%2Fdraft/knowledge-base/Knowledge/Plan.md');
+  });
+
+  // The new tab is the app's own page, opened without `noopener` only so a
+  // refusal can be told from a success; the opener is cut the same moment.
+  it('severs the new tab\'s opener', () => {
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('Board.html', 'knowledge-base/Dashboards/a.html');
+    expect(openedTab.opener).toBeNull();
+  });
+
+  it('reports a tab the browser refused to open, rather than swallowing the click', () => {
+    openMock.mockImplementation(() => null);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('Board.html', 'knowledge-base/Dashboards/a.html');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('/workspace/alice%2Fdraft/knowledge-base/Dashboards/Board.html'));
+    expect(navigateMock).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  // What an anchor carries is what the click opens.
+  it('answers linkTarget with the address and the tab openLink uses', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md');
+    expect(result.current.linkTarget('Other.md', 'knowledge-base/Knowledge/Foo.md')).toEqual({
+      href: '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Other.md',
+      newTab: true,
+    });
+    expect(result.current.linkTarget('#a', 'knowledge-base/Knowledge/Foo.md')).toEqual({
+      href: '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md#a',
+      newTab: false,
+    });
+    expect(result.current.linkTarget('https://example.com', 'knowledge-base/Knowledge/Foo.md')).toBeNull();
   });
 });
 
@@ -482,7 +552,7 @@ describe('useFileNav: which branch a click lands on', () => {
       '/workspace/target-company-state/knowledge-base/Knowledge/Old.md',
     );
     result.current.openLink('./New.md', 'knowledge-base/Knowledge/Old.md');
-    expect(navigateMock).toHaveBeenCalledWith(
+    expectNewTab(
       '/workspace/target-company-state/knowledge-base/Knowledge/New.md',
     );
   });
@@ -492,5 +562,75 @@ describe('useFileNav: which branch a click lands on', () => {
     const { result } = renderNav('alice/draft', 'knowledge-base', '/library/skills');
     result.current.openFile('Knowledge/New.md');
     expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/New.md');
+  });
+});
+
+/**
+ * An id-link is a link inside a file too. The new tab gets the node's id URL
+ * and resolves it there (its route answers not-found for an id the reader
+ * cannot see), so the tab opens inside the click rather than after a round
+ * trip, at the address a middle-click on the same anchor would open.
+ */
+describe('useNodeIdNav', () => {
+  function renderNodeNav(pathname: string, search = '') {
+    routerMock.pathname = pathname;
+    routerMock.search = search;
+    return renderHook(() => useNodeIdNav(), {
+      wrapper: ({ children }) => (
+        <GitContext.Provider value={gitOnBranch('alice/draft')}>
+          <WorkspaceContext.Provider value={makeWorkspaceFixture({ kbDirName: 'knowledge-base' })}>
+            {children}
+          </WorkspaceContext.Provider>
+        </GitContext.Provider>
+      ),
+    });
+  }
+
+  it('opens another node in a new tab at its id URL, heading kept', () => {
+    const { result } = renderNodeNav('/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md');
+    result.current.openNodeId('plan-node#goal');
+    expectNewTab('/workspace/alice%2Fdraft/plan-node#goal');
+  });
+
+  it('in full screen, opens the plain id URL and leaves this tab alone', () => {
+    const { result } = renderNodeNav('/workspace/alice%2Fdraft/foo-node', '?fullscreen=1');
+    result.current.openNodeId('plan-node');
+    expectNewTab('/workspace/alice%2Fdraft/plan-node');
+  });
+
+  it('scrolls a link to the node on screen in place, address and query kept', () => {
+    const { result } = renderNodeNav('/workspace/alice%2Fdraft/foo-node', '?fullscreen=1');
+    result.current.openNodeId('foo-node#goal');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/foo-node?fullscreen=1#goal');
+    expect(openMock).not.toHaveBeenCalled();
+  });
+
+  it('answers nodeIdTarget with the same address', () => {
+    const { result } = renderNodeNav('/workspace/alice%2Fdraft/foo-node');
+    expect(result.current.nodeIdTarget('plan-node#goal')).toEqual({
+      href: '/workspace/alice%2Fdraft/plan-node#goal',
+      newTab: true,
+    });
+  });
+});
+
+/**
+ * The app's own navigation is not a link inside a file: the tree, the tabs,
+ * search and the library open in place, through `openFile` and
+ * `openWorkspacePath`, in full screen or not.
+ */
+describe('useFileNav: the app\'s own navigation stays in this tab', () => {
+  it('opens a tree path in place', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Old.md', '?fullscreen=1');
+    result.current.openWorkspacePath('knowledge-base/Knowledge/New.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/knowledge-base/Knowledge/New.md');
+    expect(openMock).not.toHaveBeenCalled();
+  });
+
+  it('opens a tab\'s file in place', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Old.md');
+    result.current.openFile('knowledge-base/Knowledge/New.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/knowledge-base/Knowledge/New.md');
+    expect(openMock).not.toHaveBeenCalled();
   });
 });
