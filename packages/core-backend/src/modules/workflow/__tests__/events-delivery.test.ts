@@ -67,6 +67,8 @@ function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => vo
       repoPath === '' ? email !== USERS.bob!.email : reads(email, `knowledge-base/${repoPath}`),
     readableAtTarget: async (_target, email, repoPaths) =>
       new Set(repoPaths.filter((p) => reads(email, `knowledge-base/${p}`))),
+    readableAtBase: async (_base, email, repoPaths) =>
+      new Set(repoPaths.filter((p) => reads(email, `knowledge-base/${p}`))),
     changeRequest: async (number) => REQUESTS[number] ?? null,
   };
 }
@@ -375,7 +377,8 @@ describe('events route — delivery rule', () => {
 
   it('a request check that fails withholds that approval and that announcement, and nothing after them', async () => {
     const bus = new WorkflowEventBus();
-    const access: EventAccess = { ...fakeAccess(), readableAtTarget: () => Promise.reject(new Error('access tree unreadable')) };
+    const unreadable = () => Promise.reject(new Error('access tree unreadable'));
+    const access: EventAccess = { ...fakeAccess(), readableAtTarget: unreadable, readableAtBase: unreadable };
     const base = listen(bus, access);
     // Bob: not the request's author, so only the failing check could have shown it to him.
     const bob = await open(base, 'bob', 's-bob');
@@ -584,7 +587,7 @@ describe('EventDelivery', () => {
     const access: EventAccess = {
       ...base,
       changeRequest: (n) => hop(base.changeRequest(n)),
-      readableAtTarget: (t, e, ps) => hop(base.readableAtTarget(t, e, ps)),
+      readableAtBase: (b, e, ps) => hop(base.readableAtBase(b, e, ps)),
     };
     const delivery = new EventDelivery(access);
     const viewers = Array.from({ length: 100 }, (_, i) => ({ userId: `u${i}`, email: i % 2 ? USERS.bob!.email : `u${i}@example.com` }));
@@ -696,6 +699,15 @@ describe('createEventAccess', () => {
     expect(atRef).toEqual([`${WS}|origin/release|a@x|${PUBLIC_REPO},${FINANCE_REPO}`, `${WS}|origin/gone|a@x|${PUBLIC_REPO}`]);
   });
 
+  it("judges a request's files at its published base, as the request tools do — even when the server holds a checkout of it", async () => {
+    batches.length = 0;
+    atRef.length = 0;
+    expect(await access.readableAtBase('main', 'a@x', [PUBLIC_REPO, FINANCE_REPO, PUBLIC_REPO])).toEqual(new Set([PUBLIC_REPO]));
+    expect(await access.readableAtBase('gone', 'a@x', [PUBLIC_REPO])).toEqual(new Set());
+    expect(batches).toEqual([]);
+    expect(atRef).toEqual([`${WS}|origin/main|a@x|${PUBLIC_REPO},${FINANCE_REPO}`, `${WS}|origin/gone|a@x|${PUBLIC_REPO}`]);
+  });
+
   it("reads a request once for one event's whole fan-out, and again for the next", async () => {
     requestReads.length = 0;
     const delivery = new EventDelivery(access);
@@ -713,14 +725,16 @@ describe('createEventAccess', () => {
     const moved = createEventAccess({
       accessControl: {
         canRead: async () => true,
-        canReadBatch: async (_ws, _email, paths) => new Map(paths.map((p) => [p, !p.startsWith('Finance/')])),
-        canReadBatchAtRef: async () => null,
+        canReadBatch: async () => new Map(),
+        canReadBatchAtRef: async (_ws, _ref, _email, paths) => new Map(paths.map((p) => [p, !p.startsWith('Finance/')])),
       },
       kbDirName: 'knowledge-base',
       getChangeRequest: async (number) =>
         number === 1
           ? { base: 'main', authorId: hashEmail('alice@example.com'), touchedNodeFiles: [{ path: PUBLIC_REPO, previousPath: FINANCE_REPO }] }
-          : null,
+          : number === 3
+            ? { base: 'main', authorId: hashEmail('alice@example.com'), touchedNodeFiles: [{ path: PUBLIC_REPO }] }
+            : null,
       workspaces: { hasWorkspace: async () => true, anyWorkspaceId: async () => WS },
     });
     const delivery = new EventDelivery(moved);
@@ -728,6 +742,8 @@ describe('createEventAccess', () => {
     const stampOpened = (n: number) => ({ id: n, ts: '2026-10-21T00:00:00.000Z', ...opened(n) }) as WorkflowEvent;
     expect(await delivery.judge(stampOpened(1), bob)).toBeNull();
     expect(await delivery.judge(stampOpened(2), bob)).toBeNull();
+    // The control: the same file, not moved, is readable at the base and shows the request.
+    expect(await delivery.judge(stampOpened(3), bob)).not.toBeNull();
   });
 });
 

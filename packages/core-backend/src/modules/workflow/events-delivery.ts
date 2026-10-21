@@ -25,9 +25,11 @@
  *   - `change-request-opened`: the person may see the request, by the rule the
  *     request tools list and 404 by (`maySeeChangeRequest`): its author, or
  *     someone who may read one of its files — both names of a move — at its
- *     target. The request's file list is read ONCE per event, however many
- *     sessions are judged; each person then costs one batch read verdict, from
- *     the target's checkout when the server holds one, as an approval does.
+ *     target, read at `origin/<target>` exactly as the tools read it
+ *     (`readablePathsAt`), so the event never announces a request the tools
+ *     answer as not found. The request's file list is read ONCE per event,
+ *     however many sessions are judged; each person then costs one batch
+ *     verdict from the access tree cached by commit.
  *   - `git-sync-failed`: the event names the workspace's root and, for a sync
  *     conflict, each conflicted file (its `reason` quotes them too). The person
  *     gets the paths they may read; git's words reach only a person who may
@@ -54,6 +56,7 @@ import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
 import { normalizeWorkspacePath } from '../kb-fs/index.js';
 import { fileIsReadable, isAuthor, maySeeChangeRequest, pathsOf } from './agent-tools/change-request-read-shape.js';
+import { readablePathsAt } from './read-on-branch.js';
 
 const log = logger('events');
 
@@ -78,6 +81,8 @@ export interface EventAccess {
   mayReadRepoPath(workspaceId: string, email: string, repoPath: string): Promise<boolean>;
   /** Which of the KB-repo-relative `repoPaths` `email` may read on `targetBranch` — what a request into that branch is scoped by. */
   readableAtTarget(targetBranch: string, email: string, repoPaths: string[]): Promise<Set<string>>;
+  /** Which of the KB-repo-relative `repoPaths` `email` may read at `origin/<base>` — the change-request tools' verdict, `readablePathsAt`. */
+  readableAtBase(base: string, email: string, repoPaths: string[]): Promise<Set<string>>;
   /**
    * Request `number` as the request list judges it — its target, author and
    * changed files — or null when there is none. Read once per event: callers
@@ -108,9 +113,10 @@ export function createEventAccess(deps: {
     /** Whether the server holds a checkout for `workspaceId` (the branch's own workspace). */
     hasWorkspace(workspaceId: string): Promise<boolean>;
     /**
-     * A workspace to read a published ref in, for a target the server holds
-     * no checkout of. Every verdict at `origin/<branch>` is the same from any
-     * clone of the repository, so any existing one serves.
+     * A workspace to read a published ref in: always for a request's base,
+     * and for an approval's target the server holds no checkout of. Every
+     * verdict at `origin/<branch>` is the same from any clone of the
+     * repository, so any existing one serves.
      */
     anyWorkspaceId(): Promise<string>;
   };
@@ -146,6 +152,11 @@ export function createEventAccess(deps: {
       // A ref that cannot be resolved answers null: nothing is granted on it.
       return new Set(unique.filter((p) => verdicts?.get(p) === true));
     },
+    // The request tools' own rule and reading, never the target's checkout: a
+    // grant there that is not yet published must not announce a request
+    // `get_change_request` answers as not found.
+    readableAtBase: async (base, email, repoPaths) =>
+      readablePathsAt(deps.accessControl, await deps.workspaces.anyWorkspaceId(), email, base, repoPaths),
     changeRequest: (number) => {
       const pending = requestsInFlight.get(number);
       if (pending) return pending;
@@ -201,7 +212,7 @@ async function maySeeRequest(number: number, email: string, access: EventAccess)
   if (!request) return false;
   if (isAuthor(request, email)) return true;
   const files = request.touchedNodeFiles ?? [];
-  const readable = await access.readableAtTarget(request.base, email, files.flatMap(pathsOf));
+  const readable = await access.readableAtBase(request.base, email, files.flatMap(pathsOf));
   const readableFiles = files.filter((f) => fileIsReadable(f, (p) => readable.has(p))).length;
   return maySeeChangeRequest({ readableFiles, isAuthor: false });
 }
