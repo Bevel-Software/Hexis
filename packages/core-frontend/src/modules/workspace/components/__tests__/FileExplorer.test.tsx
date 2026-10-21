@@ -18,7 +18,7 @@ import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.con
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { PR_STALE_EVENT } from '../../../../core/events';
-import { EventBusContext, type EventBusContextValue } from '../../../workflow/state/event-bus.context';
+import { EventBusContext, type EventBusContextValue } from '../../../workflow';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,

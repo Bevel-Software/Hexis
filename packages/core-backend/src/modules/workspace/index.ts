@@ -35,3 +35,11 @@ export {
   type AgentAccessGate,
 } from './agent-access.gate.js';
 export { SpillStore } from './spill-store.js';
+/**
+ * Document text extraction: the content-hash cache wrap, and the extractor
+ * that runs each extraction in a pooled worker under its budget. A suite that
+ * registers the workspace tools builds its own pair; the product's is wired
+ * by the composition root.
+ */
+export { DocExtractService } from './file-readers/doc-extract.service.js';
+export { WorkerDocumentExtractor } from './file-readers/extract-in-worker.js';

@@ -25,7 +25,7 @@ serveExtractions({
     }
   },
   // The parser itself did not load: the reader's fault, not the file's.
-  '.transient': () => ({ ok: false, transient: true, message: 'could not be read: the PDF reader did not load (gone)' }),
+  '.transient': () => ({ ok: false, transient: true, message: 'could not be read: the PDF reader did not load on the server; try again later' }),
   '.exit': () => process.exit(3),
   '.echo': (bytes) => ({ ok: true, summary: 'echo', text: bytes.toString('utf8') }),
   // Answers after a while: long enough for an earlier job's straggler to land during it.

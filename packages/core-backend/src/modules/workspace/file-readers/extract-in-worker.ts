@@ -15,6 +15,9 @@ import type { ExtractionJob, ExtractionReply } from './extraction-worker.js';
  */
 export const EXTRACTION_BUDGET_MS = 10_000;
 
+/** What a document answers when its worker failed outside the parser: never the worker's own error. */
+export const EXTRACTION_WORKER_FAILED = 'could not be read: its extraction failed on the server; try again later';
+
 /** The worker script: a module that calls `serveExtractions` (see `extraction-worker.ts`). */
 export interface ExtractionWorkerEntry {
   url: URL;
@@ -86,8 +89,9 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
     const left = this.budgetMs - (Date.now() - started);
     if (left <= 0) return { ok: false, failure: 'timeout', message: extractionTimeoutNotice(this.budgetMs) };
     const again = await this.attempt(extension, bytes, left, true);
-    // In a fresh worker the worker never answers `unattributed`; a crash of the moment if it ever did.
-    return 'unattributed' in again ? { ok: false, failure: 'crashed', message: again.message } : again;
+    // In a fresh worker the worker never answers `unattributed`; a crash of the moment if it ever did —
+    // and never with that rejection's words, which may be another file's.
+    return 'unattributed' in again ? { ok: false, failure: 'crashed', message: EXTRACTION_WORKER_FAILED } : again;
   }
 
   private async attempt(
@@ -112,8 +116,11 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
     if ('error' in outcome) {
       // Raised outside every guard the worker installs — its script failed to
       // load, or it ran out of memory: a fault of the moment rather than of
-      // the bytes. The worker is ending, and the pool replaces it.
-      return { ok: false, failure: 'crashed', message: `could not be read: its extraction failed (${outcome.error.message})` };
+      // the bytes. The worker is ending, and the pool replaces it. What went
+      // wrong is the server's (a module path, a heap size): logged here, and
+      // the reader is told — and the hour remembers — the same words each time.
+      console.error('[documents] an extraction worker failed:', outcome.error);
+      return { ok: false, failure: 'crashed', message: EXTRACTION_WORKER_FAILED };
     }
     if ('exited' in outcome) {
       if (this.closing) return busy();

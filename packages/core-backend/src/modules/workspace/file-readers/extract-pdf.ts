@@ -71,8 +71,11 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   try {
     ({ getDocument } = await loadPdfJs());
   } catch (err) {
-    // The reader, not the file: a later read must try this file again.
-    return { ok: false, transient: true, message: `could not be read: the PDF reader did not load (${(err as Error).message})` };
+    // The reader, not the file: a later read must try this file again. Why
+    // it did not load is the server's to know (a module path, a missing
+    // dependency) — logged here, never quoted to the reader.
+    console.error('[documents] the PDF reader did not load:', err);
+    return { ok: false, transient: true, message: READER_DID_NOT_LOAD };
   }
   let task: ReturnType<typeof openPdf>;
   try {
@@ -173,6 +176,9 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
     await task.destroy();
   }
 }
+
+/** What a PDF read answers when pdf.js itself failed to load: the same words, whatever the cause. */
+export const READER_DID_NOT_LOAD = 'could not be read: the PDF reader did not load on the server; try again later';
 
 type PdfJs = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
 let pdfjsPromise: Promise<PdfJs> | undefined;

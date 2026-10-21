@@ -12,8 +12,7 @@ import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
-import { WorkerDocumentExtractor } from '../../workspace/file-readers/extract-in-worker.js';
+import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';

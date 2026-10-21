@@ -14,8 +14,7 @@ import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
-import { WorkerDocumentExtractor } from '../../workspace/file-readers/extract-in-worker.js';
+import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
 import { loadActiveGroups } from '../../access/access-control.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';

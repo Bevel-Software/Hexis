@@ -6,25 +6,25 @@ import { dirname, join } from 'node:path';
 import express, { type RequestHandler } from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../workspace.tools.js';
-import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
-import { ToolDescriptionNotes } from '../agent-access.gate.js';
-import { SpillStore } from '../spill-store.js';
-import { WorkerPatternMatcher } from '../bounded-matcher.js';
-import { DocExtractService, type UnreadableDocument } from '../file-readers/doc-extract.service.js';
-import type { IDocumentExtractor } from '../file-readers/document-extractor.contract.js';
-import { WorkerDocumentExtractor, type WorkerDocumentExtractorOptions } from '../file-readers/extract-in-worker.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { createMcpRoutes } from '../../mcp/mcp.routes.js';
-import { McpService } from '../../mcp/mcp.service.js';
-import { testKbContext } from '../../../__tests__/kb-context.js';
-import { xrefPdf } from '../file-readers/__tests__/fixtures/damaged-pdf.js';
+import { ToolRegistry } from '../../modules/tool-registry/tool-registry.js';
+import { createManualRoutes } from '../../modules/tool-registry/manual.routes.js';
+import { createToolHandlerFactory } from '../../modules/tool-helpers/tool-handler.js';
+import type { ToolContext } from '../../modules/tool-helpers/tool.contract.js';
+import type { ToolAuth } from '../../modules/tool-auth/tool-auth.middleware.js';
+import { registerWorkspaceTools } from '../../modules/workspace/workspace.tools.js';
+import { RoutineWritePolicyService } from '../../modules/workspace/routine-write-policy.js';
+import { WorkflowHooks } from '../../modules/workflow/workflow-hooks.js';
+import { ToolDescriptionNotes } from '../../modules/workspace/agent-access.gate.js';
+import { SpillStore } from '../../modules/workspace/spill-store.js';
+import { WorkerPatternMatcher } from '../../modules/workspace/bounded-matcher.js';
+import { DocExtractService, type UnreadableDocument } from '../../modules/workspace/file-readers/doc-extract.service.js';
+import type { IDocumentExtractor } from '../../modules/workspace/file-readers/document-extractor.contract.js';
+import { WorkerDocumentExtractor, type WorkerDocumentExtractorOptions } from '../../modules/workspace/file-readers/extract-in-worker.js';
+import type { IAccessControl } from '../../modules/access/access-control.interface.js';
+import { createMcpRoutes } from '../../modules/mcp/mcp.routes.js';
+import { McpService } from '../../modules/mcp/mcp.service.js';
+import { testKbContext } from '../../__tests__/kb-context.js';
+import { xrefPdf } from '../../modules/workspace/file-readers/__tests__/fixtures/damaged-pdf.js';
 
 /**
  * A damaged document, on every surface that extracts: `read_file`, `grep`,
@@ -32,6 +32,10 @@ import { xrefPdf } from '../file-readers/__tests__/fixtures/damaged-pdf.js';
  * extract it once, never again for the same bytes, and the server keeps
  * answering its health route throughout. The fixture is a synthetic PDF with
  * a damaged cross-reference table (`fixtures/damaged-pdf.ts`).
+ *
+ * It lives with the composition root's tests because it composes the server
+ * across modules — the tool registry, the tool handler, the MCP proxy — as
+ * `create-core-server.ts` does.
  */
 
 const KB = 'knowledge-base';
@@ -324,7 +328,7 @@ describe('a PDF with a damaged cross-reference table', () => {
 describe('an extraction that runs long', () => {
   const trouble = (budgetMs?: number): WorkerDocumentExtractorOptions => ({
     entry: {
-      url: new URL('../file-readers/__tests__/fixtures/pdf-in-trouble.worker.ts', import.meta.url),
+      url: new URL('../../modules/workspace/file-readers/__tests__/fixtures/pdf-in-trouble.worker.ts', import.meta.url),
       execArgv: ['--import', 'tsx'],
     },
     ...(budgetMs === undefined ? {} : { budgetMs }),

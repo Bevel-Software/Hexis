@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { extractionTimeoutNotice } from '../document-extractor.contract.js';
 import { extractDocx } from '../extract-docx.js';
-import { EXTRACTION_BUDGET_MS, WorkerDocumentExtractor, type ExtractionWorkerEntry } from '../extract-in-worker.js';
+import { EXTRACTION_BUDGET_MS, EXTRACTION_WORKER_FAILED, WorkerDocumentExtractor, type ExtractionWorkerEntry } from '../extract-in-worker.js';
 import { extractPdf } from '../extract-pdf.js';
 import { xrefPdf } from './fixtures/damaged-pdf.js';
 
@@ -172,7 +172,7 @@ describe('WorkerDocumentExtractor — a parser that misbehaves', () => {
     const res = await extractor.extract('.pdf', Buffer.from('x'));
     expect(res.ok).toBe(false);
     expect(!res.ok && res.failure).toBe('crashed');
-    expect(!res.ok && res.message).toContain('this worker cannot load');
+    expect(!res.ok && res.message).toBe(EXTRACTION_WORKER_FAILED);
     expect(processSaw).toEqual([]);
   });
 
@@ -181,7 +181,7 @@ describe('WorkerDocumentExtractor — a parser that misbehaves', () => {
     expect(await extractor.extract('.transient', Buffer.from('x'))).toEqual({
       ok: false,
       failure: 'crashed',
-      message: 'could not be read: the PDF reader did not load (gone)',
+      message: 'could not be read: the PDF reader did not load on the server; try again later',
     });
   });
 
