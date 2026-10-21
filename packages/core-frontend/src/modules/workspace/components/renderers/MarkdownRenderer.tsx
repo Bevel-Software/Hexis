@@ -6,6 +6,7 @@ import {
   useFileNav,
   useNodeIdNav,
   useCanonicalFileUrl,
+  useFileNodeId,
 } from '../../routing/kb-routes';
 import { useRendererWorkspaceId } from './rendererWorkspace';
 import { useRendererSurface } from './rendererSurface';
@@ -164,6 +165,19 @@ export function MarkdownRenderer({
     (href: string) => linkTarget(href, filePath),
     [linkTarget, filePath],
   );
+  // An id-link to THIS node is a section link whatever the address bar says:
+  // the tab may still be on the path URL (the id not canonicalized yet, or a
+  // library frame that never canonicalizes), so the hook is told which node
+  // is on screen rather than reading it off the URL.
+  const ownNodeId = useFileNodeId(filePath);
+  const handleNodeIdLink = useCallback(
+    (idOrLink: string) => openNodeId(idOrLink, ownNodeId),
+    [openNodeId, ownNodeId],
+  );
+  const nodeIdLinkTarget = useCallback(
+    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId),
+    [nodeIdTarget, ownNodeId],
+  );
 
   // An image in the page: the same grammar, but the bytes come from this
   // workspace's raw file route (a plain `<img>` authenticates through the
@@ -271,9 +285,9 @@ export function MarkdownRenderer({
         <KbMarkdownView
           source={value}
           onOpenFile={handleFileLink}
-          onOpenNodeId={openNodeId}
+          onOpenNodeId={handleNodeIdLink}
           fileLinkTarget={fileLinkTarget}
-          nodeIdLinkTarget={nodeIdTarget}
+          nodeIdLinkTarget={nodeIdLinkTarget}
           headingLink={headingLink}
           resolveImage={resolveImage}
           // On a renderer surface (the embed) EVERY outgoing link is the

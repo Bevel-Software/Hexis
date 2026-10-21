@@ -28,6 +28,8 @@ interface SkillFilePaneProps {
   notice?: ReactNode;
   /** Follow a relative link out of rendered markdown. */
   onOpenLink?(href: string): void;
+  /** Where a file link leads, for its anchor — same contract as `KbMarkdownView`. */
+  fileLinkTarget?(href: string): KbLinkTarget | null;
   /** Resolve a bare `[text](node-id)` link — same contract as `KbMarkdownView`. */
   onOpenNodeId?(id: string): void;
   /** Where an id-link leads, for its anchor — same contract as `KbMarkdownView`. */
@@ -62,6 +64,7 @@ export function SkillFilePane({
   actions,
   notice,
   onOpenLink,
+  fileLinkTarget,
   onOpenNodeId,
   nodeIdLinkTarget,
   headingLink,
@@ -83,6 +86,7 @@ export function SkillFilePane({
         <KbMarkdownView
           source={raw}
           onOpenFile={(href) => onOpenLink?.(href)}
+          fileLinkTarget={fileLinkTarget}
           onOpenNodeId={onOpenNodeId}
           nodeIdLinkTarget={nodeIdLinkTarget}
           headingLink={headingLink}

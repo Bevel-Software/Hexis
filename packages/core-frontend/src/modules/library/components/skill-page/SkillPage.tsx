@@ -23,8 +23,7 @@ import { useGit } from '../../../git/state/git.context';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
 import {
   kbFileUrl,
-  openExternalHref,
-  resolveKbHref,
+  useFileNav,
   useNodeIdNav,
 } from '../../../workspace/routing/kb-routes';
 import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
@@ -119,6 +118,7 @@ export function SkillPage({
   // The same id-link resolver the Knowledge renderer uses — a `[text](node-id)`
   // link inside a skill file navigates to that node, not to a dead span.
   const { openNodeId, nodeIdTarget } = useNodeIdNav();
+  const { openLink, linkTarget, openFilePage } = useFileNav();
 
   const [selectedState, setSelected] = useState('SKILL.md');
   const selected = activeFile ?? selectedState;
@@ -489,26 +489,24 @@ export function SkillPage({
   const editorBase = !canEditDirectly && ownCr ? ownBranchBase : rawOnMain;
 
   /**
-   * Follow a link out of the rendered file. The same grammar as the Knowledge
-   * view (`resolveKbHref`): the destination is decoded, so a link to
-   * `Some File.md` opens `Some File.md` and not `Some%20File.md`; an absolute
-   * app URL keeps its own branch; anything else opens on the default branch,
-   * where skills live.
+   * Follow a link out of the rendered file — the Knowledge view's rule, from
+   * the same hook (`useFileNav().openLink`): the destination is decoded, an
+   * absolute app URL keeps its own branch, an external one opens in a new
+   * tab, another file of the knowledge base opens in a NEW TAB and this page
+   * stays where it is, and a link to this file's own sections moves only the
+   * fragment. A relative link resolves on the default branch, where skills
+   * live, whatever is checked out. `fileLinkTarget` is the same answer for the
+   * anchor to carry, so a middle-click goes where the click does.
    */
   const openLinkInEditor = useCallback(
     (href: string) => {
-      if (!fileWorkspacePath) return;
-      const target = resolveKbHref(href, { basePath: fileWorkspacePath, kbDirName });
-      // Same rule as `openLink`: the anchor's default was cancelled to get
-      // here, so an external destination has nobody left to open it.
-      if (target?.kind === 'external') {
-        openExternalHref(href);
-        return;
-      }
-      if (target?.kind !== 'workspace') return;
-      navigate(kbFileUrl(target.branch ?? DEFAULT_BRANCH, target.path) + target.hash);
+      if (fileWorkspacePath) openLink(href, fileWorkspacePath, DEFAULT_BRANCH);
     },
-    [fileWorkspacePath, kbDirName, navigate],
+    [fileWorkspacePath, openLink],
+  );
+  const fileLinkTarget = useCallback(
+    (href: string) => (fileWorkspacePath ? linkTarget(href, fileWorkspacePath, DEFAULT_BRANCH) : null),
+    [fileWorkspacePath, linkTarget],
   );
 
   /**
@@ -848,6 +846,7 @@ export function SkillPage({
           raw={raw}
           suggestion={null}
           onOpenLink={openLinkInEditor}
+          fileLinkTarget={fileLinkTarget}
           onOpenNodeId={openNodeId}
           nodeIdLinkTarget={nodeIdTarget}
           headingLink={headingLink}
@@ -855,14 +854,12 @@ export function SkillPage({
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
           // A page of the skill opens on the Knowledge file page, where its
-          // tools are. The URL alone would route straight back here (every
-          // file under a skill's folder IS the skill page); `rawFile` asks the
-          // item route for the file route itself, as the plugin page's file
-          // links do.
+          // tools are — in a new tab, as the page asked from inside itself
+          // (`openFilePage`, the Knowledge view's own). The plain URL would
+          // route straight back here (every file under a skill's folder IS
+          // the skill page); the file-page URL asks for the file route.
           onOpenInPlatform={
-            fileWorkspacePath
-              ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath), { state: { rawFile: true } })
-              : undefined
+            fileWorkspacePath ? () => openFilePage(fileWorkspacePath, DEFAULT_BRANCH) : undefined
           }
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside

@@ -14,10 +14,14 @@ export interface KbLinkTarget {
  * as written). With a `target` the anchor carries the address the click goes
  * to, and — when that is a new tab — `target="_blank"` and `rel="noopener"`,
  * so a middle-click, the context menu and a screen reader all agree with the
- * click. A click the reader modified (Ctrl, ⌘, Shift, Alt) on a new-tab link
- * is left to the browser: it does with that link what it does with any
- * new-tab link. Without a `target` (no resolver: the diff, the skill page)
- * the anchor is what it always was, every click taken by `onOpen`.
+ * click. A click the reader modified (Ctrl, ⌘, Shift, Alt) or made with
+ * another button is left to the browser, on a new-tab link and a section link
+ * alike: the anchor's `href` is already the address the click would open, so
+ * the browser does with it what it does with any link — a Ctrl-click on a
+ * section link opens that section in a new tab rather than moving this one.
+ * Without a `target` (no resolver) the anchor is what it always was, every
+ * click taken by `onOpen`: its `href` is the destination as written, not an
+ * address the browser could follow.
  */
 export function KbAppLink({
   href,
@@ -40,7 +44,7 @@ export function KbAppLink({
       href={target?.href ?? href}
       {...(newTab ? { target: '_blank', rel: 'noopener' } : {})}
       onClick={(e) => {
-        if (newTab && (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)) return;
+        if (target && (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)) return;
         e.preventDefault();
         onOpen();
       }}
