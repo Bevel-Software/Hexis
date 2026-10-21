@@ -7,8 +7,8 @@ import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 
 /**
- * `window.bevel.tools` as the app gives it: present on the file page, `null`
- * everywhere else, and the two cards — consent to write, and the way to the
+ * `window.bevel.tools` as the app gives it: present where a host provides the
+ * bridge (the file page, the skill page), `null` everywhere else, and the two cards — consent to write, and the way to the
  * platform — drawn by the app around the frame, driven here by the very
  * messages the frame's runtime posts.
  */
@@ -35,7 +35,7 @@ function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
   );
 }
 
-/** The page in the app but not on the file page — a skill page, a history preview. */
+/** The page in the app on a host without the bridge — a history or change-request preview. */
 function inAppElsewhere() {
   return render(
     <MemoryRouter initialEntries={['/workspace/main']}>
