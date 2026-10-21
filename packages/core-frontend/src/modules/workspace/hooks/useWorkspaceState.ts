@@ -83,6 +83,22 @@ function existenceKey(workspaceId: string, path: string): string {
   return `${workspaceId}\u0000${path}`;
 }
 
+/**
+ * What the existence reads in flight for a file answered: the number of the
+ * newest that found it gone, and the newest that found it, with its bytes.
+ */
+interface ExistenceAnswer {
+  goneAt: number | null;
+  found: { seq: number; bytes: string } | null;
+}
+
+/** The newer of two optional answers, by read number. */
+function newestOf<T>(a: T | null, b: T | null, seqOf: (x: T) => number): T | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return seqOf(a) >= seqOf(b) ? a : b;
+}
+
 function workspaceBranchOf(workspaceId: string, requested: string | undefined): string {
   try {
     return decodeURIComponent(workspaceId);
@@ -296,13 +312,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * Reads in flight that decide whether an open tab's file still exists (a
    * `file-changed` refetch, a tree refresh's check), by workspace and path
    * (`existenceKey`), each settling
-   * to the number of the latest read that found the file gone (a 404), or
-   * null. The tab is marked deleted only when
+   * to an `ExistenceAnswer`: the number of the latest read that found the
+   * file gone (a 404), and the bytes the latest read that found it read.
+   * The tab is marked deleted only when
    * the read settles; `saveFile` waits on it first, so an editor unmounting
    * meanwhile (a tab switch, the tab closing) cannot write the file back in
    * the window between the delete and the read that learns of it.
    */
-  const existenceChecksRef = useRef<Map<string, Promise<number | null>>>(new Map());
+  const existenceChecksRef = useRef<Map<string, Promise<ExistenceAnswer>>>(new Map());
   /**
    * When a tree refresh last read an open tab's file, missing from the tree,
    * and found it there after all (a file the tree leaves out: access-pruned,
@@ -354,39 +371,43 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       (goneAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
     [],
   );
-  const trackExistenceCheck = useCallback((readFrom: string, path: string, read: Promise<unknown>): number => {
+  const trackExistenceCheck = useCallback((readFrom: string, path: string, read: Promise<string>): number => {
     const seq = ++existenceReadSeqRef.current;
     const key = existenceKey(readFrom, path);
-    const thisGone = read.then(
-      () => null,
-      (err: unknown) => {
+    const thisAnswer = read.then(
+      (bytes): ExistenceAnswer => ({ goneAt: null, found: { seq, bytes } }),
+      (err: unknown): ExistenceAnswer => {
         // A 404 older than bytes or a write that landed since is about a
         // file since re-created: it refuses no save (see `applyReadGone`).
         const isGone = err instanceof WorkspaceApiError && err.status === 404
           && !isStaleLanding(readFrom, path, seq);
         if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
-        return isGone ? seq : null;
+        return { goneAt: isGone ? seq : null, found: null };
       },
     );
     // A read already in flight for the path still counts: the check answers
     // "gone" if ANY of them finds the file gone, so a later read that finds
     // it cannot let a save through past an earlier one's 404. It answers with
     // that 404's read number rather than a verdict, so bytes or a write that
-    // land while a later read is still out retire it (`isCheckGone`).
+    // land while a later read is still out retire it (`isCheckGone`); and
+    // with the bytes the newest read found, which a waiting save merges onto.
     const earlier = existenceChecksRef.current.get(key);
-    const gone = earlier
-      ? Promise.all([earlier, thisGone]).then(([a, b]) => (a === null ? b : b === null ? a : Math.max(a, b)))
-      : thisGone;
-    existenceChecksRef.current.set(key, gone);
-    void gone.then(() => {
-      if (existenceChecksRef.current.get(key) === gone) existenceChecksRef.current.delete(key);
+    const answer = earlier
+      ? Promise.all([earlier, thisAnswer]).then(([a, b]): ExistenceAnswer => ({
+        goneAt: newestOf(a.goneAt, b.goneAt, (n) => n),
+        found: newestOf(a.found, b.found, (f) => f.seq),
+      }))
+      : thisAnswer;
+    existenceChecksRef.current.set(key, answer);
+    void answer.then(() => {
+      if (existenceChecksRef.current.get(key) === answer) existenceChecksRef.current.delete(key);
     });
     return seq;
   }, [isStaleLanding]);
   /** An existence check's answer (`trackExistenceCheck`) still says gone: no bytes or write landed after its 404. */
   const isCheckGone = useCallback(
-    (readFrom: string, path: string, goneAtSeq: number | null) =>
-      goneAtSeq !== null && !isStaleLanding(readFrom, path, goneAtSeq),
+    (readFrom: string, path: string, answer: ExistenceAnswer) =>
+      answer.goneAt !== null && !isStaleLanding(readFrom, path, answer.goneAt),
     [isStaleLanding],
   );
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
@@ -1666,6 +1687,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     if (deletedPathsRef.current.has(relativePath)) {
       throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     }
+    // The bytes `content` was edited from, to tell whether a read waited on
+    // below found newer ones.
+    const editedFrom = openTabsRef.current.find((t) => t.path === relativePath)?.savedContent ?? null;
     // A read deciding whether the file still exists is in flight: its answer
     // first, so a 404 it is about to deliver refuses this write too.
     // Its own answer, not the guard set: the tab may have closed meanwhile.
@@ -1673,29 +1697,54 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // started while this save waited is waited on too.
     const checkKey = existenceKey(workspaceId, relativePath);
     let existenceCheck = existenceChecksRef.current.get(checkKey);
+    let found: ExistenceAnswer['found'] = null;
     while (existenceCheck) {
-      if (isCheckGone(workspaceId, relativePath, await existenceCheck)) {
+      const answer = await existenceCheck;
+      if (isCheckGone(workspaceId, relativePath, answer)) {
         throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
       }
+      found = newestOf(found, answer.found, (f) => f.seq);
       const newer = existenceChecksRef.current.get(checkKey);
       existenceCheck = newer !== existenceCheck ? newer : undefined;
     }
     if (deletedPathsRef.current.has(relativePath)) {
       throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     }
-    await writeFile(workspaceId, relativePath, content);
+    // A read waited on found other bytes on disk than `content` was edited
+    // from: a commit pulled from the git host, which the `file-changed` read
+    // merges the tab's edits onto. Writing `content` as it was would overwrite
+    // that commit, so the edits are merged onto it here too; when they collide
+    // the tab has given them up, and nothing is written. Bytes from a read
+    // older than a write or bytes landed since are not what the disk holds.
+    let toWrite = content;
+    let mergedOntoPull = false;
+    if (found && editedFrom !== null && found.bytes !== editedFrom
+      && !isStaleLanding(workspaceId, relativePath, found.seq)) {
+      const merged = threeWayMerge(editedFrom, content, found.bytes);
+      if (merged === null || merged === found.bytes) return;
+      toWrite = merged;
+      mergedOntoPull = true;
+    }
+    await writeFile(workspaceId, relativePath, toWrite);
     markWritten(workspaceId, relativePath);
     // Update the matching tab — both the cached current value and the on-disk
-    // baseline now equal `content`; clear dirty.
+    // baseline now equal what was written; clear dirty. A save that merged
+    // onto a pulled commit keeps the banner: the person has not seen it yet.
     setOpenTabs((prev) => {
       const idx = prev.findIndex((t) => t.path === relativePath);
       if (idx < 0) return prev;
       const next = prev.slice();
-      next[idx] = { ...next[idx], content, savedContent: content, isDirty: false, changedOnBranch: null };
+      next[idx] = {
+        ...next[idx],
+        content: toWrite,
+        savedContent: toWrite,
+        isDirty: false,
+        changedOnBranch: mergedOntoPull ? 'merged' : null,
+      };
       return next;
     });
     bumpFs();
-  }, [workspaceId, bumpFs, markWritten, isCheckGone]);
+  }, [workspaceId, bumpFs, markWritten, isCheckGone, isStaleLanding]);
 
   const clearChangedOnBranch = useCallback((relativePath: string) => {
     setOpenTabs((prev) => {

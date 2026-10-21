@@ -1331,6 +1331,49 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(disk.get('KB/Notes.md')).toBe(`${BASE.replace('First', 'Upstream first')}\n\nMine.`);
   });
 
+  it('a save waiting on a change read writes the edits merged onto the pulled bytes, not over them', async () => {
+    const result = await editedTab();
+    const edited = `${BASE}\n\nMy new closing line.`;
+    await typeInto(result, edited);
+    const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+    disk.set('KB/Notes.md', pulled);
+    const held = holdFileChangedRead(pulled);
+
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Notes.md', edited); });
+    await act(async () => { held.answer(); await saving; });
+
+    const merged = `${pulled}\n\nMy new closing line.`;
+    expect(disk.get('KB/Notes.md')).toBe(merged);
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe(merged);
+    expect(tab.savedContent).toBe(merged);
+    expect(tab.isDirty).toBe(false);
+    // The person has not seen the change yet: the banner still says the edits were merged.
+    expect(tab.changedOnBranch).toBe('merged');
+  });
+
+  it('a save waiting on a change read whose bytes collide with the edits writes nothing over them', async () => {
+    const result = await editedTab();
+    const edited = BASE.replace('Second paragraph.', 'Second paragraph, my way.');
+    await typeInto(result, edited);
+    const pulled = BASE.replace('Second paragraph.', 'Second paragraph, their way.');
+    disk.set('KB/Notes.md', pulled);
+    const held = holdFileChangedRead(pulled);
+    apiMocks.writeFile.mockClear();
+
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Notes.md', edited); });
+    await act(async () => { held.answer(); await saving; });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.get('KB/Notes.md')).toBe(pulled);
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe(pulled);
+    expect(tab.isDirty).toBe(false);
+    expect(tab.changedOnBranch).toBe('discarded');
+  });
+
   it('an echo of our own save does not touch edits typed after it', async () => {
     const result = await editedTab();
     await typeInto(result, `${BASE}\n\nTyped after the save.`);
