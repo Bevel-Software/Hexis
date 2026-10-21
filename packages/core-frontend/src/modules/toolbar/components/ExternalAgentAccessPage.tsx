@@ -103,8 +103,11 @@ export function ExternalAgentAccessPage() {
   // The agents failed to load: an empty list is then not "you have none",
   // so an Everything key waits for the person to confirm it.
   const [choicesFailed, setChoicesFailed] = useState(false);
+  // Until the agents answer, a key would be minted as Everything by default.
+  const [choicesSettled, setChoicesSettled] = useState(false);
   const [everythingConfirmed, setEverythingConfirmed] = useState(false);
   const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
+  const mayConnect = canConnectAs({ settled: choicesSettled, unavailable });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -143,10 +146,14 @@ export function ExternalAgentAccessPage() {
     let cancelled = false;
     listAgentChoices().then(
       (agents) => {
-        if (!cancelled) setAgentChoices(agents);
+        if (cancelled) return;
+        setAgentChoices(agents);
+        setChoicesSettled(true);
       },
       () => {
-        if (!cancelled) setChoicesFailed(true);
+        if (cancelled) return;
+        setChoicesFailed(true);
+        setChoicesSettled(true);
       },
     );
     return () => {
@@ -156,7 +163,7 @@ export function ExternalAgentAccessPage() {
 
   async function handleCreate() {
     const trimmed = label.trim();
-    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating || !canConnectAs(unavailable)) return;
+    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating || !mayConnect) return;
     setCreating(true);
     setCreateError(null);
     try {
@@ -199,7 +206,7 @@ export function ExternalAgentAccessPage() {
   }
 
   const trimmed = label.trim();
-  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating && canConnectAs(unavailable);
+  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating && mayConnect;
 
   // Surface the keys that matter: active keys first (most-recently-used at the
   // top, never-used ones last among the active), with disconnected keys sunk

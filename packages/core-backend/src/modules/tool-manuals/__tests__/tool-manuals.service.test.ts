@@ -953,6 +953,15 @@ describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
     ]);
   });
 
+  test("narrowed to a connection's connectors, after the read gate", async () => {
+    await writeMcpJson(draftWs, 'Ops', ['pager']);
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT, (p) => p.startsWith('Plugins/Ops/'))).toEqual([
+      { name: 'pager', path: 'Plugins/Ops/mcp.json', type: 'mcp' },
+    ]);
+    // Naming an unreadable declaration does not let it through.
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT, (p) => p.startsWith('Plugins/Secret Plugin/'))).toEqual([]);
+  });
+
   test('is empty for the default branch itself and for a branch without a workspace', async () => {
     expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DEFAULT_BRANCH)).toEqual([]);
     expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'user/gone')).toEqual([]);

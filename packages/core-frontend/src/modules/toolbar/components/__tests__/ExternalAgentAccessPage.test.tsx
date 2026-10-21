@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
@@ -851,6 +851,19 @@ describe('minting a key as an agent ("Connect as")', () => {
     expect(create).toBeEnabled();
     await user.click(create);
     expect(createMock).toHaveBeenLastCalledWith('CI', null);
+  });
+
+  it('keeps Create key disabled until the agents on offer have answered', async () => {
+    let answer!: (agents: (typeof OPS)[]) => void;
+    agentChoicesMock.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
+    const create = screen.getByRole('button', { name: 'Create key' });
+    expect(create).toBeDisabled();
+    await act(async () => answer([OPS]));
+    expect(create).toBeEnabled();
   });
 
   it('shows each key beside what it connects as', async () => {

@@ -31,7 +31,12 @@ let wsDir: string;
 async function baseUrl(
   pluginIndex?: { catalog(): Promise<{ name: string; folders: string[] }[]> },
   /** The connection's `.agent` choice; absent is Everything. */
-  connection?: { agentPath: string; agentScope?: Pick<IAgentScopeResolver, 'resolve'> },
+  connection?: {
+    agentPath: string;
+    agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
+    /** Whether the person may read the plugin's files; default yes. */
+    readable?: boolean;
+  },
   toolManualService: IToolManualService = {} as unknown as IToolManualService,
 ): Promise<string> {
   const app = express();
@@ -45,7 +50,7 @@ async function baseUrl(
   } as unknown as WorkspaceService;
   const accessControl = {
     canReadBatch: vi.fn(async (_ws: string, _email: string, rels: string[]) => {
-      return new Map(rels.map((r) => [r, true]));
+      return new Map(rels.map((r) => [r, connection?.readable ?? true]));
     }),
   } as unknown as IAccessControl;
   app.use(
@@ -111,6 +116,18 @@ describe('GET /agent/plugins/:folder/archive', () => {
     expect(body.error).toContain('The plugin "GTM" is not available to this connection.');
     // A narrowed connection with no resolver wired loads nothing.
     expect((await archive(null)).status).toBe(403);
+  });
+
+  it('an out-of-scope plugin folder the person cannot read answers the 404 an absent one does', async () => {
+    const pluginDir = path.join(wsDir, KB, 'Plugins', 'Private');
+    await fs.mkdir(pluginDir, { recursive: true });
+    await fs.writeFile(path.join(pluginDir, 'mcp.json'), '{"mcpServers":{}}', 'utf-8');
+    const base = await baseUrl(undefined, { agentPath: OPS.path, agentScope: loading(['Plugins/Other']), readable: false });
+    const existing = await fetch(`${base}/api/agent/plugins/Private/archive`);
+    const absent = await fetch(`${base}/api/agent/plugins/Nowhere/archive`);
+    expect(existing.status).toBe(404);
+    expect(await existing.json()).toEqual(await absent.json());
+    expect(absent.status).toBe(404);
   });
 
   it('zips a readable plugin folder', async () => {

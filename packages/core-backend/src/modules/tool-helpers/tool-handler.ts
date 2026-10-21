@@ -14,7 +14,7 @@ import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
 import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
-import { ConnectionScope } from '../agent-scope/index.js';
+import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../agent-scope/index.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -344,5 +344,4 @@ function withoutBranch(args: Record<string, unknown>): Record<string, unknown> {
 
 export type ToolHandlerFactory = ReturnType<typeof createToolHandlerFactory>;
 
-/** The `code` beside a refusal of a platform tool the caller's connection does not load. */
-export const NOT_AVAILABLE_TO_CONNECTION = 'not_available_to_connection';
+export { NOT_AVAILABLE_TO_CONNECTION };

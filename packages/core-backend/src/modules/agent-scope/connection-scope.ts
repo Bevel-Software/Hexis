@@ -1,4 +1,7 @@
-import { withinEntry } from './agent-file.js';
+import { pathUnderRoot } from '@bevel-software/platform-shared';
+
+/** The `code` beside a refusal of what the caller's connection does not load. */
+export const NOT_AVAILABLE_TO_CONNECTION = 'not_available_to_connection';
 
 /** The agent a connection was made as, by the file that defines it. */
 export interface ScopeAgent {
@@ -118,7 +121,7 @@ export class ConnectionScope {
     const s = this.state;
     if (s.kind === 'everything') return true;
     if (s.kind === 'unavailable') return false;
-    return s.roots.skills.some((root) => withinEntry(root, skillFolder));
+    return s.roots.skills.some((root) => pathUnderRoot(skillFolder, root));
   }
 
   /** Whether the connector defined at `definitionPath` (a `.tool` file or an MCP server definition) is loaded. */
@@ -126,7 +129,7 @@ export class ConnectionScope {
     const s = this.state;
     if (s.kind === 'everything') return true;
     if (s.kind === 'unavailable') return false;
-    return s.roots.connectors.some((root) => withinEntry(root, definitionPath));
+    return s.roots.connectors.some((root) => pathUnderRoot(definitionPath, root));
   }
 
   /**
@@ -139,7 +142,7 @@ export class ConnectionScope {
     const s = this.state;
     if (s.kind === 'everything') return true;
     if (s.kind === 'unavailable') return false;
-    return s.roots.connectors.some((root) => withinEntry(root, folder) || withinEntry(folder, root));
+    return s.roots.connectors.some((root) => pathUnderRoot(folder, root) || pathUnderRoot(root, folder));
   }
 
   /**

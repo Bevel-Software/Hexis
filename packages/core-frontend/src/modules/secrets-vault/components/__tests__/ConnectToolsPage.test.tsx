@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending } from '../../services/connect.api';
 import { ConnectToolsPage } from '../ConnectToolsPage';
@@ -569,6 +569,16 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       fireEvent.click(screen.getByRole('checkbox', { name: 'Connect as Everything anyway' }));
       await finish();
       expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', null);
+    });
+
+    it('keeps Finish disabled until the agents on offer have answered', async () => {
+      let answer!: (r: unknown) => void;
+      connectMock.getMcpOAuthRequest.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+      renderPage();
+      const finishButton = await screen.findByRole('button', { name: 'Finish & return to your agent' });
+      expect(finishButton).toBeDisabled();
+      await act(async () => answer({ clientName: 'Claude', scope: null, resource: null, agents: [OPS] }));
+      expect(finishButton).toBeEnabled();
     });
 
     it('approving with an agent picked connects as that agent', async () => {

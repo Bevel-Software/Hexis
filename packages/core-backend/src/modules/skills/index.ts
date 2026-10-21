@@ -14,6 +14,7 @@ export type {
   PendingSkill,
   GetSkillResult,
   GetSkillOptions,
+  ListSkillsOptions,
   SkillHistorySource,
   SkillScope,
 } from './skills.contract.js';

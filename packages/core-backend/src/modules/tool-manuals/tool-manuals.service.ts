@@ -350,6 +350,7 @@ export class ToolManualService implements IToolManualService {
   async listDeclaredOnlyOnBranch(
     userEmail: string,
     branch: string,
+    within?: ConnectorScope,
   ): Promise<{ name: string; path: string; type: ToolManualType }[]> {
     if (!branch || branch === this.kb.defaultBranch) return [];
     // Only a draft this process already holds a clone of — the one the caller
@@ -378,7 +379,7 @@ export class ToolManualService implements IToolManualService {
       pending.map((m) => m.path),
     );
     return pending
-      .filter((m) => allowed.get(m.path) === true)
+      .filter((m) => allowed.get(m.path) === true && (within === undefined || within(m.path)))
       .map((m) => ({ name: m.name, path: m.path, type: m.type }));
   }
 

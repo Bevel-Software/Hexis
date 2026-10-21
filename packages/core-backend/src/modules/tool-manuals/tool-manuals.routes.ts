@@ -19,8 +19,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
-import { NOT_AVAILABLE_TO_CONNECTION } from '../tool-helpers/tool-handler.js';
+import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -162,17 +161,6 @@ export function createToolManualsAgentRoutes(
       if (folderStat === null || !folderStat.isDirectory()) {
         return void res.status(404).json({ error: 'Not found' });
       }
-      // A connection made as an `.agent` file materializes only a plugin
-      // that defines a connector the file loads — the archive is how the
-      // local MCP server runs one, and nothing else asks for it.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
-      if (!scope.loadsConnectorIn(pluginRel)) {
-        const why = scope.describe();
-        return void res.status(403).json({
-          error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,
-          code: NOT_AVAILABLE_TO_CONNECTION,
-        });
-      }
       const rels: string[] = [];
       // Only an absent folder is a non-event; anything else (EACCES, EIO)
       // silently missing from the archive would hand the client an
@@ -198,6 +186,24 @@ export function createToolManualsAgentRoutes(
         email,
         rels.map((r) => `${pluginRel}/${r}`),
       );
+      // A folder with nothing the person may read is absent to them, whatever
+      // the connection — so that 404 comes first, and the connection's own
+      // refusal below never confirms a folder the person could not see.
+      if (![...verdicts.values()].some((v) => v === true)) {
+        return void res.status(404).json({ error: 'Not found' });
+      }
+      // A connection made as an `.agent` file materializes only a plugin
+      // that defines a connector the file loads — the archive is how the
+      // local MCP server runs one, and nothing else asks for it. Checked
+      // before any file is opened.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      if (!scope.loadsConnectorIn(pluginRel)) {
+        const why = scope.describe();
+        return void res.status(403).json({
+          error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,
+          code: NOT_AVAILABLE_TO_CONNECTION,
+        });
+      }
       const zip = new AdmZip();
       let included = 0;
       let bytes = 0;

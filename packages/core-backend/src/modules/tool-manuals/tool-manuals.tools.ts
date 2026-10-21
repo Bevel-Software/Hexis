@@ -262,7 +262,7 @@ export function registerToolManualsTools(
         within
           ? toolManualService.listAccessibleCatalog(ctx.user.email, within)
           : toolManualService.listAccessibleCatalog(ctx.user.email),
-        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch) : Promise.resolve([]),
+        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch, within) : Promise.resolve([]),
       ]);
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);

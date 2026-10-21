@@ -447,11 +447,13 @@ export interface IToolManualService {
    * built from the default branch only, so a server an agent declares on its
    * draft is invisible to every tool surface until the draft is merged — this
    * is how the agent is told where its declaration lives. `[]` for the default
-   * branch itself, or a branch with no workspace.
+   * branch itself, or a branch with no workspace. `within` narrows the answer
+   * to a connection's connectors, after the read gate, as the catalog's does.
    */
   listDeclaredOnlyOnBranch(
     userEmail: string,
     branch: string,
+    within?: ConnectorScope,
   ): Promise<{ name: string; path: string; type: ToolManualType }[]>;
   /** The embedded UTCP manual for an inline `.tool` (served at `/api/tools/:slug/manual`). */
   resolveInlineManual(userEmail: string, slug: string, opts?: { within?: ConnectorScope }): Promise<UtcpManualDict | null>;

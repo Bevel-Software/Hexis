@@ -3,14 +3,13 @@ import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { pathUnderRoot, type IWorkspaceService } from '@bevel-software/platform-shared';
+import type { IAccessControl } from '../access/index.js';
 import {
   AGENT_FILE_EXTENSION,
   AgentFileError,
   normalizeEntryPath,
   parseAgentFile,
-  withinEntry,
   type AgentFileDefinition,
 } from './agent-file.js';
 import { ConnectionScope } from './connection-scope.js';
@@ -43,7 +42,7 @@ export interface PluginFoldersPort {
  */
 export class AgentScopeService implements IAgentScopeResolver {
   constructor(
-    private readonly workspaceService: Pick<WorkspaceService, 'getOrCreateForBranch' | 'getWorkspacePath' | 'readFile'>,
+    private readonly workspaceService: Pick<IWorkspaceService, 'getOrCreateForBranch' | 'getWorkspacePath' | 'readFile'>,
     private readonly accessControl: Pick<IAccessControl, 'canReadBatch'>,
     private readonly kb: Pick<KbContext, 'kbDirName' | 'defaultBranch'>,
     private readonly disk: Pick<ITreeWalker, 'walkFiles'>,
@@ -74,7 +73,7 @@ export class AgentScopeService implements IAgentScopeResolver {
     if (def.plugins.length > 0) {
       const { byPlugin } = await this.plugins.membership();
       for (const plugin of byPlugin.values()) {
-        if (!def.plugins.some((entry) => withinEntry(entry, plugin.folder))) continue;
+        if (!def.plugins.some((entry) => pathUnderRoot(plugin.folder, entry))) continue;
         pluginFolders.push(plugin.folder);
         linkedSkills.push(...plugin.linkedSkills);
       }

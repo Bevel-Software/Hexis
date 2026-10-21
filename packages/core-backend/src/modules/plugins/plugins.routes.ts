@@ -17,8 +17,7 @@ import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { argumentsRefusal } from '../tool-helpers/route-argument-check.js';
-import { NOT_AVAILABLE_TO_CONNECTION } from '../tool-helpers/tool-handler.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';

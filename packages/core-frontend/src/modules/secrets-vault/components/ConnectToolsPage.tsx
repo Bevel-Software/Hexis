@@ -120,9 +120,12 @@ export function ConnectToolsPage() {
   const [connectAs, setConnectAs] = useState<string | null>(rememberedConnectAs);
   // The agents failed to load: Finish then waits for Everything to be confirmed.
   const [choicesFailed, setChoicesFailed] = useState(false);
+  // The request whose agents have answered. Until the CURRENT one has, Finish
+  // would approve Everything by default, before the person saw the choice.
+  const [choicesSettledFor, setChoicesSettledFor] = useState<string | null>(null);
   const [everythingConfirmed, setEverythingConfirmed] = useState(false);
   const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
-  const mayFinish = canConnectAs(unavailable);
+  const mayFinish = canConnectAs({ settled: agentState != null && choicesSettledFor === agentState, unavailable });
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -208,6 +211,7 @@ export function ConnectToolsPage() {
         setChoicesFailed(r.agentsUnavailable === true);
         // A remembered choice that is no longer on offer falls back to Everything.
         setConnectAs((current) => (current && offered.some((a) => a.path === current) ? current : null));
+        setChoicesSettledFor(agentState);
       })
       .catch(() => {
         if (cancelled) return;

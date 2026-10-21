@@ -121,8 +121,3 @@ export function normalizeEntryPath(raw: string): string | null {
   if (!p || p.split('/').some((s) => s === '..' || s === '.')) return null;
   return p;
 }
-
-/** Whether `path` is `entry` itself or lies in the subtree `entry` names. */
-export function withinEntry(entry: string, path: string): boolean {
-  return path === entry || path.startsWith(`${entry}/`);
-}

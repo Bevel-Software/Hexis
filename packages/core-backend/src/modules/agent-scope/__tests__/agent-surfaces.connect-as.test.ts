@@ -3,18 +3,28 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { createToolHandlerFactory, NOT_AVAILABLE_TO_CONNECTION } from '../../tool-helpers/tool-handler.js';
+import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
+import { NOT_AVAILABLE_TO_CONNECTION } from '../index.js';
 import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
 import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
-import { registerSkillsTools } from '../../skills/skills.tools.js';
-import type { GetSkillOptions, ISkillService, ListSkillsOptions, SkillSummary } from '../../skills/skills.contract.js';
-import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
-import { createToolManualsAgentRoutes } from '../../tool-manuals/tool-manuals.routes.js';
-import type { ConnectorScope, IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
-import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
+import {
+  registerSkillsTools,
+  type GetSkillOptions,
+  type ISkillService,
+  type ListSkillsOptions,
+  type SkillSummary,
+} from '../../skills/index.js';
+import {
+  registerToolManualsTools,
+  createToolManualsAgentRoutes,
+  type ConnectorScope,
+  type IToolManualService,
+  type ToolManualSummary,
+} from '../../tool-manuals/index.js';
+import { registerAgentGuideTool } from '../../agent-guide/index.js';
 import { agentFile, agentScopeOver, inMemoryKb } from './in-memory-kb.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -67,7 +77,12 @@ const toolManualService = {
     scoped(within)
       .filter((m) => m.remote === false)
       .map((m) => ({ slug: m.slug, name: m.name, path: m.path })),
-  listDeclaredOnlyOnBranch: async () => [],
+  // One draft connector per plugin, declared on a branch only.
+  listDeclaredOnlyOnBranch: async (_e: string, _branch: string, within?: ConnectorScope) =>
+    [
+      { name: 'draftdash', path: 'Plugins/Eng/release/draftdash.tool', type: 'http' },
+      { name: 'draftcrm', path: 'Plugins/Sales/draftcrm.tool', type: 'http' },
+    ].filter((m) => !within || within(m.path)),
   toManualCallTemplates: async (_e: string, opts?: { within?: ConnectorScope }) =>
     scoped(opts?.within)
       .filter((m) => m.remote !== false)
@@ -81,6 +96,7 @@ const KEYS: Record<string, string | null> = {
   bevel_plugin: 'Agents/plugin.agent',
   bevel_gone: 'Agents/gone.agent',
   bevel_prompts: 'Agents/prompts.agent',
+  bevel_hidden: 'Agents/hidden.agent',
 };
 
 const kb = inMemoryKb(
@@ -91,8 +107,13 @@ const kb = inMemoryKb(
     'Agents/plugin.agent': agentFile('name: release\nplugins: [Plugins/Eng]'),
     // Skills to work with, and no skill TOOL offered: its skills are still its prompts.
     'Agents/prompts.agent': agentFile('name: reader\nplatformTools: [read_file]\nskills: [Skills/Release]'),
+    // There, but not for this reader: as unusable as a file that is gone.
+    'Agents/hidden.agent': agentFile('name: hidden\nskills: [Skills/Release]'),
   },
-  { plugins: [{ folder: 'Plugins/Eng/release', linkedSkills: ['Skills/Sales/pitch'] }] },
+  {
+    plugins: [{ folder: 'Plugins/Eng/release', linkedSkills: ['Skills/Sales/pitch'] }],
+    hidden: new Set(['Agents/hidden.agent']),
+  },
 );
 
 let http: HttpServer | undefined;
@@ -154,6 +175,25 @@ const call = (base: string, key: string, tool: string, body: unknown = {}) =>
   });
 const get = async (base: string, key: string, path: string) =>
   (await fetch(`${base}/api${path}`, { headers: { authorization: `Bearer ${key}` } })).json();
+
+/** An MCP client of the REAL request server, proxying to the routes above with `key`. */
+async function mcpClient(base: string, key: string): Promise<Client> {
+  const mcp = new McpService({
+    loopbackBaseUrl: base,
+    manualName: 'KNOWLEDGE_BASE',
+    spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
+    publicFrontendUrl: 'http://localhost:5173',
+  });
+  const server = await mcp.createRequestServer(
+    { userId: ADA.id, tokenId: `id-${key}`, connectionId: null, bearer: key, agentPath: KEYS[key] },
+    { jsonrpc: '2.0', id: 1, method: 'prompts/list', params: {} },
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: 't', version: '0' }, { capabilities: {} });
+  await client.connect(clientTransport);
+  return client;
+}
 
 describe('Everything is byte-for-byte today’s surface', () => {
   it('every surface answers a key with no agent exactly as a deployment that cannot narrow at all', async () => {
@@ -234,6 +274,11 @@ describe('a key connected as an .agent file', () => {
     expect(local.tools.map((t) => t.name)).toEqual(['localgit']);
     const narrowSetup = (await (await call(base, 'bevel_narrow', 'list_tool_setup')).json()) as { tools: unknown[] };
     expect(narrowSetup.tools).toEqual([]);
+    // A draft's declarations too: only those of the connection's connectors.
+    const onDraft = (await (await call(base, 'bevel_plugin', 'list_tool_setup', { branch: 'ada/draft' })).json()) as {
+      onBranchOnly: { name: string }[];
+    };
+    expect(onDraft.onBranchOnly.map((p) => p.name)).toEqual(['draftdash']);
   });
 
   it('the agent guide opens by saying what the connection is connected as', async () => {
@@ -268,24 +313,6 @@ describe('a key whose .agent file is gone', () => {
  * (Local Testing found `prompts/list` empty for exactly such a file.)
  */
 describe('a key whose .agent file names skills but offers no skill tool', () => {
-  async function mcpClient(base: string, key: string): Promise<Client> {
-    const mcp = new McpService({
-      loopbackBaseUrl: base,
-      manualName: 'KNOWLEDGE_BASE',
-      spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-      publicFrontendUrl: 'http://localhost:5173',
-    });
-    const server = await mcp.createRequestServer(
-      { userId: ADA.id, tokenId: `id-${key}`, connectionId: null, bearer: key, agentPath: KEYS[key] },
-      { jsonrpc: '2.0', id: 1, method: 'prompts/list', params: {} },
-    );
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await server.connect(serverTransport);
-    const client = new Client({ name: 't', version: '0' }, { capabilities: {} });
-    await client.connect(clientTransport);
-    return client;
-  }
-
   it('serves its skills as prompts — prompts/list and prompts/get — and nothing beside them', async () => {
     const base = await start();
     const client = await mcpClient(base, 'bevel_prompts');
@@ -324,4 +351,54 @@ describe('a key whose .agent file names skills but offers no skill tool', () => 
       error: 'not_found',
     });
   });
+});
+
+/**
+ * The MCP surface itself, through the REAL request server: what the agent
+ * sees in `tools/list`, `tools_info` and `prompts/list` when the connection
+ * is narrowed, and when its file is unusable — gone, or there but no longer
+ * readable — where it must load nothing and say why, never Everything.
+ */
+describe('over MCP', () => {
+  const toolText = (r: unknown) => ((r as { content: { type: string; text: string }[] }).content[0]?.text ?? '');
+
+  it('tools_info describes the platform tools the agent lists, and not one it leaves out', async () => {
+    const base = await start();
+    const client = await mcpClient(base, 'bevel_narrow');
+    try {
+      const info = JSON.parse(
+        toolText(
+          await client.callTool({
+            name: 'tools_info',
+            arguments: { tool_names: ['KNOWLEDGE_BASE.list_skills', 'KNOWLEDGE_BASE.write_file'] },
+          }),
+        ),
+      ) as { interfaces: string; not_found: string[] };
+      expect(info.interfaces).toContain('list_skills');
+      expect(info.not_found).toEqual(['KNOWLEDGE_BASE.write_file']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  for (const [key, why] of [
+    ['bevel_gone', 'a file that is gone'],
+    ['bevel_hidden', 'a file the person can no longer read'],
+  ] as const) {
+    it(`${why}: no tool, no prompt, and the one sentence why`, async () => {
+      const base = await start();
+      const client = await mcpClient(base, key);
+      try {
+        const listed = await client.listTools();
+        expect(listed.tools).toEqual([]);
+        expect(JSON.stringify(listed._meta)).toContain(
+          `\`${KEYS[key]}\`, which no longer exists or which you can no longer read`,
+        );
+        expect((await client.listPrompts()).prompts).toEqual([]);
+        await expect(client.getPrompt({ name: 'notes' })).rejects.toThrow();
+      } finally {
+        await client.close();
+      }
+    });
+  }
 });

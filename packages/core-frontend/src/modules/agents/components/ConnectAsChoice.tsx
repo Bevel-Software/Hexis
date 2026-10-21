@@ -40,7 +40,7 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unava
     <fieldset className="space-y-1.5" disabled={disabled}>
       <legend className="text-xs font-medium text-ink">Connect as</legend>
       {hint && <p className="text-meta text-ink-muted leading-snug">{hint}</p>}
-      <div className="divide-y divide-line border border-line rounded">
+      <div className="divide-y divide-line border border-line rounded-md">
         {options.map((o) => {
           const checked = value === o.path;
           return (
@@ -64,7 +64,7 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unava
         })}
       </div>
       {unavailable && (
-        <div role="alert" className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5 space-y-1">
+        <div role="alert" className="text-xs text-danger bg-danger-soft border border-danger rounded-md px-2 py-1.5 space-y-1">
           <p>Your agent files couldn't be loaded, so only Everything can be chosen right now.</p>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input

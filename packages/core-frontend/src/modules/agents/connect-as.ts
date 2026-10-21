@@ -6,9 +6,10 @@ export interface UnavailableChoice {
 
 /**
  * Whether a connection may be made with the "Connect as" choice as it
- * stands: always, unless the agents failed to load and Everything is not yet
- * confirmed.
+ * stands: once the agents on offer have answered — before that, the default
+ * Everything is not yet a choice anyone made — and then always, unless they
+ * failed to load and Everything is not yet confirmed.
  */
-export function canConnectAs(unavailable: UnavailableChoice | undefined): boolean {
-  return !unavailable || unavailable.confirmed;
+export function canConnectAs(choices: { settled: boolean; unavailable: UnavailableChoice | undefined }): boolean {
+  return choices.settled && (!choices.unavailable || choices.unavailable.confirmed);
 }
