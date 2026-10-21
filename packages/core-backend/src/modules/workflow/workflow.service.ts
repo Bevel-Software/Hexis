@@ -65,6 +65,7 @@ import type {
   UpdateBranchOutcome,
 } from '@bevel-software/platform-shared';
 import {
+  AFFECTED_OWNERS_HEADING,
   isFolderPlaceholder,
   folderPlaceholderPath,
   isPlatformRestoreShape,
@@ -238,7 +239,7 @@ export function formatAffectedOwnersBlock(
   }
   if (eligible === 0) return '';
 
-  const out = ['## Affected owners', '', ...listed];
+  const out = [AFFECTED_OWNERS_HEADING, '', ...listed];
   if (eligible > listed.length) {
     const summary = [
       allRoles.size > 0 ? [...allRoles].sort().join(', ') : '',

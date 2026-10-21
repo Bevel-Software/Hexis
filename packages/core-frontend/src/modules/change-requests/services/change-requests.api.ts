@@ -4,8 +4,14 @@ import type {
   PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
-import { getOrCreateWorkspace, readFile } from '../../workspace/services/workspace.api';
+import { handleApiResponse } from '../../git';
+import {
+  WorkspaceApiError,
+  getOrCreateWorkspace,
+  rawFileUrl,
+  readFile,
+  toApiError,
+} from '../../workspace';
 import { BranchUnavailableError } from '../utils/readFailure';
 
 /**
@@ -111,4 +117,45 @@ export async function readFileAtForkPoint(
   return handleApiResponse<ForkPointFile>(
     await authFetch(`/api/workflow/change-requests/${crNumber}/fork-point-file?${qs}`),
   );
+}
+
+/**
+ * A file's text at a commit of a branch's workspace — `side: 'after'` the
+ * commit itself, `'before'` its first parent — through the raw route Version
+ * history reads past saves with, behind the same read gate as any file read.
+ * What an APPLIED request's file is read with: its merge commit against the
+ * target as it stood just before the apply. A refusal or a missing path
+ * rejects with a `WorkspaceApiError` carrying the status.
+ */
+export async function readFileAtCommit(
+  workspaceId: string,
+  workspacePath: string,
+  sha: string,
+  side: 'after' | 'before',
+): Promise<string> {
+  const res = await authFetch(rawFileUrl(workspaceId, workspacePath, { ref: sha, side }));
+  if (!res.ok) throw await toApiError(res);
+  return res.text();
+}
+
+/**
+ * Whether a file exists on a branch's workspace NOW — the "Open page" or
+ * "This page has since been deleted." question of a finished request's file.
+ * A HEAD on the raw route: no bytes, binary files included. `true` for a
+ * 2xx, `false` only for a 404. Every other answer rejects as a failed read
+ * would: a refusal (403) as a `WorkspaceApiError` so the file shows locked,
+ * any other status as a `WorkspaceApiError` carrying it and a network drop
+ * as the error `fetch` threw, so the file says it couldn't be read, with Try
+ * again — never "Open page" to a page nobody could confirm, and never
+ * "deleted" for a page that may well be there.
+ */
+export async function fileExistsOnWorkspace(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<boolean> {
+  // A HEAD answer has no body, so the status is all there is to say.
+  const res = await authFetch(rawFileUrl(workspaceId, workspacePath), { method: 'HEAD' });
+  if (res.status === 404) return false;
+  if (!res.ok) throw new WorkspaceApiError(res.status);
+  return true;
 }

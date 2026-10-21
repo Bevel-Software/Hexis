@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { PullRequestService, changeSourceFor } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';
+import { prMergeLog } from '../../../database/schema.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail as hash } from '../../../../shared/email-identity.js';
@@ -260,10 +263,40 @@ describe('PullRequestService.listPrsByState', () => {
   }
 
   /** The service over a drizzle-shaped select that answers `rows`. */
-  function svcOver(rows: Record<string, unknown>[], changedPaths: string[] = []) {
+  function svcOver(
+    rows: Record<string, unknown>[],
+    changedPaths: string[] = [],
+    // Each attempt belongs to the request it names, or to the first row's.
+    mergeLog: { name: string; headSha: string; prNumber?: number }[] = [],
+    opts: { mergeLogThrows?: boolean } = {},
+  ) {
     const orderBy = vi.fn(async () => rows);
-    const select = vi.fn(() => ({ from: () => ({ where: () => ({ orderBy }) }) }));
-    const db = { select } as unknown as Database;
+    // `select` counts the change-request reads; the merge-log read an applied
+    // row's head comes from is answered beside it, and counted too.
+    const select = vi.fn(() => ({ where: () => ({ orderBy }) }));
+    const mergeLogRows = mergeLog.map((r) => ({
+      prNumber: rows[0]?.number,
+      ...r,
+      succeeded: true,
+      hasError: false,
+      startedAt: new Date(0),
+    }));
+    // Answered FROM THE PREDICATE: only the attempts of the request numbers
+    // the query names come back, so a read that leaves a row out leaves that
+    // row without its head instead of passing on a stub that answers all.
+    const mergeLogReads = vi.fn(async (predicate: SQL) => {
+      if (opts.mergeLogThrows) throw new Error('db down');
+      const { params } = new PgDialect().sqlToQuery(predicate);
+      return mergeLogRows.filter((r) => params.includes(r.prNumber));
+    });
+    /** The request numbers each merge-log read asked for. */
+    const mergeLogAsked = () =>
+      mergeLogReads.mock.calls.map(([predicate]) => new PgDialect().sqlToQuery(predicate).params);
+    const db = {
+      select: () => ({
+        from: (table: unknown) => (table === prMergeLog ? { where: mergeLogReads } : select()),
+      }),
+    } as unknown as Database;
     const answer = (paths: string[]) => ({ paths, pairs: paths.map((path) => ({ path })) });
     const ensureRemotesFetched = vi.fn(async () => undefined);
     const workspace = {
@@ -279,7 +312,7 @@ describe('PullRequestService.listPrsByState', () => {
       changedPathsAndPairsOfAppliedChange: atCommit,
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
-    return { svc, select, forPr, atCommit, ensureRemotesFetched };
+    return { svc, select, forPr, atCommit, ensureRemotesFetched, mergeLogReads, mergeLogAsked };
   }
 
   beforeEach(() => {
@@ -325,6 +358,74 @@ describe('PullRequestService.listPrsByState', () => {
     });
     // The close time is the latest moment the row records, so it is `updatedAt`.
     expect(summary.updatedAt).toBe('2026-04-03T09:30:00.000Z');
+  });
+
+  it('hands the head its apply logged with the merge commit, so another request\'s (#N) commit is refused', async () => {
+    const head = 'b'.repeat(40);
+    const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [
+      { name: 'Robin Lee', headSha: head },
+    ]);
+    await svc.listPrsByState(['merged']);
+    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA, title: 'A proposal', headSha: head });
+  });
+
+  it('reads the merge log of every applied row in ONE query, and hands each row its own head', async () => {
+    const heads = { 1: '1'.repeat(40), 2: '2'.repeat(40), 3: '3'.repeat(40) };
+    const { svc, atCommit, mergeLogReads, mergeLogAsked } = svcOver(
+      [1, 2, 3].map((number) => row({ number, state: 'merged' })),
+      ['Knowledge/A.md'],
+      Object.entries(heads).map(([n, headSha]) => ({ name: 'Robin Lee', headSha, prNumber: Number(n) })),
+    );
+    await svc.listPrsByState(['merged']);
+    expect(mergeLogReads).toHaveBeenCalledTimes(1);
+    // That one query names every applied row, not just the first.
+    expect([...mergeLogAsked()[0]!].sort()).toEqual([1, 2, 3]);
+    for (const [n, headSha] of Object.entries(heads)) {
+      expect(atCommit).toHaveBeenCalledWith('ws', expect.objectContaining({ number: Number(n), headSha }));
+    }
+  });
+
+  it('a merge log that cannot be read lists the applied row with no paths, never one checked by number alone', async () => {
+    const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [], {
+      mergeLogThrows: true,
+    });
+    const [summary] = await svc.listPrsByState(['merged']);
+    expect(summary?.touchedNodePaths ?? []).toEqual([]);
+    expect(atCommit).not.toHaveBeenCalled();
+  });
+
+  it('warns once for a failed merge-log read, not once more per applied row', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { svc } = svcOver(
+        [1, 2, 3].map((number) => row({ number, state: 'merged' })),
+        ['Knowledge/A.md'],
+        [],
+        { mergeLogThrows: true },
+      );
+      await svc.listPrsByState(['merged']);
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('could not read who applied 3 change requests'))).toHaveLength(1);
+      expect(lines.filter((l) => l.includes('changedPathsAndPairsOfAppliedChange'))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('remembers nothing from a listing whose merge-log read failed: the next listing asks again', async () => {
+    const { svc, mergeLogReads } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md'], [], {
+      mergeLogThrows: true,
+    });
+    await svc.listPrsByState(['merged']);
+    await svc.listPrsByState(['merged']);
+    expect(mergeLogReads).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks the merge log nothing about a row whose change it already remembers', async () => {
+    const { svc, mergeLogReads } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md']);
+    await svc.listPrsByState(['merged']);
+    await svc.listPrsByState(['merged']);
+    expect(mergeLogReads).toHaveBeenCalledTimes(1);
   });
 
   it('reads the table for a set that contains `open` ALONGSIDE another state', async () => {
@@ -552,8 +653,12 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
       closedReason: null,
       ...over,
     };
+    // The merge log records no apply: the commit is checked by its number.
     const db = {
-      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+      select: () => ({
+        from: (table: unknown) =>
+          table === prMergeLog ? { where: async () => [] } : { where: () => ({ limit: async () => [row] }) },
+      }),
     } as unknown as Database;
     const ensureRemotesFetched = vi.fn(async () => undefined);
     const workspace = {

@@ -10,6 +10,9 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
 import { mergeCommitSubject } from '../merge-commit.js';
+import { NodeGitRunner } from '../node-git-runner.js';
+import type { GitRunOptions, IGitRunner } from '../../../../shared/git.contract.js';
+import { AppliedChangeMismatchError } from '../../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
 const BASE = 'current-company-state';
@@ -28,6 +31,11 @@ async function runGit(cwd: string, args: string[]): Promise<void> {
 async function gitOut(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd });
   return stdout.toString();
+}
+
+/** The source head a merge commit merged: its second parent. */
+async function mergedHead(repo: string, mergeSha: string | null): Promise<string> {
+  return (await gitOut(repo, ['rev-parse', `${mergeSha}^2`])).trim();
 }
 
 function stubWorkspaceService(baseWsId: string, baseRepo: string): WorkspaceService {
@@ -238,9 +246,10 @@ describe('GitService.mergeChangeRequest', () => {
     await runGit(root, ['-C', upstream, 'branch', '-D', 'alice/add']);
 
     const stale = new GitService(stubWorkspaceService(staleWsId, staleRepo), new WorkflowHooks(), testKbContext());
-    expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 7)).toBe(merged.mergeCommit);
+    const head = await mergedHead(baseRepo, merged.mergeCommit);
+    expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 7, head)).toBe(merged.mergeCommit);
     // A number nothing on the target was merged under owns nothing.
-    expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 8)).toBeNull();
+    expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 8, head)).toBeNull();
   });
 
   it('still finds the commit behind any number of newer merges on a busy target', async () => {
@@ -272,7 +281,8 @@ describe('GitService.mergeChangeRequest', () => {
     }
     await runGit(busy, ['push', 'origin', BASE]);
 
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBe(merged.mergeCommit);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7, await mergedHead(baseRepo, merged.mergeCommit)))
+      .toBe(merged.mergeCommit);
     // Twenty-five merges are a hundred and fifty git processes; slow on a
     // loaded Windows runner, so this one gets its own budget.
   }, 120_000);
@@ -293,16 +303,17 @@ describe('GitService.mergeChangeRequest', () => {
     const sha = (await gitOut(old, ['rev-parse', 'HEAD'])).trim();
     expect((await gitOut(old, ['log', '-1', '--format=%s'])).trim()).toBe('Add feature');
 
+    const head = await mergedHead(old, sha);
     const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
     // With the title: the commit is the request's own, on the target and by sha.
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, title)).toBe(sha);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, head, title)).toBe(sha);
     expect(await git.appliedChangeShas(baseWsId, { number: 5, mergeSha: sha, title }))
       .toMatchObject({ baseSha: expect.any(String), headSha: expect.any(String) });
     // Without it, nothing vouches for a number that is not where the subject
     // rule looks — and another title does not either.
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5)).toBeNull();
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, head)).toBeNull();
     await expect(git.appliedChangeShas(baseWsId, { number: 5, mergeSha: sha })).rejects.toThrow(/not the merge commit/);
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, 'Add feature')).toBeNull();
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, head, 'Add feature')).toBeNull();
   });
 
   it('does not take a current-format commit of another request for one whose title merely contains its number', async () => {
@@ -321,8 +332,9 @@ describe('GitService.mergeChangeRequest', () => {
     );
     expect(merged.kind).toBe('merged');
     if (merged.kind !== 'merged') return;
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 43)).toBe(merged.mergeCommit);
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 42, 'Fix crash')).toBeNull();
+    const head = await mergedHead(baseRepo, merged.mergeCommit);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 43, head)).toBe(merged.mergeCommit);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 42, head, 'Fix crash')).toBeNull();
     await expect(git.appliedChangeShas(baseWsId, { number: 42, mergeSha: merged.sha, title: 'Fix crash' })).rejects.toThrow(
       /not the merge commit/,
     );
@@ -353,15 +365,17 @@ describe('GitService.mergeChangeRequest', () => {
     // The commit IS in this clone, and origin/BASE names it.
     expect((await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`])).trim()).toBe(merged.mergeCommit);
 
+    const head = await mergedHead(baseRepo, merged.mergeCommit);
+
     // Variable 1: no tracking ref, remote reachable. The refresh brings it back.
     await runGit(baseRepo, ['update-ref', '-d', `refs/remotes/origin/${BASE}`]);
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBe(merged.mergeCommit);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7, head)).toBe(merged.mergeCommit);
     expect((await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`])).trim()).toBe(merged.mergeCommit);
 
     // Variable 2: tracking ref present and naming the commit, remote gone. No
     // authority, no answer — the ref is not scanned.
     await runGit(baseRepo, ['remote', 'set-url', 'origin', path.join(root, 'gone.git')]);
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBeNull();
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7, head)).toBeNull();
   });
 
   // The merge commit a later attempt recovers is matched on the number alone, so
@@ -394,6 +408,85 @@ describe('GitService.mergeChangeRequest', () => {
     expect(result.kind).toBe('merged');
     if (result.kind !== 'merged') return;
     expect(result.mergeCommit).toBeNull();
+  });
+
+  // Local Testing, attempt 10. A knowledge base that moved here from another
+  // deployment carries that deployment's merge commits, numbered from 1 like
+  // ours, so the target already holds a `(#6)` merge commit that is not this
+  // #6. When this #6 then has nothing to merge, that old commit was recorded
+  // as its own, and the finished view showed its files under #6.
+  it('does not take another deployment\'s merge commit with the same number for the request\'s own', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    // The other deployment's #6, merged long ago: subject `… (#6)`, its own head.
+    await pushFeatureBranch(root, upstream, 'old/skill', async (dir) => {
+      await fs.writeFile(path.join(dir, 'skill.md'), 'old\n');
+    });
+    const old = path.join(root, 'old-deployment');
+    await runGit(root, ['clone', '-b', BASE, upstream, old]);
+    await runGit(old, ['merge', '--no-ff', '-m', mergeCommitSubject('New skill: release-notes', 6), 'origin/old/skill']);
+    await runGit(old, ['push', 'origin', BASE]);
+    const foreign = (await gitOut(old, ['rev-parse', 'HEAD'])).trim();
+
+    // This deployment's #7 lands a change, and #6 proposes the same content on
+    // its own branch: by the time #6 is applied the target already holds it.
+    await pushFeatureBranch(root, upstream, 'alice/seven', async (dir) => {
+      await fs.writeFile(path.join(dir, 'same.md'), 'same\n');
+    });
+    await pushFeatureBranch(root, upstream, 'alice/six', async (dir) => {
+      await fs.writeFile(path.join(dir, 'same.md'), 'same\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const seven = await git.mergeChangeRequest(
+      baseWsId, 'alice/seven', BASE, { subject: mergeCommitSubject('Same', 7), body: 'x' }, USER,
+      { appliedChangeNumber: 7 },
+    );
+    expect(seven.kind).toBe('merged');
+    const sixHead = (await gitOut(upstream, ['rev-parse', 'alice/six'])).trim();
+
+    const six = await git.mergeChangeRequest(
+      baseWsId, 'alice/six', BASE, { subject: mergeCommitSubject('Same', 6), body: 'x' }, USER,
+      { appliedChangeNumber: 6, appliedChangeTitle: 'Same' },
+    );
+    expect(six.kind).toBe('merged');
+    if (six.kind !== 'merged') return;
+    // The `(#6)` on the target merged another head, so #6 owns no commit.
+    expect(six.mergeCommit).toBeNull();
+    expect(six.mergedHead).toBe(sixHead);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 6, sixHead, 'Same')).toBeNull();
+    // Asked with the head that commit did merge, it is found: the number and
+    // the head are both what make it a request's own.
+    const foreignHead = await mergedHead(baseRepo, foreign);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 6, foreignHead)).toBe(foreign);
+
+    // A row already holding the foreign commit is refused once its own head is
+    // known, and still read by number alone when no head was recorded.
+    await expect(git.appliedChangeShas(baseWsId, { number: 6, mergeSha: foreign, headSha: sixHead })).rejects.toThrow(
+      AppliedChangeMismatchError,
+    );
+    await expect(git.appliedChangeShas(baseWsId, { number: 6, mergeSha: foreign })).resolves.toMatchObject({
+      headSha: foreignHead,
+    });
+  });
+
+  it('reports the head it merged, which is its merge commit\'s second parent', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merge = () =>
+      git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE, { subject: mergeCommitSubject('Add feature', 7), body: 'x' }, USER,
+        { appliedChangeNumber: 7 },
+      );
+    const first = await merge();
+    if (first.kind !== 'merged') throw new Error('expected a merge');
+    expect(first.mergedHead).toBe(await mergedHead(baseRepo, first.mergeCommit));
+    // The retry that recovers it reports the same head.
+    const second = await merge();
+    if (second.kind !== 'merged') throw new Error('expected a merge');
+    expect(second.mergeCommit).toBe(first.mergeCommit);
+    expect(second.mergedHead).toBe(first.mergedHead);
   });
 
   /**
@@ -582,6 +675,59 @@ describe('GitService.mergeChangeRequest', () => {
       expect(seen).toHaveLength(1);
       expect(seen[0].sha).toBe(publishedTip);
       expect(seen[0].changedPaths).toEqual(['feature.md']);
+    });
+
+    it('authorizes the source head it merges, even when the source ref moves in between', async () => {
+      // The change-request reads fetch outside the workspace reservation, so
+      // `origin/<source>` can move after the merge resolved its head. The
+      // callback must still decide on the paths of the commit that is merged.
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      await pushFeatureBranch(root, upstream, 'alice/other', async (dir) => {
+        await fs.writeFile(path.join(dir, 'other.md'), 'elsewhere\n');
+      });
+      await runGit(baseRepo, ['fetch', 'origin', '+refs/heads/alice/other:refs/remotes/origin/alice/other']);
+      const otherTip = (await gitOut(baseRepo, ['rev-parse', 'refs/remotes/origin/alice/other'])).trim();
+
+      // The race is driven through the injected runner, the seam every git
+      // call of the service goes through: a concurrent fetch lands right after
+      // the merge resolved its head.
+      const real = new NodeGitRunner();
+      let raced = false;
+      const racing: IGitRunner = {
+        defaultTimeoutMs: real.defaultTimeoutMs,
+        credentials: real.credentials,
+        run: (async (cwd: string, args: string[], opts?: GitRunOptions) => {
+          const out = await real.run(cwd, args, opts as GitRunOptions & { encoding?: 'utf8' });
+          if (args[0] === 'rev-parse' && args[1] === 'origin/alice/add^{commit}') {
+            await runGit(baseRepo, ['update-ref', 'refs/remotes/origin/alice/add', otherTip]);
+            raced = true;
+          }
+          return out;
+        }) as IGitRunner['run'],
+      };
+      const git = new GitService(
+        stubWorkspaceService(baseWsId, baseRepo),
+        new WorkflowHooks(),
+        testKbContext(),
+        undefined,
+        null,
+        racing,
+      );
+      const seen: string[][] = [];
+      const result = await git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+        { authorize: async (t) => { seen.push(t.changedPaths); } },
+      );
+
+      expect(raced).toBe(true);
+      expect(result.kind).toBe('merged');
+      expect(seen).toEqual([['feature.md']]);
+      const merged = result.kind === 'merged' ? result.mergeCommit : null;
+      const files = await gitOut(baseRepo, ['diff', '--name-only', `${merged}^1`, String(merged)]);
+      expect(files.trim().split('\n')).toEqual(['feature.md']);
     });
 
     it('refuses before anything is committed or pushed when the hook throws', async () => {

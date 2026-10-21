@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 
 import { PullRequestService } from '../pull-request.service.js';
 import type { Database } from '../../../database/connection.js';
+import { prMergeLog } from '../../../database/schema.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
@@ -140,11 +141,14 @@ describe('the list of applied requests reads each merge commit once', () => {
   });
 
   function appliedHarness(rows: ReturnType<typeof applied>[]) {
+    // The merge log records no apply for any of them: each commit is checked
+    // by its number.
     const db = {
       select: () => ({
-        from: () => ({
-          where: () => ({ orderBy: async () => rows, limit: async () => rows }),
-        }),
+        from: (table: unknown) =>
+          table === prMergeLog
+            ? { where: async () => [] }
+            : { where: () => ({ orderBy: async () => rows, limit: async () => rows }) },
       }),
     } as unknown as Database;
     const ofAppliedChange = vi.fn(async (_w: string, ref: { number: number }) => ({

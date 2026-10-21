@@ -798,6 +798,19 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       throw new ChangeRequestConflictsError(cr.sourceBranch, cr.targetBranch, mergeResult.paths);
     }
 
+    // The head the merge actually took, onto the begun log row BEFORE the
+    // change request row is written. The branch can move between the gate that
+    // read `headSha` and the merge's own fetch, and the merge commit's second
+    // parent is then the newer head. Should the row update below fail, the
+    // retry's recovery (`finalizeAlreadyApplied`) looks for the commit by the
+    // heads begun rows recorded, so this one has to be the head that was merged.
+    if (mergeResult.mergedHead && mergeResult.mergedHead !== headSha) {
+      await this.db
+        .update(prMergeLog)
+        .set({ headShaAtMerge: mergeResult.mergedHead })
+        .where(eq(prMergeLog.id, logRow.id));
+    }
+
     // Merged. Record CR + log success together; do the CR-state update FIRST so
     // the merge is durably reflected even if the log write hiccups. Gate the
     // write on the row STILL being `open` (CAS): if a concurrent merge/close won
@@ -843,7 +856,10 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     }
     await this.db
       .update(prMergeLog)
-      .set({ succeeded: true, completedAt })
+      // The head the merge actually took, which the reader requires the merge
+      // commit's second parent to be: the branch can move between the gate
+      // that read `headSha` and the fetch inside the merge.
+      .set({ succeeded: true, completedAt, headShaAtMerge: mergeResult.mergedHead ?? headSha })
       .where(eq(prMergeLog.id, logRow.id));
 
     return {
@@ -877,8 +893,9 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
    *     is already `merged` or `closed` has its own reason and must keep it.
    *   • the row must still be `open`, read here and re-checked by the CAS below.
    *   • the commit must be the request's OWN, by the same subject predicate the
-   *     reader verifies with (`mergeCommitSubjectNames`), so this records only
-   *     what `appliedChangeShas` will accept. No branch name a user can choose
+   *     reader verifies with (`mergeCommitSubjectNames`), merging a head this request
+   *     recorded as its second parent, so this records only what `appliedChangeShas` will
+   *     accept. No branch name a user can choose
    *     can produce that subject — `assertValidBranchName` forbids both the space
    *     and the `#` the agent `merge_branch` subject would need.
    *
@@ -908,15 +925,28 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // the shape no finished attempt has. Without one there is nothing to
     // recover, and a genuinely empty request is refused here as it always
     // was, without a clone being created or a remote fetched on its behalf.
-    const [begun] = await this.db
-      .select({ id: prMergeLog.id })
+    const begun = await this.db
+      .select({ headShaAtMerge: prMergeLog.headShaAtMerge })
       .from(prMergeLog)
-      .where(and(eq(prMergeLog.prNumber, prNumber), eq(prMergeLog.succeeded, false), isNull(prMergeLog.error)))
-      .limit(1);
-    if (!begun) return null;
+      .where(and(eq(prMergeLog.prNumber, prNumber), eq(prMergeLog.succeeded, false), isNull(prMergeLog.error)));
+    if (begun.length === 0) return null;
 
+    // The heads to look for the commit by: each begun attempt's — the head its
+    // merge actually took, which `mergePr` writes onto the row before it
+    // finalizes anything — and this caller's. The pushed commit's second
+    // parent is one of them; whichever it is, is the head this log records,
+    // because it is the one the reader checks that commit against.
+    const heads = [...new Set([...begun.map((b) => b.headShaAtMerge).filter((h): h is string => !!h), headSha])];
     const baseWorkspace = await this.workspaceService.getOrCreateForBranch(cr.targetBranch);
-    const own = await this.git.appliedMergeCommitOnTarget(baseWorkspace.id, cr.targetBranch, prNumber, cr.title);
+    let own: string | null = null;
+    let ownHead = headSha;
+    for (const head of heads) {
+      own = await this.git.appliedMergeCommitOnTarget(baseWorkspace.id, cr.targetBranch, prNumber, head, cr.title);
+      if (own) {
+        ownHead = head;
+        break;
+      }
+    }
     if (!own) return null;
 
     // The attempt is logged BEFORE the row is finalized, in the same order the
@@ -931,7 +961,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         triggeredByEmail,
         triggeredByEmailBidx: triggeredByEmail,
         triggeredByName: user.name,
-        headShaAtMerge: headSha,
+        headShaAtMerge: ownHead,
         mergeMethod: MERGE_METHOD,
         succeeded: false,
         // Not an error — the one thing a reader of this row has to know is that

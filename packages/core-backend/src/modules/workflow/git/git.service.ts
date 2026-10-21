@@ -80,6 +80,24 @@ const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
 /**
+ * The deadline of the one fetch that runs while holding a workspace's
+ * reservation (`changedFilesOfProposalHead`). Far below the runner's default:
+ * every other git operation on that workspace waits behind it, and the read it
+ * serves fails closed and is retried, so giving up early costs only a retry.
+ */
+const PROPOSAL_TARGET_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * The subject of the merge `mergeFromOrigin` writes when it brings a change
+ * request's source up to date with its target — the merge whose SECOND parent
+ * is the target tip it merged. `changedFilesOfProposalHead` recognises it by
+ * this subject, so the two are built in one place.
+ */
+function refreshMergeSubject(sourceBranch: string, targetBranch: string): string {
+  return `Refresh ${sourceBranch} from ${targetBranch}`;
+}
+
+/**
  * Git parses `--author="Name <email>"` by scanning for the last `<` and `>` and
  * taking everything before the `<` as the name. Stray angle brackets, newlines, or
  * carriage returns in either field break that parser or let a caller forge a
@@ -2099,25 +2117,30 @@ export class GitService implements IGitService {
         // discards a prior attempt's state, never real work.
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
+        // The source tip this attempt merges, resolved once: the merge below
+        // takes this sha, and the result reports it, so what the merge log
+        // records as the applied head is the second parent of the commit.
+        const { stdout: sourceTip } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}^{commit}`]);
+        const sourceHead = sourceTip.trim();
 
         if (opts.authorize) {
           // The tip this attempt merges into, and the paths it writes against
           // that tip. Re-read every attempt: a retry happens BECAUSE the
           // target moved, which can move its roles and its file set too.
-          const { stdout: targetSha } = await this.git(cwd, ['rev-parse', `origin/${targetBranch}`]);
-          const changedPaths = await this.prChangedPathsAt(
-            cwd,
-            `origin/${targetBranch}`,
-            `origin/${sourceBranch}`,
-            { forAccessCheck: true },
-          );
-          await opts.authorize({ sha: targetSha.trim(), changedPaths });
+          // Both ends are the SHAS this attempt merges, never the ref names:
+          // the change-request reads fetch outside this reservation, so
+          // `origin/<source>` can move between the rev-parse above and here,
+          // and the callback would then authorize paths the merge never takes.
+          const { stdout: targetTip } = await this.git(cwd, ['rev-parse', 'HEAD']);
+          const targetSha = targetTip.trim();
+          const changedPaths = await this.prChangedPathsAt(cwd, targetSha, sourceHead, { forAccessCheck: true });
+          await opts.authorize({ sha: targetSha, changedPaths });
         }
 
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceHead]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
@@ -2150,11 +2173,19 @@ export class GitService implements IGitService {
         if (staged.trim() === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
+          // An earlier attempt's commit is this request's only if it merged
+          // this same head.
           const own =
             opts.appliedChangeNumber === undefined
               ? null
-              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber, opts.appliedChangeTitle);
-          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own };
+              : await this.ownMergeCommitOn(
+                  cwd,
+                  `origin/${targetBranch}`,
+                  opts.appliedChangeNumber,
+                  sourceHead,
+                  opts.appliedChangeTitle,
+                );
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own, mergedHead: sourceHead };
         }
 
         await this.git(cwd, [
@@ -2169,7 +2200,7 @@ export class GitService implements IGitService {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
           this.accessControl?.invalidate(baseWorkspaceId);
           // A commit of this request's own, with the subject the reader verifies.
-          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim(), mergedHead: sourceHead };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // Base moved under us — reset to the new tip and re-merge next loop.
@@ -2212,9 +2243,12 @@ export class GitService implements IGitService {
     baseWorkspaceId: string,
     targetBranch: string,
     number: number,
+    headSha: string,
     title?: string,
   ): Promise<string | null> {
     assertValidBranchName(targetBranch);
+    // No head, nothing a commit could be matched to: it owns none.
+    if (!/^[0-9a-f]{40,64}$/.test(headSha)) return null;
     const cwd = await this.repoDir(baseWorkspaceId);
     // The fetch runs outside the workspace mutex, the way the implicit and
     // per-request fetches do (see `fetchLocks`, `fetchPrRefs`): it writes only
@@ -2237,7 +2271,9 @@ export class GitService implements IGitService {
       );
       return null;
     }
-    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number, title));
+    return this.mutex.run(baseWorkspaceId, () =>
+      this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number, headSha, title),
+    );
   }
 
   /**
@@ -2265,6 +2301,13 @@ export class GitService implements IGitService {
    * {@link appliedMergeCommitOnTarget}, which the approval gate asks before it
    * refuses a retry that has nothing left to merge.
    *
+   * The message alone is not enough, so the commit must also have merged
+   * `headSha`, the request's own source head, as its second parent. A
+   * knowledge base moved here from another deployment carries that
+   * deployment's merge commits, numbered from 1 like ours, so `(#6)` on the
+   * target may be some other request #6. Taking it recorded that other
+   * request's change under this one.
+   *
    * `title` lets the old message format be recognised — see
    * {@link mergeCommitMessageNames}.
    */
@@ -2272,21 +2315,23 @@ export class GitService implements IGitService {
     cwd: string,
     targetRef: string,
     number: number,
+    headSha: string,
     title?: string,
   ): Promise<string | null> {
     // The whole message per commit. Records are NUL-separated (`-z`), the one
-    // byte a commit message cannot hold, and the sha is the record's first
-    // line: nothing a title may contain can split a record or a line early.
+    // byte a commit message cannot hold; the sha is the record's first line
+    // and the parents its second, so nothing a title may contain can split a
+    // record or a line early.
     const { stdout } = await this.git(cwd, [
       'log', '-z', '--merges', '--fixed-strings', `--grep=(#${number})`,
-      '--format=%H%n%B', targetRef,
+      '--format=%H%n%P%n%B', targetRef,
     ]);
     for (const record of stdout.split('\0')) {
-      const newline = record.indexOf('\n');
-      const sha = (newline === -1 ? record : record.slice(0, newline)).trim();
+      const [shaLine = '', parentsLine = '', ...rest] = record.split('\n');
+      const sha = shaLine.trim();
       if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;
-      const message = newline === -1 ? '' : record.slice(newline + 1);
-      if (mergeCommitMessageNames(message, number, title)) return sha;
+      if (parentsLine.trim().split(/\s+/)[1] !== headSha) continue;
+      if (mergeCommitMessageNames(rest.join('\n'), number, title)) return sha;
     }
     return null;
   }
@@ -3482,6 +3527,16 @@ export class GitService implements IGitService {
         `commit ${mergeSha} is not a merge commit, so it cannot be change request #${number}'s`,
       );
     }
+    // The head the request's apply recorded, when the caller knows it. A
+    // subject naming `(#N)` is not unique to this request: a knowledge base
+    // that moved here from another deployment carries that deployment's merge
+    // commits, numbered from 1 like ours, and an apply that wrote no commit of
+    // its own once recorded one of those as its own.
+    if (applied.headSha !== undefined && headSha !== applied.headSha) {
+      throw new AppliedChangeMismatchError(
+        `commit ${mergeSha} merged ${headSha}, not change request #${number}'s head ${applied.headSha}`,
+      );
+    }
     const baseSha = await revParse(`${mergeSha}^1^{commit}`);
     if (!baseSha) {
       throw new AppliedChangeMismatchError(`no first parent for commit ${mergeSha}`);
@@ -3564,6 +3619,175 @@ export class GitService implements IGitService {
       const { baseSha } = await this.appliedEnds(cwd, applied);
       return this.prFilesForRange(cwd, `${baseSha}..${applied.mergeSha}`, opts.patchCap ?? 400);
     });
+  }
+
+  /**
+   * The files a change request PROPOSED, read from the source head its apply
+   * recorded (`pr_merge_log.head_sha_at_merge`) against the target's
+   * published tip, three dots: the changes on that head since it and the
+   * target last met. What an applied request that made NO merge commit of its
+   * own still has to show — the target already held everything it proposed,
+   * so nothing on the target records its files, and its branch is retired.
+   *
+   * The head is this request's own (its own merge-log row recorded it). When
+   * the head is already part of the target — its commits landed through
+   * another request — it is read against the target as it stood before they
+   * arrived (see {@link targetBeforeArrival}), so the request still lists what
+   * it proposed. The head is not on its own proof against another request's
+   * change, though: when
+   * the head and the target last met at more than one commit, which one the
+   * diff starts from decides whose files it lists — see {@link proposalBase},
+   * which needs `sourceBranch` to recognise the request's own refresh merge
+   * and otherwise answers no files. The
+   * TARGET is refreshed first, and that refresh is REQUIRED: a stale target
+   * tip older than the head's fork point would put the target's own later
+   * work — other people's files — into the diff, and nothing local can prove
+   * the tip it has is not that old. So when the target cannot be fetched this
+   * fails closed with a plain `Error` (retryable: the next read fetches
+   * again), never answering from the last-seen tip. The head is never
+   * fetched — the retired branch cannot be — so it is in this clone's object
+   * store or this rejects with a `WorkflowValidationError`.
+   */
+  async changedFilesOfProposalHead(
+    workspaceId: string,
+    targetBranch: string,
+    headSha: string,
+    opts: { patchCap?: number; sourceBranch?: string } = {},
+  ): Promise<PullRequestFile[]> {
+    assertValidBranchName(targetBranch);
+    if (opts.sourceBranch !== undefined) assertValidBranchName(opts.sourceBranch);
+    if (!/^[0-9a-f]{40,64}$/.test(headSha)) {
+      throw new WorkflowValidationError(`invalid commit sha: ${headSha}`);
+    }
+    const cwd = await this.repoDir(workspaceId);
+    // Unlike the open-request reads, the fetch runs UNDER the reservation:
+    // this answer is only safe against the tip this fetch delivered, so the
+    // fetch, the target's resolution and the diff are one serialized git
+    // operation. What that costs the workspace is bounded twice: the fetch
+    // gets its own short deadline rather than the runner's default (a slow
+    // origin fails this read closed, retryable, instead of holding every other
+    // git operation here), and the caller answers repeat reads from its detail
+    // cache before it ever gets here.
+    return this.mutex.run(workspaceId, async () => {
+      if (!(await this.fetchPublishedRefs(cwd, [targetBranch], { timeoutMs: PROPOSAL_TARGET_FETCH_TIMEOUT_MS }))) {
+        throw new Error(`could not refresh ${targetBranch} to read commit ${headSha} against it`);
+      }
+      try {
+        await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${headSha}^{commit}`]);
+      } catch (err) {
+        // Only git's own "no such object" (exit 1 under --quiet) means the
+        // clone lacks the head; a deadline or a broken repository is not
+        // that answer and propagates as the failure it is.
+        if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+        throw new WorkflowValidationError(`commit ${headSha} is not in this clone`);
+      }
+      const baseRef = await this.resolvePublishedBranchRef(cwd, targetBranch);
+      let base = await this.proposalBase(cwd, baseRef, headSha, targetBranch, opts.sourceBranch);
+      if (base === headSha) {
+        // The head itself is on the target: its commits reached it through
+        // another request (a stacked draft cut from this one, or a draft
+        // sharing its commit). Against today's target it changes nothing, but
+        // it still proposed what it proposed — so it is read against the target
+        // as it stood just BEFORE the head arrived: the first-parent parent of
+        // the mainline commit that brought it in. Only the head's own commits
+        // lie between the two, never what that other request added.
+        const before = await this.targetBeforeArrival(cwd, baseRef, headSha);
+        base = before === null
+          ? null
+          : await this.proposalBase(cwd, before, headSha, targetBranch, opts.sourceBranch);
+      }
+      if (base === null) return [];
+      return this.prFilesForRange(cwd, `${base}..${headSha}`, opts.patchCap ?? 400);
+    });
+  }
+
+  /**
+   * Where a proposal head and the target last met, for
+   * {@link changedFilesOfProposalHead}: the commit the head's change is read
+   * against, or null when no commit can be named without guessing.
+   *
+   * One merge base is that commit, exactly as a three-dot diff reads it. More
+   * than one is what stacked drafts leave behind: the apply refreshed the draft
+   * by merging the target into it, and the target later received the draft's
+   * own commit through another request, so both of the refresh merge's
+   * parents are now on the target. A three-dot diff picks one of them at
+   * git's discretion, and the draft-side one reads back exactly what the
+   * refresh pulled from the target — other requests' files under this
+   * request's number. When the head is this request's own refresh merge (the
+   * subject {@link mergeFromOrigin} writes, its second parent the target tip
+   * it merged, and that parent one of the bases) the change is read against
+   * that parent: what the request showed when it was applied. Anything else
+   * answers null — no file list rather than someone else's.
+   */
+  private async proposalBase(
+    cwd: string,
+    baseRef: string,
+    headSha: string,
+    targetBranch: string,
+    sourceBranch: string | undefined,
+  ): Promise<string | null> {
+    let bases: string[];
+    try {
+      const { stdout } = await this.git(cwd, ['merge-base', '--all', baseRef, headSha]);
+      bases = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    } catch (err) {
+      // Exit 1 is git's "these histories never met"; anything else propagates.
+      if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+      return null;
+    }
+    if (bases.length === 1) return bases[0];
+    if (bases.length === 0 || !sourceBranch) return null;
+    const { stdout } = await this.git(cwd, ['log', '-1', '--format=%P%n%s', headSha]);
+    const [parentLine = '', subject = ''] = stdout.split('\n');
+    const parents = parentLine.trim().split(' ').filter(Boolean);
+    const targetSide = parents[1];
+    return parents.length === 2 &&
+      subject.trim() === refreshMergeSubject(sourceBranch, targetBranch) &&
+      bases.includes(targetSide)
+      ? targetSide
+      : null;
+  }
+
+  /**
+   * The target as it stood just before `headSha` became part of it: the first
+   * parent of the oldest commit on the target's first-parent line that
+   * contains the head — the merge (or commit) that brought the head in. When
+   * the head lies on that line itself (it reached the target with no merge of
+   * its own, or is the target's tip), the head is that commit, so the answer
+   * is the head's own first parent: never the head, which would read its
+   * change against itself as nothing. Null when nothing on that line holds the
+   * head or the arrival is a root commit.
+   */
+  private async targetBeforeArrival(cwd: string, baseRef: string, headSha: string): Promise<string | null> {
+    // Two walks, intersected: git's `--first-parent --ancestry-path` together
+    // drops the very merge that brought the head in, so the target's line and
+    // the head's descendants are listed separately.
+    const lines = (out: string) => out.split('\n').map((l) => l.trim()).filter(Boolean);
+    const [{ stdout: mainline }, { stdout: descendants }] = await Promise.all([
+      this.git(cwd, ['rev-list', '--first-parent', `${headSha}..${baseRef}`]),
+      this.git(cwd, ['rev-list', '--ancestry-path', `${headSha}..${baseRef}`]),
+    ]);
+    const holdsHead = new Set(lines(descendants));
+    const line = lines(mainline);
+    // The range leaves the head out, so an empty line means the head is the
+    // tip (the caller only asks once the head is on the target).
+    const arrival = line.length === 0 ? headSha : line.filter((sha) => holdsHead.has(sha)).pop();
+    if (!arrival) return null;
+    const before = await this.firstParent(cwd, arrival);
+    // The arrival stepping straight onto the head: the head is on the line.
+    return before === headSha ? this.firstParent(cwd, headSha) : before;
+  }
+
+  /** A commit's first parent, or null for a root commit. */
+  private async firstParent(cwd: string, sha: string): Promise<string | null> {
+    try {
+      const { stdout: parent } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', `${sha}^1`]);
+      return parent.trim() || null;
+    } catch (err) {
+      // A root commit has no parent: nothing stood before it.
+      if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+      return null;
+    }
   }
 
   /**
@@ -3979,24 +4203,43 @@ export class GitService implements IGitService {
 
   /** Fetch the two branches a CR spans so origin refs reflect the latest push. */
   private async fetchPrRefs(cwd: string, baseBranch: string, headBranch: string): Promise<void> {
+    await this.fetchPublishedRefs(cwd, [baseBranch, headBranch]);
+  }
+
+  /**
+   * {@link fetchPrRefs} for any set of published branches, same contract.
+   * Answers whether the fetch succeeded, for the one caller that must not
+   * read a stale tip (`changedFilesOfProposalHead`).
+   */
+  private async fetchPublishedRefs(
+    cwd: string,
+    branches: string[],
+    opts: { timeoutMs?: number } = {},
+  ): Promise<boolean> {
     // Best-effort: a branch may be local-only (rare) or origin briefly
     // unreachable; `resolveBranchRef` still falls back to whatever is local.
     // `--no-write-fetch-head` — this runs on the CR-detail path (polled around
-    // every merge) and only the `origin/<branch>` refs are read; writing two
+    // every merge) and only the `origin/<branch>` refs are read; writing
     // for-merge FETCH_HEAD entries here can break a concurrent refresh in the
     // same clone (see `pull`).
     //
     // Explicit destination refspecs for the same reason as `mergeChangeRequest`:
     // "reflect the latest push" is exactly what a drifted `remote.origin.fetch`
     // silently stops delivering, and the CR diff would then be computed against
-    // a stale head. Every caller `assertValidBranchName`s both branches.
-    await this.git(cwd, [
-      'fetch', '--no-write-fetch-head', 'origin',
-      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`,
-      `+refs/heads/${headBranch}:refs/remotes/origin/${headBranch}`,
-    ]).then(
-      () => void this.prFetchFailureLoggedAt.delete(cwd),
-      (err: unknown) => this.notePrFetchFailure(cwd, err),
+    // a stale head. Every caller `assertValidBranchName`s every branch.
+    return this.git(
+      cwd,
+      ['fetch', '--no-write-fetch-head', 'origin', ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`)],
+      opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs },
+    ).then(
+      () => {
+        this.prFetchFailureLoggedAt.delete(cwd);
+        return true;
+      },
+      (err: unknown) => {
+        this.notePrFetchFailure(cwd, err);
+        return false;
+      },
     );
   }
 

@@ -122,10 +122,14 @@ export interface ChangedPathPair {
 }
 
 /**
- * An APPLIED change request, named by BOTH the commit its row records and the
- * number that row carries — because reading the commit's own change is only
- * sound if the commit really is that request's merge commit, and the number is
- * what proves it (the merge commit's subject ends with `(#<number>)`).
+ * An APPLIED change request, named by the commit its row records, the number
+ * that row carries and, when its apply logged one, the source head it merged —
+ * because reading the commit's own change is only sound if the commit really is
+ * that request's merge commit. The number is checked against the merge commit's
+ * subject (it ends with `(#<number>)`), and the head against its second
+ * parent: the number alone does not prove ownership, since a knowledge base
+ * that moved between deployments carries other merge commits naming the same
+ * numbers (see `headSha` below).
  *
  * The pair travels together so no read can ask for a commit without saying which
  * request it must belong to. `merged_sha` is not reliably a commit the request
@@ -144,6 +148,14 @@ export interface AppliedChangeRef {
    * the number after git's subject — be recognised as the request's own.
    */
   title?: string;
+  /**
+   * The source head this request's apply recorded (`pr_merge_log.head_sha_at_merge`).
+   * When given, the merge commit's SECOND parent must be it. The number alone
+   * does not prove the commit is this request's: a knowledge base that moved
+   * between deployments carries another deployment's merge commits, whose
+   * subjects name the same small numbers.
+   */
+  headSha?: string;
 }
 
 /**
@@ -164,7 +176,13 @@ export interface AppliedChangeRef {
  *   file list is empty anyway, so nothing readable is lost.
  */
 export type AppliedMergeResult =
-  | { kind: 'merged'; sha: string; mergeCommit: string | null }
+  | {
+      kind: 'merged';
+      sha: string;
+      mergeCommit: string | null;
+      /** The source head this merge merged — `mergeCommit`'s second parent when it has one. */
+      mergedHead?: string;
+    }
   | { kind: 'conflicts'; paths: string[] };
 
 export type PrFileStatus =
@@ -426,6 +444,52 @@ export interface PullRequestDetail extends PullRequestSummary {
    * `DELETE /api/workflow/change-requests/:number` re-checks server-side.
    */
   viewerCanDelete: boolean;
+  /**
+   * How a request that is no longer open ended — what the finished view of
+   * the change-request dialog says about it. Absent (or `null`) while the
+   * request is open.
+   */
+  finished?: PullRequestFinished | null;
+}
+
+/**
+ * How an applied or closed change request ended, from its row and the merge
+ * log. Read-only facts; nothing here is a verb.
+ */
+export interface PullRequestFinished {
+  /** When it was applied or closed (the row's `closed_at`), ISO; `null` when the row records none. */
+  at: string | null;
+  /**
+   * Who applied it, by DISPLAY NAME only: the name the request's newest
+   * succeeded apply recorded in the merge log (the name its merge commit
+   * carries). Never an email address. `null` for a closed request — who
+   * closed one is recorded nowhere — and for an applied one whose apply
+   * recorded no usable name.
+   */
+  appliedBy: { name: string } | null;
+  /** The recorded close reason; `'repository-replaced'` is the one there is. `null` otherwise. */
+  closedReason: 'repository-replaced' | null;
+  /**
+   * The request's OWN merge commit, verified the way the detail's file list
+   * is (second parent, subject naming this request) — what the view reads
+   * each file "as applied" from (the commit against its first parent).
+   * `null` for a closed request, and for an applied one whose apply made no
+   * commit of its own (the target already held everything): the row's
+   * recorded sha is then the target tip, usually another request's commit,
+   * and is never sent.
+   */
+  appliedSha: string | null;
+  /**
+   * `true` only for an applied request that RECORDED a merge commit which
+   * could not be read on this answer: the commit is not in this clone yet, or
+   * the merge log that verifies it could not be read. Its change exists but
+   * is unavailable here, so `appliedSha` is `null` WITHOUT meaning the apply
+   * made no commit, and the view must not say nothing was applied. `false`
+   * everywhere else — a closed request, an apply verified as its own, and one
+   * that made no commit of its own (none recorded, or the recorded one is
+   * verifiably another request's).
+   */
+  appliedUnreadable: boolean;
 }
 
 /**

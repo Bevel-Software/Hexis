@@ -38,3 +38,32 @@ export {
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
 export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
 export { OpenPageInPlatformContext } from './components/renderers/htmlToolBridge';
+/**
+ * What another module needs to read and link a workspace's files without
+ * reaching into workspace's internals: change requests (the finished view
+ * above all) dial a branch's workspace, read a file's bytes at a commit, map
+ * a failed read, and ask which renderer a path gets.
+ */
+export { hasFileViewer, isBinaryFile, rendersAsText } from './components/renderers';
+export {
+  getOrCreateWorkspace,
+  rawFileUrl,
+  readFile,
+  toApiError,
+  WorkspaceApiError,
+} from './services/workspace.api';
+/**
+ * The file pane and the renderer pieces a file shown outside the file page
+ * mounts: a change request's branch preview and a skill page's file pane.
+ */
+export { FilePaneCard } from './components/FilePaneCard';
+export {
+  getFileRenderer,
+  getRendererLayout,
+  type RendererFileRef,
+} from './components/renderers';
+export { DownloadFileButton } from './components/renderers/DownloadFileButton';
+export { READ_PANE } from './components/renderers/readPane';
+export { KbMarkdownView } from './components/renderers/KbMarkdownView';
+export type { KbImageResolver } from './components/renderers/kbMarkdownPipeline';
+export { HtmlRenderer } from './components/renderers/HtmlRenderer';
