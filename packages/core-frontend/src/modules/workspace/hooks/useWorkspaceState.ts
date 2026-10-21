@@ -339,7 +339,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * When a tree refresh last read an open tab's file, missing from the tree,
    * and found it there after all (a file the tree leaves out: access-pruned,
-   * `.bevelignore`d), by path. Refreshes run on every change event; within
+   * `.bevelignore`d), by workspace and path (`existenceKey`). Refreshes run on every change event; within
    * `TREE_ABSENT_RECHECK_MS` of that read they do not read it again.
    */
   const treeAbsentCheckedAtRef = useRef<Map<string, number>>(new Map());
@@ -679,14 +679,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         for (const tab of openTabsRef.current) {
           if (present.has(tab.path) || tab.deletedBy || isPendingDelete(tab.path)) continue;
           if (existenceChecksRef.current.has(existenceKey(workspaceId, tab.path))) continue;
-          const checkedAt = treeAbsentCheckedAtRef.current.get(tab.path);
+          const absentKey = existenceKey(workspaceId, tab.path);
+          const checkedAt = treeAbsentCheckedAtRef.current.get(absentKey);
           if (checkedAt !== undefined && Date.now() - checkedAt < TREE_ABSENT_RECHECK_MS) continue;
           const readFrom = workspaceId;
           const read = readFile(readFrom, tab.path);
           const seq = trackExistenceCheck(readFrom, tab.path, read);
           read.then(
-            () => treeAbsentCheckedAtRef.current.set(tab.path, Date.now()),
-            () => treeAbsentCheckedAtRef.current.delete(tab.path),
+            () => treeAbsentCheckedAtRef.current.set(absentKey, Date.now()),
+            () => treeAbsentCheckedAtRef.current.delete(absentKey),
           );
           read.catch((err) => {
             if (err instanceof WorkspaceApiError && err.status === 404) applyReadGone(readFrom, tab.path, seq, null);
@@ -2041,6 +2042,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     ownDeletesRef.current = new Map();
     deletedPathsRef.current = new Set();
     existenceChecksRef.current = new Map();
+    treeAbsentCheckedAtRef.current = new Map();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingUploads(new Map());
     // The banners go with them. An upload still routing when the user

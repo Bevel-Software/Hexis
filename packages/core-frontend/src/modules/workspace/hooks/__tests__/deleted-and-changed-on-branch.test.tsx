@@ -468,6 +468,27 @@ describe('a file deleted by someone else', () => {
     }
   });
 
+  it("does not skip the read on another branch because the branch just left found the file", async () => {
+    apiMocks.listFiles.mockImplementation(async () => treeOf([]));
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    act(() => bus.emit(treeChanged()));
+    await settle();
+
+    // Within the recheck window, on `feature` (ws-2), the same path is deleted.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'ws-2', name: 'Workspace', absolutePath: '/tmp/ws-2', createdAt: '2026-10-09T00:00:00.000Z' },
+      fileTree: treeOf([]),
+    });
+    act(() => { result.current.setPersistenceBranch('feature'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-2'));
+    await open(result, 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit({ ...treeChanged(), workspaceId: 'ws-2', branch: 'feature' } as WorkflowEvent));
+
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: null }));
+  });
+
   it("keeps an agent's change awaiting review on a tab someone else deleted", async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
