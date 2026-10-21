@@ -187,7 +187,9 @@ describe.skipIf(!PG_ADMIN_URL)('a commit under recovery (real Postgres, real git
           // While the agent runs, the row is out of every pass's reach, and
           // out of the count the merge waits on — but still a commit to land.
           seen.claimable = await pending.claimNext(WS, new Date(Date.now() + 60 * 60_000));
-          seen.queued = await pending.queuedOnBranch(DRAFT);
+          seen.queued = await pending.queuedOnBranch(DRAFT, { into: true });
+          // A merge OUT of the branch still waits for it: its save is not on the remote.
+          seen.queuedOut = await pending.queuedOnBranch(DRAFT);
           seen.live = await pending.hasLiveRowFor(WS, DRAFT, SAVE);
           // What `branch_status` lists as uncommitted: the save is committed
           // in the workspace (its push is what failed), so nothing.
@@ -223,6 +225,7 @@ describe.skipIf(!PG_ADMIN_URL)('a commit under recovery (real Postgres, real git
 
         expect(seen.claimable).toBeNull();
         expect(seen.queued).toEqual({ queued: 0, stuck: 0, needsAttention: null });
+        expect(seen.queuedOut).toEqual({ queued: 1, stuck: 0, needsAttention: null });
         expect(seen.live).toBe(true);
         expect(seen.uncommitted).toEqual([]);
         expect(seen.described).toBe('conflicts');
@@ -326,11 +329,24 @@ describe.skipIf(!PG_ADMIN_URL)('a commit under recovery (real Postgres, real git
   );
 
   it(
+    'a row escalated before the hand-off is not put under recovery',
+    async () => {
+      await pending.enqueue({ workspaceId: WS, branch: DRAFT, path: SAVE, authorEmail: 'ada@x.io', authorName: 'Ada' });
+      const row = await pending.claimNext(WS, new Date(Date.now() + 60 * 60_000));
+      // The repository is replaced while the worker holds the row.
+      expect(await pending.markNeedsAttentionOnBranch(DRAFT, 'The repository was replaced.')).toBe(1);
+      expect(await pending.markRecoveryStarted(row!.id)).toBe(false);
+      expect(await pending.queuedOnBranch(DRAFT)).toEqual({ queued: 0, stuck: 1, needsAttention: 'The repository was replaced.' });
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
     'a row escalated while the agent ran stays escalated when the agent returns',
     async () => {
       await pending.enqueue({ workspaceId: WS, branch: DRAFT, path: SAVE, authorEmail: 'ada@x.io', authorName: 'Ada' });
       const row = await pending.claimNext(WS, new Date(Date.now() + 60 * 60_000));
-      await pending.markRecoveryStarted(row!.id);
+      expect(await pending.markRecoveryStarted(row!.id)).toBe(true);
       // The repository is replaced mid-run: the row goes to a person.
       expect(await pending.markNeedsAttentionOnBranch(DRAFT, 'The repository was replaced.')).toBe(1);
       await pending.markRecoveryFinished(row!.id);

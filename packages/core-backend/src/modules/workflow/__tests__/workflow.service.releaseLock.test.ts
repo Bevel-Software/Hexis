@@ -78,7 +78,7 @@ function makePending(): PendingCommitsService {
     claimNext: vi.fn().mockResolvedValue(null),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),

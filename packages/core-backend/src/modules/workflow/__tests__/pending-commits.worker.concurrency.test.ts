@@ -42,7 +42,7 @@ function queueWith(rows: PendingCommit[]) {
     hasReadyRow: vi.fn().mockResolvedValue(false),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
   } as unknown as PendingCommitsService & { markSucceeded: ReturnType<typeof vi.fn>; claimNext: ReturnType<typeof vi.fn> };
   return service;

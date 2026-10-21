@@ -404,7 +404,12 @@ export class PendingCommitsWorker {
         // commits get a fresh transient budget, and holds the row
         // `recovering` while the agent runs, so the merge the agent makes
         // for it (`update_branch`) does not wait on it.
-        await this.deps.service.markRecoveryStarted(row.id);
+        if (!(await this.deps.service.markRecoveryStarted(row.id))) {
+          // Escalated to a person since this pass claimed it (its repository
+          // replaced): the escalation stands, and no agent runs for it.
+          log.warn(`recovery not started for ws=${row.workspaceId} path=${row.path}: the row was escalated meanwhile`);
+          return;
+        }
         log.warn(
           `transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
         );

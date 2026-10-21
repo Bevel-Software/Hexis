@@ -4307,6 +4307,8 @@ export class WorkflowService implements IWorkflowService {
   /**
    * Wait until no commit is queued on `branch`, or the bound runs out. A
    * commit escalated to a person ends the wait at once: nothing will land it.
+   * `into`: the merge is into `branch`'s own workspace, which a commit under
+   * recovery does not hold (see `PendingCommitsService.queuedOnBranch`).
    *
    * Polls the queue rather than draining it: the worker's own per-workspace
    * serialization stays the only writer to the clone, and the row is deleted
@@ -4314,11 +4316,12 @@ export class WorkflowService implements IWorkflowService {
    */
   private async awaitPendingCommits(
     branch: string,
+    opts: { into?: boolean } = {},
   ): Promise<{ ok: true } | { ok: false; pending: number; needsAttention?: string }> {
     const { timeoutMs, pollMs } = this.mergeWaitForPendingCommits;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const { queued, stuck, needsAttention } = await this.pendingCommits.queuedOnBranch(branch);
+      const { queued, stuck, needsAttention } = await this.pendingCommits.queuedOnBranch(branch, opts);
       if (needsAttention !== null) return { ok: false, pending: queued + stuck, needsAttention };
       if (queued === 0) return { ok: true };
       if (Date.now() >= deadline) return { ok: false, pending: queued };
@@ -4913,8 +4916,10 @@ export class WorkflowService implements IWorkflowService {
     // the first or swept up by the second. Waited for, as `mergeBranch` waits
     // — outside the lifecycle locks, which must not be held for seconds of
     // waiting on a queue.
+    // The workspace's own branch is waited on as the merge's destination: a
+    // commit under recovery there is the one this merge is made to rescue.
     for (const b of from === branch ? [branch] : [from, branch]) {
-      const settled = await this.awaitPendingCommits(b);
+      const settled = await this.awaitPendingCommits(b, { into: b === branch });
       if (!settled.ok) {
         const message = settled.needsAttention
           ? `A commit queued on "${b}" failed and needs a person: ${settled.needsAttention} ` +

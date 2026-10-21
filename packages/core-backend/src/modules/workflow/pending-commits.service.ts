@@ -38,10 +38,11 @@
  *                                                    (status='needs_attention')
  *
  * `recovering` is the row the recovery agent was spawned for, for as long as
- * the agent runs: no pass claims it, and the wait a merge makes for commits
- * still being committed (`queuedOnBranch`) does not count it — the agent is
- * there to merge the shared branch in FOR that row, and waiting on it would
- * refuse the agent's own merge. It is still a commit that has not landed, so
+ * the agent runs: no pass claims it, and the wait a merge INTO its branch's
+ * workspace makes for commits still being committed (`queuedOnBranch`) does
+ * not count it — the agent is there to merge the shared branch in FOR that
+ * row, and waiting on it would refuse the agent's own merge. A merge OUT of
+ * the branch still waits for it. It is still a commit that has not landed, so
  * everything else that asks "is there work left to land?" counts it (see
  * {@link LIVE_STATUSES}).
  */
@@ -361,9 +362,13 @@ export class PendingCommitsService {
    * budget, and hold the row in `'recovering'` while the agent runs: no pass
    * claims it, and the merge the agent makes to rescue it does not wait for
    * it (see `queuedOnBranch`).
+   *
+   * Only from `'running'`, the status the worker holds the row in: a row
+   * escalated since the worker claimed it (its repository replaced) stays
+   * escalated, and the answer is false — the caller must not spawn the agent.
    */
-  async markRecoveryStarted(id: string): Promise<void> {
-    await this.db
+  async markRecoveryStarted(id: string): Promise<boolean> {
+    const started = await this.db
       .update(pendingCommits)
       .set({
         status: 'recovering',
@@ -371,7 +376,9 @@ export class PendingCommitsService {
         recoveryAgentRuns: sql`${pendingCommits.recoveryAgentRuns} + 1`,
         lastAttemptedAt: new Date(),
       })
-      .where(eq(pendingCommits.id, id));
+      .where(and(eq(pendingCommits.id, id), eq(pendingCommits.status, 'running')))
+      .returning({ id: pendingCommits.id });
+    return started.length > 0;
   }
 
   /**
@@ -517,12 +524,15 @@ export class PendingCommitsService {
    * pushed yet either), how many were escalated to `needs_attention`, and the
    * message of the oldest of those, or null when none was.
    *
-   * A `recovering` row is neither: it is the commit the recovery agent was
-   * spawned to rescue, and the agent rescues it by merging the shared branch
-   * in and publishing (`update_branch`) — the very merge this count holds.
-   * Counted, it would refuse the agent's merge on account of the commit the
-   * merge is for. Every other row on the branch, a save made during the
-   * recovery run included, still counts.
+   * A `recovering` row is queued for a merge OUT of the branch (`mergeBranch`,
+   * or `updateBranch` reading it as `from`): that merge takes what the remote
+   * holds, and the row's save is not there yet. For a merge INTO the branch's
+   * own workspace (`into`) it is not counted: it is the commit the recovery
+   * agent was spawned to rescue, and the agent rescues it by merging the
+   * shared branch in and publishing (`update_branch`) — counted, it would
+   * refuse that merge on account of the commit the merge is for. Every other
+   * row on the branch, a save made during the recovery run included, counts
+   * either way.
    *
    * Keyed on the branch the row was written for, not a workspace id: the
    * question is asked by `mergeBranch`, which merges what the REMOTE holds of
@@ -530,6 +540,7 @@ export class PendingCommitsService {
    */
   async queuedOnBranch(
     branch: string,
+    opts: { into?: boolean } = {},
   ): Promise<{ queued: number; stuck: number; needsAttention: string | null }> {
     const rows = await this.db
       .select({ status: pendingCommits.status, lastError: pendingCommits.lastError })
@@ -539,7 +550,9 @@ export class PendingCommitsService {
       .orderBy(asc(pendingCommits.queuedAt), asc(pendingCommits.id));
     const stuck = rows.filter((r) => r.status === 'needs_attention');
     return {
-      queued: rows.filter((r) => r.status === 'pending' || r.status === 'running').length,
+      queued: rows.filter(
+        (r) => r.status === 'pending' || r.status === 'running' || (r.status === 'recovering' && !opts.into),
+      ).length,
       stuck: stuck.length,
       needsAttention:
         stuck.length === 0 ? null : (stuck[0]?.lastError || 'A queued commit on this branch failed and needs a person.'),

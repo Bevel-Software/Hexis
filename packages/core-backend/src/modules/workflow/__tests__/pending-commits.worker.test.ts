@@ -58,7 +58,7 @@ function makeService(): PendingCommitsService {
     hasReadyRow: vi.fn().mockResolvedValue(false),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
     markRecoveryFinished: vi.fn().mockResolvedValue(undefined),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
@@ -225,6 +225,24 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(service.markRecoveryStarted).toHaveBeenCalled();
     expect(service.markRecoveryFinished).toHaveBeenCalledWith('row-1');
     expect(service.markNeedsAttention).not.toHaveBeenCalled();
+  });
+
+  it('spawns no agent for a row escalated between its claim and the hand-off, and leaves the escalation alone', async () => {
+    // The repository was replaced while the commit ran: the row is
+    // `needs_attention` now, and `markRecoveryStarted` (guarded on `running`)
+    // refuses to move it.
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: conflict'));
+    vi.mocked(service.markRecoveryStarted).mockResolvedValueOnce(false);
+
+    await worker.drainOnce();
+
+    expect(service.markRecoveryStarted).toHaveBeenCalledWith('row-1');
+    expect(recoveryAgent.run).not.toHaveBeenCalled();
+    expect(service.markRecoveryFinished).not.toHaveBeenCalled();
+    expect(service.markNeedsAttention).not.toHaveBeenCalled();
+    expect(feedback.send).not.toHaveBeenCalled();
   });
 
   it('holds the row in recovery for exactly as long as the agent runs, however the run ends', async () => {

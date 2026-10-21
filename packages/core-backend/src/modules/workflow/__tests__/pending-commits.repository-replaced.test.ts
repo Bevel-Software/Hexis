@@ -141,12 +141,12 @@ describe('PendingCommitsService.queuedOnBranch', () => {
     expect(sql.params).toEqual(['alice/draft']);
   });
 
-  it('does not count the row under recovery — the merge waits for every other row', async () => {
+  it('does not count the row under recovery for a merge into its branch — that merge waits for every other row', async () => {
     // The recovery agent rescues a `recovering` row by merging the shared
     // branch in; counted, that row would refuse the agent's own merge. A save
     // made during the run is `pending` and holds the merge as any other.
     const only = selectDb([{ status: 'recovering', lastError: 'push rejected: conflict' }]);
-    await expect(new PendingCommitsService(only.db).queuedOnBranch('alice/draft')).resolves.toEqual({
+    await expect(new PendingCommitsService(only.db).queuedOnBranch('alice/draft', { into: true })).resolves.toEqual({
       queued: 0,
       stuck: 0,
       needsAttention: null,
@@ -155,7 +155,16 @@ describe('PendingCommitsService.queuedOnBranch', () => {
       { status: 'recovering', lastError: 'push rejected: conflict' },
       { status: 'pending', lastError: null },
     ]);
-    await expect(new PendingCommitsService(withSave.db).queuedOnBranch('alice/draft')).resolves.toEqual({
+    await expect(new PendingCommitsService(withSave.db).queuedOnBranch('alice/draft', { into: true })).resolves.toEqual({
+      queued: 1,
+      stuck: 0,
+      needsAttention: null,
+    });
+  });
+
+  it('counts the row under recovery for a merge out of its branch — its save is not on the remote yet', async () => {
+    const { db } = selectDb([{ status: 'recovering', lastError: 'push rejected: conflict' }]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
       queued: 1,
       stuck: 0,
       needsAttention: null,
