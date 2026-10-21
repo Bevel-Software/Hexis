@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createMcpRoutes } from '../mcp.routes.js';
 import { McpService } from '../mcp.service.js';
-import { SpillStore } from '../../workspace/spill-store.js';
+import { SpillStore } from '../../workspace/index.js';
 import { TOOL_READ_ONLY_SETTING, ToolReadOnlyHints, ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import { createCatalogRevisionRoutes } from '../../../core/catalog-revision.js';

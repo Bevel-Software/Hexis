@@ -8,7 +8,7 @@ import {
   type DeploymentSettingsService,
 } from '../settings/deployment-settings.service.js';
 import { logger } from '../../shared/logging.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId, req.userEmail)
+import '../auth/index.js'; // Express Request augmentation (req.userId, req.userEmail), through auth's public entry
 
 const log = logger('tool-read-only-hints');
 
