@@ -207,7 +207,9 @@ export function createToolHintsRoutes(
       const name = String(req.params.name);
       // The user ID, as the setup routes record it: `updated_by` is a uuid column.
       const entry = await hints.set(name, readOnly, req.userId ?? null);
-      log.info(`${req.userEmail ?? 'an admin'} set the read-only hint of "${name}" to ${readOnly === null ? 'its built-in value' : String(readOnly)}`);
+      // The admin by user id, as the row records them: an address is personal
+      // data, and the log keeps its lines longer than the audit needs it.
+      log.info(`admin ${req.userId ?? 'unknown'} set the read-only hint of "${name}" to ${readOnly === null ? 'its built-in value' : String(readOnly)}`);
       res.json(entry);
     } catch (err) {
       if (err instanceof UnknownToolError) {
