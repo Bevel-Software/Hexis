@@ -179,6 +179,23 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     expect(server.mcp).toEqual([]);
   });
 
+  it('answers closed and runs nothing for calls still being decided when the view ends, even after its Allow', async () => {
+    const server = stubServer();
+    const { frame, nextView } = mount('file page');
+    frame.post({ type: 'bevel.tool.call', requestId: 'c1', fn: 'callToolChain', args: ['return 1'] });
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    await waitFor(() => expect(frame.replies).toEqual([expect.objectContaining({ requestId: 'c1', ok: true })]));
+
+    frame.post(write('w1'));
+    frame.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
+    frame.post({ type: 'bevel.tool.call', requestId: 'c2', fn: 'callToolChain', args: ['return 2'] });
+    nextView();
+    await waitFor(() => expect(frame.replies).toHaveLength(4));
+    for (const reply of frame.replies.slice(1)) expect(reply).toMatchObject({ ok: false, code: 'closed' });
+    expect(screen.queryByText(CARD)).toBeNull();
+    expect(server.mcp).toEqual(['call_tool_chain']);
+  });
+
   it('answers requireTools true on the file page with nothing shown', async () => {
     const { frame } = mount('file page');
     frame.post({ type: 'bevel.tools.require', requestId: 'q1' });
