@@ -318,15 +318,15 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     if (scopes?.length) {
       const granted = new Set((seen.scope ?? '').split(' ').filter(Boolean));
       if (!scopes.every((s) => granted.has(s))) {
-        // Refused like the others, in the log; `invalid_scope` to the client
-        // (RFC 6749 §5.2), since the token itself is fine — and untouched, so
-        // the same token refreshes with the scope it was granted.
-        log.warn('refresh refused: requested scope exceeds the originally granted scope', {
-          clientId,
-          connectionId: seen.connectionId ?? null,
-          userId: seen.userId,
-        });
-        throw new InvalidScopeError('Requested scope exceeds the originally granted scope');
+        // `invalid_scope` to the client (RFC 6749 §5.2), since the token
+        // itself is fine — and untouched, so the same token refreshes with
+        // the scope it was granted.
+        return this.refuseRefresh(
+          'requested scope exceeds the originally granted scope',
+          'Requested scope exceeds the originally granted scope',
+          seen,
+          (message) => new InvalidScopeError(message),
+        );
       }
       scope = scopes.join(' ');
     }
@@ -362,6 +362,11 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // existed is placed under one first, outside the transaction, as a first
     // mint would place it: finding or making a connection is idempotent.
     const connectionId = seen.connectionId ?? (await this.ensureConnection(seen.userId, seen.clientId));
+    // The opportunistic prune too runs BEFORE the transaction opens, on the
+    // pool: inside it, this request would hold a transaction's client while
+    // waiting for a second one, and a burst of refreshes the size of the pool
+    // would have every one of them wait out the connect timeout.
+    await this.pruneTokenTables(now.getTime());
     const { consumed, tokens, replayed } = await this.deps.db.transaction(async (tx) => {
       let row = rotatedAgoMs === null ? await this.retireFresh(tx, hash, clientId, now) : undefined;
       let replayed = rotatedAgoMs !== null;
@@ -424,18 +429,23 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     return row;
   }
 
-  /** The one place a refresh is refused: logged with its reason, never the token, then the client's `invalid_grant`. */
+  /**
+   * The one place a refresh is refused: logged with its reason, never the
+   * token, then the client's error — `invalid_grant` unless the caller says
+   * otherwise (a widened scope is `invalid_scope`).
+   */
   private refuseRefresh(
     reason: string,
     clientMessage: string,
     row: { clientId: string; connectionId?: string | null; userId?: string },
+    error: (message: string) => Error = (message) => new InvalidGrantError(message),
   ): never {
     log.warn(`refresh refused: ${reason}`, {
       clientId: row.clientId,
       connectionId: row.connectionId ?? null,
       userId: row.userId ?? null,
     });
-    throw new InvalidGrantError(clientMessage);
+    throw error(clientMessage);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -565,8 +575,10 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    *   first mint, which finds or makes the live connection for (user, client).
    * @param tx The transaction the insert belongs to, when the mint must land
    *   with the statement that consumed the token it replaces (a refresh).
-   *   The prune stays on the pool, outside it: a best-effort statement that
-   *   fails inside a transaction would abort the mint it is meant to spare.
+   *   The prune is then the caller's, before the transaction opens: a
+   *   best-effort statement that fails inside a transaction would abort the
+   *   mint it is meant to spare, and one on the pool from inside it would
+   *   hold this request's client while waiting for another.
    */
   private async mintTokens(
     userId: string,
@@ -574,35 +586,17 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     scope: string | null,
     resource: string | null,
     connectionId?: string,
-    tx: Tx | Database = this.deps.db,
+    tx?: Tx,
   ): Promise<OAuthTokens> {
     const accessToken = this.deps.tokenPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const refreshToken = this.refreshPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const now = Date.now();
-    // Opportunistic pruning, piggybacked on mint (one per sign-in / refresh —
-    // no scheduler needed) so the oauth tables stay bounded: a token row whose
-    // refresh window has closed can never authenticate again (revoked-but-live
-    // rows are kept until then, so revocation stays observable), and an auth
-    // code past its 60s TTL can never be exchanged. Best-effort — a cleanup
-    // hiccup must not fail the token issuance itself.
-    try {
-      const cutoff = new Date(now);
-      // A rotated row can authenticate for its access token's hour and be
-      // replayed for the reuse grace; past both it is history only.
-      const rotatedCutoff = new Date(now - ACCESS_TTL_MS - REFRESH_REUSE_GRACE_MS);
-      await this.deps.db.delete(oauthTokens).where(
-        or(
-          lt(oauthTokens.refreshExpiresAt, cutoff),
-          and(isNull(oauthTokens.refreshExpiresAt), lt(oauthTokens.expiresAt, cutoff)),
-          lt(oauthTokens.rotatedAt, rotatedCutoff),
-        ),
-      );
-      await this.deps.db.delete(oauthAuthCodes).where(lt(oauthAuthCodes.expiresAt, cutoff));
-    } catch (err) {
-      log.warn('token-table prune failed (non-fatal):', { err });
-    }
+    // A mint of its own (a sign-in) prunes here; a refresh pruned before its
+    // transaction opened.
+    if (!tx) await this.pruneTokenTables(now);
     const boundTo = connectionId ?? (await this.ensureConnection(userId, clientId));
-    await tx.insert(oauthTokens).values({
+    const sink: Tx | Database = tx ?? this.deps.db;
+    await sink.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),
       refreshTokenHash: hashToken(refreshToken),
       clientId,
@@ -620,6 +614,34 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       refresh_token: refreshToken,
       ...(scope ? { scope } : {}),
     };
+  }
+
+  /**
+   * Opportunistic pruning, piggybacked on every mint (one per sign-in /
+   * refresh — no scheduler needed) so the oauth tables stay bounded: a token
+   * row whose refresh window has closed can never authenticate again
+   * (revoked-but-live rows are kept until then, so revocation stays
+   * observable), a rotated row can authenticate for its access token's hour
+   * and be replayed for the reuse grace and past both is history only, and
+   * an auth code past its 60s TTL can never be exchanged. Best-effort, on the
+   * pool and never inside a transaction — a cleanup hiccup must not fail the
+   * token issuance itself.
+   */
+  private async pruneTokenTables(now: number): Promise<void> {
+    try {
+      const cutoff = new Date(now);
+      const rotatedCutoff = new Date(now - ACCESS_TTL_MS - REFRESH_REUSE_GRACE_MS);
+      await this.deps.db.delete(oauthTokens).where(
+        or(
+          lt(oauthTokens.refreshExpiresAt, cutoff),
+          and(isNull(oauthTokens.refreshExpiresAt), lt(oauthTokens.expiresAt, cutoff)),
+          lt(oauthTokens.rotatedAt, rotatedCutoff),
+        ),
+      );
+      await this.deps.db.delete(oauthAuthCodes).where(lt(oauthAuthCodes.expiresAt, cutoff));
+    } catch (err) {
+      log.warn('token-table prune failed (non-fatal):', { err });
+    }
   }
 
   /**
