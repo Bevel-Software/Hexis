@@ -151,6 +151,29 @@ describe('lint: module boundaries', () => {
     expect(boundaryHits(around)).toHaveLength(1);
     // A trailing slash is the module's folder, which is its index.
     expect(await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from '../audit/';\nexport { a };\n")).toEqual([]);
+    // Inside one module too: only the normal-form spelling of the same import passes.
+    const roundabout = await lintAs(
+      `${BE}/modules/mcp/__lint_fixture__.ts`,
+      "import { a } from './oauth/../mcp.routes.js';\nexport { a };\n",
+    );
+    expect(roundabout.filter((m) => m.includes('normal form'))).toHaveLength(1);
+    expect(await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from './mcp.routes.js';\nexport { a };\n")).toEqual([]);
+  });
+
+  it("rejects a package naming another module's internals through its own exports", async () => {
+    const cases = [
+      [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/', 'audit', 'request-audit.js'],
+      [`${BE}/modules/mcp/oauth/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/', 'audit', 'request-audit.js'],
+      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/', 'workspace', 'components/FileTree'],
+    ] as const;
+    for (const [file, prefix, other, internal] of cases) {
+      const deep = await lintAs(file, `import { a } from '${prefix}${other}/${internal}';\nexport { a };\n`);
+      expect(boundaryHits(deep), `${file}: ${prefix}${other}/${internal}`).toHaveLength(1);
+      expect(deep[0]).toContain(`modules/${other}/index.ts`);
+      for (const entry of [`${prefix}${other}`, `${prefix}${other}/index.js`]) {
+        expect(await lintAs(file, `import { a } from '${entry}';\nexport { a };\n`), entry).toEqual([]);
+      }
+    }
   });
 
   it('covers every folder depth a module has, with no ceiling', async () => {

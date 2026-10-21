@@ -25,7 +25,7 @@ import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
+import { AccessDeniedError } from '../access-model/index.js';
 import {
   AccessMutationService,
   AccessMutationError,
@@ -43,7 +43,7 @@ import {
   ROLE_TOKEN_PREFIX,
   type PluginTokenVerb,
   type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView } from './access-view.js';
 import type { AccessView, LabelledAccessView } from './access-view.js';

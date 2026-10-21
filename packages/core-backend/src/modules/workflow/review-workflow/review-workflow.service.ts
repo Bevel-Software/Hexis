@@ -15,7 +15,7 @@ import type {
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
-import { AccessUnreadableError } from '../../access-model/access-errors.js';
+import { AccessUnreadableError } from '../../access-model/index.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
 import { mergeCommitSubject } from '../git/merge-commit.js';

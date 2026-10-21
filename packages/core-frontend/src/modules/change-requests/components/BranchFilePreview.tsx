@@ -3,16 +3,11 @@ import { ExternalLink } from 'lucide-react';
 import { Banner } from '../../../shared/components';
 import { fetchFileAccess } from '../../access/api';
 import { FilePaneCard } from '../../workspace/components/FilePaneCard';
-import {
-  CanDownloadContext,
-  DownloadFileButton,
-} from '../../workspace/components/renderers/DownloadFileButton';
+import { CanDownloadContext } from '../../workspace';
+import { DownloadFileButton } from '../../workspace/components/renderers/DownloadFileButton';
 import { READ_PANE } from '../../workspace/components/renderers/readPane';
-import {
-  RendererWorkspaceContext,
-  getFileRenderer,
-  getRendererLayout,
-} from '../../workspace/components/renderers';
+import { RendererWorkspaceContext } from '../../workspace';
+import { getFileRenderer, getRendererLayout } from '../../workspace/components/renderers';
 import { kbFileUrl } from '../../workspace';
 import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
 

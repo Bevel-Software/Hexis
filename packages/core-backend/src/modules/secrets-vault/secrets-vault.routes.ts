@@ -12,7 +12,8 @@ import {
   configuredAs,
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
-import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
+import type { IToolManualService, ToolManualSummary } from '../tool-manuals/index.js';
+import type { ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
 import type { IConnectionProbeService } from '../connection-probe/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';

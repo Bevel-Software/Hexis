@@ -14,7 +14,7 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
 import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { LayoutContext } from '../../layout/state/layout.context';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';

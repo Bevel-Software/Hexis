@@ -68,7 +68,7 @@ import type { IAdminAccessService } from '../admin/admin.interface.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
-import type { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { WorkspaceMutex } from '../kb-fs/index.js';
 import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
 import {
   isUntouchedStarterPage,

@@ -59,7 +59,7 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
+import { AccessDeniedError } from '../access-model/index.js';
 import {
   AGENT_GUIDE_FILE,
   isAgentGuidePath,
@@ -73,7 +73,7 @@ import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRun
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
+import type { IChangeReadGate } from '../access-model/index.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';

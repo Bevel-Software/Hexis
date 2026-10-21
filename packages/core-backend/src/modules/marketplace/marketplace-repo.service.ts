@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import { WorkspaceMutex } from '../kb-fs/index.js';
 import type { VirtualTree } from '../plugins/index.js';
 import { type IGitRunner } from '../../shared/git.contract.js';
 

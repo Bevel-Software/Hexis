@@ -8,7 +8,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { ReadForTool } from '../workspace/workspace.tools.js';
 import type { IEmbedService } from './embed.interface.js';
 import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
-import { SESSION_ID_INPUT, type ToolDescriptionNotes } from '../workspace/agent-access.gate.js';
+import { SESSION_ID_INPUT, type ToolDescriptionNotes } from '../workspace/index.js';
 import { sessionIdInputOf } from '../workspace/workspace.tools.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
