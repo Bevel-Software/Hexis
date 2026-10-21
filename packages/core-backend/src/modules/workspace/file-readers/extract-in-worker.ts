@@ -127,6 +127,11 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
     }
     if ('exited' in outcome) {
       if (this.closing) return busy();
+      // Exit 0 is the worker ending itself over an earlier job's straggler that
+      // landed between jobs (see `serveExtractions`), after this job was posted
+      // but before it was taken up: it says nothing about this file. Run it
+      // again in a fresh worker, as for any rejection it cannot pin on this job.
+      if (outcome.exited === 0 && !fresh) return { unattributed: true, message: EXTRACTION_WORKER_FAILED };
       return {
         ok: false,
         failure: 'crashed',

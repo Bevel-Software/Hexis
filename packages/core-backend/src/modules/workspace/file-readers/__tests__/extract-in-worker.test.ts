@@ -109,6 +109,15 @@ describe('WorkerDocumentExtractor — a parser that misbehaves', () => {
     expect(processSaw).toEqual([]);
   });
 
+  it('never answers the next job as crashed when the worker ends itself over a straggler between jobs', async () => {
+    extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts'), poolMax: 1 });
+    expect(await extractor.extract('.straggler-between-jobs', Buffer.from('x'))).toMatchObject({ ok: true });
+    // The one worker is handed this job at once, and exits (code 0) before taking it up:
+    // the job runs again in a fresh worker and is answered as its own.
+    expect(await extractor.extract('.echo', Buffer.from('mine'))).toEqual({ ok: true, summary: 'echo', text: 'mine' });
+    expect(processSaw).toEqual([]);
+  });
+
   it('still pins a rejection on its own job when the worker had served another first', async () => {
     extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts'), poolMax: 1 });
     expect(await extractor.extract('.echo', Buffer.from('warm'))).toMatchObject({ ok: true });

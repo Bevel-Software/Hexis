@@ -52,7 +52,9 @@ export function serveExtractions(extractors: Readonly<Record<string, ExtractFn>>
   const failCurrent = (reason: unknown): void => {
     // A straggler from a job already answered: this worker's parser state is
     // no longer to be trusted, and left running it could pin the rejection on
-    // the NEXT job's file. It ends itself; the pool replaces it.
+    // the NEXT job's file. It ends itself; the pool replaces it. Exit code 0 is
+    // this signal: the host may already have posted the next job, and runs that
+    // job again in a fresh worker rather than answering it as crashed.
     if (current === undefined) process.exit(0);
     const ownJob = served === 1;
     answer({ id: current, ok: false, message: couldNotBeExtracted(reason), retire: true, ...(ownJob ? {} : { unattributed: true }) });

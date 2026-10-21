@@ -15,6 +15,19 @@ serveExtractions({
     setTimeout(() => void Promise.reject(new Error('late')), 20);
     return { ok: true, summary: 'straggler', text: 'answered first' };
   },
+  // Answers, then — once the host has had time to hand the worker its next
+  // job — leaves a rejection behind before that job's message is taken up:
+  // the worker sees it BETWEEN jobs, and ends itself.
+  '.straggler-between-jobs': () => {
+    setImmediate(() => {
+      const until = Date.now() + 200;
+      while (Date.now() < until) {
+        /* the host answers, releases this worker and posts the next job meanwhile */
+      }
+      void Promise.reject(new Error('late, between jobs'));
+    });
+    return { ok: true, summary: 'straggler', text: 'answered first' };
+  },
   '.throw': () => {
     throw new Error('boom');
   },
