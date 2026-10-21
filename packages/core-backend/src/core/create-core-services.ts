@@ -129,6 +129,7 @@ import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
+import { ChangeRequestHooks, type IChangeRequestHooks } from '../modules/workflow/change-request-hooks.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
 import {
   PendingCommitsWorker,
@@ -326,6 +327,12 @@ export interface CoreServices {
   reviewWorkflowService: ReviewWorkflowService;
   fileLockService: FileLockService;
   workflowService: WorkflowService;
+  /**
+   * The seam for "a change request was opened": a deployment registers here
+   * how the reviewers are told (the cloud's mail, say), and the open's answer
+   * says whether somebody did. Core registers nothing.
+   */
+  changeRequestHooks: IChangeRequestHooks;
   /** Remote sync (`POST /api/sync`): a git host or pipeline makes the clones catch up. */
   kbSyncService: KbSyncService;
   eventBus: WorkflowEventBus;
@@ -954,6 +961,10 @@ export async function createCoreServices(
   // id-repair keeps the id namespace collision-free. Subscribers are registered
   // below, once the reacting services exist.
   const fileChangeNotifier = new FileChangeNotifier();
+  // Who tells the reviewers of an opened change request: the composition root
+  // of a distribution registers its listener here, after this returns (see
+  // `ChangeRequestHooks`).
+  const changeRequestHooks = new ChangeRequestHooks();
   const workflowService = new WorkflowService(
     db,
     gitService,
@@ -971,6 +982,11 @@ export async function createCoreServices(
     // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
     workflowHooks,
+    // Exposed as `changeRequestHooks`, the same instance, for the same reason.
+    changeRequestHooks,
+    // The opened event names the approvers as accounts; auth answers which
+    // of the addresses the access model names have one.
+    authService,
   );
   // The leftover-branch cleanup asks the Deployment page at every round, so
   // switching it off there applies without a restart.
@@ -1675,6 +1691,7 @@ export async function createCoreServices(
     reviewWorkflowService,
     fileLockService,
     workflowService,
+    changeRequestHooks,
     kbSyncService,
     eventBus,
     fileChangeNotifier,
