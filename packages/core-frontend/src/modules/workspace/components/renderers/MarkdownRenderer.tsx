@@ -14,29 +14,7 @@ import { WorkspaceContext } from '../../state/workspace.context';
 import { markdownLinkForPaste } from '../../utils/pasteLink';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
-
-/** Decode a URL hash (`#some%20slug`) to its bare slug, tolerating bad escapes. */
-function safeDecodeHash(hash: string): string {
-  const raw = hash.replace(/^#/, '');
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
-/** Escape a slug for safe interpolation into an attribute-selector string. */
-function escapeForSelector(value: string): string {
-  return (
-    value
-      .replace(/["\\]/g, '\\$&')
-      // CSS-hex-escape control characters (newline, CR, …): a raw control char in
-      // a CSS string is a syntax error that would make querySelector throw. The
-      // trailing space terminates the hex escape.
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `)
-  );
-}
+import { scrollToHeading } from './scrollToHeading';
 
 /**
  * Markdown view/edit renderer driven entirely by the parent's `readOnly`
@@ -130,15 +108,8 @@ export function MarkdownRenderer({
   // hash, the file, or the rendered value changes — the latter because the
   // content may still be loading when the route first resolves.
   useEffect(() => {
-    if (!readOnly) return;
-    const slug = location.hash ? safeDecodeHash(location.hash) : '';
-    if (!slug) return;
-    const raf = requestAnimationFrame(() => {
-      const container = scrollContainerRef.current;
-      if (!container) return;
-      const target = container.querySelector(`[id="${escapeForSelector(slug)}"]`);
-      target?.scrollIntoView({ block: 'start' });
-    });
+    if (!readOnly || !location.hash) return;
+    const raf = requestAnimationFrame(() => scrollToHeading(scrollContainerRef.current, location.hash));
     return () => cancelAnimationFrame(raf);
   }, [location.hash, filePath, value, readOnly]);
 

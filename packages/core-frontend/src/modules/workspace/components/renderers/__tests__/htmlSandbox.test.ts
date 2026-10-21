@@ -592,6 +592,20 @@ describe('buildSandboxedHtml', () => {
       ]);
       expect(bridge.scrolled).toEqual([]);
     });
+
+    it('a fragment the parent hands back (a link to this page by its own name) scrolls as a bare one does', async () => {
+      const bridge = runBridge({ ids: ['q3'] });
+      await bridge.deliver({ type: 'bevel.jump', hash: '#q3' });
+      expect(bridge.scrolled).toEqual(['q3']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('takes a jump from the parent only: a message from anywhere else scrolls nothing', async () => {
+      const bridge = runBridge({ ids: ['q3'] });
+      await bridge.deliver({ type: 'bevel.jump', hash: '#q3' }, { fromParent: false });
+      await bridge.deliver({ type: 'bevel.jump', hash: 'q3' });
+      expect(bridge.scrolled).toEqual([]);
+    });
   });
 
   it('embeds the body HTML verbatim (sanitization happens upstream)', () => {

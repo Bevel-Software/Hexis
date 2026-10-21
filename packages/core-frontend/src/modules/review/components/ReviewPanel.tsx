@@ -3,11 +3,7 @@ import { Check, Trash2, Eye, ChevronDown, X } from 'lucide-react';
 import type { PendingChange } from '@bevel-software/platform-shared';
 import { useReview } from '../state/review.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import {
-  useFileNav,
-  useNodeIdNav,
-  stripJunkBeforeKbDir,
-} from '../../workspace/routing/kb-routes';
+import { useFileNav, useNodeIdNav, stripJunkBeforeKbDir } from '../../workspace';
 import { useWorkspaceImageResolver } from '../../workspace/hooks/useWorkspaceImageResolver';
 import { pluginOfPath, currentKbLayout, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';

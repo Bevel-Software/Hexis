@@ -24,7 +24,14 @@
  *  - `OpenPageInPlatformContext`: how an HTML page mounted there is taken
  *    to the file page when it needs tools and the viewer picks Open in the
  *    platform (a skill page provides it; without it the renderer opens the
- *    file's own address).
+ *    file's own address). `PageLinkHomeContext`: the file such a page's
+ *    links resolve against, where its `filePath` is not one (a skill page).
+ *  - `useFileNav` and `useNodeIdNav` (with `KbLinkTarget`, `OpenLinkOptions`
+ *    and `stripJunkBeforeKbDir`): where a link inside rendered content leads
+ *    and how it is followed — the one rule for those links, which a surface
+ *    rendering a file of the knowledge base outside the file page (a skill
+ *    page, a review diff) follows too. `scrollToHeading`: how such a surface
+ *    goes to a section of its own markdown file.
  */
 export {
   CanDownloadContext,
@@ -36,5 +43,16 @@ export {
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
-export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
-export { OpenPageInPlatformContext } from './components/renderers/htmlToolBridge';
+export {
+  asksForFilePage,
+  kbFilePageUrl,
+  kbFileUrl,
+  resolveKbHref,
+  stripJunkBeforeKbDir,
+  useFileNav,
+  useNodeIdNav,
+  type OpenLinkOptions,
+} from './routing/kb-routes';
+export { OpenPageInPlatformContext, PageLinkHomeContext } from './components/renderers/htmlToolBridge';
+export type { KbLinkTarget } from './components/renderers/KbAppLink';
+export { scrollToHeading } from './components/renderers/scrollToHeading';

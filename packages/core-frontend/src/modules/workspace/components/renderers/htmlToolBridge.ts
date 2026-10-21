@@ -54,6 +54,25 @@ export function useOpenPageInPlatform(): (() => void) | null {
   return useContext(OpenPageInPlatformContext);
 }
 
+/**
+ * The file a page's links resolve against, for a host whose `filePath` is not
+ * a workspace path on this tab's branch — a skill page names its files
+ * relative to the skill and reads them from the default branch. Absent, a
+ * link resolves against `filePath` on the branch this tab stands on.
+ */
+export interface PageLinkHome {
+  /** The page's workspace path. */
+  path: string;
+  /** The branch the page was read from. */
+  branch: string;
+}
+
+export const PageLinkHomeContext = createContext<PageLinkHome | null>(null);
+
+export function usePageLinkHome(): PageLinkHome | null {
+  return useContext(PageLinkHomeContext);
+}
+
 /** The four members a page calls, by the name the frame posts. */
 export type PageToolFunction = 'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain';
 

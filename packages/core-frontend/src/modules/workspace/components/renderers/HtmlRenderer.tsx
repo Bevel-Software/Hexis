@@ -12,6 +12,7 @@ import {
   asToolCall,
   pageName,
   useOpenPageInPlatform,
+  usePageLinkHome,
   usePageTools,
 } from './htmlToolBridge';
 import {
@@ -74,6 +75,7 @@ export function HtmlRenderer({
   // that provides them. Everywhere else the page gets `bevel.tools = null`.
   const pageTools = usePageTools();
   const openPageInPlatform = useOpenPageInPlatform();
+  const linkHome = usePageLinkHome();
   const toolPagePath = surface === null && pageTools ? pageTools.pagePath : null;
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   /**
@@ -165,6 +167,12 @@ export function HtmlRenderer({
   // branch; relative paths resolve against this file) and follows it by the
   // rule for links inside a file: another file opens in a new tab, and this
   // page — its state, its scroll, its full-screen view — stays as it was.
+  // A link to a section of this same page (`Roadmap.html#q3` from inside
+  // Roadmap.html) is handed back to the frame as `bevel.jump`, which scrolls
+  // it the way the bridge scrolls a bare `#q3`: a fragment on the app's own
+  // address would never reach the frame. A host whose `filePath` is not a
+  // workspace path on this tab's branch (a skill page) names the page's real
+  // home through `PageLinkHomeContext`.
   useEffect(() => {
     function onNavMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
@@ -173,11 +181,16 @@ export function HtmlRenderer({
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.navigate') return;
       const href = typeof msg.href === 'string' ? msg.href : null;
       if (!href) return;
-      openLink(href, filePath);
+      openLink(href, linkHome?.path ?? filePath, {
+        homeBranch: linkHome?.branch,
+        onSection: (hash) => {
+          if (hash) iframeWin.postMessage({ type: 'bevel.jump', hash }, '*');
+        },
+      });
     }
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
-  }, [openLink, filePath]);
+  }, [openLink, filePath, linkHome]);
 
   /** Show one of the app's cards over the page and resolve with the viewer's answer. A card already up answers this ask too. */
   function showCard(kind: PageCard['kind']): Promise<boolean | null> {

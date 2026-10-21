@@ -21,11 +21,7 @@ import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { useGit } from '../../../git/state/git.context';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import {
-  kbFileUrl,
-  useFileNav,
-  useNodeIdNav,
-} from '../../../workspace/routing/kb-routes';
+import { kbFileUrl, useFileNav, useNodeIdNav } from '../../../workspace';
 import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
@@ -497,12 +493,28 @@ export function SkillPage({
    * fragment. A relative link resolves on the default branch, where skills
    * live, whatever is checked out. `fileLinkTarget` is the same answer for the
    * anchor to carry, so a middle-click goes where the click does.
+   *
+   * A link to a section of this file scrolls the pane to that heading
+   * (`scrollToSection`, from the pane) and leaves this page's address alone:
+   * the skill page has no heading scroll on its address, so moving the
+   * fragment there would change the URL and nothing on screen.
    */
   const openLinkInEditor = useCallback(
-    (href: string) => {
-      if (fileWorkspacePath) openLink(href, fileWorkspacePath, DEFAULT_BRANCH);
+    (href: string, scrollToSection: (hash: string) => void) => {
+      if (fileWorkspacePath) {
+        openLink(href, fileWorkspacePath, { homeBranch: DEFAULT_BRANCH, onSection: scrollToSection });
+      }
     },
     [fileWorkspacePath, openLink],
+  );
+  /**
+   * An HTML page's links resolve against its real home — the workspace path
+   * and the default branch — not `active`, which names the file relative to
+   * the skill.
+   */
+  const pageLinkHome = useMemo(
+    () => (fileWorkspacePath ? { path: fileWorkspacePath, branch: DEFAULT_BRANCH } : undefined),
+    [fileWorkspacePath],
   );
   const fileLinkTarget = useCallback(
     (href: string) => (fileWorkspacePath ? linkTarget(href, fileWorkspacePath, DEFAULT_BRANCH) : null),
@@ -861,6 +873,7 @@ export function SkillPage({
           onOpenInPlatform={
             fileWorkspacePath ? () => openFilePage(fileWorkspacePath, DEFAULT_BRANCH) : undefined
           }
+          linkHome={pageLinkHome}
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
            * `Propose changes` for EVERYONE and jump to the Knowledge editor —

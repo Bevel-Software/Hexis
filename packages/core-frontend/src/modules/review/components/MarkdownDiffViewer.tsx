@@ -10,7 +10,7 @@ import {
   useKbMarkdownComponents,
   type KbImageResolver,
 } from '../../workspace/components/renderers/kbMarkdownPipeline';
-import type { KbLinkTarget } from '../../workspace/components/renderers/KbAppLink';
+import type { KbLinkTarget } from '../../workspace';
 
 const MAX_RENDERED_LINES = 5000;
 

@@ -373,6 +373,16 @@ const NAV_BRIDGE = `
   }
   globalThis.bevel.openNode = navigate;
   globalThis.bevel.navigate = navigate;
+  // A link that names this page's own file with a fragment
+  // ('Roadmap.html#q3') is posted like any path; the parent recognises the
+  // file and hands the fragment back to be scrolled here, as '#q3' is.
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('message', function (event) {
+    if (event.source !== parent) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.jump' || typeof msg.hash !== 'string') return;
+    var hash = normalize(msg.hash);
+    if (hash.charAt(0) === '#') jumpTo(hash);
+  });
   if (typeof document !== 'undefined') {
     document.addEventListener('click', function (e) {
       var el = e.target;

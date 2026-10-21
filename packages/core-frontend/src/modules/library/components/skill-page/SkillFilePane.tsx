@@ -1,11 +1,15 @@
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import '../../../change-requests/change-requests.css';
 import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
-import type { KbLinkTarget } from '../../../workspace/components/renderers/KbAppLink';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
-import { OpenPageInPlatformContext } from '../../../workspace';
+import {
+  OpenPageInPlatformContext,
+  PageLinkHomeContext,
+  scrollToHeading,
+  type KbLinkTarget,
+} from '../../../workspace';
 import type { DiffLine } from '../../../change-requests/utils/diff';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
@@ -26,8 +30,12 @@ interface SkillFilePaneProps {
   actions?: ReactNode;
   /** Sits between the bar and the body: the "your suggestions are inline" strip. */
   notice?: ReactNode;
-  /** Follow a relative link out of rendered markdown. */
-  onOpenLink?(href: string): void;
+  /**
+   * Follow a link out of rendered markdown. `scrollToSection` takes this
+   * file to one of its own headings (`#steps`), for a link to a section of
+   * the file on screen: the page's address has no heading scroll of its own.
+   */
+  onOpenLink?(href: string, scrollToSection: (hash: string) => void): void;
   /** Where a file link leads, for its anchor — same contract as `KbMarkdownView`. */
   fileLinkTarget?(href: string): KbLinkTarget | null;
   /** Resolve a bare `[text](node-id)` link — same contract as `KbMarkdownView`. */
@@ -44,6 +52,11 @@ interface SkillFilePaneProps {
    * workspace path.
    */
   onOpenInPlatform?(): void;
+  /**
+   * The file an HTML page's links resolve against — its workspace path and
+   * the branch it was read from — since `file` is relative to the skill.
+   */
+  linkHome?: { path: string; branch: string };
 }
 
 /**
@@ -70,7 +83,9 @@ export function SkillFilePane({
   headingLink,
   resolveImage,
   onOpenInPlatform,
+  linkHome,
 }: SkillFilePaneProps) {
+  const markdownRef = useRef<HTMLDivElement | null>(null);
   return (
     <FilePaneCard file={file} actions={actions} notice={notice} className="mt-4">
       {raw === null ? (
@@ -83,9 +98,10 @@ export function SkillFilePane({
         // id-link resolution, heading copy-anchors. `scroll={false}`
         // because the library page is the scroller — a nested scrollbox
         // here would trap the wheel inside the pane.
+        <div ref={markdownRef}>
         <KbMarkdownView
           source={raw}
-          onOpenFile={(href) => onOpenLink?.(href)}
+          onOpenFile={(href) => onOpenLink?.(href, (hash) => scrollToHeading(markdownRef.current, hash))}
           fileLinkTarget={fileLinkTarget}
           onOpenNodeId={onOpenNodeId}
           nodeIdLinkTarget={nodeIdLinkTarget}
@@ -93,6 +109,7 @@ export function SkillFilePane({
           resolveImage={resolveImage}
           scroll={false}
         />
+        </div>
       ) : /\.html?$/i.test(file) ? (
         // The same sandboxed preview the Knowledge viewer gives `.html` — a
         // skill's bundled template (a deck, a report shell) is meant to be
@@ -101,7 +118,9 @@ export function SkillFilePane({
         // has no height of its own.
         <div className="h-[70vh]">
           <OpenPageInPlatformContext.Provider value={onOpenInPlatform ?? null}>
-            <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
+            <PageLinkHomeContext.Provider value={linkHome ?? null}>
+              <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
+            </PageLinkHomeContext.Provider>
           </OpenPageInPlatformContext.Provider>
         </div>
       ) : (

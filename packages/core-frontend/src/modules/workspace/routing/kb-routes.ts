@@ -384,6 +384,14 @@ function sectionOfThisTab(location: { pathname: string; search: string }, hash: 
 
 const noLinkTarget = (): KbLinkTarget | null => null;
 
+/** How `useFileNav().openLink` follows one link, beyond the rule itself. */
+export interface OpenLinkOptions {
+  /** The branch the link's file was read from, when not this tab's (see `linkTarget`). */
+  homeBranch?: string;
+  /** Follow a link to a section of the same file here, given its fragment, instead of moving this tab. */
+  onSection?(hash: string): void;
+}
+
 /**
  * The branch segment of a `/workspace/<branch>/…` pathname, decoded, or null
  * when this location is not a workspace URL. The pathname from the router is
@@ -522,14 +530,28 @@ export function useFileNav() {
    * URL as a `Referer`, and the scheme allowlist is what keeps the sandbox
    * sealed — see {@link isOpenableExternalHref}. A destination that is
    * external but not openable stays a no-op, as it was.
+   *
+   * `onSection` is how a host whose file does not scroll to this tab's
+   * fragment follows a section link instead: the HTML page's frame (a
+   * fragment on the app's address never reaches it) and the skill page (its
+   * address has no heading scroll). It is handed the link's fragment —
+   * `#steps`, or `''` for the file itself — and this tab's address stays as
+   * it is. Without it the tab moves to its own address plus the fragment,
+   * which the markdown file page scrolls to.
    */
   const openLink = useCallback(
-    (href: string, basePath: string, homeBranch?: string) => {
-      if (resolveKbHref(href, { basePath, kbDirName })?.kind === 'external') {
+    (href: string, basePath: string, options: OpenLinkOptions = {}) => {
+      const resolved = resolveKbHref(href, { basePath, kbDirName });
+      if (resolved?.kind === 'external') {
         openExternalHref(href);
         return;
       }
-      followLinkTarget(linkTarget(href, basePath, homeBranch), navigate);
+      const target = linkTarget(href, basePath, options.homeBranch);
+      if (target && !target.newTab && resolved && options.onSection) {
+        options.onSection(resolved.hash);
+        return;
+      }
+      followLinkTarget(target, navigate);
     },
     [kbDirName, linkTarget, navigate],
   );
