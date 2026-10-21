@@ -117,17 +117,6 @@ export function createEventsRoutes(
 ): express.Router {
   const router = express.Router();
 
-  /** The read gate's verdict; a gate that is missing or fails answers no. */
-  const readable = async (userId: string, workspaceId: string, path: string): Promise<boolean> => {
-    if (!mayRead) return false;
-    try {
-      return await mayRead(userId, workspaceId, path);
-    } catch (err) {
-      log.warn(`read check for an event failed; not delivered (user=${userId})`, { err });
-      return false;
-    }
-  };
-
   /**
    * Process-wide session registry. The same map services the SSE open
    * (creates the entry) and the focus POST (mutates `focusedWorkspaceIds`).
