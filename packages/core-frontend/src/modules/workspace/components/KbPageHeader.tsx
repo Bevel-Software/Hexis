@@ -18,6 +18,7 @@ import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 import { SELF_HOLD_MESSAGE } from '../../workflow';
+import { FullScreenButton } from './FullScreenView';
 
 /**
  * The document's title, and the page's actions beside it.
@@ -134,6 +135,12 @@ export interface KbPageHeaderProps {
   /** The canonical URL, via `useCanonicalFileUrl`. Its sibling, Copy path,
    *  needs nothing from the caller: it is `path`, root-anchored. */
   onCopyLink(): Promise<boolean>;
+  /**
+   * Fill the browser window with the renderer. Given only for a full-bleed
+   * file, which has no pane bar to carry the control; a prose document's bar
+   * carries it beside Edit. Absent, the header offers none.
+   */
+  onFullScreen?: () => void;
 }
 
 /**
@@ -182,6 +189,7 @@ export function KbPageHeader({
   onShare,
   onCopyPage,
   onCopyLink,
+  onFullScreen,
 }: KbPageHeaderProps) {
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState<Record<string, CopyState>>({});
@@ -466,6 +474,7 @@ export function KbPageHeader({
             <History size={14} />
           </IconButton>
         )}
+        {onFullScreen && <FullScreenButton onEnter={onFullScreen} />}
       </div>
     </div>
   );
