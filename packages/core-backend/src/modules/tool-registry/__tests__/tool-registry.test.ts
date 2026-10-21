@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../tool-registry.js';
-import { declaresWrite, type UtcpTool } from '../tool.contract.js';
+import { declaresWrite, ToolRegistry, type UtcpTool } from '../index.js';
 
 function fakeTool(name: string): UtcpTool {
   return {

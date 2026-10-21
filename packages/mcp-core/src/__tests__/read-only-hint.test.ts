@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { Tool as UtcpTool } from '@utcp/sdk';
-import { flattenDiscoveredTool, flattenManualTool, READ_ONLY_TAG, toListedTool, withReadOnlyOverride } from '../proxied-tool.js';
-import { codeModeMetaTools, META_TOOL_READ_ONLY } from '../meta-tools.js';
+import {
+  codeModeMetaTools,
+  flattenDiscoveredTool,
+  flattenManualTool,
+  META_TOOL_READ_ONLY,
+  READ_ONLY_TAG,
+  toListedTool,
+  withReadOnlyOverride,
+} from '../index.js';
 
 /**
  * The read-only hint MCP clients gate tool approval on (`annotations.readOnlyHint`).
