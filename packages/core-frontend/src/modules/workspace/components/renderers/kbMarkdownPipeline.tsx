@@ -44,7 +44,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { CopyAnchorButton } from './CopyAnchorButton';
 import { KbImage, type KbImageResolver } from './KbImage';
-import { normalizeHref } from '../../../../shared/markdown/hrefs';
+import { isExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
 import { KbAppLink, type KbLinkTarget } from './KbAppLink';
 
 export type { KbImageResolver, KbImageSource } from './KbImage';
@@ -237,12 +237,14 @@ export function useKbMarkdownComponents({
         }
         // Legacy/internal path link: a `.md` destination, optionally with a
         // heading anchor (`Node.md#goal`) — still used by frontmatter `nodeType`.
-        // External (`http…`) and same-page (`#…`) links fall through to <a>.
+        // External (any scheme, as `resolveKbHref` reads one — not a name
+        // that merely starts `http`, like `http-notes.md`) and same-page
+        // (`#…`) links fall through to <a>.
         // Where the caller resolves link targets (the app's file page) every
         // other workspace destination is taken too — a page, an image, a PDF —
         // so none of them is left to the browser as a relative URL that
         // replaces the page being read.
-        if (onOpenFile && href && !href.startsWith('http') && !normalizeHref(href).startsWith('#')) {
+        if (onOpenFile && href && !isExternalHref(href) && !normalizeHref(href).startsWith('#')) {
           const target = fileLinkTarget?.(href) ?? null;
           if (target || /\.md(#|$)/.test(href)) {
             return (

@@ -50,6 +50,7 @@ export {
   resolveKbHref,
   stripJunkBeforeKbDir,
   useFileNav,
+  useFileNodeId,
   useNodeIdNav,
   type OpenLinkOptions,
 } from './routing/kb-routes';

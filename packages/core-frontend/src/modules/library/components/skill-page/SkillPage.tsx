@@ -21,7 +21,7 @@ import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { useGit } from '../../../git/state/git.context';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import { kbFileUrl, useFileNav, useNodeIdNav } from '../../../workspace';
+import { kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav } from '../../../workspace';
 import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
@@ -520,6 +520,24 @@ export function SkillPage({
     (href: string) => (fileWorkspacePath ? linkTarget(href, fileWorkspacePath, DEFAULT_BRANCH) : null),
     [fileWorkspacePath, linkTarget],
   );
+  /**
+   * An id-link follows the same rule, told which node is on screen — the id
+   * of the file in the pane, on the default branch it was read from — so a
+   * link to this node's own heading (`[Steps](newsletter#steps)`) scrolls
+   * the pane like a section link, instead of opening this skill again in a
+   * new tab. This page's address is not the node's id URL, so the hook could
+   * not tell from the address.
+   */
+  const ownNodeId = useFileNodeId(fileWorkspacePath, DEFAULT_BRANCH);
+  const openNodeIdInFile = useCallback(
+    (idOrLink: string, scrollToSection: (hash: string) => void) =>
+      openNodeId(idOrLink, ownNodeId, { onSection: scrollToSection }),
+    [openNodeId, ownNodeId],
+  );
+  const nodeIdLinkTarget = useCallback(
+    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId),
+    [nodeIdTarget, ownNodeId],
+  );
 
   /**
    * Images in the file, served from the DEFAULT branch's workspace: that is
@@ -859,8 +877,12 @@ export function SkillPage({
           suggestion={null}
           onOpenLink={openLinkInEditor}
           fileLinkTarget={fileLinkTarget}
-          onOpenNodeId={openNodeId}
-          nodeIdLinkTarget={nodeIdTarget}
+          onOpenNodeId={openNodeIdInFile}
+          nodeIdLinkTarget={nodeIdLinkTarget}
+          // A section link's own address (a modified click on it, a copied
+          // heading link) carries the heading as its fragment: arriving with
+          // one scrolls the pane to it.
+          sectionHash={location.hash}
           headingLink={headingLink}
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.

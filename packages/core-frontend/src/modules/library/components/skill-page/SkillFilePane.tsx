@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import '../../../change-requests/change-requests.css';
 import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
@@ -38,12 +38,23 @@ interface SkillFilePaneProps {
   onOpenLink?(href: string, scrollToSection: (hash: string) => void): void;
   /** Where a file link leads, for its anchor — same contract as `KbMarkdownView`. */
   fileLinkTarget?(href: string): KbLinkTarget | null;
-  /** Resolve a bare `[text](node-id)` link — same contract as `KbMarkdownView`. */
-  onOpenNodeId?(id: string): void;
+  /**
+   * Resolve a bare `[text](node-id)` link — same contract as `KbMarkdownView`,
+   * plus `scrollToSection` as for `onOpenLink`, for a link to this file's node.
+   */
+  onOpenNodeId?(id: string, scrollToSection: (hash: string) => void): void;
   /** Where an id-link leads, for its anchor — same contract as `KbMarkdownView`. */
   nodeIdLinkTarget?(id: string): KbLinkTarget | null;
   /** Heading deep-link builder; present ⇒ headings get the copy-anchor button. */
   headingLink?(slug: string): string;
+  /**
+   * The fragment the page's address arrived with (`#steps`), or empty. The
+   * page's address has no heading scroll of its own, so the pane scrolls a
+   * rendered markdown file to the heading it names — which is what makes a
+   * section link's own address (a middle-click on it, a copied heading link)
+   * land where the click does.
+   */
+  sectionHash?: string;
   /** Image source resolver, same contract as `KbMarkdownView`; absent ⇒ plain `<img>` tags. */
   resolveImage?: KbImageResolver;
   /**
@@ -81,11 +92,16 @@ export function SkillFilePane({
   onOpenNodeId,
   nodeIdLinkTarget,
   headingLink,
+  sectionHash,
   resolveImage,
   onOpenInPlatform,
   linkHome,
 }: SkillFilePaneProps) {
   const markdownRef = useRef<HTMLDivElement | null>(null);
+  const showsMarkdown = raw !== null && !suggestion && file.endsWith('.md');
+  useEffect(() => {
+    if (showsMarkdown && sectionHash) scrollToHeading(markdownRef.current, sectionHash);
+  }, [showsMarkdown, sectionHash, file]);
   return (
     <FilePaneCard file={file} actions={actions} notice={notice} className="mt-4">
       {raw === null ? (
@@ -103,7 +119,10 @@ export function SkillFilePane({
           source={raw}
           onOpenFile={(href) => onOpenLink?.(href, (hash) => scrollToHeading(markdownRef.current, hash))}
           fileLinkTarget={fileLinkTarget}
-          onOpenNodeId={onOpenNodeId}
+          onOpenNodeId={
+            onOpenNodeId &&
+            ((id) => onOpenNodeId(id, (hash) => scrollToHeading(markdownRef.current, hash)))
+          }
           nodeIdLinkTarget={nodeIdLinkTarget}
           headingLink={headingLink}
           resolveImage={resolveImage}

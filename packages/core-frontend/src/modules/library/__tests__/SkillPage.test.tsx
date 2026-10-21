@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
@@ -98,11 +98,15 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
     source,
     onOpenFile,
     fileLinkTarget,
+    onOpenNodeId,
+    nodeIdLinkTarget,
     resolveImage,
   }: {
     source: string;
     onOpenFile: (href: string) => void;
     fileLinkTarget?: (href: string) => unknown;
+    onOpenNodeId?: (id: string) => void;
+    nodeIdLinkTarget?: (id: string) => unknown;
     resolveImage?: (src: string) => unknown;
   }) => (
     <div data-testid="md-view">
@@ -114,6 +118,15 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
       <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
         section-probe
       </button>
+      <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
+        self-id-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
+        other-id-probe
+      </button>
+      <span data-testid="self-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
+      </span>
       <span data-testid="link-target-probe">
         {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
       </span>
@@ -379,11 +392,13 @@ function harness(
   routerState?: Record<string, unknown>,
   pageProps?: { provisional?: boolean },
   workspaceValue: WorkspaceContextValue = workspace,
+  /** The fragment the page's address arrives with, e.g. `#steps`. */
+  hash = '',
 ) {
   return (
     <MemoryRouter
       initialEntries={[
-        { pathname: '/skills-and-tools/skills/newsletter', state: routerState ?? null },
+        { pathname: '/skills-and-tools/skills/newsletter', hash, state: routerState ?? null },
       ]}
     >
       <AuthContext.Provider value={auth}>
@@ -423,6 +438,27 @@ allowed-tools: [slack_post_message]
 # Newsletter drafter
 Collect the news and draft the letter.`;
 const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
+
+/**
+ * The node id of the file in the pane, as the backend answers it for the
+ * default branch (`resolve-path`): SKILL.md is the node `newsletter`, and
+ * no other file of the skill is a node. Every other request goes to the real
+ * fetch, as it always has.
+ */
+let resolvePathSpy: MockInstance<typeof fetch>;
+beforeEach(() => {
+  const realFetch = globalThis.fetch;
+  resolvePathSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (!url.includes('/resolve-path?')) return realFetch(input, init);
+    return url.includes(encodeURIComponent('knowledge-base/Skills/newsletter/SKILL.md'))
+      ? new Response(JSON.stringify({ id: 'newsletter' }), { status: 200 })
+      : new Response('{}', { status: 404 });
+  });
+});
+afterEach(() => {
+  resolvePathSpy.mockRestore();
+});
 
 beforeEach(() => {
   apiMock.getSkill.mockReset().mockResolvedValue(skillDetail);
@@ -1625,6 +1661,56 @@ describe('SkillPage: links and images in the file', () => {
       expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
     } finally {
       open.mockRestore();
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("follows an id-link to this skill's own heading by scrolling the pane, in this tab", async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      renderPage(false);
+      await settled();
+      // The anchor's own answer agrees: a section of this page, not a new tab.
+      await waitFor(() =>
+        expect(JSON.parse(screen.getByTestId('self-id-target-probe').textContent ?? 'null')).toEqual({
+          href: '/skills-and-tools/skills/newsletter#steps',
+          newTab: false,
+        }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'self-id-probe' }));
+      expect(scrolled).toEqual(['steps']);
+      expect(open).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      // Another node is still a new tab.
+      fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
+      expect(open).toHaveBeenCalledWith('/workspace/main/plan-node#goal', '_blank');
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  // A section link's own address — where a middle-click or a modified click
+  // on it goes — is this page plus the heading. Arriving there scrolls to it,
+  // so the new tab lands where the plain click does.
+  it('scrolls to the heading its address names when it arrives with a fragment', async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      libraryMock.value = libraryValue(false, [], []);
+      render(harness(makeFakeBus(), git, undefined, undefined, workspace, '#steps'));
+      await settled();
+      await waitFor(() => expect(scrolled).toContain('steps'));
+    } finally {
       Element.prototype.scrollIntoView = original;
     }
   });

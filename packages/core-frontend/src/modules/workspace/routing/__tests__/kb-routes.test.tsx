@@ -658,6 +658,21 @@ describe('useNodeIdNav', () => {
     expectNewTab('/workspace/alice%2Fdraft/plan-node');
   });
 
+  // A host whose address has no heading scroll (the skill page) is handed
+  // the fragment of a link to its own node and scrolls itself; the tab does
+  // not move. A link to any other node still opens a new tab.
+  it('hands a link to the node on screen to onSection, and moves nothing', () => {
+    const { result } = renderNodeNav('/skills-and-tools/skills/newsletter');
+    const onSection = vi.fn();
+    result.current.openNodeId('newsletter#steps', 'newsletter', { onSection });
+    expect(onSection).toHaveBeenCalledWith('#steps');
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(openMock).not.toHaveBeenCalled();
+    result.current.openNodeId('plan-node#goal', 'newsletter', { onSection });
+    expect(onSection).toHaveBeenCalledTimes(1);
+    expectNewTab('/workspace/alice%2Fdraft/plan-node#goal');
+  });
+
   it('answers nodeIdTarget with the same address', () => {
     const { result } = renderNodeNav('/workspace/alice%2Fdraft/foo-node');
     expect(result.current.nodeIdTarget('plan-node#goal')).toEqual({

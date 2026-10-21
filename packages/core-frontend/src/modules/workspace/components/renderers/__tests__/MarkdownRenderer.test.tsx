@@ -286,6 +286,14 @@ describe('MarkdownRenderer', () => {
     await expectOpensInNewTab('Board', '/workspace/alice%2Fdraft/Dashboards/Board.html');
   });
 
+  // A scheme is what makes a link external, not a name that starts `http`:
+  // judged by prefix, this page of the workspace was left to the browser as a
+  // relative URL that replaced the page being read.
+  it('opens a relative link to a file whose name starts with http in a new tab', async () => {
+    renderPreview('[Notes](http-notes.md)', 'Knowledge/Foo.md');
+    await expectOpensInNewTab('Notes', '/workspace/alice%2Fdraft/Knowledge/http-notes.md');
+  });
+
   it('opens an id-link in a new tab at the node URL, heading kept', async () => {
     renderPreview('[Plan](plan-node#goal)', 'Knowledge/Foo.md');
     await expectOpensInNewTab('Plan', '/workspace/alice%2Fdraft/plan-node#goal');

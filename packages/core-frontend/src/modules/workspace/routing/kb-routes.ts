@@ -153,14 +153,16 @@ export function fetchNodeId(branch: string, workspacePath: string): Promise<stri
  * The frontmatter id of the file at `workspacePath` on the checked-out branch,
  * as the backend answers it ({@link fetchNodeId}), or null — not a node, not
  * resolved yet, or a renderer surface, which has no git status to ask with.
+ * `onBranch` names another branch the file was read from: the skill page
+ * renders its files from the default branch whatever is checked out.
  * The one answer to "which node is this file", shared by the copy-link URL
  * below and the id-link rule in {@link useNodeIdNav}, so neither re-reads the
  * frontmatter its own way.
  */
-export function useFileNodeId(workspacePath: string | null): string | null {
+export function useFileNodeId(workspacePath: string | null, onBranch?: string): string | null {
   const surface = useRendererSurface();
   const git = useContext(GitContext);
-  const branch = surface ? null : (git?.status?.branch ?? null);
+  const branch = surface ? null : (onBranch ?? git?.status?.branch ?? null);
   // Tie the resolved id to the exact (branch, path) it was fetched for. Inputs
   // change a render before the effect re-resolves, so without this key the
   // answer would briefly pair the new path with the *previous* node's id.
@@ -657,6 +659,10 @@ export function useFileNav() {
  * this tab is at (where `FileRoute` puts a node) is the one on screen.
  * Shared by the file renderer and the chat citation renderer so both follow
  * id-links identically.
+ *
+ * `onSection` is `OpenLinkOptions.onSection` for an id-link: a host whose
+ * address has no heading scroll (the skill page) scrolls to the fragment of a
+ * link to its own node itself, and this tab's address stays as it is.
  */
 export function useNodeIdNav() {
   const surface = useRendererSurface();
@@ -684,8 +690,15 @@ export function useNodeIdNav() {
   );
 
   const openNodeId = useCallback(
-    (idOrLink: string, ownId?: string | null) =>
-      followLinkTarget(nodeIdTarget(idOrLink, ownId), navigate),
+    (idOrLink: string, ownId?: string | null, options: Pick<OpenLinkOptions, 'onSection'> = {}) => {
+      const target = nodeIdTarget(idOrLink, ownId);
+      if (target && !target.newTab && options.onSection) {
+        const hashIdx = idOrLink.indexOf('#');
+        options.onSection(hashIdx >= 0 ? idOrLink.slice(hashIdx) : '');
+        return;
+      }
+      followLinkTarget(target, navigate);
+    },
     [nodeIdTarget, navigate],
   );
 
