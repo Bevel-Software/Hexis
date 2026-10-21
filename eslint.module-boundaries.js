@@ -25,6 +25,16 @@ const DEEPEST = 6
  */
 const SHELLS_HELD = ['packages/core-frontend']
 const INDEX = '(?:index(?:\\.(?:js|jsx|ts|tsx))?$)'
+/**
+ * Each package's own name, leading into its `modules/` as its `exports` map
+ * spells it: a package may import itself by name (`./modules/*` in the
+ * backend, `./src/*` in the frontend), and that road into another module's
+ * internals is as deep as `../` is. (Regex source: no character in them is special.)
+ */
+const SELF_LEADS = {
+  'packages/core-backend': '@bevel-software/platform-core-backend/modules/',
+  'packages/core-frontend': '@bevel-software/platform-core-frontend/src/modules/',
+}
 
 /** Tests may reach into another module's internals for fixtures; the rule is about shipped code. */
 export const MODULE_BOUNDARY_TEST_FILES = ['**/__tests__/**', '**/*.test.{ts,tsx}']
@@ -65,7 +75,7 @@ export function moduleBoundaries({ root, exceptions = {}, paths = {} }) {
       for (let depth = 0; depth <= DEEPEST; depth++) {
         const patterns = boundaryPatterns(
           modules.filter((other) => other !== own),
-          `${ups(depth + 1)}|${ups(depth + 2)}modules/|${ups(depth + 3)}src/modules/`,
+          `${ups(depth + 1)}|${ups(depth + 2)}modules/|${ups(depth + 3)}src/modules/|${SELF_LEADS[pkg]}`,
         )
         blocks.push({
           name: `module-boundaries/${pkg.split('/')[1]}/${own}/depth-${depth}`,
@@ -83,7 +93,7 @@ export function moduleBoundaries({ root, exceptions = {}, paths = {} }) {
     for (let depth = 0; depth <= DEEPEST; depth++) {
       const patterns = boundaryPatterns(
         modules,
-        `${depth === 0 ? '\\./' : ups(depth)}modules/|${ups(depth + 1)}src/modules/`,
+        `${depth === 0 ? '\\./' : ups(depth)}modules/|${ups(depth + 1)}src/modules/|${SELF_LEADS[pkg]}`,
       )
       blocks.push({
         name: `module-boundaries/${pkg.split('/')[1]}/outside-modules/depth-${depth}`,

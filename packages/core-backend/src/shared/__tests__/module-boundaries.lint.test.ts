@@ -126,6 +126,27 @@ describe('lint: module boundaries', () => {
     expect(boundaryHits(reExport)).toHaveLength(1);
   });
 
+  it("sees a package import itself by name into another module's internals", async () => {
+    // Each package's `exports` lets it name itself: `./modules/*` in the
+    // backend, `./src/*` in the frontend.
+    for (const [path, spec, index] of [
+      [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/audit/request-audit.js', 'modules/audit/index.ts'],
+      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace/components/FileTree', 'modules/workspace/index.ts'],
+      [`${FE}/core/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/auth/state/auth.context', 'modules/auth/index.ts'],
+    ]) {
+      const messages = await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`);
+      expect(boundaryHits(messages), `${path} importing ${spec}`).toHaveLength(1);
+      expect(messages[0]).toContain(index);
+    }
+    for (const [path, spec] of [
+      [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/audit/index.js'],
+      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace'],
+      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace/index'],
+    ]) {
+      expect(await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`), `${path} importing ${spec}`).toEqual([]);
+    }
+  });
+
   it('leaves shared/ and core/ alone: they are not modules', async () => {
     expect(
       await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from '../../shared/logging.js';\nexport { a };\n"),
