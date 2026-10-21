@@ -148,11 +148,11 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain('A distribution may add data members of its own to `window.bevel`');
   });
 
-  it('names the four functions of window.bevel.tools the runtime defines, where it is null, and requireTools with its card', async () => {
+  it('names the five functions of window.bevel.tools the runtime defines, where it is null, and requireTools with its card', async () => {
     const named = [...new Set([...guide.matchAll(/window\.bevel\.tools\.(\w+)\(/g)].map((m) => m[1]!))].sort();
     const onFilePage = runBridge({}, { toolBridge: true });
     expect(named).toEqual(Object.keys(onFilePage.bevel.tools as object).sort());
-    expect(named).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo']);
+    expect(named).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo', 'uploadFile']);
 
     // Null everywhere else, and the guide tells a page to check before every use.
     expect(runBridge().bevel.tools).toBeNull();
@@ -164,6 +164,14 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain('"<page name> wants to write to the knowledge base", with the page\'s path under it and Allow while open and Deny.');
     expect(flat).toContain('Deny runs nothing and rejects the call with `denied`');
     expect(flat).toContain('"<page name> uses tools that are only available in the platform", with Continue without tools and Open in the platform');
+
+    // uploadFile: its arguments, the promise, the consent rule and the size limit.
+    expect(flat).toContain('`uploadFile(file, { branch, destination, mode })`. `file` is a `File` (from an `<input type="file">` or a drop) or a `Blob` with a `name` option');
+    expect(flat).toContain("`mode` is `create` (the default), `overwrite` or `update`");
+    expect(flat).toContain("The promise resolves with `apply_file_upload`'s answer, `{ destination, count, total, files }`");
+    expect(flat).toContain("a file over the deployment's upload limit (the message names it)");
+    expect(flat).toContain('An upload is a writing call: the first one shows the card above, and Allow while open covers it and every later upload and writing call of the page view.');
+    expect(flat).toContain("The upload's token stays in the app; the page never sees it.");
 
     // requireTools exists on both, asks the app, and resolves with its answer.
     for (const [bridge, answer] of [[runBridge(), false], [onFilePage, true]] as const) {
