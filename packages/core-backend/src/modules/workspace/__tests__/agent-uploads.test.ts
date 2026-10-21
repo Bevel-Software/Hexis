@@ -568,6 +568,50 @@ describe('the upload route', () => {
     uploads.release(token);
   });
 
+  it('refuses to discard a token whose bytes are still arriving, and the upload finishes whole', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const head = Buffer.from('the first half, ');
+    const tail = Buffer.from('and the second half');
+    let finish!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new Uint8Array(head));
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        controller.enqueue(new Uint8Array(tail));
+        controller.close();
+      },
+    });
+    const arriving = fetch(`${base}/api/agent/uploads?filename=held.md`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', 'x-upload-token': token },
+      body,
+      // Node's fetch requires this for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    // Waited for, not assumed from a delay: the body has reached the store
+    // and its first bytes are staged, with the request still open.
+    const staged = Date.now() + 5_000;
+    while ((await readdir(uploadsDir).catch(() => [])).length === 0) {
+      expect(Date.now(), 'the upload never reached the store').toBeLessThan(staged);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const res = await fetch(`${base}/api/agent/uploads`, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    expect(res.status).toBe(404);
+    expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    // The file being written is still there, and the token still good.
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+
+    finish();
+    expect((await arriving).status).toBe(200);
+    const whole = Buffer.concat([head, tail]);
+    expect((await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Held` })).count).toBe(1);
+    expect(sha(await readFile(join(tempDir, KB_DIR, 'Held/held.md')))).toBe(sha(whole));
+  });
+
   it('refuses a second upload against the same token', async () => {
     const base = await start();
     const { token } = await request(base);
