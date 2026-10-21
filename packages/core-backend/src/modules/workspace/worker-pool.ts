@@ -57,23 +57,19 @@ export class WorkerPool {
 
   /**
    * A worker that has run no job yet, for a job that must not share a thread
-   * with any other job's leftovers. An idle worker is swapped for a new one; a
-   * worker freed by another job is too, so this waits in the same queue.
+   * with any other job's leftovers. With the pool full, the worker `acquire`
+   * hands over (idle, or freed by another job after waiting in the same queue)
+   * is swapped for a new one in its own place, so the pool never holds more
+   * than `poolMax`.
    */
   async acquireFresh(): Promise<Worker> {
     if (this.closed) throw this.busy();
-    const stale = this.all.size >= this.sizing.poolMax ? this.idle.pop() : undefined;
-    if (stale) this.discard(stale);
     if (this.all.size < this.sizing.poolMax) {
       const w = this.spawn();
       w.ref();
       return w;
     }
-    const used = await this.acquire();
-    this.discard(used);
-    const w = this.spawn();
-    w.ref();
-    return w;
+    return this.swap(await this.acquire());
   }
 
   /** A worker whose job ended cleanly goes to the next waiting job, or idles. */
@@ -103,6 +99,20 @@ export class WorkerPool {
     const workers = [...this.all];
     this.idle.length = 0;
     await Promise.all(workers.map((w) => w.terminate()));
+  }
+
+  /**
+   * Terminates `w`, a worker held by the caller, and gives its place straight
+   * to a new one — not to the next waiting job, as `discard` does, which would
+   * leave the new worker one past `poolMax`.
+   */
+  private swap(w: Worker): Worker {
+    this.all.delete(w);
+    void w.terminate();
+    if (this.closed) throw this.busy();
+    const fresh = this.spawn();
+    fresh.ref();
+    return fresh;
   }
 
   private spawn(): Worker {
