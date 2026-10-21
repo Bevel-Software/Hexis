@@ -300,8 +300,8 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured, db } = makeProvider([
       [oldRow] /* the row behind the hash, for this client */,
       [{ id: 'conn-1' }] /* the token's connection, still live */,
+      undefined, undefined, /* prunes — on the pool, before the transaction */
       [oldRow] /* retire.returning — inside the transaction with the mint */,
-      undefined, undefined, /* prunes */
       undefined /* token insert */,
       [] /* the (throttled) use stamp's first-use claim, after the commit: stamped before */,
       undefined /* the ordinary use stamp */,
@@ -317,7 +317,7 @@ describe('BevelOAuthProvider', () => {
     // another runner made. Only a fresh row is retired — one already rotated
     // or revoked is the replay path's business.
     expect(Object.keys(captured.set[0])).toEqual(['rotatedAt']);
-    expect(render(captured.where[2]).sql).toMatch(/"oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" is null/);
+    expect(render(captured.where[4]).sql).toMatch(/"oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" is null/);
     // A refresh STAYS on its token's connection: one connection spans every
     // token the agent holds, nothing is looked up by (user, agent) and no
     // second row is inserted for it.
@@ -332,11 +332,14 @@ describe('BevelOAuthProvider', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(captured.updateTargets).toEqual([oauthTokens, agentConnections, agentConnections]);
     expect(Object.keys(captured.set[1])).toEqual(['lastUsedAt']);
-    // The mint's prune keeps a retired row for its access hour plus the
-    // reuse grace — it can still verify and be replayed until then — and
-    // removes it after: the third term of the delete, cut off 61 minutes ago.
+    // The refresh's prune — on the pool, before the transaction opened —
+    // keeps a retired row for its access hour plus the reuse grace (it can
+    // still verify and be replayed until then) and removes it after: the
+    // third term of the delete, cut off 61 minutes ago.
     const prune = captured.where.map(render).find((w) => /"oauth_tokens"."rotated_at" < /.test(w.sql));
-    expect(prune, 'the mint prunes retired rows').toBeDefined();
+    expect(prune, 'the refresh prunes retired rows').toBeDefined();
+    // Third statement: after the read and the liveness check, before the retire.
+    expect(render(captured.where[2]).sql).toMatch(/"oauth_tokens"."rotated_at" < /);
     // The dialect renders a Date parameter as its ISO string.
     const rotatedCutoff = new Date(prune!.params.at(-1) as string | Date);
     expect(Date.now() - rotatedCutoff.getTime()).toBeGreaterThanOrEqual(61 * 60_000);
@@ -370,9 +373,9 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured } = makeProvider([
       [oldRow] /* read fresh */,
       [{ id: 'conn-1' }] /* its connection, live */,
+      undefined, undefined, /* prunes — before the transaction */
       [] /* the retire matches nothing: rotated under this request */,
       [{ ...oldRow, rotatedAt: new Date() }] /* the replay consumes it */,
-      undefined, undefined, /* prunes */
       undefined /* token insert */,
       [] /* first-use claim, after the commit */,
       undefined /* the ordinary use stamp */,
@@ -428,8 +431,8 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured } = makeProvider([
       [rotatedRow(10_000)] /* the row behind the hash: retired 10 s ago */,
       [{ id: 'conn-1' }] /* its connection, live */,
+      undefined, undefined, /* prunes — before the transaction */
       [rotatedRow(10_000)] /* the replay consumes it — inside the transaction with the mint */,
-      undefined, undefined, /* prunes */
       undefined /* token insert */,
       [] /* first-use claim, after the commit */,
       undefined /* the ordinary use stamp */,
@@ -445,7 +448,7 @@ describe('BevelOAuthProvider', () => {
       // token is never honoured. Never retired again: no `rotatedAt` write.
       expect(Object.keys(captured.set[0])).toEqual(['revokedAt']);
       expect(captured.set.flatMap((s) => Object.keys(s))).not.toContain('rotatedAt');
-      expect(render(captured.where[2]).sql).toMatch(
+      expect(render(captured.where[4]).sql).toMatch(
         /"oauth_tokens"."refresh_token_hash" = .* and "oauth_tokens"."client_id" = .* and "oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" > /,
       );
       // Said once the pair is minted, not before the checks that could still refuse.
@@ -462,7 +465,7 @@ describe('BevelOAuthProvider', () => {
     ['already replayed once', [[{ ...rotatedRow(10_000), revokedAt: new Date() }]], /refresh refused: refresh token rotated 10 s ago and already replayed once, or revoked since/],
     [
       'rotated and replayed by concurrent requests between the read and the consume',
-      [[{ ...rotatedRow(0), rotatedAt: null }], [{ id: 'conn-1' }], [] /* retire misses */, [] /* replay misses too */],
+      [[{ ...rotatedRow(0), rotatedAt: null }], [{ id: 'conn-1' }], undefined, undefined, /* prunes */ [] /* retire misses */, [] /* replay misses too */],
       /refresh refused: refresh token rotated or revoked by a concurrent request/,
     ],
   ])('exchangeRefreshToken refuses a refresh token that is %s, mints nothing, and says why in the log', async (_what, queue, said) => {
@@ -521,8 +524,8 @@ describe('BevelOAuthProvider', () => {
       [{ clientName: 'Claude' }],
       [] /* no live connection */,
       [{ id: 'conn-new' }] /* connection insert.returning */,
+      undefined, undefined, /* prunes — before the transaction */
       [oldRow] /* retire.returning */,
-      undefined, undefined, /* prunes */
       undefined /* token insert */,
     ]);
     await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');
