@@ -355,6 +355,58 @@ describe('MarkdownRenderer', () => {
     open.mockRestore();
   });
 
+  // A section link carries this tab's own address too, so a Ctrl-click or a
+  // middle-click on it is the browser's: it opens that section where the
+  // reader asked, and this tab does not move.
+  it('leaves a modified or middle click on a section link to the browser', () => {
+    navigateMock.mockClear();
+    renderPreview('[Goal](Foo.md#goal)', 'Knowledge/Foo.md', '/workspace/alice%2Fdraft/foo-node?fullscreen=1');
+    const open = stubWindowOpen();
+    const link = screen.getByRole('link', { name: 'Goal' });
+    const leftToBrowser: boolean[] = [];
+    const after = (e: Event) => {
+      leftToBrowser.push(!e.defaultPrevented);
+      e.preventDefault();
+    };
+    window.addEventListener('click', after);
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...init }));
+    }
+    window.removeEventListener('click', after);
+    expect(leftToBrowser).toEqual([true, true, true, true]);
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  // The node on screen is known by its id, not read off the address: a tab
+  // still on the file's PATH URL (not canonicalized yet, or a library frame
+  // that never canonicalizes) keeps an id-link to this node in place.
+  it('scrolls an id-link to the node on screen in place while the tab is on its path URL', async () => {
+    navigateMock.mockClear();
+    const filePath = 'Knowledge/OnPath.md';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) =>
+      String(input).includes('/resolve-path?')
+        ? new Response(JSON.stringify({ id: 'on-path-node' }), { status: 200 })
+        : new Response('', { status: 404 }),
+    );
+    try {
+      renderPreview('[Goal](on-path-node#goal) [Plan](plan-node)', filePath, `/workspace/alice%2Fdraft/${filePath}?fullscreen=1`);
+      const here = `/workspace/alice%2Fdraft/${filePath}?fullscreen=1#goal`;
+      await waitFor(() => expect(screen.getByRole('link', { name: 'Goal' })).toHaveAttribute('href', here));
+      expect(screen.getByRole('link', { name: 'Goal' })).not.toHaveAttribute('target');
+      const open = stubWindowOpen();
+      await userEvent.setup().click(screen.getByRole('link', { name: 'Goal' }));
+      expect(navigateMock).toHaveBeenCalledWith(here);
+      expect(open).not.toHaveBeenCalled();
+      open.mockRestore();
+      // Another node is still another tab.
+      await expectOpensInNewTab('Plan', '/workspace/alice%2Fdraft/plan-node');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   // --- Images in preview mode ---
 
   it('serves a relative image from the raw file route of the current workspace, resolved against the file', () => {

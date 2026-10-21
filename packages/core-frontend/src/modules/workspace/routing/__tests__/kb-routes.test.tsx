@@ -510,6 +510,24 @@ describe('useFileNav.openLink', () => {
     });
     expect(result.current.linkTarget('https://example.com', 'knowledge-base/Knowledge/Foo.md')).toBeNull();
   });
+
+  // The skill page reads its files from the default branch whatever is
+  // checked out: told so, a relative link opens there, and a link to the
+  // file itself is still a section of this tab.
+  it('resolves a relative link on the home branch it is told the file was read from', () => {
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/skills-and-tools/skills/newsletter');
+    const base = 'knowledge-base/Skills/newsletter/SKILL.md';
+    expect(result.current.linkTarget('ref.md', base, 'main')).toEqual({
+      href: '/workspace/main/knowledge-base/Skills/newsletter/ref.md',
+      newTab: true,
+    });
+    expect(result.current.linkTarget('SKILL.md#steps', base, 'main')).toEqual({
+      href: '/skills-and-tools/skills/newsletter#steps',
+      newTab: false,
+    });
+    result.current.openLink('ref.md', base, 'main');
+    expectNewTab('/workspace/main/knowledge-base/Skills/newsletter/ref.md');
+  });
 });
 
 /**
@@ -603,6 +621,24 @@ describe('useNodeIdNav', () => {
     result.current.openNodeId('foo-node#goal');
     expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/foo-node?fullscreen=1#goal');
     expect(openMock).not.toHaveBeenCalled();
+  });
+
+  // The node on screen told by its id: a tab still on the file's path URL —
+  // canonicalizing, or a `FileRoute` that never canonicalizes — keeps a link
+  // to it in place; any other id is still a new tab.
+  it('scrolls a link to the node on screen in place on its path URL when told its id', () => {
+    const path = '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md';
+    const { result } = renderNodeNav(path, '?fullscreen=1');
+    expect(result.current.nodeIdTarget('foo-node#goal', 'foo-node')).toEqual({
+      href: `${path}?fullscreen=1#goal`,
+      newTab: false,
+    });
+    result.current.openNodeId('foo-node#goal', 'foo-node');
+    expect(navigateMock).toHaveBeenCalledWith(`${path}?fullscreen=1#goal`);
+    expect(openMock).not.toHaveBeenCalled();
+    navigateMock.mockClear();
+    result.current.openNodeId('plan-node', 'foo-node');
+    expectNewTab('/workspace/alice%2Fdraft/plan-node');
   });
 
   it('answers nodeIdTarget with the same address', () => {

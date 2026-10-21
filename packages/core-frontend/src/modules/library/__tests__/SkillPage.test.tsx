@@ -87,17 +87,20 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetch
 vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
-// the raw source so assertions can see the body text, plus two probes for the
-// wiring the page hands the view: a click on a percent-encoded link, and what
+// the raw source so assertions can see the body text, plus probes for the
+// wiring the page hands the view: a click on a link (another file, and a
+// section of this one), where the page says such a link leads, and what
 // the image resolver answers for a picture beside the file.
 vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
   KbMarkdownView: ({
     source,
     onOpenFile,
+    fileLinkTarget,
     resolveImage,
   }: {
     source: string;
     onOpenFile: (href: string) => void;
+    fileLinkTarget?: (href: string) => unknown;
     resolveImage?: (src: string) => unknown;
   }) => (
     <div data-testid="md-view">
@@ -105,6 +108,15 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
       <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
         link-probe
       </button>
+      <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
+        section-probe
+      </button>
+      <span data-testid="link-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
+      </span>
+      <span data-testid="section-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
+      </span>
       <span data-testid="image-probe">
         {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
       </span>
@@ -455,15 +467,29 @@ describe('SkillPage', () => {
     expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/skills-and-tools\/connect$/);
   });
 
-  it("opens a page of the skill on the Knowledge file page, not back on this page, for Open in the platform", async () => {
-    renderPage(true);
-    await settled();
-    expect(paneProps.last?.onOpenInPlatform).toBeTypeOf('function');
-    act(() => paneProps.last!.onOpenInPlatform!());
-    // The file's own address, with the state that makes the item route show
-    // the file route rather than this skill page again.
-    expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/workspace\/[^/]+\/knowledge-base\/Skills\/newsletter\/SKILL\.md$/);
-    expect(screen.getByTestId('navigated-raw-file')).toHaveTextContent('true');
+  it("opens a page of the skill on the Knowledge file page in a new tab, not back on this page, for Open in the platform", async () => {
+    const open = vi
+      .spyOn(window, 'open')
+      .mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(true);
+      await settled();
+      expect(paneProps.last?.onOpenInPlatform).toBeTypeOf('function');
+      act(() => paneProps.last!.onOpenInPlatform!());
+      // The file page's own address on the default branch — the query is what
+      // makes the item route show the file route rather than this skill page
+      // again, since a new tab carries no router state.
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(
+        `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/SKILL.md?as=file`,
+        '_blank',
+      );
+      // And this tab stayed on the skill page.
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
   });
 
   it('loads the skill and shows its name, needed integrations and files', async () => {
@@ -1535,18 +1561,59 @@ describe('SkillPage: deciding on a change', () => {
  * is under test is what the PAGE hands the view.
  */
 describe('SkillPage: links and images in the file', () => {
-  it('opens a percent-encoded link as the file it names, on the default branch', async () => {
-    // The drift this fixes: the page used to resolve the href undecoded, so a
-    // link written `Some File.md` opened `Some%20File.md`, a file that is not there.
+  const SOME_FILE_URL = `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some%20File.md`;
+
+  it('opens a link to another file in a new tab, as the file it names, on the default branch', async () => {
+    // Decoded: the page used to resolve the href undecoded, so a link written
+    // `Some File.md` opened `Some%20File.md`, a file that is not there. And a
+    // NEW TAB: a link inside a file never navigates away from it. The git
+    // status names another branch, so the default branch is the page's doing.
+    const open = vi
+      .spyOn(window, 'open')
+      .mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        status: { ...git.status!, branch: 'alice/draft' },
+      });
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(SOME_FILE_URL, '_blank');
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it("hands the view each link's target: another file a new tab, this file's section this tab", async () => {
     renderPage(false);
     await settled();
-    fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
-    const target = await screen.findByTestId('navigated-to');
-    expect(target.textContent).toMatch(
-      new RegExp(
-        `^/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some(%20| )File\\.md$`,
-      ),
-    );
+    // The same answer the click follows, so the anchor's href, target and rel
+    // agree with it (a middle-click goes where the click goes).
+    expect(JSON.parse(screen.getByTestId('link-target-probe').textContent ?? 'null')).toEqual({
+      href: SOME_FILE_URL,
+      newTab: true,
+    });
+    expect(JSON.parse(screen.getByTestId('section-target-probe').textContent ?? 'null')).toEqual({
+      href: '/skills-and-tools/skills/newsletter#steps',
+      newTab: false,
+    });
+  });
+
+  it('follows a link to a section of the file on screen in this tab, by its fragment only', async () => {
+    const open = vi.spyOn(window, 'open');
+    try {
+      renderPage(false);
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'section-probe' }));
+      expect(open).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
   });
 
   it("serves a relative image from the default branch's workspace, under the skill folder", async () => {
