@@ -1,9 +1,9 @@
 import jwt from 'jsonwebtoken';
-import { and, eq, getTableColumns, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import {
   AccountAdmissionRefusedError,
   AccountChangeRefusedError,
@@ -863,26 +863,27 @@ export class AuthService implements IAccountSwitchGuard {
   }
 
   /**
-   * Resolve a set of `authorId` hashes back to the app users that produced
-   * them. Used by the PR list to display the human who triggered each PR
-   * instead of the shared GitHub service account.
+   * The live accounts behind a set of addresses — the approvers of a change
+   * request just opened, which the workflow module hands to the deployment's
+   * notification listeners as people with accounts (`ApproverAccounts`).
    *
-   * Loads all users and hashes them in-process rather than indexing on a
-   * stored hash column — the user table is small (one row per team member)
-   * and refreshes are infrequent (PR list polls at 60s), so the cost is
-   * negligible and we avoid carrying a denormalised hash column.
+   * One indexed read through the email's blind index, never a scan of every
+   * account: this is asked on every change request opened, and a deployment
+   * is as large as it is. Switched-off accounts are left out — a person who
+   * cannot act on a request is not told of it — so a caller that needs them
+   * asks another way. Keyed by the canonical address asked for.
    */
-  async findUsersByEmailHash(
-    hashes: Set<string>,
+  async findActiveAccountsByEmail(
+    emails: readonly string[],
   ): Promise<Map<string, { id: string; email: string; name: string }>> {
     const result = new Map<string, { id: string; email: string; name: string }>();
-    if (hashes.size === 0) return result;
-    const rows = await this.db.select().from(users);
-    for (const row of rows) {
-      const h = hashEmail(row.email);
-      if (!hashes.has(h)) continue;
-      result.set(h, { id: row.id, email: row.email, name: row.name });
-    }
+    const canonical = [...new Set(emails.map((e) => canonicalEmail(e)).filter(Boolean))];
+    if (canonical.length === 0) return result;
+    const rows = await this.db
+      .select({ id: users.id, email: users.email, name: users.name })
+      .from(users)
+      .where(and(inArray(users.emailBidx, canonical), isNull(users.deactivatedAt)));
+    for (const row of rows) result.set(canonicalEmail(row.email), { id: row.id, email: row.email, name: row.name });
     return result;
   }
 

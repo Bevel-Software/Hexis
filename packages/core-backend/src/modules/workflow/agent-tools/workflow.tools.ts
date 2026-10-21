@@ -154,6 +154,12 @@ const changeRequestSummarySchema: JsonSchema = {
       description: `The changed paths with their kind of change, cut to ${CHANGE_REQUEST_PATH_LIMIT}; \`include: ["all-paths"]\` lists them all.`,
     },
     totalFiles: { type: 'integer', description: 'How many files the request changes in total, cut or not.' },
+    notified: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'On the answer to an open only: the channels that reached the approvers ("email", say), as the deployment\'s listeners said; empty when nobody was told and the request waits to be found in the app.',
+    },
   },
   required: ['url', 'number', 'title', 'state', 'sourceBranch', 'targetBranch', 'approvals', 'mergeBlockedReasons', 'files', 'totalFiles'],
 };
