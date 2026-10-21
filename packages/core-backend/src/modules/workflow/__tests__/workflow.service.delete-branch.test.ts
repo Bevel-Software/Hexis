@@ -115,6 +115,7 @@ interface Harness {
   deleted: string[];
   /** What the service announced to connected tabs. */
   emitted: { kind: string; number?: number }[];
+  changeRequestHooks: { onChangeRequestOpened: ReturnType<typeof vi.fn>; runChangeRequestOpened: ReturnType<typeof vi.fn> };
   hasAnyActive: MockInstance<FileLockService['hasAnyActive']>;
 }
 
@@ -142,6 +143,7 @@ function harness(opts: {
 }): Harness {
   const deleted: string[] = [];
   const emitted: { kind: string; number?: number }[] = [];
+  const changeRequestHooks = { onChangeRequestOpened: vi.fn(), runChangeRequestOpened: vi.fn(async () => []) };
   const rows = opts.rows ?? [];
   const branches = { ...(opts.branches ?? {}) };
   const git = {
@@ -212,8 +214,11 @@ function harness(opts: {
     testKbContext(),
     openChangeGate(),
     { emit: (e: { kind: string; number?: number }) => void emitted.push(e) } as unknown as WorkflowEventBus,
+    undefined,
+    undefined,
+    changeRequestHooks,
   );
-  return { svc, git, fetch, deleted, emitted, hasAnyActive };
+  return { svc, git, fetch, deleted, emitted, hasAnyActive, changeRequestHooks };
 }
 
 const merged = (number: number, source: string, sha: string | null): CrRow => ({
@@ -557,6 +562,9 @@ describe('a change request that proposes nothing never blocks a deletion', () =>
       expect.objectContaining({ number: 21, source: 'ali/sync', target: DEFAULT }),
       expect.objectContaining({ number: 22, source: 'ali/feature', target: 'ali/sync' }),
     ]);
+    // A reopened request was opened once already: the deployment's
+    // change-request-opened listeners are not told again.
+    expect(h.changeRequestHooks.runChangeRequestOpened).not.toHaveBeenCalled();
     // The app's path, the same.
     reopens.length = 0;
     await expect(h.svc.deleteBranch(workspaceIdForBranch(DEFAULT), 'ali/sync', ADMIN)).rejects.toThrow(/stale info/);
