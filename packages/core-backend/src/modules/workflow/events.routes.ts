@@ -28,10 +28,9 @@
  * client refetches state from scratch.
  *
  * **Who receives what** — the bus picks the sessions that HEAR about an
- * event (focus for workspace events, owner for user events, and every
- * session for an agent's tool calls); before writing it, the route asks the
- * delivery rule (`IEventDelivery`) whether this session's person may have it,
- * and in what form (`events-delivery.ts`). Live fan-out and replay go
+ * event (focus for workspace events, owner for user events); before writing
+ * it, the route asks the delivery rule (`IEventDelivery`) whether this
+ * session's person may have it, and in what form (`events-delivery.ts`). Live fan-out and replay go
  * through the same rule, and through one ordered queue per session, so a
  * slow verdict never reorders a session's stream.
  *
@@ -177,20 +176,11 @@ export function createEventsRoutes(
     };
     sessions.set(sessionId, session);
 
-    // Another person's agent tool calls reach every session from the bus, and
-    // only an admin may have them. Asked once per session, so a non-admin
-    // drops them without an admin resolution per call; for an admin the rule
-    // still asks per event, so a revoked admin stops hearing them at once.
-    const admin = delivery.isAdmin(viewer);
-
     // Every event this session hears goes through the delivery rule, in the
     // order it arrived: the verdict is async, the stream must not reorder.
     const push = (event: WorkflowEvent): void => {
       if (session.closed) return;
-      const verdict =
-        event.kind === 'agent-tool-call' && event.forUserId !== userId
-          ? admin.then((yes) => (yes ? delivery.judge(event, viewer) : null))
-          : delivery.judge(event, viewer);
+      const verdict = delivery.judge(event, viewer);
       session.queue = session.queue.then(async () => {
         const deliverable = await verdict;
         if (deliverable && !session.closed) writeSseEvent(res, deliverable);

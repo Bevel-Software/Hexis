@@ -140,7 +140,7 @@ describe('WorkflowEventBus', () => {
       expect(onBob.push).not.toHaveBeenCalled();
     });
 
-    it('passes agent-tool-call to every session, for the events route to narrow to its person and admins', () => {
+    it("delivers an agent's tool call only to the person whose agent made it", () => {
       const bus = new WorkflowEventBus();
       const onAlice = makeSubscriber('s-alice', 'u-alice');
       const onBob = makeSubscriber('s-bob', 'u-bob');
@@ -156,7 +156,7 @@ describe('WorkflowEventBus', () => {
       });
 
       expect(onAlice.push).toHaveBeenCalledTimes(1);
-      expect(onBob.push).toHaveBeenCalledTimes(1);
+      expect(onBob.push).not.toHaveBeenCalled();
     });
 
     it('delivers change-request-merge-failed only to the user who triggered the merge', () => {

@@ -255,9 +255,7 @@ export class WorkflowEventBus {
    *
    *   - Workspace-scoped events: only sessions currently focused on the
    *     same `workspaceId`.
-   *   - User-scoped events: only sessions whose `userId` matches `forUserId`,
-   *     except `agent-tool-call`, which every session hears for the events
-   *     route's rule to narrow to its person and admins.
+   *   - User-scoped events: only sessions whose `userId` matches `forUserId`.
    *   - Global events (heartbeat, resync, change-request-*): everyone.
    *
    * The focus check resolves through `getFocusedWorkspaceIds()` so a session
@@ -282,10 +280,7 @@ export class WorkflowEventBus {
       return watched.some((id) => canonicalize(id) === target);
     }
     if (isUserScoped(event)) {
-      // An agent's tool calls are an admin's to hear too, which the bus
-      // cannot tell; it passes them on, and the events route's delivery rule
-      // (`events-delivery.ts`) narrows them to their person and admins.
-      return sub.userId === event.forUserId || event.kind === 'agent-tool-call';
+      return sub.userId === event.forUserId;
     }
     return true;
   }

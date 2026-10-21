@@ -12,18 +12,20 @@
  *   - An event that names a path on a workspace (`file-changed`, the two lock
  *     events, and any later kind that carries `workspaceId` and `path`): the
  *     person may read the path on that branch, as the file routes judge it.
- *   - `approval-changed`: the person may read the approved path at the
- *     request's target branch — the verdict the request's own detail and the
- *     merge gate are scoped by. Judged on the path alone, from the access
- *     tree at `origin/<target>`, which is cached by commit: never by reading
- *     the request's detail, which diffs the branch pair with several git
- *     subprocesses per person per event.
+ *   - `approval-changed`: the person may read the approved path on the
+ *     request's target branch — judged as a file event on that branch is,
+ *     from the server's checkout of it (a cached read of the access rules
+ *     from disk, no git), and only for a target the server holds no checkout
+ *     of from its published ref. Never by reading the request's detail, which
+ *     diffs the branch pair with several git subprocesses per person per event.
  *   - `git-sync-failed`: the event names the workspace's root and, for a sync
  *     conflict, each conflicted file (its `reason` quotes them too). The person
  *     gets the paths they may read; git's words reach only a person who may
  *     read the root and every path the conflict names, and everyone else gets
  *     a fixed sentence.
- *   - `agent-tool-call`: the person whose agent made the call, and admins.
+ *   - `agent-tool-call`: the person whose agent made the call, as the bus
+ *     already filters it; the rule says the same, so a bus that passed it on
+ *     would not widen the audience.
  *
  * Every other kind is delivered as it is. That includes the change-request
  * lifecycle kinds (`change-request-opened`, `-merged`, `-rejected`,
@@ -38,8 +40,8 @@
 
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/index.js';
-import type { IAdminAccessService } from '../admin/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
 
 const log = logger('events');
@@ -63,12 +65,8 @@ export interface EventAccess {
   mayReadPath(workspaceId: string, email: string, wsPath: string): Promise<boolean>;
   /** May `email` read the KB-repo-relative `repoPath` on `workspaceId`; `''` is the root. */
   mayReadRepoPath(workspaceId: string, email: string, repoPath: string): Promise<boolean>;
-  /**
-   * May `email` read the KB-repo-relative `repoPath` at the published tip of
-   * `targetBranch` — what a request into that branch is scoped by.
-   */
+  /** May `email` read the KB-repo-relative `repoPath` on `targetBranch` — what a request into that branch is scoped by. */
   mayReadAtTarget(targetBranch: string, email: string, repoPath: string): Promise<boolean>;
-  isAdmin(email: string): Promise<boolean>;
 }
 
 /**
@@ -78,21 +76,22 @@ export interface EventAccess {
 export interface IEventDelivery {
   /** The event as `viewer` may receive it: itself, a redacted copy, or null. Never rejects. */
   judge(event: WorkflowEvent, viewer: EventViewer): Promise<WorkflowEvent | null>;
-  /** Whether `viewer` is an admin. Never rejects; a failure is a no. */
-  isAdmin(viewer: EventViewer): Promise<boolean>;
 }
 
-/** The deployment's `EventAccess`: the access service the file routes and the request tools use. */
+/** The deployment's `EventAccess`: the access service the file routes use, read in the server's own checkouts. */
 export function createEventAccess(deps: {
   accessControl: Pick<IAccessControl, 'canRead' | 'canReadBatchAtRef'>;
-  adminAccess: IAdminAccessService;
   kbDirName: string;
-  /**
-   * A workspace to read a published ref in. Every verdict at `origin/<branch>`
-   * is the same from any clone of the repository, so any existing one serves;
-   * the composition root answers with one that exists.
-   */
-  anyWorkspaceId: () => Promise<string>;
+  workspaces: {
+    /** Whether the server holds a checkout for `workspaceId` (the branch's own workspace). */
+    hasWorkspace(workspaceId: string): Promise<boolean>;
+    /**
+     * A workspace to read a published ref in, for a target the server holds
+     * no checkout of. Every verdict at `origin/<branch>` is the same from any
+     * clone of the repository, so any existing one serves.
+     */
+    anyWorkspaceId(): Promise<string>;
+  };
 }): EventAccess {
   return {
     mayReadPath: (workspaceId, email, wsPath) =>
@@ -105,8 +104,12 @@ export function createEventAccess(deps: {
       ),
     mayReadRepoPath: (workspaceId, email, repoPath) => deps.accessControl.canRead(workspaceId, email, repoPath),
     mayReadAtTarget: async (targetBranch, email, repoPath) => {
+      // The branch's own checkout, when the server has one (the default
+      // branch always): the same disk read a file event on that branch gets.
+      const own = workspaceIdForBranch(targetBranch);
+      if (await deps.workspaces.hasWorkspace(own)) return deps.accessControl.canRead(own, email, repoPath);
       const verdicts = await deps.accessControl.canReadBatchAtRef(
-        await deps.anyWorkspaceId(),
+        await deps.workspaces.anyWorkspaceId(),
         `origin/${targetBranch}`,
         email,
         [repoPath],
@@ -114,7 +117,6 @@ export function createEventAccess(deps: {
       // A ref that cannot be resolved answers null: nothing is granted on it.
       return verdicts?.get(repoPath) === true;
     },
-    isAdmin: (email) => deps.adminAccess.isAdmin(email),
   };
 }
 
@@ -135,7 +137,7 @@ async function deliveryFor(
       case 'git-sync-failed':
         return email ? await gitSyncFailedFor(event, email, access) : redactGitSyncFailed(event, []);
       case 'agent-tool-call':
-        return viewer.userId === event.forUserId || (email && (await access.isAdmin(email))) ? event : null;
+        return viewer.userId === event.forUserId ? event : null;
     }
     // Structural, not by kind: anything that names a path on a workspace is
     // judged by the path, so a kind added later is covered without a line here.
@@ -195,17 +197,6 @@ export class EventDelivery implements IEventDelivery {
   private readonly inFlight = new Map<string, Promise<WorkflowEvent | null>>();
 
   constructor(private readonly access: EventAccess) {}
-
-  /** Whether `viewer` is an admin; never rejects, a failure being a no. */
-  async isAdmin(viewer: EventViewer): Promise<boolean> {
-    if (!viewer.email) return false;
-    try {
-      return await this.access.isAdmin(viewer.email);
-    } catch (err) {
-      log.warn(`admin resolution failed for user=${viewer.userId}; treated as not admin`, { err });
-      return false;
-    }
-  }
 
   judge(event: WorkflowEvent, viewer: EventViewer): Promise<WorkflowEvent | null> {
     const key = `${event.id}\u0000${event.ts}\u0000${viewer.userId}`;

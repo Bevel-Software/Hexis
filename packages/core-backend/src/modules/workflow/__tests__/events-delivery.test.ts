@@ -31,12 +31,13 @@ const PUBLIC_REPO = 'Public/Notes.md';
 const FINANCE_REQUEST = 7;
 const PUBLIC_REQUEST = 8;
 
-const USERS: Record<string, { email: string; admin: boolean }> = {
-  alice: { email: 'alice@example.com', admin: false },
-  bob: { email: 'bob@example.com', admin: false },
-  root: { email: 'root@example.com', admin: true },
+const USERS: Record<string, { email: string }> = {
+  alice: { email: 'alice@example.com' },
+  bob: { email: 'bob@example.com' },
+  /** A deployment admin. Admin status grants nothing here: events are about what a person may read. */
+  root: { email: 'root@example.com' },
   /** Reads the root, like Alice, but not `Finance/`: a folder denied below a readable root. */
-  carol: { email: 'carol@example.com', admin: false },
+  carol: { email: 'carol@example.com' },
 };
 
 /** Fake of the access service the file routes use, and of the change-request scope the tools use. */
@@ -55,7 +56,6 @@ function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => vo
     mayReadRepoPath: async (_ws, email, repoPath) =>
       repoPath === '' ? email !== USERS.bob!.email : reads(email, `knowledge-base/${repoPath}`),
     mayReadAtTarget: async (_target, email, repoPath) => reads(email, `knowledge-base/${repoPath}`),
-    isAdmin: async (email) => Object.values(USERS).some((u) => u.email === email && u.admin),
   };
 }
 
@@ -324,7 +324,7 @@ describe('events route — delivery rule', () => {
     expect(kinds(again)).toEqual([`change-request-opened:${PUBLIC_REQUEST}`]);
   });
 
-  it("an agent's tool call reaches its own person and admins through the route, nobody else", async () => {
+  it("an agent's tool call reaches its own person through the route, nobody else — an admin included", async () => {
     const bus = new WorkflowEventBus();
     const base = listen(bus, fakeAccess());
     const alice = await open(base, 'alice', 's-alice');
@@ -342,24 +342,8 @@ describe('events route — delivery rule', () => {
 
     const toolCalls = (s: Stream) => s.events.filter((e) => e.kind === 'agent-tool-call');
     expect(toolCalls(alice)).toHaveLength(1);
-    expect(toolCalls(root)).toHaveLength(1);
+    expect(toolCalls(root)).toEqual([]);
     expect(toolCalls(bob)).toEqual([]);
-  });
-
-  it("asks once per session whether its person is an admin, not once per other person's tool call", async () => {
-    const bus = new WorkflowEventBus();
-    const base0 = fakeAccess();
-    const asked: string[] = [];
-    const access: EventAccess = { ...base0, isAdmin: async (email) => (asked.push(email), base0.isAdmin(email)) };
-    const base = listen(bus, access);
-    const bob = await open(base, 'bob', 's-bob');
-    await focus(base, 'bob', 's-bob');
-
-    const call = (n: number): WorkflowEventPayload => ({ kind: 'agent-tool-call', forUserId: 'alice', threadId: 't', tool: 'write_file', summary: `call ${n}` });
-    await emitAndSettle(bus, [call(1), call(2), call(3)], bob);
-
-    expect(bob.events.filter((e) => e.kind === 'agent-tool-call')).toEqual([]);
-    expect(asked).toEqual([USERS.bob!.email]);
   });
 
   it('fans one event out to 100 sessions through the route, each getting what it may read', async () => {
@@ -442,10 +426,10 @@ describe('EventDelivery', () => {
   const stamp = (p: WorkflowEventPayload, id = 1): WorkflowEvent => ({ id, ts: '2026-10-19T00:00:00.000Z', ...p }) as WorkflowEvent;
   const toolCall = stamp({ kind: 'agent-tool-call', forUserId: 'alice', threadId: 't', tool: 'write_file', summary: `writing ${FINANCE}` });
 
-  it('agent-tool-call reaches the person whose agent made the call, and admins, nobody else', async () => {
+  it('agent-tool-call reaches the person whose agent made the call, nobody else', async () => {
     const access = fakeAccess();
     expect(await judge(toolCall, { userId: 'alice', email: USERS.alice!.email }, access)).toBe(toolCall);
-    expect(await judge(toolCall, { userId: 'root', email: USERS.root!.email }, access)).toBe(toolCall);
+    expect(await judge(toolCall, { userId: 'root', email: USERS.root!.email }, access)).toBeNull();
     expect(await judge(toolCall, { userId: 'bob', email: USERS.bob!.email }, access)).toBeNull();
   });
 
@@ -521,6 +505,8 @@ describe('EventDelivery', () => {
 describe('createEventAccess', () => {
   const calls: string[] = [];
   const atRef: string[] = [];
+  /** The branches the server holds a checkout of: `main` yes, `release` no. */
+  const checkedOut = new Set([WS]);
   const access = createEventAccess({
     accessControl: {
       canRead: async (ws, email, rel) => (calls.push(`${ws}|${email}|${rel}`), !rel.startsWith('Finance/')),
@@ -530,9 +516,11 @@ describe('createEventAccess', () => {
         return new Map(paths.map((p) => [p, !p.startsWith('Finance/')]));
       },
     },
-    adminAccess: { isAdmin: async (email) => email === USERS.root!.email },
     kbDirName: 'knowledge-base',
-    anyWorkspaceId: async () => WS,
+    workspaces: {
+      hasWorkspace: async (workspaceId) => checkedOut.has(workspaceId),
+      anyWorkspaceId: async () => WS,
+    },
   });
 
   it('judges a path as the file routes do: repo-relative inside the KB, open outside it', async () => {
@@ -544,13 +532,23 @@ describe('createEventAccess', () => {
     expect(calls).toEqual([`${WS}|a@x|Finance/Budget.md`, `${WS}|a@x|Public/Notes.md`, `${WS}|a@x|`, `${WS}|a@x|Finance/Budget.md`]);
   });
 
-  it("judges an approved path at the request's target, in any clone, as the request's detail is scoped — and grants nothing on a ref that does not resolve", async () => {
+  it("judges an approved path from the target branch's own checkout when the server holds one — a disk read, no git", async () => {
+    calls.length = 0;
     expect(await access.mayReadAtTarget('main', 'a@x', PUBLIC_REPO)).toBe(true);
     expect(await access.mayReadAtTarget('main', 'a@x', FINANCE_REPO)).toBe(false);
+    expect(calls).toEqual([`${WS}|a@x|${PUBLIC_REPO}`, `${WS}|a@x|${FINANCE_REPO}`]);
+    expect(atRef).toEqual([]);
+  });
+
+  it('falls back to the published ref, in any clone, for a target with no checkout — and grants nothing on a ref that does not resolve', async () => {
+    calls.length = 0;
+    expect(await access.mayReadAtTarget('release', 'a@x', PUBLIC_REPO)).toBe(true);
+    expect(await access.mayReadAtTarget('release', 'a@x', FINANCE_REPO)).toBe(false);
     expect(await access.mayReadAtTarget('gone', 'a@x', PUBLIC_REPO)).toBe(false);
+    expect(calls).toEqual([]);
     expect(atRef).toEqual([
-      `${WS}|origin/main|a@x|${PUBLIC_REPO}`,
-      `${WS}|origin/main|a@x|${FINANCE_REPO}`,
+      `${WS}|origin/release|a@x|${PUBLIC_REPO}`,
+      `${WS}|origin/release|a@x|${FINANCE_REPO}`,
       `${WS}|origin/gone|a@x|${PUBLIC_REPO}`,
     ]);
   });

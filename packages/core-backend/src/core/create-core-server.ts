@@ -667,13 +667,15 @@ export async function createCoreServer(
   // browser API can't set headers). Mounted as its own app.use so it
   // doesn't share an outer middleware chain with the JSON routes above.
   // Every event passes the delivery rule on its way to a session: the file
-  // routes' read verdict, and for an approval the verdict at the request's
-  // target — read in any existing clone, as the request tools read it.
+  // routes' read verdict, read in the server's own checkouts — for an
+  // approval, the target branch's; a target with no checkout at its ref.
   const eventDelivery = new EventDelivery(createEventAccess({
     accessControl: core.accessControl,
-    adminAccess: core.adminAccess,
     kbDirName: core.kbDirName,
-    anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
+    workspaces: {
+      hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
+      anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
+    },
   }));
   app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware, eventDelivery));
   app.use('/api', core.authMiddleware, createDiffRoutes(
