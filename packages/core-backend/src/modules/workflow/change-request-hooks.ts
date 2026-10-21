@@ -1,5 +1,6 @@
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { ListenerSeam, type NotifyingListener } from '../../shared/listener-seam.js';
 
 const log = logger('cr');
 
@@ -59,13 +60,10 @@ export interface ChangeRequestOpenedEvent {
 
 /**
  * A listener answers how it reached the approvers — a non-empty channel name,
- * `'email'` say — or null when it did not (nothing configured, nobody to
- * tell, the send failed). It is awaited: the opener's answer says who was
- * notified, truthfully, so a listener bounds its own wait. A throw is logged
- * and counts as null; it never fails the open. An empty name is no channel
- * and counts as null too.
+ * `'email'` say — or null when it did not; the rule is {@link NotifyingListener}'s:
+ * awaited, a throw logged and counted as null, never failing the open.
  */
-export type ChangeRequestOpenedHook = (event: ChangeRequestOpenedEvent) => Promise<string | null>;
+export type ChangeRequestOpenedHook = NotifyingListener<ChangeRequestOpenedEvent>;
 
 /**
  * Core's seam for "a change request was opened": a deployment (the cloud
@@ -81,25 +79,18 @@ export interface IChangeRequestHooks {
 }
 
 export class ChangeRequestHooks implements IChangeRequestHooks {
-  private readonly opened: ChangeRequestOpenedHook[] = [];
+  // The request exists whether or not the reviewers were told: the opener's
+  // answer says they were not, and the request is found in the app as before.
+  private readonly opened = new ListenerSeam<ChangeRequestOpenedEvent>(
+    log,
+    'a change-request-opened listener failed; the reviewers were not notified by it:',
+  );
 
   onChangeRequestOpened(hook: ChangeRequestOpenedHook): void {
-    this.opened.push(hook);
+    this.opened.add(hook);
   }
 
-  async runChangeRequestOpened(event: ChangeRequestOpenedEvent): Promise<string[]> {
-    const notified: string[] = [];
-    for (const hook of this.opened) {
-      try {
-        const channel = await hook(event);
-        if (channel !== null && channel !== '') notified.push(channel);
-      } catch (err) {
-        // The request exists whether or not the reviewers were told: the
-        // opener's answer says they were not, and the request is found in
-        // the app as before.
-        log.error('a change-request-opened listener failed; the reviewers were not notified by it:', { err });
-      }
-    }
-    return notified;
+  runChangeRequestOpened(event: ChangeRequestOpenedEvent): Promise<string[]> {
+    return this.opened.run(event);
   }
 }
