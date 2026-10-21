@@ -2257,6 +2257,51 @@ describe('FileViewer full screen', () => {
     ).toBeTruthy();
   });
 
+  // The control that was pressed is withdrawn by the switch, so focus would
+  // otherwise fall to the body each way and the next Tab restart at the top.
+  it.each([
+    ['prose, from the pane bar', 'knowledge-base/Knowledge/Foo.md'],
+    ['full-bleed, from the page header', 'knowledge-base/Dashboards/Roadmap.html'],
+  ])('moves focus to the exit control on entry and back to Full screen on exit (%s)', async (_kind, filePath) => {
+    const user = userEvent.setup();
+    render(<ViewerHarness filePath={filePath} renderers={stubFor('.md', '.html')} />);
+    await screen.findByTestId('stub-renderer');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByRole('button', { name: 'Full screen' })).toHaveFocus();
+  });
+
+  it('moves focus into the view when the URL opens it, and to Full screen when it is left', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(screen.getByRole('button', { name: 'Full screen' })).toHaveFocus();
+  });
+
+  it('leaves focus in the renderer when the reader is working there', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+
+    await user.click(screen.getByLabelText('Scratch'));
+    await user.keyboard('{Escape}');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(screen.getByLabelText('Scratch')).toHaveFocus();
+  });
+
   it('leaves on Escape, but a dialog opened on top takes Escape first', async () => {
     const user = userEvent.setup();
     render(

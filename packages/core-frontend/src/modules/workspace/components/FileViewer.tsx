@@ -51,7 +51,12 @@ import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
-import { ExitFullScreenButton, FULL_SCREEN_SURFACE, FullScreenButton } from './FullScreenView';
+import {
+  ExitFullScreenButton,
+  FULL_SCREEN_ENTRY_SELECTOR,
+  FULL_SCREEN_SURFACE,
+  FullScreenButton,
+} from './FullScreenView';
 import { useFullScreenView } from '../hooks/useFullScreenView';
 import { DOCUMENT_COLUMN, documentSideGutters } from '../../../shared/theme/measure';
 import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
@@ -947,7 +952,15 @@ export function FileViewer() {
   // out. A full-bleed renderer scrolls inside itself and keeps its own.
   const readingOffsetRef = useRef<number | null>(null);
   const { enter: enterFullScreenView, leave: leaveFullScreenView } = fullScreen;
+  // Focus crosses the switch the way it crosses a dialog's: in on opening,
+  // back on closing. The control that was pressed is captured HERE, before
+  // the switch, because the switch itself withdraws it (the pane bar, or the
+  // header's button) and focus would fall to the body with it.
+  const focusBeforeFullScreenRef = useRef<HTMLElement | null>(null);
+  const exitFullScreenRef = useRef<HTMLButtonElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
   const enterFullScreen = useCallback(() => {
+    focusBeforeFullScreenRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const shell = editorContainerRef.current;
     const pane = readPaneRef.current;
     if (shell && pane) {
@@ -971,6 +984,32 @@ export function FileViewer() {
       const paneTop = pane.getBoundingClientRect().top - shell.getBoundingClientRect().top + shell.scrollTop;
       shell.scrollTop = paneTop + offset;
     }
+  }, [filling]);
+  // Focus still inside the renderer (an editor's caret, a page's control) is
+  // where the reader is working, and stays there both ways. Otherwise: on
+  // the way in — the button, a URL, a reload — the exit control; on the way
+  // out, the element that had focus before, or, when that is gone or there
+  // never was one (opened by URL), the way back in, else the read pane.
+  // `preventScroll`, so the reading offset carried above is not undone.
+  const wasFillingRef = useRef(false);
+  useEffect(() => {
+    const pane = readPaneRef.current;
+    const keepsFocus = (el: Element | null) => !!pane && !!el && pane.contains(el) && el !== pane;
+    if (filling) {
+      wasFillingRef.current = true;
+      if (!keepsFocus(document.activeElement)) exitFullScreenRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (!wasFillingRef.current) return;
+    wasFillingRef.current = false;
+    const before = focusBeforeFullScreenRef.current;
+    focusBeforeFullScreenRef.current = null;
+    if (keepsFocus(document.activeElement)) return;
+    const target =
+      (before?.isConnected ? before : null) ??
+      pageRef.current?.querySelector<HTMLElement>(FULL_SCREEN_ENTRY_SELECTOR) ??
+      pane;
+    target?.focus({ preventScroll: true });
   }, [filling]);
 
   // A page opened for writing (the `startEditing` request above) gets the
@@ -1397,7 +1436,7 @@ export function FileViewer() {
   );
 
   return (
-    <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
+    <div ref={pageRef} className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <PullNeededBanner />
       <GitSyncFailedBanner />
       {/* No "you don't have permission to edit" banner, deliberately: for a
@@ -1774,7 +1813,7 @@ export function FileViewer() {
             ) : (
               rendererElement
             )}
-            {filling && <ExitFullScreenButton onExit={leaveFullScreen} surface={readPaneRef} />}
+            {filling && <ExitFullScreenButton ref={exitFullScreenRef} onExit={leaveFullScreen} surface={readPaneRef} />}
           </div>
         </>
       )}

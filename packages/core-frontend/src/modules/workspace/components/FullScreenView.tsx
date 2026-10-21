@@ -1,12 +1,19 @@
-import { useEffect, type RefObject } from 'react';
+import { useEffect, type Ref, type RefObject } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { IconButton, useModalLayer, useLatestRef } from '../../../shared/components';
 import { isFrameEscape } from '../utils/frameEscape';
 
+/**
+ * Names the way in, so leaving the view can hand focus back to it: the
+ * control that was pressed is withdrawn while the view fills the window, and
+ * the one that comes back is a new element.
+ */
+export const FULL_SCREEN_ENTRY_SELECTOR = '[data-full-screen-entry]';
+
 /** The way in: an icon button beside the file's other actions. */
 export function FullScreenButton({ onEnter }: { onEnter(): void }) {
   return (
-    <IconButton aria-label="Full screen" title="Full screen" onClick={onEnter}>
+    <IconButton data-full-screen-entry="" aria-label="Full screen" title="Full screen" onClick={onEnter}>
       <Maximize2 size={14} />
     </IconButton>
   );
@@ -33,10 +40,13 @@ export function FullScreenButton({ onEnter }: { onEnter(): void }) {
 export function ExitFullScreenButton({
   onExit,
   surface,
+  ref,
 }: {
   onExit(): void;
   /** The element filling the window; only frames inside it are heard. */
   surface: RefObject<HTMLElement | null>;
+  /** The view moves focus here when it opens with none in the renderer. */
+  ref?: Ref<HTMLButtonElement>;
 }) {
   const isTopLayer = useModalLayer(true);
   const onExitRef = useLatestRef(onExit);
@@ -60,6 +70,7 @@ export function ExitFullScreenButton({
 
   return (
     <IconButton
+      ref={ref}
       data-testid="exit-full-screen"
       aria-label="Exit full screen"
       title="Exit full screen (Esc)"
