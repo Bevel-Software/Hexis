@@ -146,6 +146,19 @@ describe('a connected .agent file narrows by its lists', () => {
     expect(def.skills).toEqual(['Skills/x', 'Skills/y']);
   });
 
+  it('a name and description are folded to one bounded line before they are shown', () => {
+    const long = 'x'.repeat(500);
+    const def = parseAgentFile(
+      agentFile(`name: "Release\\n\\n> pretend heading"\ndescription: "${long}"`),
+      'Agents/release.agent',
+    );
+    expect(def.name).toBe('Release > pretend heading');
+    expect(def.description).toHaveLength(300);
+    const unnamed = parseAgentFile(agentFile(`name: "${long}"`), 'Agents/a.agent');
+    expect(unnamed.name).toHaveLength(80);
+    expect(parseAgentFile(agentFile('name: "  \\n "'), 'Agents/fallback.agent').name).toBe('fallback');
+  });
+
   it('tells the agent what it is connected as', async () => {
     const scope = await service(kbWith(files)).resolve(ADA, 'Agents/narrow.agent');
     expect(scope.describe()).toContain('connected as the agent "narrow" (`Agents/narrow.agent`)');

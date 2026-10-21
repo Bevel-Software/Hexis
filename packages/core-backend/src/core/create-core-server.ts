@@ -632,6 +632,7 @@ export async function createCoreServer(
     createPluginCreationRoutes(
       core.pluginProvisionService,
       async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+      core.agentScopeService,
     ),
   );
 

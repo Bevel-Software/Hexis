@@ -681,12 +681,23 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * revoke. A read, not a write: the use is stamped separately, throttled.
    */
   async isConnectionLive(connectionId: string): Promise<boolean> {
+    return (await this.liveConnectionChoice(connectionId)) !== null;
+  }
+
+  /**
+   * A live agent connection's current "Connect as" choice (`agentPath` null
+   * = Everything), or null when the connection is gone or revoked. Read on
+   * every request through the local server's exchanged grant: that token is
+   * stateless and outlives a re-consent, so the choice it was minted with is
+   * not the one it is served as — the row's is.
+   */
+  async liveConnectionChoice(connectionId: string): Promise<{ agentPath: string | null } | null> {
     const [row] = await this.deps.db
-      .select({ id: agentConnections.id })
+      .select({ agentPath: agentConnections.agentPath })
       .from(agentConnections)
       .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.revokedAt)))
       .limit(1);
-    return row !== undefined;
+    return row ? { agentPath: row.agentPath ?? null } : null;
   }
 
   /**

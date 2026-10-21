@@ -17,9 +17,9 @@ export const AGENT_FILE_EXTENSION = '.agent';
  * what the lists name, so an agent that names no skills loads none.
  */
 export interface AgentFileDefinition {
-  /** Frontmatter `name`, else the file's base name. */
+  /** Frontmatter `name` folded to one line of at most `AGENT_NAME_MAX` characters, else the file's base name. */
   name: string;
-  /** Frontmatter `description`, folded to one line; empty when there is none. */
+  /** Frontmatter `description`, folded to one line of at most `AGENT_DESCRIPTION_MAX`; empty when there is none. */
   description: string;
   /** Plugin folders (a parent folder means every plugin under it). */
   plugins: string[];
@@ -60,8 +60,11 @@ export function parseAgentFile(content: string, repoPath: string): AgentFileDefi
   }
   const obj = parsed as Record<string, unknown>;
   const base = repoPath.slice(repoPath.lastIndexOf('/') + 1).replace(/\.agent$/i, '');
-  const name = typeof obj.name === 'string' && obj.name.trim() ? obj.name.trim() : base;
-  const description = typeof obj.description === 'string' ? obj.description.replace(/\s+/g, ' ').trim() : '';
+  // Both are written by anyone who may edit the file and are read back into
+  // the handshake, the agent guide and refusals, so they are folded to one
+  // line and bounded: a newline must not break the text they sit in.
+  const name = foldLine(obj.name, AGENT_NAME_MAX) || foldLine(base, AGENT_NAME_MAX);
+  const description = foldLine(obj.description, AGENT_DESCRIPTION_MAX);
   return {
     name,
     description,
@@ -70,6 +73,17 @@ export function parseAgentFile(content: string, repoPath: string): AgentFileDefi
     connectors: pathList(obj, 'connectors'),
     platformTools: obj.platformTools === undefined || obj.platformTools === null ? null : names(obj, 'platformTools'),
   };
+}
+
+/** The longest `name` an agent is shown by. */
+export const AGENT_NAME_MAX = 80;
+/** The longest `description` an agent is shown with. */
+export const AGENT_DESCRIPTION_MAX = 300;
+
+/** A frontmatter string folded to one trimmed line of at most `max` characters; empty for anything else. */
+function foldLine(value: unknown, max: number): string {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\s+/g, ' ').trim().slice(0, max).trim();
 }
 
 function entries(obj: Record<string, unknown>, key: string): string[] {

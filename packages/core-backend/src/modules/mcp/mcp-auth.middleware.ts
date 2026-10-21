@@ -229,10 +229,13 @@ export function createMcpAuthMiddleware(
       // stamped too (throttled, off the request's path), so the Audit log's
       // "last used" follows the local server's calls, not only its sign-ins.
       // Carried on the request so those calls are logged under the agent.
+      // The same read answers what the connection is made as NOW: a
+      // re-consent changes the row, not the token, so the row's choice is
+      // the one served, never the one the token was minted with.
       if (claim.connectionId) {
-        let live: boolean;
+        let live: { agentPath: string | null } | null;
         try {
-          live = await oauthProvider.isConnectionLive(claim.connectionId);
+          live = await oauthProvider.liveConnectionChoice(claim.connectionId);
         } catch (err) {
           log.error('agent-connection check failed:', { err });
           res.status(500).json({ error: 'Authentication backend unavailable' });
@@ -244,8 +247,10 @@ export function createMcpAuthMiddleware(
         }
         oauthProvider.noteConnectionUse(claim.connectionId);
         req.agentConnectionId = claim.connectionId;
+        if (live.agentPath) req.mcpAgentPath = live.agentPath;
+      } else if (claim.agentPath) {
+        req.mcpAgentPath = claim.agentPath;
       }
-      if (claim.agentPath) req.mcpAgentPath = claim.agentPath;
       req.mcpCallerKind = 'internal';
       next();
       return;

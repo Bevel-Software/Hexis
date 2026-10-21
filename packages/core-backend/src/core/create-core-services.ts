@@ -1484,8 +1484,8 @@ export async function createCoreServices(
     defaultBranch: () => kb.defaultBranch,
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
-  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
   // user's identity of ANY kind is refused the link.
@@ -1496,7 +1496,7 @@ export async function createCoreServices(
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
-  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService);
+  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
 
   // Recovery-bot identity: a synthetic `recovery-bot@bevel.local` user
   // backing (a) the recovery agent's commit authorship and (b) the

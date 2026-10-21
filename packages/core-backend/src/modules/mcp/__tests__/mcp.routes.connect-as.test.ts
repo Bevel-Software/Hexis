@@ -125,6 +125,31 @@ describe('the local server’s exchanged grant', () => {
     const { token } = (await res.json()) as { token: string };
     expect(internalTokens.verify(token)).toEqual({ userId: 'user-5', externalProxy: true, connectionId: 'conn-9' });
   });
+
+  it("a direct tool call reads the connection's CURRENT choice: a re-consent reaches a token minted before it", async () => {
+    const internalTokens = new InternalTokenService({ secret: 'test-secret' });
+    const keys = { looksLikeExternalApiKey: () => false } as never;
+    let current: { agentPath: string | null } | null = { agentPath: 'Agents/ops.agent' };
+    const verify = createTokenVerifier(keys, internalTokens, undefined, {
+      liveConnectionChoice: async (id) => (id === 'conn-9' ? current : null),
+    });
+    // Minted as Everything, served as the agent chosen since.
+    const everything = internalTokens.mint({ userId: 'user-5', externalProxy: true, connectionId: 'conn-9' }, 60_000);
+    expect(await verify(everything)).toEqual({
+      ok: true,
+      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', agentPath: 'Agents/ops.agent', scope: 'write' },
+    });
+    // Minted as an agent, served as Everything once the person chose it.
+    current = { agentPath: null };
+    const asAgent = internalTokens.mint(
+      { userId: 'user-5', externalProxy: true, connectionId: 'conn-9', agentPath: 'Agents/ops.agent' },
+      60_000,
+    );
+    expect(await verify(asAgent)).toEqual({
+      ok: true,
+      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', scope: 'write' },
+    });
+  });
 });
 
 describe('an MCP request', () => {
