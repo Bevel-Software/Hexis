@@ -7,7 +7,7 @@ import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import { bodyEnvelope, declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { ISkillService } from './skills.contract.js';
+import type { ISkillService, SkillScope } from './skills.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
 import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/index.js';
@@ -134,9 +134,13 @@ export function registerSkillsTools(
     return { paths: committed.includes(skillMdOf(loaded)) ? committed : [skillMdOf(loaded), ...loaded.files], at };
   };
 
-  registry.registerExternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
+  registry.registerExternalTool((ctx) =>
+    buildListSkillsDef(skillService, ctx.userEmail, ctx.connectionScope?.skillFilter()),
+  );
   registry.registerInternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
-  registry.registerExternalTool((ctx) => buildGetSkillDef(skillService, ctx.userEmail));
+  registry.registerExternalTool((ctx) =>
+    buildGetSkillDef(skillService, ctx.userEmail, ctx.connectionScope?.skillFilter()),
+  );
   registry.registerInternalTool((ctx) => buildGetSkillDef(skillService, ctx.userEmail));
   // Both defs are built per catalog listing (their descriptions name the skills
   // THIS caller may read), so declare the arguments here as well: a direct REST
@@ -148,7 +152,11 @@ export function registerSkillsTools(
     '/agent/tools/list_skills',
     toolAuth,
     toolHandler(async (args, ctx: ToolContext) => {
-      const skills = await skillService.listSkills(ctx.user.email, { branch: branchArg(args) });
+      const within = ctx.connectionScope?.skillFilter();
+      const skills = await skillService.listSkills(ctx.user.email, {
+        branch: branchArg(args),
+        ...(within ? { within } : {}),
+      });
       // Judged on each skill's SKILL.md, by the default branch's rules — a
       // skill only on a draft is judged where it would land. Each verdict goes
       // onto a COPY: the summaries may be the catalog shared across users.
@@ -178,7 +186,12 @@ export function registerSkillsTools(
           400,
         );
       }
-      const result = await skillService.getSkill(ctx.user.email, name, file, { version, branch });
+      const within = ctx.connectionScope?.skillFilter();
+      const result = await skillService.getSkill(ctx.user.email, name, file, {
+        version,
+        branch,
+        ...(within ? { within } : {}),
+      });
       if (!result.ok) return result;
       if (result.kind === 'file') {
         const verdicts = await verdictsFor(ctx, [result.file.path]);
@@ -227,8 +240,13 @@ function branchArg(args: Record<string, unknown>): string | undefined {
  * the tool's fixed text leaves under {@link TOOL_DESCRIPTION_CAP} once the
  * guide-first sentence the registry puts in front is counted.
  */
-async function availableSkillsLine(skillService: ISkillService, userEmail: string | undefined, budget: number): Promise<string> {
-  const skills = await skillService.listSkills(userEmail);
+async function availableSkillsLine(
+  skillService: ISkillService,
+  userEmail: string | undefined,
+  budget: number,
+  within?: SkillScope,
+): Promise<string> {
+  const skills = await skillService.listSkills(userEmail, within ? { within } : {});
   if (skills.length === 0) return 'No skills are currently available.';
   const names = skills.map((s) => `\`${s.name}\``);
   const rest = (shown: number): string =>
@@ -280,12 +298,17 @@ const LIST_SKILLS_DESCRIPTION =
   'Each skill carries `canWrite`: whether you may change its SKILL.md directly on the default branch. ' +
   `${CAN_WRITE_CLAUSE} `;
 
-async function buildListSkillsDef(skillService: ISkillService, userEmail?: string): Promise<UtcpTool> {
+async function buildListSkillsDef(skillService: ISkillService, userEmail?: string, within?: SkillScope): Promise<UtcpTool> {
   return toolDef({
     name: 'list_skills',
     description:
       LIST_SKILLS_DESCRIPTION +
-      (await availableSkillsLine(skillService, userEmail, skillsLineBudget('list_skills', LIST_SKILLS_INPUTS, LIST_SKILLS_DESCRIPTION))),
+      (await availableSkillsLine(
+        skillService,
+        userEmail,
+        skillsLineBudget('list_skills', LIST_SKILLS_INPUTS, LIST_SKILLS_DESCRIPTION),
+        within,
+      )),
     path: '/api/agent/tools/list_skills',
     inputs: LIST_SKILLS_INPUTS,
     outputs: {
@@ -338,12 +361,17 @@ const GET_SKILL_DESCRIPTION =
   'The skill (or `file`) carries `canWrite`: whether you may change all of it directly on the default branch. ' +
   `${CAN_WRITE_CLAUSE} `;
 
-async function buildGetSkillDef(skillService: ISkillService, userEmail?: string): Promise<UtcpTool> {
+async function buildGetSkillDef(skillService: ISkillService, userEmail?: string, within?: SkillScope): Promise<UtcpTool> {
   return toolDef({
     name: 'get_skill',
     description:
       GET_SKILL_DESCRIPTION +
-      (await availableSkillsLine(skillService, userEmail, skillsLineBudget('get_skill', GET_SKILL_INPUTS, GET_SKILL_DESCRIPTION))),
+      (await availableSkillsLine(
+        skillService,
+        userEmail,
+        skillsLineBudget('get_skill', GET_SKILL_INPUTS, GET_SKILL_DESCRIPTION),
+        within,
+      )),
     path: '/api/agent/tools/get_skill',
     inputs: GET_SKILL_INPUTS,
     outputs: {

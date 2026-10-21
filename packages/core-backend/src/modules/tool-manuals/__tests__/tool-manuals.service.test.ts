@@ -486,6 +486,30 @@ describe('ToolManualService', () => {
     });
   });
 
+  /**
+   * A connection made as an `.agent` file narrows the catalog (`within`) —
+   * AFTER the read gate, on every read an agent surface makes, so it can take
+   * a manual away and never give one.
+   */
+  describe('narrowed to a connection’s connectors', () => {
+    const onlyBilling = (p: string) => p === 'Plugins/billing.tool';
+    const everything = () => true;
+
+    test('every agent-facing read answers only what is both readable and within', async () => {
+      const s = svc();
+      expect((await s.toManualCallTemplates('user@x.eu', { within: onlyBilling })).map((t) => t.name)).toEqual(['billing']);
+      expect((await s.listAccessibleCatalog('user@x.eu', onlyBilling)).tools.map((t) => t.name)).toEqual(['billing']);
+      expect(await s.catalogFingerprints('user@x.eu', onlyBilling)).toHaveLength(1);
+      expect(await s.listLocalOnly('user@x.eu', () => false)).toEqual([]);
+    });
+
+    test('an entry naming a manual the person may not read loads nothing for it', async () => {
+      const s = svc(denyBilling);
+      expect(await s.toManualCallTemplates('user@x.eu', { within: onlyBilling })).toEqual([]);
+      expect((await s.toManualCallTemplates('user@x.eu', { within: everything })).map((t) => t.name)).toEqual(['weather']);
+    });
+  });
+
   test('skips a `.tool` with a malformed `variables` entry (never silently mis-scoped)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsvbad-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

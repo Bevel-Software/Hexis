@@ -356,6 +356,16 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
   hiddenTools: HiddenTool[];
 }
 
+/**
+ * A connection's narrowing of the catalog: whether the connector defined at
+ * `definitionPath` (a `.tool` file, or the MCP server definition a server
+ * entry came from) is one the connection loads. Applied AFTER the caller's
+ * read gate, so it can only take manuals away. The agent surfaces pass the
+ * connection scope's `allowsConnector` (`modules/agent-scope`); absent is the
+ * whole readable catalog.
+ */
+export type ConnectorScope = (definitionPath: string) => boolean;
+
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
@@ -377,7 +387,7 @@ export interface IToolManualService {
    * unparseable by definition, so the verdict comes from its folder's
    * `access.md` chain — default-deny, as everywhere else.
    */
-  listAccessibleCatalog(userEmail: string): Promise<AccessibleCatalog>;
+  listAccessibleCatalog(userEmail: string, within?: ConnectorScope): Promise<AccessibleCatalog>;
   /**
    * One readable `.tool` by slug, with its description + capabilities, for the
    * browser tool page. `null` when no such slug exists OR the caller can't read
@@ -406,7 +416,7 @@ export interface IToolManualService {
    * manual's embedded tools breaks without touching anything a summary shows.
    * Opaque to callers: only equality is ever asked of these lines.
    */
-  catalogFingerprints(userEmail: string): Promise<string[]>;
+  catalogFingerprints(userEmail: string, within?: ConnectorScope): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
@@ -422,7 +432,7 @@ export interface IToolManualService {
    * NOT include the KB manual (the route prepends that). With `{ remoteOnly: true }`
    * (the remote MCP proxy), LOCAL-ONLY manuals (`remote: false`) are excluded.
    */
-  toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]>;
+  toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean; within?: ConnectorScope }): Promise<CallTemplate[]>;
   /**
    * The caller's accessible LOCAL-ONLY (`remote: false`) manuals.
    *
@@ -430,7 +440,7 @@ export interface IToolManualService {
    * both: `name` is the UTCP namespace its `${VAR}` refs are keyed by, and
    * `slug` is what addresses the manual on the variable-resolution route.
    */
-  listLocalOnly(userEmail: string): Promise<{ slug: string; name: string; path: string }[]>;
+  listLocalOnly(userEmail: string, within?: ConnectorScope): Promise<{ slug: string; name: string; path: string }[]>;
   /**
    * Tools declared on `branch` whose namespace the default-branch catalog does
    * not serve yet, filtered to what the caller can read there. The catalog is

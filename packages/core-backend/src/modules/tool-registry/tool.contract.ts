@@ -1,4 +1,5 @@
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
+import type { ConnectionScope } from '../agent-scope/index.js';
 
 export type { JsonSchema, UtcpTool };
 
@@ -12,6 +13,12 @@ export interface ToolManualContext {
   userEmail?: string;
   /** The requesting user's id, when it could be resolved (for per-user gating). */
   userId?: string;
+  /**
+   * What the requesting connection may load, when it was made as an `.agent`
+   * file (`modules/agent-scope`): a provider that names skills or connectors
+   * in its description names only those. Absent is Everything.
+   */
+  connectionScope?: ConnectionScope;
 }
 
 /**

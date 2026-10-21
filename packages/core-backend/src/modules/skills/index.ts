@@ -15,4 +15,5 @@ export type {
   GetSkillResult,
   GetSkillOptions,
   SkillHistorySource,
+  SkillScope,
 } from './skills.contract.js';

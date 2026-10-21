@@ -128,6 +128,12 @@ export interface AuditPrincipal {
   /** Events currently on record for it (within the retention window). */
   eventCount: number;
   user: { id: string; email: string; name: string };
+  /**
+   * For a key or an agent connection: the `.agent` file it connects as (a
+   * repo-relative knowledge-base path), or null for Everything. Absent for a
+   * page, which acts as its viewer.
+   */
+  agentPath?: string | null;
 }
 
 /** One event as the page reads it. */

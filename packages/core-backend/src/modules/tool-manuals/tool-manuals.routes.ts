@@ -19,6 +19,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -64,6 +65,11 @@ export function createToolManualsAgentRoutes(
      */
     pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
+  /**
+   * Resolves the scope of a connection made as an `.agent` file, so
+   * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
+   */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -83,9 +89,18 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      const userManuals = email ? await toolManualService.toManualCallTemplates(email, { remoteOnly }) : [];
+      // A connection made as an `.agent` file lists only the connectors that
+      // file loads, and says which agent it is — the MCP proxy words its
+      // refusals and its handshake from that. Everything lists as it always
+      // did, with no `connection` at all.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const within = scope.connectorFilter();
+      const userManuals = email
+        ? await toolManualService.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
+        : [];
       const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
-      res.json({ manuals });
+      const connection = scope.toWire();
+      res.json(connection ? { manuals, connection } : { manuals });
     } catch (err) {
       log.error('all-tools failed:', { err });
       res.status(500).json({ error: 'Failed to list tools' });

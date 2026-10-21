@@ -25,6 +25,13 @@ declare global {
        * the page its call comes from (`X-Bevel-Page`).
        */
       mcpCallerKind?: McpCallerKind;
+      /**
+       * The `.agent` file the MCP caller's credential connects as — a key's
+       * `api_tokens.agent_path`, an agent connection's
+       * `agent_connections.agent_path`, or the one an exchanged grant
+       * carries. Unset is Everything.
+       */
+      mcpAgentPath?: string;
     }
   }
 }
@@ -111,6 +118,7 @@ export function createMcpAuthMiddleware(
         req.userId = resolved.user.id;
         req.userEmail = resolved.user.email;
         req.externalApiKeyId = resolved.tokenId;
+        if (resolved.agentPath) req.mcpAgentPath = resolved.agentPath;
         req.mcpCallerKind = 'key';
         next();
         return;
@@ -137,6 +145,9 @@ export function createMcpAuthMiddleware(
         // unattributed rather than refused.
         if (typeof info.extra?.connectionId === 'string') {
           req.agentConnectionId = info.extra.connectionId;
+        }
+        if (typeof info.extra?.agentPath === 'string' && info.extra.agentPath) {
+          req.mcpAgentPath = info.extra.agentPath;
         }
         if (!req.userId) {
           unauthorized(res, 'Invalid access token');
@@ -234,6 +245,7 @@ export function createMcpAuthMiddleware(
         oauthProvider.noteConnectionUse(claim.connectionId);
         req.agentConnectionId = claim.connectionId;
       }
+      if (claim.agentPath) req.mcpAgentPath = claim.agentPath;
       req.mcpCallerKind = 'internal';
       next();
       return;

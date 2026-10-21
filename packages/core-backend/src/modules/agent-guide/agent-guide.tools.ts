@@ -104,10 +104,21 @@ export function registerAgentGuideTool(
   router.post(
     `/agent/tools/${GET_AGENT_GUIDE_TOOL}`,
     toolAuth,
-    toolHandler(async (args) => {
+    toolHandler(async (args, ctx) => {
       const list = await sections();
       const wanted = typeof args.section === 'string' ? args.section.trim() : '';
-      if (!wanted) return { guide: joinGuideSections(list), sections: list.map((s) => ({ id: s.id, title: s.title })) };
+      // A connection made as an `.agent` file is told so at the top of the
+      // whole guide: the catalog it describes is narrowed to that agent.
+      // Everything is told nothing new, so its guide is the same text.
+      const connection = ctx.connectionScope?.describe() ?? null;
+      if (!wanted) {
+        const guide = joinGuideSections(list);
+        return {
+          guide: connection ? `> ${connection}\n\n${guide}` : guide,
+          sections: list.map((s) => ({ id: s.id, title: s.title })),
+          ...(connection ? { connection } : {}),
+        };
+      }
       const one = list.find((s) => s.id === wanted);
       if (!one) {
         throw new ToolError(

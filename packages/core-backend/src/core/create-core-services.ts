@@ -98,6 +98,7 @@ import {
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
+import { AgentScopeService, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   GitHubFacadeCredentialsService,
@@ -300,6 +301,12 @@ export interface CoreServices {
   pluginJoinRequestJobs: PluginJoinRequestJobs;
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
+  /**
+   * Connecting as an `.agent` file: the choices offered at consent and key
+   * mint, and the scope every agent surface narrows a connection to — see
+   * `modules/agent-scope`.
+   */
+  agentScopeService: IAgentScopeResolver;
   /** Link / unlink / repair shared skills into plugins. */
   pluginLinksService: PluginLinksService;
   pluginRenameService: PluginRenameService;
@@ -840,6 +847,11 @@ export async function createCoreServices(
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
   const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
+  // What a connection made as an `.agent` file may load: the file re-read on
+  // every resolve through the person's read gate, its `plugins:` resolved
+  // through the link index above (a plugin's own folder and the skills its
+  // manifest links).
+  const agentScopeService = new AgentScopeService(workspaceService, accessControl, kb, disk, pluginLinkIndex);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
@@ -1462,6 +1474,7 @@ export async function createCoreServices(
     kbDirName: kbDirName,
     creatorAccess,
     loadActiveGroups,
+    agentScope: agentScopeService,
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
   // The branch every tool call runs on is resolved by the handler, before the
@@ -1668,6 +1681,7 @@ export async function createCoreServices(
     joinRequestsService,
     pluginJoinRequestJobs,
     pluginLinkIndex,
+    agentScopeService,
     pluginLinksService,
     pluginRenameService,
     marketplaceCompiler,

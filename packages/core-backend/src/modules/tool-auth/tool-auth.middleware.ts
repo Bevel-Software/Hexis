@@ -47,6 +47,13 @@ export interface ToolAuth {
    * recorder attributes a direct tool call to.
    */
   connectionId?: string;
+  /**
+   * The `.agent` file an EXTERNAL caller's connection was made as — a
+   * connection key's `api_tokens.agent_path`, or the one an `externalProxy`
+   * token carries for an agent connection. Absent is Everything. Every agent
+   * surface resolves it to the connection's scope (`modules/agent-scope`).
+   */
+  agentPath?: string;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -159,6 +166,7 @@ export function createTokenVerifier(
               source: 'external',
               userId: claim.userId,
               ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
+              ...(claim.agentPath ? { agentPath: claim.agentPath } : {}),
               scope: 'write',
             },
           }
@@ -169,7 +177,16 @@ export function createTokenVerifier(
     if (externalApiKeyService.looksLikeExternalApiKey(token)) {
       const resolved = await externalApiKeyService.verifyAndLoadToken(token);
       if (resolved) {
-        return { ok: true, auth: { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' } };
+        return {
+          ok: true,
+          auth: {
+            source: 'external',
+            userId: resolved.user.id,
+            tokenId: resolved.tokenId,
+            ...(resolved.agentPath ? { agentPath: resolved.agentPath } : {}),
+            scope: 'write',
+          },
+        };
       }
       // A live key of a switched-off account is told so, not sent to mint another.
       if (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) {

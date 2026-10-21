@@ -43,6 +43,7 @@ import {
   EXTERNAL_KB_MANUAL_NAME,
   MAX_CAPABILITIES,
   type IToolManualService,
+  type ConnectorScope,
   type ToolManualDescriptor,
   type ToolManualDescriptorBase,
   type ToolManualSummary,
@@ -304,8 +305,8 @@ export class ToolManualService implements IToolManualService {
     return (await this.accessibleManuals(userEmail)).map(toSummary);
   }
 
-  async listAccessibleCatalog(userEmail: string): Promise<AccessibleCatalog> {
-    const { manuals, invalid } = await this.accessibleScan(userEmail);
+  async listAccessibleCatalog(userEmail: string, within?: ConnectorScope): Promise<AccessibleCatalog> {
+    const { manuals, invalid } = await this.accessibleScan(userEmail, within);
     return { tools: manuals.map(toSummary), invalid };
   }
 
@@ -313,8 +314,8 @@ export class ToolManualService implements IToolManualService {
     return (await this.scan()).manuals.map(toSummary);
   }
 
-  async catalogFingerprints(userEmail: string): Promise<string[]> {
-    return (await this.accessibleManuals(userEmail)).map(manualFingerprint);
+  async catalogFingerprints(userEmail: string, within?: ConnectorScope): Promise<string[]> {
+    return (await this.accessibleManuals(userEmail, within)).map(manualFingerprint);
   }
 
   async getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null> {
@@ -341,8 +342,8 @@ export class ToolManualService implements IToolManualService {
     };
   }
 
-  async listLocalOnly(userEmail: string): Promise<{ slug: string; name: string; path: string }[]> {
-    const manuals = await this.accessibleManuals(userEmail);
+  async listLocalOnly(userEmail: string, within?: ConnectorScope): Promise<{ slug: string; name: string; path: string }[]> {
+    const manuals = await this.accessibleManuals(userEmail, within);
     return manuals.filter((m) => m.remote === false).map((m) => ({ slug: m.slug, name: m.name, path: m.path }));
   }
 
@@ -456,8 +457,11 @@ export class ToolManualService implements IToolManualService {
     return { name: m.name, type: m.type, remote: m.remote, healthCheck: m.healthCheck, callTemplate };
   }
 
-  async toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]> {
-    const manuals = await this.accessibleManuals(userEmail);
+  async toManualCallTemplates(
+    userEmail: string,
+    opts?: { remoteOnly?: boolean; within?: ConnectorScope },
+  ): Promise<CallTemplate[]> {
+    const manuals = await this.accessibleManuals(userEmail, opts?.within);
     const out: CallTemplate[] = [];
     for (const m of manuals) {
       // Remote consumers (the hosted MCP proxy) don't get local-only manuals —
@@ -590,8 +594,8 @@ export class ToolManualService implements IToolManualService {
     };
   }
 
-  private async accessibleManuals(userEmail: string): Promise<ToolManualDescriptor[]> {
-    return (await this.accessibleScan(userEmail)).manuals;
+  private async accessibleManuals(userEmail: string, within?: ConnectorScope): Promise<ToolManualDescriptor[]> {
+    return (await this.accessibleScan(userEmail, within)).manuals;
   }
 
   /**
@@ -599,8 +603,12 @@ export class ToolManualService implements IToolManualService {
    * ONE `canReadBatch`. Both halves are paths in the same workspace judged by
    * the same rule, and splitting them into two calls would pay a second
    * round-trip to ask the same question.
+   *
+   * `within` narrows the answer to a connection's connectors, AFTER the read
+   * gate: it can take a manual out of what the caller may read, never put one
+   * in. Absent, the answer is the caller's whole readable catalog.
    */
-  private async accessibleScan(userEmail: string): Promise<ScanResult> {
+  private async accessibleScan(userEmail: string, within?: ConnectorScope): Promise<ScanResult> {
     const { manuals, invalid } = await this.scan();
     if (manuals.length === 0 && invalid.length === 0) return emptyScan();
     const wsId = this.kb.defaultWorkspaceId();
@@ -612,9 +620,10 @@ export class ToolManualService implements IToolManualService {
     // A REFUSED file is gated the same way a listed one is: its path is a fact
     // about the knowledge base, and "there is a broken tool at this path" is
     // not something to tell someone who may not read that path.
+    const inScope = (p: string) => allowed.get(p) === true && (within === undefined || within(p));
     return {
-      manuals: manuals.filter((m) => allowed.get(m.path) === true),
-      invalid: invalid.filter((i) => allowed.get(i.path) === true),
+      manuals: manuals.filter((m) => inScope(m.path)),
+      invalid: invalid.filter((i) => inScope(i.path)),
     };
   }
 

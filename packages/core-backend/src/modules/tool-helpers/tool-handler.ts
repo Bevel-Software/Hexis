@@ -13,6 +13,8 @@ import { branchHandlingFor, type BranchHandling } from './tool-def.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
+import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
+import { ConnectionScope } from '../agent-scope/index.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -255,6 +257,17 @@ export function createToolHandlerFactory(
             ? withoutBranch(args)
             : args;
         const ctx = await resolve(auth, abort.signal, sessionId);
+        // The connection's scope, at the one route every caller of a platform
+        // tool arrives through — MCP, a chain, the local server, a script with
+        // a key — and before the tool runs. A connection made as an `.agent`
+        // file that does not list this tool is refused it by name.
+        const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
+        const scope =
+          ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
+        if (!scope.allowsPlatformTool(toolName)) {
+          res.status(403).json({ error: scope.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION });
+          return;
+        }
         if (resolved) ctx.branch = resolved.branch;
         let out = await handler(toolArgs, ctx);
         // A defaulted call's answer says which branch it ran on, so a caller
@@ -315,3 +328,6 @@ function withoutBranch(args: Record<string, unknown>): Record<string, unknown> {
 }
 
 export type ToolHandlerFactory = ReturnType<typeof createToolHandlerFactory>;
+
+/** The `code` beside a refusal of a platform tool the caller's connection does not load. */
+export const NOT_AVAILABLE_TO_CONNECTION = 'not_available_to_connection';
