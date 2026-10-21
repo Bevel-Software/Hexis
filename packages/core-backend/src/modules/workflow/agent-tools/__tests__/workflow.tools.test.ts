@@ -8,9 +8,9 @@ import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middlewar
 import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
 import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
-import { ToolError } from '../../../tool-helpers/tool.contract.js';
+import { ToolError } from '../../../tool-helpers/index.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
-import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/agent-access.gate.js';
+import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/index.js';
 import { registerWorkflowTools } from '../workflow.tools.js';
 import {
   BranchAuthorshipError,
@@ -650,6 +650,16 @@ describe('registerWorkflowTools', () => {
       expect(json).not.toContain('patch');
       expect(json).not.toContain('a line of generated knowledge text');
       expect(files.every((f) => !('patch' in f))).toBe(true);
+    });
+
+    it('says who was notified when the service does, and nothing of it otherwise', async () => {
+      const base = await start();
+      // A read of a request later has no `notified` to report: the key is absent, not empty.
+      expect(await open(base)).not.toHaveProperty('notified');
+      opened = { ...BIG(), notified: ['email'] };
+      expect(await open(base)).toMatchObject({ number: 7, notified: ['email'] });
+      opened = { ...BIG(), notified: [] };
+      expect((await open(base)).notified).toEqual([]);
     });
 
     it('keeps the 27-file answer under 10,000 characters', async () => {
