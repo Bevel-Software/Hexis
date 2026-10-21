@@ -502,6 +502,64 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
   });
 
+  it("rejecting an agent's change while a read deciding whether the file exists is out waits for it, and writes nothing back when it is gone", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+    apiMocks.writeFile.mockClear();
+    disk.delete('KB/Draft.md');
+
+    // The tree refresh no longer lists the file; its read is slow, and Reject
+    // is clicked before it answers.
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      answer = () => reject(new WorkspaceApiError(404, 'Not found'));
+    }));
+    act(() => bus.emit(treeChanged()));
+    await waitFor(() => expect(answer).toBeDefined());
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await act(async () => {
+      answer();
+      await expect(rejecting).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+    expect(result.current.activeTab?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
+  });
+
+  it("rejecting an agent's change on a tab already marked deleted writes nothing back", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toBeTruthy());
+    apiMocks.writeFile.mockClear();
+
+    await act(async () => {
+      await expect(result.current.rejectPendingContent()).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(result.current.activeTab?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
+  });
+
+  it("rejecting an agent's change on a file still there writes the baseline back, as before", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const baseline = result.current.activeTab?.savedContent;
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+
+    await act(async () => { await result.current.rejectPendingContent(); });
+
+    expect(disk.get('KB/Draft.md')).toBe(baseline);
+    expect(result.current.activeTab?.pendingFileContent).toBeNull();
+  });
+
   it('dates the delete when the tab learns of it, and keeps that time', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');

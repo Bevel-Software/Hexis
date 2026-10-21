@@ -1694,39 +1694,46 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
   }, [workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes]);
 
-  const saveFile = useCallback(async (relativePath: string, content: string) => {
-    if (!workspaceId) return;
-    // Someone else deleted this file. The editor that held its unsaved edits
-    // unmounts when the notice replaces it, and its lock cleanup (and the
-    // autosave / idle-release timers) persist the buffer through here —
-    // which re-created the deleted file and wiped the notice. The edits stay
-    // on the tab, offered to copy; nothing writes them back unasked.
-    if (deletedPathsRef.current.has(relativePath)) {
-      throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
-    }
-    // The bytes `content` was edited from, to tell whether a read waited on
-    // below found newer ones.
-    const editedFrom = openTabsRef.current.find((t) => t.path === relativePath)?.savedContent ?? null;
+  /**
+   * The guard before every write to a file an open tab holds (`saveFile`,
+   * `rejectPendingContent`): throws when someone else deleted it, and
+   * otherwise answers with the newest bytes a read waited on found.
+   *
+   * Someone else deleted this file: the editor that held its unsaved edits
+   * unmounts when the notice replaces it, and its lock cleanup (and the
+   * autosave / idle-release timers) persist the buffer — which re-created the
+   * deleted file and wiped the notice. A rejected agent change wrote its
+   * baseline back the same way. The edits and the agent's version stay on the
+   * tab, offered to copy; nothing writes them back unasked.
+   */
+  const awaitStillOnBranch = useCallback(async (readFrom: string, relativePath: string) => {
+    const refuse = () => new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
+    if (deletedPathsRef.current.has(relativePath)) throw refuse();
     // A read deciding whether the file still exists is in flight: its answer
     // first, so a 404 it is about to deliver refuses this write too.
     // Its own answer, not the guard set: the tab may have closed meanwhile.
     // The newest check answers for every read in flight before it; one that
-    // started while this save waited is waited on too.
-    const checkKey = existenceKey(workspaceId, relativePath);
+    // started while this write waited is waited on too.
+    const checkKey = existenceKey(readFrom, relativePath);
     let existenceCheck = existenceChecksRef.current.get(checkKey);
     let found: ExistenceAnswer['found'] = null;
     while (existenceCheck) {
       const answer = await existenceCheck;
-      if (isCheckGone(workspaceId, relativePath, answer)) {
-        throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
-      }
+      if (isCheckGone(readFrom, relativePath, answer)) throw refuse();
       found = newestOf(found, answer.found, (f) => f.seq);
       const newer = existenceChecksRef.current.get(checkKey);
       existenceCheck = newer !== existenceCheck ? newer : undefined;
     }
-    if (deletedPathsRef.current.has(relativePath)) {
-      throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
-    }
+    if (deletedPathsRef.current.has(relativePath)) throw refuse();
+    return found;
+  }, [isCheckGone]);
+
+  const saveFile = useCallback(async (relativePath: string, content: string) => {
+    if (!workspaceId) return;
+    // The bytes `content` was edited from, to tell whether a read waited on
+    // below found newer ones.
+    const editedFrom = openTabsRef.current.find((t) => t.path === relativePath)?.savedContent ?? null;
+    const found = await awaitStillOnBranch(workspaceId, relativePath);
     // A read waited on found other bytes on disk than `content` was edited
     // from: a commit pulled from the git host, which the `file-changed` read
     // merges the tab's edits onto. Writing `content` as it was would overwrite
@@ -1778,7 +1785,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return next;
     });
     bumpFs();
-  }, [workspaceId, bumpFs, markWritten, isCheckGone, isStaleLanding]);
+  }, [workspaceId, bumpFs, markWritten, awaitStillOnBranch, isStaleLanding]);
 
   const clearChangedOnBranch = useCallback((relativePath: string) => {
     setOpenTabs((prev) => {
@@ -1852,6 +1859,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // savedContent holds that baseline; if it's null, fall back to content.
     const baseline = active?.savedContent ?? active?.content ?? null;
     if (!active || baseline === null) return;
+    await awaitStillOnBranch(workspaceId, path);
     await writeFile(workspaceId, path, baseline);
     markWritten(workspaceId, path);
     setOpenTabs((prev) => prev.map((t) => (
@@ -1860,7 +1868,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         : t
     )));
     bumpFs();
-  }, [workspaceId, bumpFs, markWritten]);
+  }, [workspaceId, bumpFs, markWritten, awaitStillOnBranch]);
 
   // ── fsRevision invalidation ───────────────────────────────────────────────
 
