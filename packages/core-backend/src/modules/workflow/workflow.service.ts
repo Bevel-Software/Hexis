@@ -761,7 +761,6 @@ export class WorkflowService implements IWorkflowService {
             source: summary.branch,
             target: summary.base,
             authorIdHash: summary.authorId ?? null,
-            title: summary.title,
           });
         }
       }
@@ -2506,7 +2505,6 @@ export class WorkflowService implements IWorkflowService {
       source: input.sourceBranch,
       target: input.targetBranch,
       authorIdHash: hashEmail(user.email),
-      title: input.title,
     } as const;
     if (pushRefused) {
       // The request exists; its detail reads the published refs, which the
@@ -2928,6 +2926,7 @@ export class WorkflowService implements IWorkflowService {
       kind: 'approval-changed',
       number,
       path,
+      targetBranch: baseBranch,
       approverUserId: user.id,
       change: 'added',
     });
@@ -2959,6 +2958,7 @@ export class WorkflowService implements IWorkflowService {
       kind: 'approval-changed',
       number,
       path,
+      targetBranch: baseBranch,
       approverUserId: user.id,
       change: 'removed',
     });
