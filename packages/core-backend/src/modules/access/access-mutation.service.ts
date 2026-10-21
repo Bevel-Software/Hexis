@@ -40,21 +40,17 @@ import type { IAccessControl } from './access-control.interface.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { isTextBytes } from '../workspace/file-readers/text-reader.js';
 import {
-  type Verb,
   ADMIN_CANONICAL,
   KNOWN_VERBS,
   canonicalRoleName,
   splitPrincipalToken,
   accessFrontmatterExtensionList,
-} from '../access-model/access-grammar.js';
-import {
   spliceRevoke,
   spliceGrant,
   validatePrincipal,
   AccessSpliceError,
-  type Principal,
-  type TokenMatch,
-} from '../access-model/access-splice.js';
+} from '../access-model/index.js';
+import type { Verb, Principal, TokenMatch } from '../access-model/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import {
   canCarryFrontmatter,

@@ -43,9 +43,8 @@ import {
   parseAccessFile,
   parseOwnAccessEntries,
   stripComment,
-  type ParsedEntry,
-  type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
+import type { ParsedEntry, Verb } from '../access-model/index.js';
 
 const log = logger('access');
 

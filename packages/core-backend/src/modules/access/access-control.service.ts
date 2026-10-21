@@ -32,15 +32,13 @@ import {
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
-import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
+  AccessConfigError,
+  AccessUnreadableError,
+  synthesizePluginPrincipals,
   GROUPS_YAML,
   SYNCED_GROUPS_YAML,
   parseGroupsFile,
-  type GroupsIndex,
-} from '../access-model/group-files.js';
-import {
   ADMIN_CANONICAL,
   EVERYONE_CANONICAL,
   EVERYONE_DISPLAY,
@@ -58,12 +56,8 @@ import {
   parseRolesYaml,
   requiredVerbsFor,
   sourceVerbsFor,
-  type AccessFile,
-  type OwnEntries,
-  type ParsedEntry,
-  type RolesIndex,
-  type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
+import type { GroupsIndex, AccessFile, OwnEntries, ParsedEntry, RolesIndex, Verb } from '../access-model/index.js';
 import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,

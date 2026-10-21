@@ -10,4 +10,9 @@
  */
 export * from './access-grammar.js';
 export * from './access-errors.js';
+export * from './group-files.js';
+export * from './access-splice.js';
+export * from './roles-yaml-guard.js';
+export { synthesizePluginPrincipals } from './plugin-principals.js';
+export { renderRolesYaml } from './render-roles-yaml.js';
 export type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from './change-gate.js';

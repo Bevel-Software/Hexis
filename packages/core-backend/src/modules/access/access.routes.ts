@@ -26,7 +26,17 @@ import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
+import {
+  AccessDeniedError,
+  canonicalRoleName,
+  EVERYONE_CANONICAL,
+  PLUGIN_TOKEN_PREFIX,
+  PLUGIN_TOKEN_VERBS,
+  ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
+} from '../access-model/index.js';
+import type { PluginTokenVerb, Verb, Principal } from '../access-model/index.js';
 import {
   AccessMutationService,
   AccessMutationError,
@@ -36,23 +46,11 @@ import {
   governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
-import {
-  canonicalRoleName,
-  EVERYONE_CANONICAL,
-  PLUGIN_TOKEN_PREFIX,
-  PLUGIN_TOKEN_VERBS,
-  ROLE_TOKEN_PREFIX,
-  GROUP_TOKEN_PREFIX,
-  splitPrincipalToken,
-  type PluginTokenVerb,
-  type Verb,
-} from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView } from './access-view.js';
 import type { AccessView, LabelledAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
-import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
