@@ -177,6 +177,19 @@ describe('AuditLogPage', () => {
     expect(screen.queryByRole('button', { name: /Revoke key for Old script/ })).not.toBeInTheDocument();
   });
 
+  it('shows what each connection and key connects as: Everything, or the agent file it was made as', async () => {
+    vi.mocked(listPrincipals).mockResolvedValue([
+      { ...ALICE_CLAUDE, agentPath: 'Agents/delivery-mechanic.agent' },
+      { ...ALICE_CI, agentPath: null },
+    ]);
+    renderPage({ isAdmin: true });
+    await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
+    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
+    expect(rowOf('Claude')).toHaveTextContent('As delivery-mechanic');
+    expect(within(rowOf('Claude')).getByTitle('Agents/delivery-mechanic.agent')).toBeInTheDocument();
+    expect(rowOf('CI pipeline')).toHaveTextContent('As Everything');
+  });
+
   it('shows an admin a key its owner deleted for good, marked as such, with its history intact', async () => {
     vi.mocked(listPrincipals).mockResolvedValue([{ ...BOB_OLD, deletedAt: NOW - 10 * DAY, eventCount: 18 }]);
     renderPage({ isAdmin: true });

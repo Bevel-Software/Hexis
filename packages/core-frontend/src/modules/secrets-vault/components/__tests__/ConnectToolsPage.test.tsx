@@ -522,7 +522,60 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
     } finally {
       Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
     }
-    expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state');
+    // Nothing chosen: the connection is made as Everything, exactly as before.
+    expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', null);
     expect(connectMock.getMcpOAuthRequest).toHaveBeenCalledWith('signed-state');
+  });
+
+  describe('"Connect as"', () => {
+    const OPS = { path: 'Agents/ops.agent', name: 'ops', description: 'Watches the dashboards.' };
+
+    /** Click Finish with the address held, as above; resolves once the browser would have left. */
+    async function finish() {
+      const realLocation = window.location;
+      Object.defineProperty(window, 'location', { configurable: true, value: { ...realLocation, href: realLocation.href } });
+      try {
+        fireEvent.click(await screen.findByRole('button', { name: 'Finish & return to your agent' }));
+        await waitFor(() => expect(window.location.href).toBe('/agent-callback?code=abc'));
+      } finally {
+        Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
+      }
+    }
+
+    beforeEach(() => {
+      window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=signed-state');
+      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, agents: [OPS] });
+      connectMock.completeMcpOAuth.mockResolvedValue('/agent-callback?code=abc');
+    });
+
+    it('offers Everything, selected, before the person approves, and each agent by name with its description', async () => {
+      renderPage();
+      const group = await screen.findByRole('group', { name: 'Connect as' });
+      expect(within(group).getByRole('radio', { name: /Everything/ })).toBeChecked();
+      expect(await within(group).findByRole('radio', { name: /ops.*Watches the dashboards\./ })).not.toBeChecked();
+    });
+
+    it('approving with an agent picked connects as that agent', async () => {
+      renderPage();
+      fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
+      await finish();
+      expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', 'Agents/ops.agent');
+    });
+
+    it('keeps the choice across a tool sign-in’s round-trip, and a new authorization starts at Everything', async () => {
+      const first = renderPage();
+      fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
+      first.unmount();
+      // Back from a provider: the query is gone, the session copy remains.
+      window.history.replaceState(null, '', '/skills-and-tools/connect');
+      const back = renderPage();
+      expect(await screen.findByRole('radio', { name: /ops/ })).toBeChecked();
+      back.unmount();
+      // Another agent's authorization arrives: its choice is its own.
+      window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=another-state');
+      renderPage();
+      await screen.findByRole('radio', { name: /ops/ });
+      expect(screen.getByRole('radio', { name: /Everything/ })).toBeChecked();
+    });
   });
 });

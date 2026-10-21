@@ -23,6 +23,7 @@ import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
+import { ConnectAsChoice, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -96,6 +97,9 @@ export function ExternalAgentAccessPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [label, setLabel] = useState('');
+  // "Connect as" for a new key: Everything unless an agent is picked.
+  const [agentChoices, setAgentChoices] = useState<AgentChoice[]>([]);
+  const [connectAs, setConnectAs] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -128,15 +132,31 @@ export function ExternalAgentAccessPage() {
     void refresh();
   }, [refresh]);
 
+  // The agents a key may be minted as. A failure costs only the choice:
+  // Everything is always on offer.
+  useEffect(() => {
+    let cancelled = false;
+    listAgentChoices().then(
+      (agents) => {
+        if (!cancelled) setAgentChoices(agents);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function handleCreate() {
     const trimmed = label.trim();
     if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating) return;
     setCreating(true);
     setCreateError(null);
     try {
-      const minted = await createExternalApiKey(trimmed);
+      const minted = await createExternalApiKey(trimmed, connectAs);
       setReveal(minted);
       setLabel('');
+      setConnectAs(null);
       // Optimistic-ish: refresh the list so the new row shows up underneath
       // the reveal modal.
       void refresh();
@@ -535,6 +555,13 @@ export function ExternalAgentAccessPage() {
                   {creating ? 'Creating…' : 'Create key'}
                 </button>
               </div>
+              <ConnectAsChoice
+                agents={agentChoices}
+                value={connectAs}
+                disabled={creating}
+                hint="What the key loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
+                onChange={setConnectAs}
+              />
               {createError && (
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
                   {createError}
@@ -575,7 +602,8 @@ export function ExternalAgentAccessPage() {
                         <div className="flex-1 min-w-0">
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
-                            Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
+                            <span title={k.agentPath ?? undefined}>As {connectedAsLabel(k.agentPath)}</span> · Created{' '}
+                            {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
                             {/* A key an admin took is not one you can reconnect — say so,
                                 or people try. Your own disconnect keeps its word. */}
                             {revoked &&

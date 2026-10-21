@@ -22,7 +22,8 @@ import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared
  * regression cases below name all six.
  */
 
-const { listMock, createMock, instructionsMock, facadeMock, registrationMock, adminState } = vi.hoisted(() => ({
+const { listMock, createMock, instructionsMock, facadeMock, registrationMock, adminState, agentChoicesMock } = vi.hoisted(() => ({
+  agentChoicesMock: vi.fn(),
   listMock: vi.fn(),
   createMock: vi.fn(),
   instructionsMock: vi.fn(),
@@ -47,6 +48,12 @@ vi.mock('../../../admin/state/admin.context', async (importOriginal) => ({
 vi.mock('../../../settings/services/github-facade.api', () => ({
   fetchGitHubFacade: facadeMock,
   fetchMarketplaceRegistration: registrationMock,
+}));
+
+// The agents a key may be minted as ("Connect as").
+vi.mock('../../../agents/services/agent-choices.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../agents/services/agent-choices.api')>()),
+  listAgentChoices: agentChoicesMock,
 }));
 
 vi.mock('../../services/external-api-keys.api', () => ({
@@ -91,6 +98,9 @@ beforeEach(() => {
   registrationMock.mockReset();
   registrationMock.mockResolvedValue(true);
   listMock.mockResolvedValue([]);
+  agentChoicesMock.mockReset();
+  agentChoicesMock.mockResolvedValue([]);
+  createMock.mockClear();
   instructionsMock.mockResolvedValue({
     instructions: 'Search the knowledge base first.',
     header: 'Search the knowledge base first.',
@@ -789,6 +799,57 @@ describe('the Marketplaces tab', () => {
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     await screen.findByText('keys are down');
     expect(screen.queryByText(/None yet/)).toBeNull();
+  });
+});
+
+describe('minting a key as an agent ("Connect as")', () => {
+  const OPS = { path: 'Agents/ops.agent', name: 'ops', description: 'Watches the dashboards.' };
+
+  it('offers Everything, selected by default, then each agent by name with its description', async () => {
+    agentChoicesMock.mockResolvedValue([OPS]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    const group = screen.getByRole('group', { name: 'Connect as' });
+    const everything = within(group).getByRole('radio', { name: /Everything/ });
+    expect(everything).toBeChecked();
+    const ops = await within(group).findByRole('radio', { name: /ops.*Watches the dashboards\./ });
+    expect(ops).not.toBeChecked();
+  });
+
+  it('mints as Everything unless an agent is picked, and as the agent when one is', async () => {
+    agentChoicesMock.mockResolvedValue([OPS]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
+    await user.click(screen.getByRole('button', { name: 'Create key' }));
+    expect(createMock).toHaveBeenLastCalledWith('CI', null);
+  });
+
+  it('records the picked agent on the key', async () => {
+    agentChoicesMock.mockResolvedValue([OPS]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await user.click(await screen.findByRole('radio', { name: /ops/ }));
+    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'Pipeline');
+    await user.click(screen.getByRole('button', { name: 'Create key' }));
+    expect(createMock).toHaveBeenLastCalledWith('Pipeline', 'Agents/ops.agent');
+  });
+
+  it('shows each key beside what it connects as', async () => {
+    listMock.mockResolvedValue([
+      { id: 'k1', kind: 'key', label: 'Laptop', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null, agentPath: null },
+      { id: 'k2', kind: 'key', label: 'Pipeline', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null, agentPath: 'Agents/ops.agent' },
+    ]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText('Pipeline');
+    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
+    expect(rowOf('Laptop')).toHaveTextContent('As Everything');
+    expect(rowOf('Pipeline')).toHaveTextContent('As ops');
   });
 });
 
