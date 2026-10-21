@@ -67,6 +67,7 @@ import {
   isFolderPlaceholder,
   folderPlaceholderPath,
   isPlatformRestoreShape,
+  CHANGE_REQUEST_DESCRIPTION_MAX,
   CHANGE_REQUEST_TITLE_MAX,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
@@ -189,6 +190,19 @@ function redactTokens(msg: string, token: string | null | undefined): string {
  * history, and a closed one is no longer asking anything. A worded 409 either
  * way, so the refusal says which.
  */
+/**
+ * A description — on opening, a replacement, or what an append leaves — is
+ * at most {@link CHANGE_REQUEST_DESCRIPTION_MAX} characters; a worded 400
+ * past it. Undefined (no description given) always fits.
+ */
+function assertDescriptionFits(description: string | undefined): void {
+  if (description !== undefined && description.length > CHANGE_REQUEST_DESCRIPTION_MAX) {
+    throw new WorkflowValidationError(
+      `A change request's description is at most ${CHANGE_REQUEST_DESCRIPTION_MAX} characters; this one would have ${description.length}.`,
+    );
+  }
+}
+
 function assertEditable(state: string): void {
   if (state === 'merged') {
     throw new WorkflowDomainError(
@@ -2269,6 +2283,7 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError('source and target branches must differ');
     }
     if (!input.title?.trim()) throw new WorkflowValidationError('title is required');
+    assertDescriptionFits(input.description?.trim());
     if (this.kb.isProtectedBranch(input.sourceBranch)) {
       throw new WorkflowValidationError(
         `Cannot open a change request *from* a protected branch ("${input.sourceBranch}").`,
@@ -3489,6 +3504,16 @@ export class WorkflowService implements IWorkflowService {
       'roles.yaml',
     );
     if (isAdmin === true) return 'admin';
+    // A base that cannot be read decides nothing further: the per-file check
+    // below reads the same tree and would answer the same, after a detail
+    // read and a batch lookup done for nothing.
+    if (isAdmin === null) {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `The base branch "${baseBranch}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
+        409,
+      );
+    }
     let detail;
     try {
       detail = await this.prs.getPrDetail(number, {
@@ -3512,13 +3537,6 @@ export class WorkflowService implements IWorkflowService {
         paths,
       );
       if (writeMap && paths.every((p) => writeMap.get(p) === true)) return 'writes-every-file';
-    }
-    if (isAdmin === null) {
-      this.kickDeletedBranchSweep();
-      throw new WorkflowDomainError(
-        `The base branch "${baseBranch}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
-        409,
-      );
     }
     return null;
   }
@@ -3553,6 +3571,10 @@ export class WorkflowService implements IWorkflowService {
         `A change request's title is at most ${CHANGE_REQUEST_TITLE_MAX} characters; this one has ${title.length}.`,
       );
     }
+    // A replacement is measured here; an append is measured on what it
+    // leaves, inside the transaction, since that depends on the body as
+    // stored.
+    assertDescriptionFits(description);
     const summary = await this.prs.getPr(number);
     if (!summary) throw new WorkflowDomainError('change request not found', 404);
     assertEditable(summary.state);
@@ -3606,6 +3628,10 @@ export class WorkflowService implements IWorkflowService {
         appended === undefined
           ? description
           : [row.body.trim(), appended].filter((s) => s.length > 0).join('\n\n');
+      // What an append leaves is measured against the same ceiling as a
+      // replacement; a refusal here rolls the transaction back and writes
+      // nothing.
+      assertDescriptionFits(body);
       const written = await tx
         .update(changeRequests)
         .set({

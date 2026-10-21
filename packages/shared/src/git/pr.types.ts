@@ -427,7 +427,9 @@ export interface PullRequestDetail extends PullRequestSummary {
  * `appendDescription` instead adds a paragraph after the description as the
  * server holds it at the moment of the write, so two appends racing each
  * other both land (never together with `description`). A title is at most
- * {@link CHANGE_REQUEST_TITLE_MAX} characters.
+ * {@link CHANGE_REQUEST_TITLE_MAX} characters and a description, after an
+ * append as much as after a replacement, at most
+ * {@link CHANGE_REQUEST_DESCRIPTION_MAX}.
  *
  * A union of the allowed shapes, so a client cannot build `{}` or a
  * `description` together with `appendDescription`. The server reads the
@@ -453,6 +455,16 @@ export interface UpdateChangeRequestFields {
 
 /** Longest title a change request may carry — the route and the agent tool alike. */
 export const CHANGE_REQUEST_TITLE_MAX = 256;
+
+/**
+ * Longest description a change request may carry, in characters — on
+ * opening, on a replacement and on what an append leaves, for the routes and
+ * the agent tools alike. The body is decrypted by every listing and every
+ * detail read, and the propose flow appends a note on each later round, so
+ * without a ceiling a request's body grows for as long as it is open. The
+ * same ceiling comments had.
+ */
+export const CHANGE_REQUEST_DESCRIPTION_MAX = 64_000;
 
 /**
  * Result of a successful merge via the in-app gate. `sha` is the merge commit

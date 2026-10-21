@@ -225,12 +225,43 @@ describe('WorkflowService.updateChangeRequest — who may edit', () => {
     expect(h.written).toHaveLength(1);
   });
 
+  it('refuses a description past 64,000 characters with 400, on a replacement and on what an append would leave', async () => {
+    const h = harness({ authorEmail: AUTHOR, body: 'x'.repeat(63_990) });
+    await h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'y'.repeat(64_000) });
+    await expect(h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'y'.repeat(64_001) })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('at most 64000 characters'),
+    });
+    // 63,990 stored + the two newlines + 9 = 64,001: measured on what the
+    // append leaves, inside the transaction, and nothing is written.
+    await expect(h.svc.updateChangeRequest(9, user(AUTHOR), { appendDescription: 'z'.repeat(9) })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('at most 64000 characters'),
+    });
+    expect(h.written).toHaveLength(1);
+  });
+
   it('refuses a replacement and an append together with 400', async () => {
     const h = harness({ authorEmail: AUTHOR });
     await expect(
       h.svc.updateChangeRequest(9, user(AUTHOR), { description: 'a', appendDescription: 'b' }),
     ).rejects.toMatchObject({ status: 400 });
     expect(h.tx.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.openChangeRequest — the same ceiling on the description', () => {
+  it('refuses a description past 64,000 characters with 400 before touching a workspace', async () => {
+    const h = harness({ authorEmail: AUTHOR });
+    await expect(
+      h.svc.openChangeRequest('ws', user(AUTHOR), {
+        sourceBranch: 'mallory/draft',
+        targetBranch: 'main',
+        title: 'Too long',
+        description: 'y'.repeat(64_001),
+      }),
+    ).rejects.toMatchObject({ status: 400, message: expect.stringContaining('at most 64000 characters') });
+    expect(h.workspaces.getOrCreateForBranch).not.toHaveBeenCalled();
   });
 });
 

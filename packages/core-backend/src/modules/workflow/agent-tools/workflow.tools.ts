@@ -451,7 +451,7 @@ export function registerWorkflowTools(
         sourceBranch: { type: 'string', minLength: 1, description: 'The draft branch carrying the changes.' },
         targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${kb.defaultBranch}').` },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'Short imperative title (≤256 chars).' },
-        description: { type: 'string', description: 'Optional markdown body shown verbatim to reviewers.' },
+        description: { type: 'string', maxLength: 64_000, description: 'Optional markdown body shown verbatim to reviewers (≤64,000 chars).' },
         include: {
           type: 'array',
           items: { type: 'string', enum: [...CHANGE_REQUEST_INCLUDES] },
@@ -500,8 +500,8 @@ export function registerWorkflowTools(
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'The new title (≤256 chars).' },
-        description: { type: 'string', description: 'The new description (Markdown); an empty string clears it.' },
-        appendDescription: { type: 'string', description: 'A paragraph (Markdown) added after the description as stored at the moment of the write. Not together with `description`.' },
+        description: { type: 'string', maxLength: 64_000, description: 'The new description (Markdown, ≤64,000 chars); an empty string clears it.' },
+        appendDescription: { type: 'string', maxLength: 64_000, description: 'A paragraph (Markdown) added after the description as stored at the moment of the write; what it leaves is ≤64,000 chars. Not together with `description`.' },
       },
       required: ['number'],
       additionalProperties: false,

@@ -1157,6 +1157,7 @@ export function ChangeRequestDialog({
               aria-label="Description"
               placeholder="Why this change, in your words"
               value={draftDescription}
+              maxLength={64_000}
               disabled={saving}
               onChange={(e) => setDraftDescription(e.target.value)}
             />
