@@ -2162,6 +2162,8 @@ describe('FileViewer: the file changed on the branch while you were editing', ()
     render(<ViewerHarness initialContent="First line." captureTyped />);
     await screen.findByRole('button', { name: 'Edit' });
     expect(screen.queryByText(/changed on the branch while you were editing/)).not.toBeInTheDocument();
+  });
+});
 
 // ── Full screen ───────────────────────────────────────────────────────────
 // The view is the host's: a renderer registered by a deployment (the
