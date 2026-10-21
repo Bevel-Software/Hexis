@@ -313,6 +313,33 @@ export function judgeMcpServerEntry(name: string, raw: unknown): McpEntryVerdict
   return { ok: false, reason: `unknown type "${raw.type}"` };
 }
 
+/**
+ * The part of a plugin's `mcp.json` and `plugin.json` that ONE server is built
+ * from: its own `mcpServers` entry and its own Hexis extension block, and
+ * nothing a sibling declares. The scan digests this per server, so an edit to
+ * one server moves that server's revision alone — a person who skipped one
+ * server of a shared file does not see a catalog change for the server they
+ * kept whenever the skipped one is edited.
+ *
+ * Only called for a server {@link descriptorsFromMcpJson} produced, so the
+ * mcp.json parses; a manifest that does not contributes no extension block,
+ * exactly as it contributes none to the descriptor.
+ */
+export function mcpServerSourceText(mcpJsonText: string, pluginJsonText: string | null, name: string): string {
+  const mcp: unknown = JSON.parse(mcpJsonText);
+  const entry = isRecord(mcp) && isRecord(mcp.mcpServers) ? mcp.mcpServers[name] : undefined;
+  let manifest: unknown = null;
+  if (pluginJsonText !== null) {
+    try {
+      manifest = JSON.parse(pluginJsonText);
+    } catch {
+      manifest = null;
+    }
+  }
+  const ext = extensionServers(manifest)[name];
+  return JSON.stringify([entry ?? null, ext ?? null]);
+}
+
 export function descriptorsFromMcpJson(
   pluginFolder: string,
   mcpJsonText: string,

@@ -13,6 +13,7 @@ import { closeDb, createDb, type Database } from '../../database/connection.js';
 import { runCoreMigrations } from '../../database/migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { AuthService } from '../../auth/auth.service.js';
+import { AccountErasureService } from '../../auth/account-erasure.service.js';
 
 /**
  * A tool the person skips on the Connect page STAYS skipped.
@@ -367,6 +368,34 @@ describe.skipIf(!PG_ADMIN_URL)('a skipped tool stays skipped, on a real Postgres
       // What the table holds agrees: one row, Lena's, for the tool still skipped.
       const rows = await db.$client.query('select user_id, manual from skipped_tools');
       expect(rows.rows).toEqual([{ user_id: lena, manual: 'qa_userkey' }]);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    "erasing an account takes that person's skips with it, and nobody else's",
+    async () => {
+      const url = await scratchDatabaseUrl('hexis_skipped_erase');
+      const db = await pool(url);
+      await runCoreMigrations(db, coreMigrationsDir());
+      const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+      const lena = (await auth.createAccountWithoutPassword('lena@acme.test', 'Lena')).user.id;
+      const tom = (await auth.createAccountWithoutPassword('tom@acme.test', 'Tom')).user.id;
+
+      const base = await session(new DbSkippedToolsService(db));
+      expect((await setSkipped(base, 'granola', true, lena)).status).toBe(204);
+      expect((await setSkipped(base, 'granola', true, tom)).status).toBe(204);
+
+      // The erasure an admin runs, not a hand-written DELETE: what is pinned is
+      // that the account's deletion is not refused by the new foreign key, and
+      // that it leaves no row keyed to the person behind. The review workflow
+      // has no approvals to rewrite in an empty database.
+      const erasure = new AccountErasureService(db, { eraseApprover: async () => {} });
+      expect(await erasure.eraseUser(lena)).toBe(true);
+
+      const rows = await db.$client.query('select user_id, manual from skipped_tools');
+      expect(rows.rows).toEqual([{ user_id: tom, manual: 'granola' }]);
+      expect((await pending(base, tom)).toolOAuth).toEqual([expect.objectContaining({ slug: 'granola', skipped: true })]);
     },
     PG_TEST_TIMEOUT,
   );

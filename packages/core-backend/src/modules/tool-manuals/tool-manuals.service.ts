@@ -19,7 +19,7 @@ import {
 // Also a side effect: loading the package registers the 'google_service_account'
 // auth type, so a `.tool` naming it validates here.
 import { findUnservedGoogleServiceAccountAuth, holdsLiteralGoogleServiceAccountKey } from '@bevel-software/platform-mcp-core';
-import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
+import { descriptorsFromMcpJson, mcpServerSourceText } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
@@ -909,13 +909,14 @@ export class ToolManualService implements IToolManualService {
     const discovered = await this.source.discover(kbRoot);
     for (const plugin of discovered.plugins) {
       if (plugin.mcpJsonText === null) continue; // no servers is the common case, not an error
-      // One stamp for every server the file declares: the two texts together
-      // are the whole source of these descriptors, so any edit to either
-      // (a URL, a header, an added or dropped server, a `local: true` flip)
-      // moves every server's digest — which is correct, if slightly generous.
-      const from = sourceDigest(plugin.mcpJsonText + '\u0000' + (plugin.manifestText ?? ''));
+      // One stamp PER SERVER, from that server's own mcp.json entry and
+      // plugin.json extension block: an edit to a URL, a header or a
+      // `local: true` flip moves the server it belongs to and no sibling. A
+      // whole-file stamp would move a kept server's revision whenever a server
+      // the reader skipped was edited, though the reader's catalog never
+      // changed.
       for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText, layout)) {
-        d.sourceRevision = from;
+        d.sourceRevision = sourceDigest(mcpServerSourceText(plugin.mcpJsonText, plugin.manifestText, d.name));
         parsed.push(d);
       }
     }

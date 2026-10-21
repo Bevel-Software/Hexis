@@ -6,9 +6,7 @@ import { InternalTokenService } from '../../tool-auth/internal-token.service.js'
 import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
 import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { registerToolManualsTools } from '../tool-manuals.tools.js';
-import type { SkippedToolSource } from '../tool-manuals.routes.js';
-import type { IToolManualService } from '../tool-manuals.contract.js';
+import { registerToolManualsTools, type IToolManualService, type SkippedToolSource } from '../index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { HiddenTool, HiddenToolSource } from '../../../shared/hidden-tools.js';
 

@@ -7,7 +7,7 @@ const disk = new NodeFs();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, HEXIS_EXTENSION_NS } from '@bevel-software/platform-shared';
 import { ToolManualService } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -477,6 +477,43 @@ describe('ToolManualService', () => {
       await writeFile(join(tools(), 'weather.tool'), JSON.stringify(withAnother));
 
       expect(await inlineLine()).not.toBe(before);
+    });
+
+    // Two servers in one mcp.json: a person who skipped `ledger` and kept `crm`
+    // must not be told their catalog changed when only `ledger` was edited.
+    test("moves a server's line for an edit to that server, and not for an edit to a sibling", async () => {
+      const dir = join(tools(), 'Sales');
+      await mkdir(dir, { recursive: true });
+      const writeSales = async (ledgerUrl: string, crmHeader: string) => {
+        await writeFile(
+          join(dir, 'mcp.json'),
+          JSON.stringify({
+            mcpServers: {
+              crm: { type: 'streamable-http', url: 'https://crm.example.com/mcp' },
+              ledger: { type: 'streamable-http', url: ledgerUrl },
+            },
+          }),
+        );
+        await writeFile(
+          join(dir, 'plugin.json'),
+          JSON.stringify({
+            name: 'sales',
+            extensions: { [HEXIS_EXTENSION_NS]: { mcpServers: { crm: { headers: { 'X-Tenant': crmHeader } } } } },
+          }),
+        );
+      };
+      const lineOf = async (name: string) =>
+        (await svc().catalogFingerprints('user@x.eu')).find((l) => l.startsWith(`${name}\u0000`))!;
+
+      await writeSales('https://ledger.example.com/mcp', 'acme');
+      const [crm, ledger] = [await lineOf('crm'), await lineOf('ledger')];
+
+      await writeSales('https://ledger.example.com/v2/mcp', 'acme');
+      expect(await lineOf('crm')).toBe(crm);
+      expect(await lineOf('ledger')).not.toBe(ledger);
+
+      await writeSales('https://ledger.example.com/v2/mcp', 'globex');
+      expect(await lineOf('crm')).not.toBe(crm);
     });
 
     test('drops the line of a manual named in `except`, and only that one', async () => {
