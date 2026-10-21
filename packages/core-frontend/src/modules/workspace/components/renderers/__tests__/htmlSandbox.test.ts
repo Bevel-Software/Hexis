@@ -428,17 +428,26 @@ describe('buildSandboxedHtml', () => {
   // Escape (a card's close, leaving full screen) would go deaf once the
   // reader clicked into the page. The frame hands the parent an Escape the
   // page did not use, and nothing else.
-  it('hands the parent an Escape the page left alone, and no other key', () => {
+  it('hands the parent an Escape the page left alone, and no other key', async () => {
     const bridge = runBridge();
-    bridge.press('Escape');
-    bridge.press('a');
-    bridge.press('Enter');
+    await bridge.press('Escape');
+    await bridge.press('a');
+    await bridge.press('Enter');
     expect(bridge.posted).toEqual([{ type: 'bevel.key', key: 'Escape' }]);
   });
 
-  it('keeps an Escape the page cancelled to the page', () => {
+  it('keeps an Escape the page cancelled to the page', async () => {
     const bridge = runBridge();
-    bridge.press('Escape', { alreadyPrevented: true });
+    await bridge.press('Escape', { alreadyPrevented: true });
+    expect(bridge.posted).toEqual([]);
+  });
+
+  // A handler the page adds after the bridge ran comes after the bridge's in
+  // the same phase; the page's word on the key is final only once the
+  // dispatch is over, so that is when the bridge reads it.
+  it('keeps an Escape to the page when a handler of its own cancels it after the bridge\'s', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape', { preventedAfter: true });
     expect(bridge.posted).toEqual([]);
   });
 

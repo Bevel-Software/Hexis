@@ -36,10 +36,13 @@ export interface BridgeRun {
    */
   deliver: (data: unknown, opts?: { fromParent?: boolean }) => Promise<void>;
   /**
-   * Press `key` with focus inside the frame, as it reaches the window after
-   * the page's own handlers; `alreadyPrevented` is one a handler cancelled.
+   * Press `key` with focus inside the frame, as it reaches the window.
+   * `alreadyPrevented` is one a handler of the page's cancelled before the
+   * bridge's; `preventedAfter` one a handler the page added later cancelled
+   * after it, in the same dispatch. Answers once the dispatch is over and the
+   * task the bridge leaves behind has run.
    */
-  press: (key: string, opts?: { alreadyPrevented?: boolean }) => void;
+  press: (key: string, opts?: { alreadyPrevented?: boolean; preventedAfter?: boolean }) => Promise<void>;
 }
 
 /**
@@ -144,8 +147,11 @@ export function runBridge(
       for (const fn of messageHandlers) fn({ source, data });
       await new Promise((r) => setTimeout(r, 0));
     },
-    press: (key, pressOpts = {}) => {
-      for (const fn of keyHandlers) fn({ key, defaultPrevented: pressOpts.alreadyPrevented ?? false });
+    press: async (key, pressOpts = {}) => {
+      const event = { key, defaultPrevented: pressOpts.alreadyPrevented ?? false };
+      for (const fn of keyHandlers) fn(event);
+      if (pressOpts.preventedAfter) event.defaultPrevented = true;
+      await new Promise((r) => setTimeout(r, 0));
     },
   };
 }

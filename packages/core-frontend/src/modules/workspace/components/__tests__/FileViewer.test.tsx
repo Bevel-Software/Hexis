@@ -2154,6 +2154,36 @@ describe('FileViewer full screen', () => {
     expect(mounts.count).toBe(1);
   });
 
+  // The pane leaving the shell's flow collapses the shell's scroll, so the
+  // reader's place is carried by hand: into the pane's own scroller on the
+  // way in, back into the shell's on the way out. happy-dom lays nothing out,
+  // so the geometry is given: the pane starts 100px into the shell's content.
+  it('keeps the reader\'s place in a prose document across entry and exit', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    const shell = screen.getByTestId('kb-document-shell');
+    const pane = readPane();
+    const PANE_START = 100;
+    const rect = (top: number) => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) });
+    vi.spyOn(shell, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
+    vi.spyOn(pane, 'getBoundingClientRect').mockImplementation(
+      () => rect(pane.hasAttribute('data-full-screen') ? 0 : PANE_START - shell.scrollTop) as DOMRect,
+    );
+
+    // 300px into the document.
+    shell.scrollTop = PANE_START + 300;
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(readPane()).toBe(pane);
+    expect(pane.scrollTop).toBe(300);
+
+    // Read on to 500px, then leave: the shell lands on the same place.
+    pane.scrollTop = 500;
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(pane).not.toHaveAttribute('data-full-screen');
+    expect(shell.scrollTop).toBe(PANE_START + 500);
+  });
+
   it('keeps an edit unsaved across the toggle, and Ctrl+S saves it while filling the window', async () => {
     const user = userEvent.setup();
     const saved: string[] = [];
