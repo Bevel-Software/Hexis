@@ -16,6 +16,12 @@ import { createToolManualsAgentRoutes } from '../../tool-manuals/tool-manuals.ro
 import type { ConnectorScope, IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
 import { agentFile, agentScopeOver, inMemoryKb } from './in-memory-kb.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { McpService } from '../../mcp/mcp.service.js';
+import { SpillStore } from '../../workspace/index.js';
 
 /**
  * Every agent surface a connection reaches, behind the REAL auth gate, tool
@@ -74,6 +80,7 @@ const KEYS: Record<string, string | null> = {
   bevel_narrow: 'Agents/narrow.agent',
   bevel_plugin: 'Agents/plugin.agent',
   bevel_gone: 'Agents/gone.agent',
+  bevel_prompts: 'Agents/prompts.agent',
 };
 
 const kb = inMemoryKb(
@@ -82,6 +89,8 @@ const kb = inMemoryKb(
       'name: narrow\nplatformTools: [list_skills, get_skill, list_tool_setup, list_local_tools, get_agent_guide]\nskills: [Skills/Release]',
     ),
     'Agents/plugin.agent': agentFile('name: release\nplugins: [Plugins/Eng]'),
+    // Skills to work with, and no skill TOOL offered: its skills are still its prompts.
+    'Agents/prompts.agent': agentFile('name: reader\nplatformTools: [read_file]\nskills: [Skills/Release]'),
   },
   { plugins: [{ folder: 'Plugins/Eng/release', linkedSkills: ['Skills/Sales/pitch'] }] },
 );
@@ -248,5 +257,71 @@ describe('a key whose .agent file is gone', () => {
     const res = await call(base, 'bevel_gone', 'list_skills');
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toBe(all.connection.unavailable);
+  });
+});
+
+/**
+ * `platformTools` decides which tools an agent is OFFERED, not which skills it
+ * has: a file that names skills but no skill tool still serves those skills as
+ * prompts. Both MCP servers read prompts through `list_skills` and
+ * `get_skill`, so this runs the REAL proxy against the REAL routes above.
+ * (Local Testing found `prompts/list` empty for exactly such a file.)
+ */
+describe('a key whose .agent file names skills but offers no skill tool', () => {
+  async function mcpClient(base: string, key: string): Promise<Client> {
+    const mcp = new McpService({
+      loopbackBaseUrl: base,
+      manualName: 'KNOWLEDGE_BASE',
+      spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
+      publicFrontendUrl: 'http://localhost:5173',
+    });
+    const server = await mcp.createRequestServer(
+      { userId: ADA.id, tokenId: `id-${key}`, connectionId: null, bearer: key, agentPath: KEYS[key] },
+      { jsonrpc: '2.0', id: 1, method: 'prompts/list', params: {} },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: 't', version: '0' }, { capabilities: {} });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  it('serves its skills as prompts — prompts/list and prompts/get — and nothing beside them', async () => {
+    const base = await start();
+    const client = await mcpClient(base, 'bevel_prompts');
+    try {
+      expect((await client.listPrompts()).prompts.map((p) => p.name)).toEqual(['notes']);
+      const prompt = await client.getPrompt({ name: 'notes' });
+      expect(JSON.stringify(prompt.messages)).toContain('# notes');
+      await expect(client.getPrompt({ name: 'pitch' })).rejects.toThrow(/Unknown skill "pitch"/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('still offers no skill tool, and refuses one called through MCP by name', async () => {
+    const base = await start();
+    const names = ((await get(base, 'bevel_prompts', '/agent/utcp')) as { tools: { name: string }[] }).tools.map((t) => t.name);
+    expect(names).toEqual([]);
+    expect((await call(base, 'bevel_prompts', 'write_file')).status).toBe(403);
+    const client = await mcpClient(base, 'bevel_prompts');
+    try {
+      expect((await client.listTools()).tools.map((t) => t.name)).not.toContain('list_skills');
+      const refused = await client.callTool({ name: 'list_skills', arguments: {} });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toContain('not available to this connection');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('answers a direct call of the skill routes with its skills alone — exactly its prompts', async () => {
+    const base = await start();
+    const listed = (await (await call(base, 'bevel_prompts', 'list_skills')).json()) as { skills: SkillSummary[] };
+    expect(listed.skills.map((s) => s.name)).toEqual(['notes']);
+    expect(await (await call(base, 'bevel_prompts', 'get_skill', { name: 'pitch' })).json()).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
   });
 });

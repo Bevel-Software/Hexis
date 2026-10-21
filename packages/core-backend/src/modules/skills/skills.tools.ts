@@ -148,6 +148,9 @@ export function registerSkillsTools(
   declareRouteTool('list_skills', LIST_SKILLS_INPUTS);
   declareRouteTool('get_skill', GET_SKILL_INPUTS);
 
+  // Both skill routes are also how prompts are read (`servesPrompts`): a
+  // connection made as an `.agent` file that names skills has them as
+  // prompts even when its `platformTools` does not offer these two tools.
   router.post(
     '/agent/tools/list_skills',
     toolAuth,
@@ -162,7 +165,7 @@ export function registerSkillsTools(
       // onto a COPY: the summaries may be the catalog shared across users.
       const verdicts = await verdictsFor(ctx, skills.map(skillMdOf));
       return { skills: skills.map((s) => ({ ...s, canWrite: verdicts.get(skillMdOf(s)) === true })) };
-    }),
+    }, { servesPrompts: true }),
   );
 
   router.post(
@@ -210,7 +213,7 @@ export function registerSkillsTools(
       };
       if (!allowedTools) return { ...result, skill };
       return { ...result, skill, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
-    }),
+    }, { servesPrompts: true }),
   );
 }
 

@@ -42,6 +42,17 @@ export interface ToolHandlerOptions {
    * being refused).
    */
   branch?: BranchHandling;
+  /**
+   * The route is ALSO the read path of the MCP prompts surface (`list_skills`
+   * and `get_skill`: both the hosted proxy and the local server build
+   * `prompts/list` and `prompts/get` on them). A connection's
+   * `platformTools` decides which tools its agent is OFFERED — the MCP
+   * listing and `tools/call` refuse the rest by name — not which prompts it
+   * has, so such a route is not refused for want of a `platformTools` entry.
+   * Its answer is still narrowed to the connection's skills by the handler,
+   * and a connection that loads nothing is refused it like any other route.
+   */
+  servesPrompts?: boolean;
 }
 
 /**
@@ -264,7 +275,11 @@ export function createToolHandlerFactory(
         const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
         const scope =
           ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
-        if (!scope.allowsPlatformTool(toolName)) {
+        // The handler narrows by the scope decided here, so a context built
+        // without one cannot read as Everything inside the tool either.
+        ctx.connectionScope = scope;
+        const allowed = scope.allowsPlatformTool(toolName) || (opts.servesPrompts === true && scope.allowsPrompts());
+        if (!allowed) {
           res.status(403).json({ error: scope.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION });
           return;
         }

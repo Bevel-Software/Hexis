@@ -49,7 +49,7 @@ which hold tool names. A folder means everything under it.
 | Key | What it holds | Absent |
 |-----|---------------|--------|
 | `harnessTools` | The tools the harness gives the session (its own, like `Read` or `Bash`, and the MCP servers it mounts). Read by the runner that starts the agent; the platform ignores it. Called `tools.allow` before; runners still read that name until every file has moved. | Up to the runner |
-| `platformTools` | Names of the platform's own tools, as `tools/list` shows them: `read_file`, `grep`, `list_skills`, … | Every platform tool |
+| `platformTools` | Names of the platform's own tools, as `tools/list` shows them: `read_file`, `grep`, `list_skills`, … It decides which tools the agent is offered, not which skills it has: the skills the other lists name are its prompts either way. | Every platform tool |
 | `connectors` | `.tool` files and MCP server definitions (`mcp.json`). A folder means every connector under it. | No connectors |
 | `skills` | Skill folders. A folder above several means every skill under it. | No skills |
 | `plugins` | Plugin folders. Each loads the plugin's connectors and skills, including the skills its manifest links from elsewhere. A folder above several means every plugin under it. | No plugins |
@@ -96,6 +96,10 @@ connection and the key in the Audit log.
   `list_skills`, `get_skill`, `prompts/list`, `list_tool_setup` and
   `list_local_tools`. A call to a tool the agent does not load is answered
   that the tool is not available to this connection, naming the agent.
+  The one exception is a direct REST call to `list_skills` or `get_skill`:
+  those two routes are also how prompts are read, so they answer with the
+  agent's skills (exactly its prompts) even when `platformTools` does not
+  offer them as tools.
 - **The code-mode tools stay.** `call_tool_chain`, `tools_info` and their
   siblings are how a connection calls its tools, not tools of their own: they
   are offered to every connection that loads anything, and they reach only the

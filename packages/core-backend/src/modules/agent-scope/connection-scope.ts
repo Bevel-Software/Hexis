@@ -156,6 +156,16 @@ export class ConnectionScope {
     return this.state.kind === 'everything' ? undefined : (p) => this.allowsConnector(p);
   }
 
+  /**
+   * Whether the connection's prompts may be read: its skills, served as MCP
+   * prompts. Not a platform tool, so `platformTools` has no say — an agent
+   * that names skills gets them as prompts whatever tools it is offered. False
+   * only for a file that cannot be used, which loads nothing at all.
+   */
+  allowsPrompts(): boolean {
+    return this.state.kind !== 'unavailable';
+  }
+
   /** Whether the platform's own tool `name` is loaded. */
   allowsPlatformTool(name: string): boolean {
     const s = this.state;
