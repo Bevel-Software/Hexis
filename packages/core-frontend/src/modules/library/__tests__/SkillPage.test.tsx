@@ -124,6 +124,9 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
       <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
         other-id-probe
       </button>
+      <span data-testid="other-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
+      </span>
       <span data-testid="self-id-target-probe">
         {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
       </span>
@@ -1688,11 +1691,35 @@ describe('SkillPage: links and images in the file', () => {
       expect(screen.queryByTestId('navigated-to')).toBeNull();
       // Another node is still a new tab.
       fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
-      expect(open).toHaveBeenCalledWith('/workspace/main/plan-node#goal', '_blank');
+      expect(open).toHaveBeenCalledWith(`/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`, '_blank');
       expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
     } finally {
       open.mockRestore();
       Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  // The pane renders the default branch's file whatever is checked out, so
+  // an id in it names a node there: with a draft checked out, the click and
+  // the anchor both open the default branch's node, not the draft's.
+  it("opens another node on the default branch, where the file was read, while a draft is checked out", async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        status: { ...git.status!, branch: 'alice/draft' },
+      });
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(`/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`, '_blank');
+      expect(JSON.parse(screen.getByTestId('other-id-target-probe').textContent ?? 'null')).toEqual({
+        href: `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`,
+        newTab: true,
+      });
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+    } finally {
+      open.mockRestore();
     }
   });
 

@@ -526,16 +526,17 @@ export function SkillPage({
    * link to this node's own heading (`[Steps](newsletter#steps)`) scrolls
    * the pane like a section link, instead of opening this skill again in a
    * new tab. This page's address is not the node's id URL, so the hook could
-   * not tell from the address.
+   * not tell from the address. Any other id names a node on the default
+   * branch too, where this file was read from, whatever is checked out.
    */
   const ownNodeId = useFileNodeId(fileWorkspacePath, DEFAULT_BRANCH);
   const openNodeIdInFile = useCallback(
     (idOrLink: string, scrollToSection: (hash: string) => void) =>
-      openNodeId(idOrLink, ownNodeId, { onSection: scrollToSection }),
+      openNodeId(idOrLink, ownNodeId, { homeBranch: DEFAULT_BRANCH, onSection: scrollToSection }),
     [openNodeId, ownNodeId],
   );
   const nodeIdLinkTarget = useCallback(
-    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId),
+    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId, DEFAULT_BRANCH),
     [nodeIdTarget, ownNodeId],
   );
 

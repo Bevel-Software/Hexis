@@ -663,6 +663,12 @@ export function useFileNav() {
  * `onSection` is `OpenLinkOptions.onSection` for an id-link: a host whose
  * address has no heading scroll (the skill page) scrolls to the fragment of a
  * link to its own node itself, and this tab's address stays as it is.
+ *
+ * `homeBranch` is `linkTarget`'s, for an id-link: the branch the file the
+ * link sits in was read from, when not this tab's. The skill page renders
+ * its files from the default branch whatever is checked out, so an id there
+ * names a node on the default branch, not on somebody's draft. Omitted, it
+ * is this tab's branch.
  */
 export function useNodeIdNav() {
   const surface = useRendererSurface();
@@ -675,12 +681,13 @@ export function useNodeIdNav() {
   const branch = branchFromPathname(location.pathname) ?? git?.status?.branch ?? null;
 
   const nodeIdTarget = useCallback(
-    (idOrLink: string, ownId?: string | null): KbLinkTarget | null => {
-      if (!branch) return null;
+    (idOrLink: string, ownId?: string | null, homeBranch?: string): KbLinkTarget | null => {
+      const onBranch = homeBranch ?? branch;
+      if (!onBranch) return null;
       const hashIdx = idOrLink.indexOf('#');
       const id = hashIdx >= 0 ? idOrLink.slice(0, hashIdx) : idOrLink;
       const hash = hashIdx >= 0 ? idOrLink.slice(hashIdx) : '';
-      const url = kbNodeUrl(branch, id);
+      const url = kbNodeUrl(onBranch, id);
       if (id === ownId || url === location.pathname) {
         return sectionOfThisTab(location, hash);
       }
@@ -690,8 +697,8 @@ export function useNodeIdNav() {
   );
 
   const openNodeId = useCallback(
-    (idOrLink: string, ownId?: string | null, options: Pick<OpenLinkOptions, 'onSection'> = {}) => {
-      const target = nodeIdTarget(idOrLink, ownId);
+    (idOrLink: string, ownId?: string | null, options: OpenLinkOptions = {}) => {
+      const target = nodeIdTarget(idOrLink, ownId, options.homeBranch);
       if (target && !target.newTab && options.onSection) {
         const hashIdx = idOrLink.indexOf('#');
         options.onSection(hashIdx >= 0 ? idOrLink.slice(hashIdx) : '');

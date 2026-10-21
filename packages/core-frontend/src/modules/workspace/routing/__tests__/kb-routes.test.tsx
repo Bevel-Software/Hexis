@@ -673,6 +673,19 @@ describe('useNodeIdNav', () => {
     expectNewTab('/workspace/alice%2Fdraft/plan-node#goal');
   });
 
+  // A host that read its file from another branch than this tab's (the skill
+  // page reads the default branch while a draft is checked out) names it,
+  // and the id resolves there — on the click and on the anchor alike.
+  it('opens an id on the branch its file was read from when told one', () => {
+    const { result } = renderNodeNav('/skills-and-tools/skills/newsletter');
+    expect(result.current.nodeIdTarget('plan-node#goal', null, 'main')).toEqual({
+      href: '/workspace/main/plan-node#goal',
+      newTab: true,
+    });
+    result.current.openNodeId('plan-node#goal', null, { homeBranch: 'main' });
+    expectNewTab('/workspace/main/plan-node#goal');
+  });
+
   it('answers nodeIdTarget with the same address', () => {
     const { result } = renderNodeNav('/workspace/alice%2Fdraft/foo-node');
     expect(result.current.nodeIdTarget('plan-node#goal')).toEqual({

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Pencil, Eye, RotateCw } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
@@ -67,6 +68,12 @@ export function HtmlRenderer({
   readOnly = false,
 }: FileRendererProps) {
   const { openLink, openFilePage } = useFileNav();
+  // The fragment this tab's address arrived with (`Board.html#totals`, from a
+  // section link opened in a new tab or a shared address). It names a place
+  // in the PAGE, which lives in the frame, where the app's address never
+  // reaches: the frame is handed it as `bevel.jump` once it has loaded, the
+  // same message a click on a section link inside the page is answered with.
+  const { hash: arrivalHash } = useLocation();
   const surface = useRendererSurface();
   // Whether the surface's host grows with the page (an issue panel) rather
   // than giving it a pane to scroll in (the app, the MCP App's pane).
@@ -428,6 +435,9 @@ export function HtmlRenderer({
             // iframe cannot exfiltrate, navigate, popup, or fetch.
             sandbox="allow-scripts"
             referrerPolicy="no-referrer"
+            onLoad={(e) => {
+              if (arrivalHash) e.currentTarget.contentWindow?.postMessage({ type: 'bevel.jump', hash: arrivalHash }, '*');
+            }}
             // In a pane the frame fills it and scrolls inside; where the host
             // grows with the page, the frame has the reader's height (a
             // flex-grown frame in an auto-height column would collapse to the

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { getFileRenderer } from '..';
 import { GitContext, type GitContextValue } from '../../../../git';
@@ -90,6 +90,34 @@ describe('a link inside an HTML page', () => {
     expect(post).toHaveBeenCalledWith({ type: 'bevel.jump', hash: '#q3' }, '*');
     expect(post).toHaveBeenCalledWith({ type: 'bevel.jump', hash: '#q4' }, '*');
     expect(screen.getByTestId('location').textContent).toBe(`${AT}?fullscreen=1`);
+  });
+
+  // Where a section link's new tab lands: `Board.html#totals`. The fragment
+  // is on the app's address, which the frame never sees, so the page is
+  // handed it once it has loaded, as a click on a section link inside it is.
+  it('scrolls the page to the section its address names once the frame has loaded', async () => {
+    const { container } = onFilePage(`${AT}#q3`);
+    const frame = await frameOf(container);
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    fireEvent.load(frame);
+    expect(post).toHaveBeenCalledWith({ type: 'bevel.jump', hash: '#q3' }, '*');
+    expect(screen.getByTestId('location').textContent).toBe(`${AT}#q3`);
+  });
+
+  it('in full screen, scrolls the page to the section its address names too', async () => {
+    const { container } = onFilePage(`${AT}?fullscreen=1#totals`);
+    const frame = await frameOf(container);
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    fireEvent.load(frame);
+    expect(post).toHaveBeenCalledWith({ type: 'bevel.jump', hash: '#totals' }, '*');
+  });
+
+  it('hands the frame no jump when its address names no section', async () => {
+    const { container } = onFilePage(AT);
+    const frame = await frameOf(container);
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    fireEvent.load(frame);
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'bevel.jump' }), '*');
   });
 
   it('resolves against the page home its host names (a skill page), on that branch', async () => {
