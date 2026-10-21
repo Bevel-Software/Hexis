@@ -8,22 +8,37 @@
 // The blocks are therefore cut per module AND per folder depth inside it (a
 // flat-config `*` never crosses a `/`): at depth d, d+1 `../` lead out of the
 // module into `modules/`, so `^(\.\./){d+1}<other>/` names another module, and
-// the same with `modules/` or `src/modules/` after one or two more `../`.
-// One pattern per target module, so the message can name the entry to use.
+// so does any longer way round that climbs further and comes back down
+// through a `modules/` folder. One pattern per target module, so the message
+// can name the entry to use.
+//
+// Counting `../` only measures a path in normal form, so a relative specifier
+// that is not (`./../x`, `a/../x`, `a/./x`, `a//x`) is refused in the same
+// files: written plainly it is either allowed or named by the patterns above.
+// The depths come from the tree at config load, one block per folder level
+// each module actually has, so a new sub-folder is covered the day it lands.
 
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 const PACKAGES = ['packages/core-backend', 'packages/core-frontend']
-const DEEPEST = 6
-const INDEX = '(?:index(?:\\.(?:js|jsx|ts|tsx))?$)'
+/** The module's public entry: its folder alone, or its `index` file. */
+const INDEX = '(?:index(?:\\.(?:js|jsx|ts|tsx))?)?$'
+/** A relative specifier with a `.` or `..` past its leading climb, or an empty segment. */
+const NOT_NORMAL = '^(?=\\.\\.?/)(?:.*//|.*/\\.(?:/|$)|\\./\\.\\.?(?:/|$)|(?:.*/)?(?!\\.\\.?(?:/|$))[^/]+/\\.\\.(?:/|$))'
 
 /** Tests may reach into another module's internals for fixtures; the rule is about shipped code. */
 export const MODULE_BOUNDARY_TEST_FILES = ['**/__tests__/**', '**/*.test.{ts,tsx}']
 
+const subdirs = (dir) => readdirSync(dir).filter((name) => statSync(join(dir, name)).isDirectory())
+
 function modulesOf(root, pkg) {
-  const dir = join(root, pkg, 'src', 'modules')
-  return readdirSync(dir).filter((name) => statSync(join(dir, name)).isDirectory()).sort()
+  return subdirs(join(root, pkg, 'src', 'modules')).sort()
+}
+
+/** How many folders deep the module's tree goes, its own folder being 0. */
+function depthOf(dir) {
+  return Math.max(0, ...subdirs(dir).map((name) => 1 + depthOf(join(dir, name))))
 }
 
 const ups = (n) => `(?:\\.\\./){${n}}`
@@ -40,16 +55,25 @@ export function moduleBoundaries({ root, exceptions = {}, paths = {} }) {
   for (const pkg of PACKAGES) {
     const modules = modulesOf(root, pkg)
     for (const own of modules) {
-      for (let depth = 0; depth <= DEEPEST; depth++) {
-        const patterns = modules
-          .filter((other) => other !== own)
-          .map((other) => ({
-            regex: `^(?:${ups(depth + 1)}|${ups(depth + 2)}modules/|${ups(depth + 3)}src/modules/)${other}/(?!${INDEX})`,
-            caseSensitive: true,
+      const deepest = depthOf(join(root, pkg, 'src', 'modules', own))
+      for (let depth = 0; depth <= deepest; depth++) {
+        const patterns = [
+          {
+            regex: NOT_NORMAL,
             message:
-              `Modular Domain-Driven Design: reach another module through its index — import from ` +
-              `modules/${other}/index.ts, not its internals (export what you need from that index).`,
-          }))
+              'Modular Domain-Driven Design: write a relative import in normal form (no `./..`, `a/..`, ' +
+              '`/./` or `//`), so the module-boundary rule can see which module it reaches.',
+          },
+          ...modules
+            .filter((other) => other !== own)
+            .map((other) => ({
+              regex: `^${ups(depth + 1)}(?:(?:\\.\\./)+(?:[^/]+/)*modules/)?${other}/(?!${INDEX})`,
+              caseSensitive: true,
+              message:
+                `Modular Domain-Driven Design: reach another module through its index — import from ` +
+                `modules/${other}/index.ts, not its internals (export what you need from that index).`,
+            })),
+        ]
         blocks.push({
           name: `module-boundaries/${pkg.split('/')[1]}/${own}/depth-${depth}`,
           files: [`${pkg}/src/modules/${own}/${'*/'.repeat(depth)}*.{ts,tsx}`],
