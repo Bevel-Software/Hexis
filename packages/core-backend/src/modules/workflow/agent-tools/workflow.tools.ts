@@ -6,7 +6,7 @@ import { toolDef } from '../../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/agent-access.gate.js';
+import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/index.js';
 import { readablePathsAt, readableAtCommits, assertReadableAtCommits } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -154,6 +154,12 @@ const changeRequestSummarySchema: JsonSchema = {
       description: `The changed paths with their kind of change, cut to ${CHANGE_REQUEST_PATH_LIMIT}; \`include: ["all-paths"]\` lists them all.`,
     },
     totalFiles: { type: 'integer', description: 'How many files the request changes in total, cut or not.' },
+    notified: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'On the answer to an open only: the channels that reached the approvers ("email", say), as the deployment\'s listeners said; empty when nobody was told and the request waits to be found in the app.',
+    },
   },
   required: ['url', 'number', 'title', 'state', 'sourceBranch', 'targetBranch', 'approvals', 'mergeBlockedReasons', 'files', 'totalFiles'],
 };
@@ -993,6 +999,11 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const branch = args.branch as string;
       const workspaceId = await workspaceOf(ctx, branch);
+      // Each read below takes the workspace's reservation on its own: this
+      // is a REPORT of independent facts, not a range measured across steps,
+      // and a save or sync landing between two of them is tolerated — the
+      // next call reports it. (The one answer that must be exact, what a
+      // merge is of, is taken under one reservation by `update_branch`.)
       const [status, branches, pending, forkBase] = await Promise.all([
         ctx.workflowService.branchStatus(workspaceId),
         ctx.workflowService.listBranches(workspaceId),

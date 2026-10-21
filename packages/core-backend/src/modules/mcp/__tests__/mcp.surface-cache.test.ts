@@ -9,11 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CallTemplate } from '@utcp/sdk';
 import { McpService, type McpCaller } from '../mcp.service.js';
-import { SpillStore } from '../../workspace/spill-store.js';
+import { SpillStore } from '../../workspace/index.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
-import type { AgentEventInput } from '../../audit/audit.contract.js';
+import { toolDef } from '../../tool-helpers/index.js';
+import type { AgentEventInput } from '../../audit/index.js';
 import type { SurfaceCacheOptions } from '../surface-cache.js';
 import { SharedDefinitions } from '../shared-definitions.js';
 

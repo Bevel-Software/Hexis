@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router-dom';
 import { RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
 import { OpenPageInPlatformContext, PageToolsContext } from '../htmlToolBridge';
-import { GitContext, type GitContextValue } from '../../../../git/state/git.context';
+import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 
 /**

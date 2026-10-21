@@ -1,5 +1,6 @@
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { ListenerSeam, type NotifyingListener } from '../../shared/listener-seam.js';
 
 const log = logger('accounts');
 
@@ -24,13 +25,10 @@ export interface AccountInvitedEvent {
 
 /**
  * A listener answers how it reached the person — a non-empty channel name,
- * `'email'` say — or null when it did not (nothing configured, the send
- * failed). It is awaited: the admin's answer says who was notified,
- * truthfully, so a listener bounds its own wait. A throw is logged and
- * counts as null; it never fails the invite. An empty name is no channel and
- * counts as null too.
+ * `'email'` say — or null when it did not; the rule is {@link NotifyingListener}'s:
+ * awaited, a throw logged and counted as null, never failing the invite.
  */
-export type AccountInvitedHook = (event: AccountInvitedEvent) => Promise<string | null>;
+export type AccountInvitedHook = NotifyingListener<AccountInvitedEvent>;
 
 /**
  * Core's seam for "an account was invited": a deployment (the cloud with its
@@ -46,24 +44,18 @@ export interface IAccountHooks {
 }
 
 export class AccountHooks implements IAccountHooks {
-  private readonly invited: AccountInvitedHook[] = [];
+  // The account exists whether or not the person was told: the admin's
+  // answer says they were not, and the admin sends the link themselves.
+  private readonly invited = new ListenerSeam<AccountInvitedEvent>(
+    log,
+    'an account-invited listener failed; the person was not notified by it:',
+  );
 
   onAccountInvited(hook: AccountInvitedHook): void {
-    this.invited.push(hook);
+    this.invited.add(hook);
   }
 
-  async runAccountInvited(event: AccountInvitedEvent): Promise<string[]> {
-    const notified: string[] = [];
-    for (const hook of this.invited) {
-      try {
-        const channel = await hook(event);
-        if (channel !== null && channel !== '') notified.push(channel);
-      } catch (err) {
-        // The account exists whether or not the person was told: the admin's
-        // answer says they were not, and the admin sends the link themselves.
-        log.error('an account-invited listener failed; the person was not notified by it:', { err });
-      }
-    }
-    return notified;
+  runAccountInvited(event: AccountInvitedEvent): Promise<string[]> {
+    return this.invited.run(event);
   }
 }
