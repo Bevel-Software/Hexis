@@ -201,6 +201,12 @@ export interface AgentToolCallEvent {
 
 // ── Global ───────────────────────────────────────────────────────────────────
 
+/**
+ * A change request was opened. Reaches EVERY session, so it says only that a
+ * request exists: its number, its branches and who opened it — no title and
+ * no paths, which a person may not be allowed to read. A reader fetches the
+ * request, and sees of it what the request routes show them.
+ */
 export interface ChangeRequestOpenedEvent {
   kind: 'change-request-opened';
   number: number;
@@ -208,7 +214,6 @@ export interface ChangeRequestOpenedEvent {
   target: string;
   /** Hash of the author's email (matches the marker in the CR body); null when unattributable. */
   authorIdHash: string | null;
-  title: string;
 }
 
 export interface ChangeRequestMergedEvent {
@@ -282,7 +287,14 @@ export interface ChangeRequestMergeFailedEvent {
 export interface ApprovalChangedEvent {
   kind: 'approval-changed';
   number: number;
+  /** The approved file, KB-repo-relative. */
   path: string;
+  /**
+   * The request's target branch: the event names a path, and whether a
+   * session's person may hear of it is judged by their read access to that
+   * path at the target — the same rule the request's own detail is scoped by.
+   */
+  targetBranch: string;
   approverUserId: string;
   change: 'added' | 'removed';
 }
