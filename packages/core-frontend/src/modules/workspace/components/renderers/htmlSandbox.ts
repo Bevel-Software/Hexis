@@ -402,16 +402,24 @@ const NAV_BRIDGE = `
  * posts `bevel.key` instead, and the parent decides what Escape means there
  * (see `ExitFullScreenButton`).
  *
- * Only Escape, and only one the page left alone: the listener is on the
- * window in the bubble phase, after every handler of the page's own, and an
- * Escape one of them cancelled (closing the page's own popup) is the page's.
+ * Only Escape, and only one the page left alone: an Escape one of the page's
+ * handlers cancelled (closing the page's own popup) is the page's. Which
+ * handlers run before this one is not the bridge's to choose — a handler the
+ * page adds to the window after the bridge ran (a module of its own, a popup
+ * that listens only while open) comes after it in the same phase — so the
+ * bridge does not decide while the key is still being dispatched. It looks
+ * on the next task, once the dispatch is over, every handler of the page's
+ * has had its turn and `defaultPrevented` is final.
  */
 const KEY_BRIDGE = `
 ;(function () {
   if (typeof globalThis.addEventListener !== 'function') return;
   globalThis.addEventListener('keydown', function (e) {
-    if (e.key !== 'Escape' || e.defaultPrevented) return;
-    parent.postMessage({ type: 'bevel.key', key: 'Escape' }, '*');
+    if (e.key !== 'Escape') return;
+    setTimeout(function () {
+      if (e.defaultPrevented) return;
+      parent.postMessage({ type: 'bevel.key', key: 'Escape' }, '*');
+    }, 0);
   });
 })();
 `;

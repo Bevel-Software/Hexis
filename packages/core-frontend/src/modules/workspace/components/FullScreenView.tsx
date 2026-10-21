@@ -1,6 +1,7 @@
 import { useEffect, type RefObject } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { IconButton, useModalLayer, useLatestRef } from '../../../shared/components';
+import { isFrameEscape } from '../utils/frameEscape';
 
 /** The way in: an icon button beside the file's other actions. */
 export function FullScreenButton({ onEnter }: { onEnter(): void }) {
@@ -21,11 +22,13 @@ export function FullScreenButton({ onEnter }: { onEnter(): void }) {
  * view registers after it, so it is the topmost layer and takes Escape first.
  *
  * An Escape pressed inside a page's frame never reaches this document, so the
- * frame posts it instead (`bevel.key`, see `htmlSandbox.ts`). One that comes
- * from a frame inside `surface` is pressed here again, on the document, so it
- * meets every Escape listener the app has — the same modal layer order, a
- * card over the page first — exactly as a key pressed outside the frame would.
- * Any other window's message is not the view's to act on.
+ * frame posts one the page left alone instead (`bevel.key`, see
+ * `htmlSandbox.ts`), a task after the key. One that comes from a frame inside
+ * `surface` (`isFrameEscape`) is pressed here again, on the document, so it
+ * meets the app's document- and window-level Escape listeners in their usual
+ * order — the modal layer's among them, so a card over the page takes it
+ * first. A handler on an element of the app's does not see it: none of them
+ * had focus. Any other window's message is not the view's to act on.
  */
 export function ExitFullScreenButton({
   onExit,
@@ -44,10 +47,7 @@ export function ExitFullScreenButton({
       onExitRef.current();
     }
     function onFrameKey(e: MessageEvent) {
-      const msg = e.data as { type?: unknown; key?: unknown } | null;
-      if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.key' || msg.key !== 'Escape') return;
-      const frames = surface.current?.querySelectorAll('iframe') ?? [];
-      if (!e.source || !Array.from(frames).some((f) => f.contentWindow === e.source)) return;
+      if (!isFrameEscape(e, surface.current)) return;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     }
     document.addEventListener('keydown', onKeyDown);
