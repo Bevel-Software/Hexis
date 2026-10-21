@@ -20,6 +20,7 @@ import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION } from '../tool-helpers/tool-handler.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -161,6 +162,17 @@ export function createToolManualsAgentRoutes(
       if (folderStat === null || !folderStat.isDirectory()) {
         return void res.status(404).json({ error: 'Not found' });
       }
+      // A connection made as an `.agent` file materializes only a plugin
+      // that defines a connector the file loads — the archive is how the
+      // local MCP server runs one, and nothing else asks for it.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      if (!scope.loadsConnectorIn(pluginRel)) {
+        const why = scope.describe();
+        return void res.status(403).json({
+          error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,
+          code: NOT_AVAILABLE_TO_CONNECTION,
+        });
+      }
       const rels: string[] = [];
       // Only an absent folder is a non-event; anything else (EACCES, EIO)
       // silently missing from the archive would hand the client an
@@ -284,7 +296,11 @@ export function createToolManualsAgentRoutes(
       const email = await callerEmail(req);
       if (!email) return void res.status(403).json({ error: 'Forbidden' });
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
-      const manual = await toolManualService.resolveInlineManual(email, String(slug));
+      // A connection made as an `.agent` file reads only the manuals of the
+      // connectors it loads; another is as absent as one the person cannot read.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const within = scope.connectorFilter();
+      const manual = await toolManualService.resolveInlineManual(email, String(slug), within ? { within } : undefined);
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       res.json(manual);
     } catch (err) {

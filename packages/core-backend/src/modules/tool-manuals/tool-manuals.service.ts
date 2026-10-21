@@ -478,11 +478,17 @@ export class ToolManualService implements IToolManualService {
     return out;
   }
 
-  async resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null> {
+  async resolveInlineManual(
+    userEmail: string,
+    slug: string,
+    opts?: { within?: ConnectorScope },
+  ): Promise<UtcpManualDict | null> {
     const found = (await this.scan()).manuals.find((m) => m.slug === slug);
     if (!found || found.type !== 'inline') return null;
     const wsId = this.kb.defaultWorkspaceId();
     if (!(await this.accessControl.canRead(wsId, userEmail, found.path))) return null;
+    // After the read gate, as every narrowing is: a connection's scope can only take away.
+    if (opts?.within && !opts.within(found.path)) return null;
     try {
       return manualSerializer.validateDict({
         utcp_version: '1.1.0',

@@ -8,7 +8,7 @@ import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '..
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
-import { ConnectAsChoice, type AgentChoice } from '../../agents';
+import { ConnectAsChoice, canConnectAs, type AgentChoice } from '../../agents';
 import {
   getConnectPending,
   startToolOAuth,
@@ -118,6 +118,11 @@ export function ConnectToolsPage() {
   // unless the person picks one, and kept across a tool sign-in's round-trip.
   const [agentChoices, setAgentChoices] = useState<AgentChoice[]>([]);
   const [connectAs, setConnectAs] = useState<string | null>(rememberedConnectAs);
+  // The agents failed to load: Finish then waits for Everything to be confirmed.
+  const [choicesFailed, setChoicesFailed] = useState(false);
+  const [everythingConfirmed, setEverythingConfirmed] = useState(false);
+  const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
+  const mayFinish = canConnectAs(unavailable);
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -200,6 +205,7 @@ export function ConnectToolsPage() {
         setAgentName(r.clientName);
         const offered = r.agents ?? [];
         setAgentChoices(offered);
+        setChoicesFailed(r.agentsUnavailable === true);
         // A remembered choice that is no longer on offer falls back to Everything.
         setConnectAs((current) => (current && offered.some((a) => a.path === current) ? current : null));
       })
@@ -248,7 +254,7 @@ export function ConnectToolsPage() {
   };
 
   const onFinish = async () => {
-    if (!agentState) return;
+    if (!agentState || !mayFinish) return;
     setFinishing(true);
     try {
       const redirectTo = await completeMcpOAuth(agentState, connectAs);
@@ -377,7 +383,7 @@ export function ConnectToolsPage() {
                   variant="primary"
                   size="sm"
                   className="shrink-0"
-                  disabled={finishing}
+                  disabled={finishing || !mayFinish}
                   onClick={() => void onFinish()}
                 >
                   {finishing ? 'Finishing…' : 'Finish & return to your agent'}
@@ -394,6 +400,7 @@ export function ConnectToolsPage() {
                     if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
                     else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
                   }}
+                  unavailable={unavailable}
                 />
               </div>
             </Surface>

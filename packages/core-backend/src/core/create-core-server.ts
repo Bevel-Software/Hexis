@@ -590,6 +590,7 @@ export async function createCoreServer(
     core.secretsVaultService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    core.agentScopeService,
   ));
   app.use('/api', toolsRouter);
 

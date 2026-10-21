@@ -150,6 +150,17 @@ describe('the local server’s exchanged grant', () => {
       auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', scope: 'write' },
     });
   });
+
+  it("refuses a direct tool call through a revoked connection's token, whatever the token says it connects as", async () => {
+    const internalTokens = new InternalTokenService({ secret: 'test-secret' });
+    const keys = { looksLikeExternalApiKey: () => false } as never;
+    const verify = createTokenVerifier(keys, internalTokens, undefined, { liveConnectionChoice: async () => null });
+    const token = internalTokens.mint(
+      { userId: 'user-5', externalProxy: true, connectionId: 'conn-9', agentPath: 'Agents/ops.agent' },
+      60_000,
+    );
+    expect(await verify(token)).toEqual({ ok: false, status: 401, message: 'Access for this agent was revoked' });
+  });
 });
 
 describe('an MCP request', () => {

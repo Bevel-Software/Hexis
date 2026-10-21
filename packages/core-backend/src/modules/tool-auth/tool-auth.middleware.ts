@@ -153,8 +153,9 @@ export function createTokenVerifier(
   /**
    * Where an `externalProxy` token that names an agent connection reads the
    * connection's CURRENT choice: the token outlives a re-consent, so the
-   * `.agent` it was minted with may no longer be the one chosen. Absent, or
-   * the connection no longer live, the token's own choice stands.
+   * `.agent` it was minted with may no longer be the one chosen. A
+   * connection no longer live (revoked, deleted) refuses the token. Absent,
+   * the token's own choice stands.
    */
   connections?: ConnectionChoices,
 ): (token: string | undefined) => Promise<VerifyResult> {
@@ -177,7 +178,9 @@ export function createTokenVerifier(
       let agentPath = claim.agentPath;
       if (claim.externalProxy && claim.connectionId && connections) {
         const live = await connections.liveConnectionChoice(claim.connectionId);
-        if (live) agentPath = live.agentPath ?? undefined;
+        // A revoked connection's token is dead here too, as it is at the MCP endpoint.
+        if (!live) return { ok: false, status: 401, message: 'Access for this agent was revoked' };
+        agentPath = live.agentPath ?? undefined;
       }
       return claim.externalProxy
         ? {

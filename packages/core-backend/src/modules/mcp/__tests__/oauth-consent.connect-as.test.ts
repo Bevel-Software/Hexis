@@ -30,7 +30,7 @@ const kb = inMemoryKb({
 });
 kb.hidden.add('Agents/secret.agent');
 
-async function mount(opts: { email?: string } = {}) {
+async function mount(opts: { email?: string; agents?: Parameters<typeof createOAuthConsentRoutes>[0]['agents'] } = {}) {
   const issueAuthCode = vi.fn(async () => ({ redirectTo: 'https://agent.example.com/cb?code=c1' }));
   const completeConsent = vi.fn(async () => ({ redirectTo: 'https://claude.ai/cb?code=gh' }));
   const app = express();
@@ -52,7 +52,7 @@ async function mount(opts: { email?: string } = {}) {
         clientNameFor: () => 'Claude',
         completeConsent,
       },
-      agents: agentScopeOver(kb),
+      agents: opts.agents ?? agentScopeOver(kb),
     }),
   );
   http = app.listen(0);
@@ -81,6 +81,25 @@ describe('the consent step offers "Connect as"', () => {
       scope: null,
       resource: null,
       agents: [{ path: 'Agents/mechanic.agent', name: 'delivery-mechanic', description: 'Moves code around.' }],
+    });
+  });
+
+  it('says so when the agents cannot be listed, rather than passing it off as having none', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failing = {
+      listChoices: async () => {
+        throw new Error('checkout unavailable');
+      },
+      choosable: async () => null,
+    };
+    const { base } = await mount({ agents: failing });
+    const res = await fetch(`${base}/mcp/oauth/request?state=${encodeURIComponent(state())}`);
+    expect(await res.json()).toEqual({
+      clientName: 'Claude',
+      scope: null,
+      resource: null,
+      agents: [],
+      agentsUnavailable: true,
     });
   });
 });

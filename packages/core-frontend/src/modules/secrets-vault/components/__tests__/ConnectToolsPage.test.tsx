@@ -555,6 +555,22 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       expect(await within(group).findByRole('radio', { name: /ops.*Watches the dashboards\./ })).not.toBeChecked();
     });
 
+    it('says when the agents could not be loaded, and approves Everything only once that is confirmed', async () => {
+      connectMock.getMcpOAuthRequest.mockResolvedValue({
+        clientName: 'Claude',
+        scope: null,
+        resource: null,
+        agents: [],
+        agentsUnavailable: true,
+      });
+      renderPage();
+      expect(await screen.findByRole('alert')).toHaveTextContent(/agent files couldn't be loaded/);
+      expect(screen.getByRole('button', { name: 'Finish & return to your agent' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Connect as Everything anyway' }));
+      await finish();
+      expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', null);
+    });
+
     it('approving with an agent picked connects as that agent', async () => {
       renderPage();
       fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));

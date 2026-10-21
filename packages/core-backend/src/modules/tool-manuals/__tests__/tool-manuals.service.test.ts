@@ -183,6 +183,15 @@ describe('ToolManualService', () => {
     expect(manual).toBeNull();
   });
 
+  test("does not resolve a readable inline manual outside a connection's connectors", async () => {
+    // The narrowing applies after the read gate, on the manual's own path.
+    const paths: string[] = [];
+    const within = (p: string) => (paths.push(p), false);
+    expect(await svc().resolveInlineManual('user@x.eu', 'weather', { within })).toBeNull();
+    expect(paths).toEqual([expect.stringMatching(/weather\.tool$/)]);
+    expect(await svc().resolveInlineManual('user@x.eu', 'weather', { within: () => true })).not.toBeNull();
+  });
+
   test('resolves an inline tool that calls Google as a service account, and surfaces the key variable', async () => {
     // The auth block is what makes the call; the key it names has to reach the
     // secrets UI as a shared variable or nobody can store it.

@@ -61,10 +61,14 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const client = await deps.provider.clientsStore.getClient(st.c);
     // Everything is not in the list: it is the choice every consent has, and
     // the one the page selects. A failure to read the agents costs the choice
-    // of an agent, never the consent itself.
+    // of an agent, never the consent itself — but it is SAID
+    // (`agentsUnavailable`), so the page does not pass an empty list off as
+    // "you have no agents" and approve Everything unasked.
+    let agentsUnavailable = false;
     const agents = deps.agents && req.userEmail
       ? await deps.agents.listChoices(req.userEmail).catch((err: unknown) => {
           log.warn('listing the agents to connect as failed:', { detail: err instanceof Error ? err.message : String(err) });
+          agentsUnavailable = true;
           return [];
         })
       : [];
@@ -73,6 +77,7 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
       scope: st.sc ?? null,
       resource: st.rs ?? null,
       agents,
+      ...(agentsUnavailable ? { agentsUnavailable: true } : {}),
     });
   });
 

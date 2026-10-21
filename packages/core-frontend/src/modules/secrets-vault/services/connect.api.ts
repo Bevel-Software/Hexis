@@ -148,6 +148,8 @@ export interface McpOAuthRequest {
    * a choice).
    */
   agents?: AgentChoice[];
+  /** Set when the agents could not be listed: `agents` is then empty for that reason, not because there are none. */
+  agentsUnavailable?: boolean;
 }
 
 /** Describe the pending MCP authorization carried in the signed `state`. */

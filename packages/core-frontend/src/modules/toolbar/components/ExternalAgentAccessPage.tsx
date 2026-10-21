@@ -23,7 +23,7 @@ import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
-import { ConnectAsChoice, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
+import { ConnectAsChoice, canConnectAs, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -100,6 +100,11 @@ export function ExternalAgentAccessPage() {
   // "Connect as" for a new key: Everything unless an agent is picked.
   const [agentChoices, setAgentChoices] = useState<AgentChoice[]>([]);
   const [connectAs, setConnectAs] = useState<string | null>(null);
+  // The agents failed to load: an empty list is then not "you have none",
+  // so an Everything key waits for the person to confirm it.
+  const [choicesFailed, setChoicesFailed] = useState(false);
+  const [everythingConfirmed, setEverythingConfirmed] = useState(false);
+  const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -132,15 +137,17 @@ export function ExternalAgentAccessPage() {
     void refresh();
   }, [refresh]);
 
-  // The agents a key may be minted as. A failure costs only the choice:
-  // Everything is always on offer.
+  // The agents a key may be minted as. A failure costs only the choice —
+  // Everything is always on offer — and is shown, not passed off as none.
   useEffect(() => {
     let cancelled = false;
     listAgentChoices().then(
       (agents) => {
         if (!cancelled) setAgentChoices(agents);
       },
-      () => {},
+      () => {
+        if (!cancelled) setChoicesFailed(true);
+      },
     );
     return () => {
       cancelled = true;
@@ -149,7 +156,7 @@ export function ExternalAgentAccessPage() {
 
   async function handleCreate() {
     const trimmed = label.trim();
-    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating) return;
+    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating || !canConnectAs(unavailable)) return;
     setCreating(true);
     setCreateError(null);
     try {
@@ -192,7 +199,7 @@ export function ExternalAgentAccessPage() {
   }
 
   const trimmed = label.trim();
-  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating;
+  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating && canConnectAs(unavailable);
 
   // Surface the keys that matter: active keys first (most-recently-used at the
   // top, never-used ones last among the active), with disconnected keys sunk
@@ -561,6 +568,7 @@ export function ExternalAgentAccessPage() {
                 disabled={creating}
                 hint="What the key loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
                 onChange={setConnectAs}
+                unavailable={unavailable}
               />
               {createError && (
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">

@@ -5,6 +5,8 @@ const log = logger('declared-variables');
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
 type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
 
@@ -48,6 +50,12 @@ export function createDeclaredVariableRoutes(
   secretsVault: ISecretsVaultService,
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
+  /**
+   * Resolves the scope of a connection made as an `.agent` file: such a
+   * connection is handed only the variables of a connector the file loads.
+   * Absent, a narrowed connection is handed none.
+   */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -125,7 +133,11 @@ export function createDeclaredVariableRoutes(
       // `listAccessible` already applies the per-file read verdict, so an
       // unreadable manual is simply absent — same fail-closed read model the
       // catalog uses.
-      const manual = (await toolManualService.listAccessible(who.email)).find((m) => m.slug === slug);
+      const found = (await toolManualService.listAccessible(who.email)).find((m) => m.slug === slug);
+      // A connection made as an `.agent` file is handed only the variables of
+      // a connector it loads; another is as absent as an unreadable one.
+      const scope = found ? await resolveConnectionScope(agentScope, who.email, req.toolAuth?.agentPath) : null;
+      const manual = found && scope?.allowsConnector(found.path) ? found : undefined;
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       if (manual.remote !== false) {
         return void res.status(409).json({

@@ -838,6 +838,21 @@ describe('minting a key as an agent ("Connect as")', () => {
     expect(createMock).toHaveBeenLastCalledWith('Pipeline', 'Agents/ops.agent');
   });
 
+  it('says when the agents could not be loaded, and mints Everything only once that is confirmed', async () => {
+    agentChoicesMock.mockRejectedValue(new Error('down'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/agent files couldn't be loaded/);
+    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
+    const create = screen.getByRole('button', { name: 'Create key' });
+    expect(create).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: 'Connect as Everything anyway' }));
+    expect(create).toBeEnabled();
+    await user.click(create);
+    expect(createMock).toHaveBeenLastCalledWith('CI', null);
+  });
+
   it('shows each key beside what it connects as', async () => {
     listMock.mockResolvedValue([
       { id: 'k1', kind: 'key', label: 'Laptop', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null, agentPath: null },

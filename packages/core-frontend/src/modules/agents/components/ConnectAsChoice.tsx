@@ -1,6 +1,7 @@
 import { useId } from 'react';
 import { cn } from '../../../lib/utils';
 import type { AgentChoice } from '../services/agent-choices.api';
+import type { UnavailableChoice } from '../connect-as';
 
 export interface ConnectAsChoiceProps {
   /** The agents the person may connect as; Everything is always offered first. */
@@ -11,6 +12,12 @@ export interface ConnectAsChoiceProps {
   disabled?: boolean;
   /** One line under the heading, saying what the choice is for here. */
   hint?: string;
+  /**
+   * Set when the agents could not be loaded: the list is not "you have
+   * none", so the choice says it failed and asks the person to confirm
+   * Everything before the connection is made (see {@link canConnectAs}).
+   */
+  unavailable?: UnavailableChoice;
 }
 
 /**
@@ -19,7 +26,7 @@ export interface ConnectAsChoiceProps {
  * consent step and the connection-key form — so both offer the same choice
  * the same way.
  */
-export function ConnectAsChoice({ agents, value, onChange, disabled, hint }: ConnectAsChoiceProps) {
+export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unavailable }: ConnectAsChoiceProps) {
   const name = useId();
   const options: { path: string | null; title: string; detail: string }[] = [
     {
@@ -56,6 +63,19 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint }: Con
           );
         })}
       </div>
+      {unavailable && (
+        <div role="alert" className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5 space-y-1">
+          <p>Your agent files couldn't be loaded, so only Everything can be chosen right now.</p>
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={unavailable.confirmed}
+              onChange={(e) => unavailable.onConfirm(e.target.checked)}
+            />
+            Connect as Everything anyway
+          </label>
+        </div>
+      )}
     </fieldset>
   );
 }

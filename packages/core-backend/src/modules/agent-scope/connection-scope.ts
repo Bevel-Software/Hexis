@@ -130,6 +130,19 @@ export class ConnectionScope {
   }
 
   /**
+   * Whether any connector this connection loads is defined in `folder`
+   * (repo-relative) or in a folder that contains it — what a plugin's
+   * archive asks, since the local MCP server materializes a plugin only to
+   * run a connector it defines.
+   */
+  loadsConnectorIn(folder: string): boolean {
+    const s = this.state;
+    if (s.kind === 'everything') return true;
+    if (s.kind === 'unavailable') return false;
+    return s.roots.connectors.some((root) => withinEntry(root, folder) || withinEntry(folder, root));
+  }
+
+  /**
    * {@link allowsSkill} as the narrowing a skill listing takes, or undefined
    * for Everything — so an Everything caller's listing runs exactly the code
    * it ran before connections could be narrowed.

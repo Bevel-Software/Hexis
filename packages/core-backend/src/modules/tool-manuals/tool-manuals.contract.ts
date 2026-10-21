@@ -454,7 +454,7 @@ export interface IToolManualService {
     branch: string,
   ): Promise<{ name: string; path: string; type: ToolManualType }[]>;
   /** The embedded UTCP manual for an inline `.tool` (served at `/api/tools/:slug/manual`). */
-  resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null>;
+  resolveInlineManual(userEmail: string, slug: string, opts?: { within?: ConnectorScope }): Promise<UtcpManualDict | null>;
   /** Validate a draft `.tool` file's content for the renderer preview. */
   preview(content: string): Promise<ToolManualPreview>;
   /**
