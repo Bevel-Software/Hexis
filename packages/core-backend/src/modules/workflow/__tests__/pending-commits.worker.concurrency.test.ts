@@ -93,8 +93,6 @@ function makeWorker(
     recoveryBot: RECOVERY_BOT,
     now: () => new Date('2026-01-01T00:01:00Z'),
   });
-  // Same seam the sibling suite uses: the single-pass drain without the loop.
-  (worker as unknown as { running: boolean }).running = true;
   return worker;
 }
 

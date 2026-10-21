@@ -110,10 +110,6 @@ describe('PendingCommitsWorker.drainOnce', () => {
       recoveryBot: RECOVERY_BOT,
       now: () => new Date('2026-01-01T00:01:00Z'),
     });
-    // drainOnce checks `this.running` against the per-workspace iterator;
-    // start() sets it true. We don't want the polling loop, just the
-    // single-pass drain, so flip the flag manually.
-    (worker as unknown as { running: boolean }).running = true;
   });
 
   it('happy path: claims row, runs commit, marks succeeded — no other branches taken', async () => {
@@ -403,7 +399,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     it('gives up the pass the moment stop() lands mid-burst', async () => {
       queue(12);
       workflow.runPendingCommit.mockImplementation(async () => {
-        (worker as unknown as { running: boolean }).running = false;
+        void worker.stop();
       });
       await worker.drainOnce();
       expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);

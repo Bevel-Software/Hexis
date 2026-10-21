@@ -129,6 +129,17 @@ function makeGit(overrides: Partial<{
   } as unknown as GitService;
 }
 
+/**
+ * One git collaborator whose behaviour a test switches between calls — the
+ * remote failing, then healthy again — so recovery is observed through the
+ * one service instance that holds the per-workspace sync state.
+ */
+function switchableGit(initial: GitService): { git: GitService; use: (next: GitService) => void } {
+  let current = initial;
+  const git = new Proxy({} as GitService, { get: (_target, key) => Reflect.get(current, key) });
+  return { git, use: (next) => void (current = next) };
+}
+
 function makeFacade(
   git: GitService,
   locks: FileLockService,
@@ -642,18 +653,14 @@ describe('WorkflowService — git-sync visibility events', () => {
   });
 
   it('emits git-sync-recovered once when a push finally lands, then goes quiet again', async () => {
-    const failing = makeGit({ pushBehavior: 'auth-fail' });
-    const svc = makeFacade(failing, makeFileLocks(USER.id), makePending(), events);
+    const remote = switchableGit(makeGit({ pushBehavior: 'auth-fail' }));
+    const svc = makeFacade(remote.git, makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
     expect(kinds()).toEqual(['git-sync-failed']);
 
     // Same service instance — the failing/healthy state is per-workspace and
     // lives on it, so recovery has to be observed through the same object.
-    const healthy = makeGit();
-    const recovered = makeFacade(healthy, makeFileLocks(USER.id), makePending(), events);
-    Object.assign(svc as unknown as Record<string, unknown>, {
-      git: (recovered as unknown as { git: GitService }).git,
-    });
+    remote.use(makeGit());
 
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
@@ -672,15 +679,11 @@ describe('WorkflowService — git-sync visibility events', () => {
     // callers hand the encoded form (user%2Ffeat). The tracker must treat
     // them as one workspace, or a failure recorded by one caller can never
     // be cleared by the other's success and the banner sticks forever.
-    const svc = makeFacade(
-      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
-      makeFileLocks(USER.id),
-      makePending(),
-      events,
-    );
+    const remote = switchableGit(makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }));
+    const svc = makeFacade(remote.git, makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('user%2Ffeat', 'user/feat', 'foo.md', USER).catch(() => undefined);
 
-    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    remote.use(makeGit());
     await svc.runPendingCommit('user/feat', 'user/feat', 'foo.md', USER);
 
     const sync = emitSpy.mock.calls
@@ -695,7 +698,8 @@ describe('WorkflowService — git-sync visibility events', () => {
 
   it('tracks workspaces independently — one recovering neither clears nor suppresses another', async () => {
     const failingGit = () => makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
-    const svc = makeFacade(failingGit(), makeFileLocks(USER.id), makePending(), events);
+    const remote = switchableGit(failingGit());
+    const svc = makeFacade(remote.git, makeFileLocks(USER.id), makePending(), events);
 
     // Both workspaces broken.
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
@@ -703,9 +707,9 @@ describe('WorkflowService — git-sync visibility events', () => {
 
     // ws-1 recovers; ws-2 is still broken and must (a) not be cleared by
     // ws-1's recovery and (b) still announce its own next failure.
-    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    remote.use(makeGit());
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
-    Object.assign(svc as unknown as Record<string, unknown>, { git: failingGit() });
+    remote.use(failingGit());
     await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
 
     expect(

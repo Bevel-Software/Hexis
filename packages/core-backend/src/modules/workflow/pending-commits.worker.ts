@@ -188,6 +188,13 @@ export class PendingCommitsWorker {
     recoveryBot: PendingCommitsWorkerDeps['recoveryBot'];
   };
   private running = false;
+  /**
+   * `stop()` was asked for and no `start()` since: a pass in flight gives
+   * up between rows and between workspaces. Separate from `running` (the
+   * loop is up) so a single `drainOnce` on a worker whose loop was never
+   * started still runs, and `stop()` still ends it.
+   */
+  private stopped = false;
   private loopPromise: Promise<void> | null = null;
   private stopSignal: ((value: void) => void) | null = null;
 
@@ -206,6 +213,7 @@ export class PendingCommitsWorker {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.stopped = false;
     this.loopPromise = this.runLoop();
   }
 
@@ -215,6 +223,7 @@ export class PendingCommitsWorker {
    * Idempotent.
    */
   async stop(): Promise<void> {
+    this.stopped = true;
     if (!this.running) return;
     this.running = false;
     // Unblock the sleep early so shutdown isn't gated on POLL_INTERVAL_MS.
@@ -230,7 +239,8 @@ export class PendingCommitsWorker {
   /**
    * Run one drain pass: rotate through known workspaces, draining each
    * one's ready rows before moving on. Exposed publicly so tests can step
-   * the loop deterministically without driving `setTimeout`.
+   * the loop deterministically without driving `setTimeout`: it runs on a
+   * worker whose loop was never started, and `stop()` ends it.
    *
    * Draining a BURST rather than a single row per sweep is what keeps a
    * bulk change honest. One row per sweep, with a `POLL_INTERVAL_MS` sleep
@@ -258,7 +268,7 @@ export class PendingCommitsWorker {
       Array.from({ length: slots }, async () => {
         // Bail between workspaces if stop() fired — the in-flight workspace
         // gets to finish but no new one is started.
-        while (this.running) {
+        while (!this.stopped) {
           const id = queue.shift();
           if (id === undefined) return;
           // Contained here, in the slot: a rejection that escaped would settle
@@ -279,7 +289,7 @@ export class PendingCommitsWorker {
   /** Drain one workspace's ready rows, in order, up to the burst ceiling. */
   private async drainWorkspace(workspaceId: string): Promise<void> {
     for (let drained = 0; drained < MAX_BURST_PER_WORKSPACE; drained += 1) {
-      if (!this.running) return;
+      if (this.stopped) return;
       const row = await this.deps.service.claimNext(workspaceId, this.deps.now());
       if (!row) break;
       // Is this the last commit of the burst? Everything before it can skip

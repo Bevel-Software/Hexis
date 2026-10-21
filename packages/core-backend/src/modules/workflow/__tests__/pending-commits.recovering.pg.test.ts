@@ -4,16 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { closeDb, createDb, type Database } from '../../database/connection.js';
-import { runCoreMigrations } from '../../database/migrate.js';
-import { coreMigrationsDir } from '../../../assets.js';
+import { closeDb, coreMigrationsDir, createDb, runCoreMigrations, type Database, type RecoveryAgentRunner } from '../../../index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import { GitService } from '../git/git.service.js';
 import { gitOut, runGit, stubWorkflowHooks, stubWorkspaceService } from '../git/__tests__/git-test-helpers.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
-import { N_TRANSIENT, PendingCommitsWorker, type RecoveryAgentRunner } from '../pending-commits.worker.js';
+import { N_TRANSIENT, PendingCommitsWorker } from '../pending-commits.worker.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
@@ -191,6 +189,8 @@ describe.skipIf(!PG_ADMIN_URL)('a commit under recovery (real Postgres, real git
           // A merge OUT of the branch still waits for it: its save is not on the remote.
           seen.queuedOut = await pending.queuedOnBranch(DRAFT);
           seen.live = await pending.hasLiveRowFor(WS, DRAFT, SAVE);
+          // Readiness still waits on it: the oldest commit not yet landed.
+          seen.oldest = await pending.oldestQueuedAt();
           // What `branch_status` lists as uncommitted: the save is committed
           // in the workspace (its push is what failed), so nothing.
           seen.uncommitted = await svc.listPendingChangePaths(WS);
@@ -227,6 +227,7 @@ describe.skipIf(!PG_ADMIN_URL)('a commit under recovery (real Postgres, real git
         expect(seen.queued).toEqual({ queued: 0, stuck: 0, needsAttention: null });
         expect(seen.queuedOut).toEqual({ queued: 1, stuck: 0, needsAttention: null });
         expect(seen.live).toBe(true);
+        expect(seen.oldest).toBeInstanceOf(Date);
         expect(seen.uncommitted).toEqual([]);
         expect(seen.described).toBe('conflicts');
         expect(seen.merged).toMatchObject({ kind: 'merged', from: DRAFT, resolvedPaths: ['shared.md'] });
@@ -317,6 +318,8 @@ describe.skipIf(!PG_ADMIN_URL)('a commit under recovery (real Postgres, real git
       // The worker handed it to the agent, and the process died mid-run.
       await pending.markRecoveryStarted(row!.id);
       expect(await pending.claimNext(WS, later())).toBeNull();
+      // Not landed, so readiness still reports it as the oldest commit waiting.
+      expect(await pending.oldestQueuedAt()).toEqual(row!.queuedAt);
 
       // The next process's boot.
       await pending.startupReconcile([], { scan: async () => [] }, { email: BOT.email, name: BOT.name });
