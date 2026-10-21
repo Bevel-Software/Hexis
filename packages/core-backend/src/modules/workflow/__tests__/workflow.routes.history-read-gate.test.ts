@@ -41,7 +41,12 @@ async function makeHarness(): Promise<Harness> {
   const accessControl = { canRead, canReadAtRef } as unknown as IAccessControl;
   const workflow = {
     listChangesForFile: vi.fn(async () => []),
-    compareFile: vi.fn(async () => ''),
+    compareFile: vi.fn(async (_w: string, _p: string, from: string, to: string, authorize?: (s: { from: string[]; to: string[] }) => Promise<void>) => {
+      // Each branch resolves to its served commit and, for `b`, a second one (a
+      // local head past the published tip): the verdict is asked at both.
+      await authorize?.({ from: [`sha-of-${from}`], to: [`sha-of-${to}`, `other-sha-of-${to}`] });
+      return { diff: '', from: `sha-of-${from}`, to: `sha-of-${to}` };
+    }),
     showFileAtChange: vi.fn(async () => ''),
     fileAtChange: vi.fn(async () => ({ baseline: null, current: 'x' })),
   };
@@ -113,23 +118,29 @@ describe('history routes enforce the read model', () => {
     expect(h.workflow.listChangesForFile).not.toHaveBeenCalled();
   });
 
-  it('compare-file authorizes at every ref the comparison could serve', async () => {
-    // The comparison prefers a local ref (and the working tree) over
-    // `origin/<branch>`, so BOTH candidates are authorized per branch.
+  it('compare-file authorizes at the two commits the diff was served from, never at a ref', async () => {
+    // The diff is made first, pinned to the commit each side was read at,
+    // and authorized at those before any of it is answered: a branch ref a
+    // fetch moves meanwhile cannot have swapped in content the verdict never
+    // saw.
     h = await makeHarness();
     const res = await get(`/compare-file?from=a&to=b&path=${OPEN}`);
     expect(res.status).toBe(200);
     const refs = h.canReadAtRef.mock.calls.map((c) => c[1]).sort();
-    expect(refs).toEqual(['a', 'b', 'origin/a', 'origin/b']);
+    expect(refs).toEqual(['other-sha-of-b', 'sha-of-a', 'sha-of-b']);
 
-    // Any RESOLVABLE ref denying the read refuses the diff.
-    h.canReadAtRef.mockImplementation(async (_w: string, ref: string) => (ref === 'b' ? false : true));
-    expect((await get(`/compare-file?from=a&to=b&path=${OPEN}`)).status).toBe(403);
+    // Any commit a side resolves to denying the read refuses the diff — the
+    // served one or the other (a grant at the served commit never outruns a
+    // denial at the branch's other tip) — disclosing none of it.
+    for (const denying of ['sha-of-a', 'sha-of-b', 'other-sha-of-b']) {
+      h.canReadAtRef.mockImplementation(async (_w: string, ref: string) => (ref === denying ? false : true));
+      const denied = await get(`/compare-file?from=a&to=b&path=${OPEN}`);
+      expect(denied.status, denying).toBe(403);
+      expect(await denied.json()).not.toHaveProperty('diff');
+    }
 
-    // A branch none of whose refs resolve cannot be authorized: refused.
-    h.canReadAtRef.mockImplementation(async (_w: string, ref: string) =>
-      ref.endsWith('b') ? null : true,
-    );
+    // A commit whose rules cannot be read grants nothing: refused.
+    h.canReadAtRef.mockImplementation(async (_w: string, ref: string) => (ref === 'sha-of-b' ? null : true));
     expect((await get(`/compare-file?from=a&to=b&path=${OPEN}`)).status).toBe(403);
   });
 

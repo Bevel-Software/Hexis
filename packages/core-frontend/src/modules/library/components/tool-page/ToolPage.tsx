@@ -1,7 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ChevronRight } from 'lucide-react';
-import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../../shared/theme/header';
 import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { announceToolCredentialsChanged } from '../../../../core/events';
@@ -191,15 +191,19 @@ export function ToolPage({
               exactly as on the plugin page: with nowhere to go, anything
               past the width goes across the way back unless it is clipped.
               Clipped, the title gives way first and the way back stays
-              clickable. */}
+              clickable.
+
+              `TITLE_INK_ROOM` on both boxes that clip — the row's
+              `overflow-hidden` and the name's `truncate` — so the tails of
+              g, y and p survive the clipping, as on every other page title. */}
           <NameWithBadges
             as="h1"
             wrap={false}
-            className="min-w-0 flex-1 overflow-hidden"
+            className={cn('min-w-0 flex-1 overflow-hidden', TITLE_INK_ROOM)}
             gap="gap-4"
             leading={<ToolLogo slug={tool.slug} name={tool.name} size="lg" />}
             name={tool.name}
-            nameClassName="text-display font-semibold text-ink"
+            nameClassName={cn('text-display font-semibold text-ink', TITLE_INK_ROOM)}
           />
           {/* No `Manage access` here, deliberately. Access is decided at the
               PLUGIN — a tool inherits its folder's `access.md`, so an editor

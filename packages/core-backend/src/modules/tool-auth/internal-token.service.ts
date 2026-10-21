@@ -33,7 +33,7 @@ export interface InternalTokenClaim {
    * connection key to pass through). The verifier resolves such tokens to
    * `source: 'external'`: the caller IS an external agent, and must be treated
    * like one everywhere — admitted to external-only surfaces (`start_session`,
-   * `ask`), refused from internal-only ones (`execute_command`, …), and
+   * `ask`), refused from internal-only ones (`switch_branch`, …), and
    * expected to carry `sessionId` on the tool body, not in the token.
    */
   externalProxy?: boolean;

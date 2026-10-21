@@ -41,7 +41,10 @@ import {
   HEADER_COLUMN_TOP,
   PAGE_HEADER_TESTID,
   SIDEBAR_HEADER_TESTID,
+  TITLE_INK_ROOM,
 } from '../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
+import { declarationsOf } from '../../../__tests__/tailwindDeclarations';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** `src/`, three levels up from `modules/layout/__tests__`. */
@@ -499,5 +502,52 @@ describe('the two bands open at the same offset', () => {
     const article = columnOf(PAGE_HEADER_TESTID);
     expect(article.tagName).toBe('ARTICLE');
     expect(article.parentElement!.className.split(/\s+/)).toContain(HEADER_COLUMN_TOP);
+  });
+});
+
+/**
+ * The title on the band keeps the tails of its g, y and p.
+ *
+ * `text-display` sets a line height tighter than its glyphs, and `truncate`
+ * clips to the line box, so the tails were cut off. `TITLE_INK_ROOM` widens
+ * the clipping box by a padding and hands the same distance back as a
+ * negative margin: the title keeps exactly its line box, the band does not
+ * move. Two things make that true, and both are pinned here against the
+ * stylesheet the build serves rather than against the source of the
+ * constant: the padding and the margin are the same distance with opposite
+ * signs, and `truncate` still clips (which is why the room is needed at all)
+ * and still ends a long title with an ellipsis. The shape of the markup —
+ * the room on the title and on every wrapper that clips it — is checked by
+ * `expectTitleKeepsItsInk`, here on the knowledge page's header and in each
+ * Library page's own test. The declarations are read through
+ * `declarationsOf`, the one resolver of a utility class to the CSS the build
+ * gives it.
+ */
+describe('a page title keeps its ink', () => {
+  /** What the build gives an element wearing exactly these classes. */
+  const declarationsOfClasses = (className: string) =>
+    declarationsOf(Object.assign(document.createElement('div'), { className }));
+
+  it('hands back as margin exactly the padding it adds, so the band does not move', async () => {
+    const room = await declarationsOfClasses(TITLE_INK_ROOM);
+    // Tailwind spells the negative utility as the positive one times -1, so the
+    // two cannot drift apart by a token change: this reads the sign, not a number.
+    expect(room['padding-block']).toBeDefined();
+    expect(room['margin-block']).toBe(`calc(${room['padding-block']} * -1)`);
+  });
+
+  it('still truncates with an ellipsis — the clipping the room exists for', async () => {
+    expect(await declarationsOfClasses('truncate')).toMatchObject({
+      overflow: 'hidden',
+      'text-overflow': 'ellipsis',
+      'white-space': 'nowrap',
+    });
+  });
+
+  it("the knowledge page's title has the room, and so does the group that clips it", () => {
+    renderSeam();
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
+    // With the title in it, the band is still exactly the token tall.
+    expect(heightOf(PAGE_HEADER_TESTID)).toBe(headerHeight);
   });
 });

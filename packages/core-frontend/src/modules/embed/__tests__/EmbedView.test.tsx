@@ -550,6 +550,26 @@ describe('the renderer', () => {
     expect((await screen.findByTestId('sizing-reader')).textContent).toBe('false');
   });
 
+  it("opens a page on its FILE PAGE in a new tab by an address that asks for it — a skill's page would claim the bare one", async () => {
+    api.loadEmbed.mockResolvedValue(
+      view({ repoRelative: 'Skills/qa-bridge/view.html', workspacePath: `${KB}/Skills/qa-bridge/view.html`, content: '<p>qa</p>' }),
+    );
+    const opened = vi.spyOn(window, 'open').mockReturnValue(null);
+    const Opener = () => {
+      const surface = useRendererSurface();
+      return (
+        <button type="button" onClick={() => surface?.openFilePage(`${KB}/Skills/qa-bridge/view.html`)}>
+          open
+        </button>
+      );
+    };
+    mount({ ...EMPTY_REGISTRY, renderers: [{ extensions: ['.html'], Component: Opener }] } as unknown as AppRegistry);
+    fireEvent.click(await screen.findByRole('button', { name: 'open' }));
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(String(opened.mock.calls[0]![0])).toMatch(/\/workspace\/main\/knowledge-base\/Skills\/qa-bridge\/view\.html\?as=file$/);
+    opened.mockRestore();
+  });
+
   it('falls back to the built-in renderer for the type when nothing is registered', async () => {
     api.loadEmbed.mockResolvedValue(view());
     mount();
