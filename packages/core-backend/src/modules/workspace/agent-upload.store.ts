@@ -417,6 +417,24 @@ export class AgentUploadStore {
     }
   }
 
+  /**
+   * Give `token` up unapplied: spend it and delete any bytes sent with it NOW,
+   * rather than when it expires. For a caller that will not retry — the app
+   * answering a page's `uploadFile`, which holds the token on the page's behalf
+   * and drops it when the upload or the apply is refused.
+   *
+   * Refused with the one refusal, like every unusable token, and also while
+   * the token is busy — bytes still arriving, or an apply holding it — so a
+   * discard never deletes a file somebody is writing or reading.
+   */
+  async discard(token: string): Promise<void> {
+    const record = this.find(token);
+    // `attaching` stays set once the bytes are in; only without `received` are they still arriving.
+    const arriving = record.attaching && record.received === undefined;
+    if (arriving || record.claimed) throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
+    await this.consume(token);
+  }
+
   /** Spend the token and delete its bytes. Idempotent. */
   async consume(token: string): Promise<void> {
     const key = hash(token);
