@@ -129,23 +129,16 @@ export function createAccessRoutes(
   };
 
   /**
-   * The groups `email` may be offered as a grantee, or name in a grant: every
-   * group for an admin, who manages them all, and only the caller's own
-   * groups for anyone else. A group's NAME is information — on a deployment
-   * that gives each client, author or customer a group of its own, the list
-   * of groups is the client list — so the picker never names a group the
-   * caller has no part in, and the grant route refuses one with the same
-   * words as a group that does not exist. The same split the Library's Groups
-   * tab makes (`GET /api/teams`, `groupsOfUser`): membership is direct, and
-   * read on the default branch, where the active group source lives.
+   * The groups `email` may be offered as a grantee, or name in a grant: the
+   * resolver's ONE answer to who sees which group (`visibleGroups`: every
+   * group for an admin, only their own for anyone else), the same the
+   * Library's Groups tab lists. Read on the default branch, where the active
+   * group source lives. The picker never names a group the caller has no
+   * part in, and the grant route refuses one with the same words as a group
+   * that does not exist.
    */
-  const visibleGroups = async (email: string, groups: string[]): Promise<string[]> => {
-    if (groups.length === 0) return groups;
-    const wsId = kb.defaultWorkspaceId();
-    if (await accessControl.holdsAdminRootWrite(wsId, email)) return groups;
-    const mine = new Set(await accessControl.groupsOfUser(wsId, email));
-    return groups.filter((g) => mine.has(g));
-  };
+  const visibleGroups = (email: string, groups: string[]): Promise<string[]> =>
+    accessControl.visibleGroups(kb.defaultWorkspaceId(), email, groups);
 
   /**
    * The plugins `email` may DISCOVER — read the folder's access.md, the same

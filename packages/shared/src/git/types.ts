@@ -80,8 +80,155 @@ export interface RemoteSyncPullResult {
   changedPaths: string[];
 }
 
+/**
+ * How one conflicted path is settled when a branch is updated from another:
+ * the text to keep, or one side whole, or the file gone.
+ */
+export interface MergeResolution {
+  /** The conflicted path, exactly as the conflict named it (repository-relative or workspace-relative). */
+  path: string;
+  /** The resolved text of the file. */
+  content?: string;
+  /**
+   * Keep one side as it is — `ours` is the branch being updated, `theirs` the
+   * branch merged in — or `delete` the file.
+   */
+  choose?: 'ours' | 'theirs' | 'delete';
+}
+
+/**
+ * One path a merge could not settle by itself, with everything a resolver
+ * needs to settle it: the file at the merge base, on each side, and the
+ * working copy as git left it with its conflict markers.
+ */
+export interface ConflictedFile {
+  path: string;
+  /** The file at the merge base; null when it did not exist there, or when `truncated` names `base`. */
+  base: string | null;
+  /** The file on the branch being updated; null when that side deleted it, or when `truncated` names `ours`. */
+  ours: string | null;
+  /** The file on the branch merged in; null when that side deleted it, or when `truncated` names `theirs`. */
+  theirs: string | null;
+  /**
+   * The working copy with git's conflict markers; null when a side deleted
+   * the file (git leaves no marked-up copy then), or when `truncated` names
+   * `merged`.
+   */
+  merged: string | null;
+  /**
+   * The sides that were too large or not text and were left out — a null
+   * side named here is omitted, not deleted. Read it instead: `ours` is the
+   * branch's own file (`read_file`), `theirs` the merged-in branch's
+   * (`read_file_at` at that branch), `base` the file at `mergeBase`
+   * (`read_file_at` at that commit, which is on the branch's own history); a
+   * whole side can still be kept with `choose`.
+   */
+  truncated?: Array<'base' | 'ours' | 'theirs' | 'merged'>;
+}
+
+/**
+ * What merging one branch into another, in the receiving branch's own
+ * workspace, did:
+ *
+ *  - `merged`           — a merge commit `sha` was made on the branch, and
+ *                         `publish` (when given) has run over it; `sha` is the
+ *                         commit as it stands after that, `resolvedPaths` the
+ *                         conflicts the caller's resolutions settled.
+ *  - `nothing-to-merge` — the branch already held everything; `sha` is its tip.
+ *  - `conflicts`        — the merge was undone and the working tree left as it
+ *                         was: `files` describes every conflicted path,
+ *                         `unresolved` the ones no resolution covered. Call
+ *                         again with a resolution per path.
+ */
+export type MergeIntoBranchOutcome =
+  | { kind: 'merged'; sha: string; from: string; resolvedPaths: string[] }
+  | { kind: 'nothing-to-merge'; sha: string; from: string }
+  | {
+      kind: 'conflicts';
+      from: string;
+      /** The common ancestor the merge was computed from; null when the histories are unrelated. */
+      mergeBase: string | null;
+      /** The branch's own tip, what `ours` means in every file. */
+      ours: string;
+      /** The merged-in branch's tip, what `theirs` means in every file. */
+      theirs: string;
+      files: ConflictedFile[];
+      unresolved: string[];
+    };
+
+/**
+ * What a merge's `publish` may do while the merge still holds its workspace:
+ * `push` the branch, and `pullRebase` it onto its moved remote with the merge
+ * kept as a merge — the two moves every workflow push's cooperative recovery
+ * is made of, so that recovery can run inside the reservation unchanged.
+ */
+export interface ReservedPushOps {
+  push(): Promise<void>;
+  pullRebase(): Promise<{ treeChanged: boolean }>;
+}
+
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
+  /**
+   * Merge `origin/<fromBranch>` into `branch`, in `branch`'s own workspace,
+   * as a merge commit authored by `user` — or report what conflicts and undo
+   * everything. The working tree is never left mid-merge: a conflict is
+   * described (both sides, the base, the marked-up working copy) and the
+   * merge aborted in the same reservation, and a later call carrying a
+   * resolution for every conflicted path makes the merge for real. A
+   * resolution naming a path that is not conflicted is refused before
+   * anything is written. `publish`, when given, runs right after the merge
+   * commit, inside the same reservation, over the pushes it may make
+   * (`ReservedPushOps`): the caller brings the one push policy every
+   * workflow push takes, and whatever it throws leaves the merge commit on
+   * the local branch, unpublished, the checkout clean (a replay that
+   * conflicts undoes itself), a later call answering `nothing-to-merge`
+   * without pushing — the commit is published as any local commit is.
+   * Without `publish` nothing is pushed. Resolutions come with `authorizeResolutions`
+   * (required with them, refused without): it is asked inside the
+   * reservation, after the fetch and before the merge touches the checkout,
+   * with the two commits the merge is of — `theirs` is the commit merged,
+   * described and recorded, never the ref it was read from, which a
+   * concurrent fetch may move — the checkout clean at `ours`, so a rule
+   * read from it is the branch's own commit's, never a tree mid-merge;
+   * throwing refuses before anything is written. Nothing to merge is a
+   * question of ancestry: a source the branch does not yet reach is merged
+   * in even when the two trees are identical.
+   *
+   * Refused when the workspace is not on `branch`, or holds edits not yet
+   * committed (`kind: 'branch-busy'`, 409): a merge over them could lose them.
+   */
+  mergeIntoBranch(
+    workspaceId: string,
+    branch: string,
+    fromBranch: string,
+    user: AuthUser,
+    opts: { subject: string; body: string; publish?: (ops: ReservedPushOps) => Promise<void> } & (
+      | { resolutions?: undefined; authorizeResolutions?: undefined }
+      | {
+          resolutions: MergeResolution[];
+          authorizeResolutions: (merge: { ours: string; theirs: string }) => Promise<void>;
+        }
+    ),
+  ): Promise<MergeIntoBranchOutcome>;
+  /**
+   * One file as `branch` has PUBLISHED it (`origin/<branch>`; its local head
+   * only for a branch origin does not have), with the commit it was read at.
+   * `content` is null when the file is not there; a path that is a folder at
+   * that commit is refused, as every per-file history read refuses it.
+   * Access to the file at that commit is the caller's to check: `authorize`,
+   * when given, is asked inside the reservation before anything is said
+   * about the path there (the folder refusal included), with every commit
+   * the branch resolves to in this repository (its local head and its
+   * published tip, whichever resolve; the served one first), all of which
+   * are the caller's to require a grant from; its throw is the answer.
+   */
+  readFileAtBranch(
+    workspaceId: string,
+    relativePath: string,
+    branch: string,
+    authorize?: (commits: string[]) => Promise<void>,
+  ): Promise<{ sha: string; ref: string; content: string | null }>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
   createBranch(
     workspaceId: string,
@@ -218,10 +365,23 @@ export interface IGitService {
    * Unified diff of a single file between two branches. Both names must
    * resolve to a known branch on this workspace (local head or
    * `refs/remotes/origin/<name>`); arbitrary refspecs and SHAs are
-   * rejected upstream. Returns the raw `git diff` output — empty string
+   * rejected upstream. `diff` is the raw `git diff` output — empty string
    * when the file is identical on both sides, a unified-diff body
    * otherwise (including the "new file mode" / "deleted file mode"
-   * headers when the file only exists on one side).
+   * headers when the file only exists on one side). `from` and `to` are
+   * the COMMITS each side was served from, resolved once inside the
+   * reservation (the checked-out side is served from the working tree;
+   * its commit is the checkout's head): what a caller authorizes the diff
+   * at, so a fetch that moves a branch after this call cannot have swapped
+   * in content the verdict never saw. `authorize`, when given, is asked
+   * inside the reservation, before anything is said about the path at
+   * either side (a refusal that names what the path is there — a folder —
+   * is itself an answer), with EVERY commit each branch resolves to in this
+   * repository: its local head and its published tip, whichever resolve,
+   * the served one first. All of them are the caller's to require a grant
+   * from — a grant at the served commit must not outrun a denial at the
+   * other, which is what the compare route has always required of both
+   * refs — and its throw is the answer.
    *
    * Read-only: nothing is checked out, fetched, or written.
    */
@@ -230,7 +390,8 @@ export interface IGitService {
     relativePath: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string>;
+    authorize?: (sides: { from: string[]; to: string[] }) => Promise<void>,
+  ): Promise<{ diff: string; from: string; to: string }>;
   // `workingStatus` + `diffFileWorking` removed: under save=share the
   // working tree is never dirty, so listing dirty files / diffing them
   // against HEAD reports the empty state by definition. Cross-branch

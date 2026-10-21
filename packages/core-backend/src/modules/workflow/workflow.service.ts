@@ -58,9 +58,11 @@ import type {
   IWorkflowService,
   MergeBranchOutcome,
   MergeChangeRequestOutcome,
+  MergeResolution,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
+  UpdateBranchOutcome,
 } from '@bevel-software/platform-shared';
 import {
   AFFECTED_OWNERS_HEADING,
@@ -69,6 +71,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -87,6 +90,11 @@ import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
+import {
+  ChangeRequestHooks,
+  type ChangeRequestPerson,
+  type IChangeRequestHooks,
+} from './change-request-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
@@ -106,8 +114,7 @@ import {
   WorkflowValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -247,6 +254,34 @@ export function formatAffectedOwnersBlock(
   return out.join('\n');
 }
 
+/** What the access layer answers for the changed paths of a request, or null when it cannot. */
+type EligibleWritersAtRef = Awaited<ReturnType<IAccessControl['eligibleWritersForPathsAtRef']>>;
+
+/**
+ * The `## Affected owners` markdown block appended to the CR body, from the
+ * eligibility already resolved. The per-path list is capped (see
+ * {@link formatAffectedOwnersBlock}) so the body stays within the
+ * `gh pr create --body` arg limit on large changesets. The empty string when
+ * nothing was resolvable — keeps the body clean rather than printing a stub
+ * heading.
+ */
+function buildAffectedOwnersBlock(paths: string[], resolved: EligibleWritersAtRef): string {
+  if (!resolved || resolved.size === 0) return '';
+  return formatAffectedOwnersBlock(paths, resolved);
+}
+
+/**
+ * The one question the open asks of accounts: which of these addresses have
+ * a live account. `AuthService.findActiveAccountsByEmail` answers it in a
+ * single indexed read; the shape is spelled here so the workflow module
+ * imports nothing of auth's. Keyed by the canonical address asked for.
+ */
+export interface ApproverAccounts {
+  findActiveAccountsByEmail(
+    emails: readonly string[],
+  ): Promise<Map<string, { id: string; email: string; name: string }>>;
+}
+
 /** Git commit subjects are capped at 200 characters (`GitService.commitFile`). */
 const MAX_COMMIT_SUBJECT = 200;
 
@@ -341,6 +376,19 @@ export class WorkflowService implements IWorkflowService {
      * hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
+    /**
+     * The seam a deployment's notification extends when a request is opened
+     * (see `change-request-hooks.ts`). The composition root passes the SAME
+     * instance it exposes as `changeRequestHooks`; the default registers
+     * nobody, so a test construction notifies nobody and says so.
+     */
+    private readonly changeRequestHooks: IChangeRequestHooks = new ChangeRequestHooks(),
+    /**
+     * Who turns the addresses the access model names into accounts, for the
+     * opened event's `approvers`. Absent (a harness without accounts), every
+     * approver counts as unresolved.
+     */
+    private readonly accounts?: ApproverAccounts,
   ) {
     // The type already requires it; this holds for a caller the compiler did
     // not see (plain JavaScript, a positional slip in a harness).
@@ -422,22 +470,29 @@ export class WorkflowService implements IWorkflowService {
    * opposite directions (`A -> B` and `B -> A`), and nothing is ever held
    * while waiting for the other key.
    *
-   * A PROTECTED target's key is NOT reserved. No path in the system can
-   * delete a protected branch (`git.deleteBranch` throws
+   * A PROTECTED branch's key is NOT reserved, at either end. No path in the
+   * system can delete a protected branch (`git.deleteBranch` throws
    * `ProtectedBranchError` before any lock, `retireMergedSourceBranch`
    * returns early on one), so the key would exclude nothing. It would only
-   * cost: nearly every request targets the protected default branch, so one
-   * shared key there would serialize every open on the hottest path for the
-   * duration of a fetch + merge + push + diff. The source needs no such
-   * carve-out; `openChangeRequest` refuses protected sources before locking.
+   * cost: nearly every request targets the protected default branch, and
+   * every draft refreshes FROM it (`updateBranch`, the merge tool's sync),
+   * so one shared key there would serialize every open on the hottest path for the
+   * duration of a fetch + merge + push + diff. A protected SOURCE takes no
+   * key for the same reason: `openChangeRequest` refuses protected sources
+   * before locking, and a draft refreshing from the default branch is
+   * exactly a protected source.
    */
   private runOnBranchPair<T>(
     source: string,
     target: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const keys = [`branch:${source}`];
-    if (!this.kb.isProtectedBranch(target)) keys.push(`branch:${target}`);
+    // A PROTECTED branch's key is not reserved at EITHER end (see above):
+    // nothing can delete one, so the key would exclude nothing and only
+    // serialize every draft that refreshes from the default branch behind
+    // every other. The same branch at both ends (a draft syncing its own
+    // shared state) takes its one key.
+    const keys = [...new Set([source, target].filter((b) => !this.kb.isProtectedBranch(b)).map((b) => `branch:${b}`))];
     return this.branchLifecycle.runAll(keys, fn);
   }
 
@@ -969,7 +1024,17 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     opts: { preserveMerges?: boolean } = {},
   ): Promise<boolean> {
-    const { treeChanged } = await this.git.pull(workspaceId, opts);
+    return this.pullWorkspaceVia(() => this.git.pull(workspaceId, opts), workspaceId);
+  }
+
+  /**
+   * `pullWorkspace` over the pull it is given: the workspace's own
+   * (`git.pull`, which takes the workspace's reservation) or one a caller
+   * already holding that reservation hands in (a merge's publish). The
+   * announcement is the same either way.
+   */
+  private async pullWorkspaceVia(pull: () => Promise<{ treeChanged: boolean }>, workspaceId: string): Promise<boolean> {
+    const { treeChanged } = await pull();
     const defaultBranch = this.kb.defaultBranch;
     if (treeChanged && branchForWorkspaceId(workspaceId) === defaultBranch) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: defaultBranch });
@@ -1260,8 +1325,9 @@ export class WorkflowService implements IWorkflowService {
     path: string,
     fromBranch: string,
     toBranch: string,
-  ): Promise<string> {
-    return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
+    authorize: (sides: { from: string[]; to: string[] }) => Promise<void>,
+  ): Promise<{ diff: string; from: string; to: string }> {
+    return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch, authorize);
   }
 
   fileAtForkPoint(
@@ -1894,8 +1960,33 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<void> {
     // No explicit `undefined` third argument when there are no options: the
     // call shape stays the bare `push(workspaceId, user)` every caller made.
-    const push = () =>
-      opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user);
+    return this.pushWithRecoveryVia(
+      {
+        push: () => (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user)),
+        pull: () => this.pullWorkspace(workspaceId, { preserveMerges: true }),
+      },
+      workspaceId,
+      branch,
+      targetPath,
+      user,
+    );
+  }
+
+  /**
+   * `pushWithRecovery`'s policy over the two moves it is made of — the push,
+   * and the pull-rebase that keeps a stranded merge a merge — so that a
+   * caller already holding the workspace's reservation (a merge publishing
+   * itself, `updateBranch`) runs the SAME policy over its own unlocked moves,
+   * and a push the host refuses answers one way there too.
+   */
+  private async pushWithRecoveryVia(
+    ops: { push: () => Promise<void>; pull: () => Promise<unknown> },
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+  ): Promise<void> {
+    const push = ops.push;
     try {
       await push();
       this.noteGitSyncOk(workspaceId, branch);
@@ -1916,7 +2007,7 @@ export class WorkflowService implements IWorkflowService {
           // with whatever push of the branch comes next — a save, a share —
           // and a plain rebase would flatten it into cherry-picks. With no
           // merge among the local commits the two spellings replay the same.
-          await this.pullWorkspace(workspaceId, { preserveMerges: true });
+          await ops.pull();
           try {
             await push();
           } catch (retryErr) {
@@ -2225,12 +2316,16 @@ export class WorkflowService implements IWorkflowService {
    *      account, so no hidden body marker). The DB-assigned number is the CR id.
    *   6. Re-fetch the full detail via the PR service so the response shape
    *      matches every other CR endpoint.
+   *   7. Tell the deployment's change-request listeners (see
+   *      `change-request-hooks.ts`); `notified` in the answer says which
+   *      channels reached the approvers. Once per request, here, whether a
+   *      person or an agent opened it — both take this road.
    */
   async openChangeRequest(
     workspaceId: string,
     user: AuthUser,
     input: OpenChangeRequestInput,
-  ): Promise<ChangeRequestDetail> {
+  ): Promise<ChangeRequestDetail & { notified: string[] }> {
     if (!input.sourceBranch) throw new WorkflowValidationError('sourceBranch is required');
     if (!input.targetBranch) throw new WorkflowValidationError('targetBranch is required');
     if (input.sourceBranch === input.targetBranch) {
@@ -2255,7 +2350,19 @@ export class WorkflowService implements IWorkflowService {
     // its branches is retired inside the window, and holding only the source
     // left a `Y -> X` request open to X being deleted under it — the very
     // failure the widened guards exist to prevent.
-    return this.runOnBranchPair(input.sourceBranch, input.targetBranch, async () => {
+    //
+    // The deployment's listeners are told AFTER the locks are released: they
+    // are awaited (the answer's `notified` is true to what happened), and a
+    // slow mailer must hold up this answer alone, never a delete or a merge
+    // on either branch. So the locked part answers what it made — the detail,
+    // or the refusal — and the telling follows.
+    const outcome = await this.runOnBranchPair(input.sourceBranch, input.targetBranch, async (): Promise<
+      { number: number; eligible: EligibleWritersAtRef } & (
+        | { detail: ChangeRequestDetail; pushRefused: null; detailError: null }
+        | { detail: null; pushRefused: PushNeedsAgentResolutionError; detailError: null }
+        | { detail: null; pushRefused: null; detailError: Error }
+      )
+    > => {
     // Uniqueness rule — A→B blocks A→B (the spec is explicit that B→A in
     // parallel is still allowed). `listOpenPrs` is cached for 30s so we
     // force-fresh to catch a CR that opened just now.
@@ -2321,11 +2428,10 @@ export class WorkflowService implements IWorkflowService {
       input.targetBranch,
       input.sourceBranch,
     );
-    const affectedOwnersBlock = await this.buildAffectedOwnersBlock(
-      workspaceId,
-      input.targetBranch,
-      touchedPaths,
-    );
+    // Resolved once: the body lists this eligibility, and the opened event
+    // hands the same people to the deployment's listeners.
+    const eligible = await this.eligibleWritersFor(workspaceId, input.targetBranch, touchedPaths);
+    const affectedOwnersBlock = buildAffectedOwnersBlock(touchedPaths, eligible);
 
     // The change request is a plain DB row now — no provider PR. Author is a
     // real column (no hidden body marker needed, since nothing runs as a shared
@@ -2408,22 +2514,117 @@ export class WorkflowService implements IWorkflowService {
       // refused push never moved — answering the refusal is what the caller
       // needs, not a detail read that may fail on a branch the host lacks.
       this.events?.emit(opened);
-      throw pushRefused;
+      return { number: prNumber, eligible, detail: null, pushRefused, detailError: null };
     }
 
-    const detail = await this.prs.getPrDetail(prNumber, {
-      fresh: true,
-      workspaceId,
-      viewerEmail: user.email,
-    });
-    if (!detail) {
-      throw new WorkflowValidationError(
-        `Created change request #${prNumber} but could not fetch its detail`,
-      );
-    }
+    // The row exists and the push landed: every tab is told, whatever the
+    // read-back below does.
     this.events?.emit(opened);
-    return detail;
+    // Reading the detail back is the caller's answer, not the open: a read
+    // that fails is reported, but it is not allowed to cost the reviewers
+    // their message — the request stands, and a retry of the open meets the
+    // duplicate check, so there is no second chance to tell them.
+    let detail: ChangeRequestDetail | null = null;
+    let detailError: Error | null = null;
+    try {
+      detail = await this.prs.getPrDetail(prNumber, {
+        fresh: true,
+        workspaceId,
+        viewerEmail: user.email,
+      });
+    } catch (err) {
+      detailError = err instanceof Error ? err : new Error(String(err));
+    }
+    if (detail) return { number: prNumber, eligible, detail, pushRefused: null, detailError: null };
+    return {
+      number: prNumber,
+      eligible,
+      detail: null,
+      pushRefused: null,
+      detailError:
+        detailError ?? new WorkflowValidationError(`Created change request #${prNumber} but could not fetch its detail`),
+    };
     });
+
+    // The request exists in every branch of the outcome — the listeners are
+    // told all the same when the push was refused (`pushPending` says so:
+    // the request is there to find, its commits reach the host with the
+    // branch's next push, and what that is worth to a reviewer is each
+    // listener's call) and when its detail could not be read back. Only
+    // then is the refusal or the failed read the caller's answer.
+    const notified = await this.notifyOpened(outcome.number, input, user, outcome.eligible, outcome.pushRefused !== null);
+    if (outcome.pushRefused) throw outcome.pushRefused;
+    if (outcome.detailError) throw outcome.detailError;
+    return { ...outcome.detail, notified };
+  }
+
+  /**
+   * Tell the deployment's listeners the request was opened (see
+   * {@link IChangeRequestHooks}); the channels that reached the approvers.
+   * Never throws: a listener's failure is the hooks' to log, and a failed
+   * read of the approvers' accounts hands the listeners none of them, counted
+   * as unresolved.
+   */
+  private async notifyOpened(
+    number: number,
+    input: OpenChangeRequestInput,
+    user: AuthUser,
+    eligible: EligibleWritersAtRef,
+    pushPending: boolean,
+  ): Promise<string[]> {
+    const { approvers, unresolvedApprovers } = await this.resolveApprovers(eligible);
+    // Only an address a person can open from outside is handed over; the
+    // relative in-app path (no `PUBLIC_FRONTEND_URL`) is the listener's to
+    // complete.
+    const link = this.prs.linkFor(number);
+    return this.changeRequestHooks.runChangeRequestOpened({
+      number,
+      title: input.title.trim(),
+      sourceBranch: input.sourceBranch,
+      targetBranch: input.targetBranch,
+      openedBy: { id: user.id, email: user.email, name: user.name },
+      approvers,
+      unresolvedApprovers,
+      ...(link.urlNote === undefined ? { url: link.url } : {}),
+      pushPending,
+    });
+  }
+
+  /**
+   * The distinct people eligible to approve some changed path, as accounts.
+   * Each path's eligibility already expands its roles and groups to the
+   * addresses the access model names (`emails`), so a person is one address
+   * however many paths or roles name them; the addresses are looked up as
+   * live accounts in one read. An address with no account, or with one
+   * switched off, and the built-in `everyone` (anyone signed in may approve;
+   * nobody can be listed for that), are counted, not handed over.
+   */
+  private async resolveApprovers(
+    eligible: EligibleWritersAtRef,
+  ): Promise<{ approvers: ChangeRequestPerson[]; unresolvedApprovers: number }> {
+    const addresses = new Set<string>();
+    let everyone = false;
+    for (const info of eligible?.values() ?? []) {
+      for (const email of info.emails) addresses.add(canonicalEmail(email));
+      if (info.roles.includes(EVERYONE_CANONICAL)) everyone = true;
+    }
+    let accounts = new Map<string, { id: string; email: string; name: string }>();
+    if (addresses.size > 0 && this.accounts) {
+      try {
+        accounts = await this.accounts.findActiveAccountsByEmail([...addresses]);
+      } catch (err) {
+        crLog.warn('the approvers of a change request could not be read as accounts; the listeners are handed none:', { err });
+      }
+    }
+    const approvers: ChangeRequestPerson[] = [];
+    let unresolvedApprovers = everyone ? 1 : 0;
+    for (const address of addresses) {
+      const account = accounts.get(address);
+      if (account) approvers.push({ id: account.id, email: account.email, name: account.name });
+      else unresolvedApprovers++;
+    }
+    approvers.sort((a, b) => a.email.localeCompare(b.email));
+    return { approvers, unresolvedApprovers };
   }
 
   /**
@@ -4183,8 +4384,8 @@ export class WorkflowService implements IWorkflowService {
     // while they are held: a bare read would let a person open the request
     // mid-merge and the agent would land its content anyway, which is the one
     // thing this tool exists to prevent. `runOnBranchPair` drops a protected
-    // target's key; the source key is held either way, and every competing
-    // request from this source takes it too.
+    // branch's key at either end; a draft source's key is held, and every
+    // competing request from this source takes it too.
     return this.runOnBranchPair(sourceBranch, targetBranch, async () => {
       // A person merges a change request. Only the request's OWN direction is
       // blocked: the target merged into the source is how a draft under review
@@ -4649,37 +4850,171 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
-   * Build the `## Affected owners` markdown block that gets appended to
-   * the CR body. Lists the eligible approvers (roles + named users) per
-   * changed path, per the access tree on `origin/<targetBranch>` — the same
-   * tree the approval gate uses server-side, so what the body advertises
-   * matches who can actually approve at merge time. The per-path list is
-   * capped (see {@link formatAffectedOwnersBlock}) so the body stays within
-   * the `gh pr create --body` arg limit on large changesets.
-   *
-   * Returns the empty string when there are no touched paths or no
-   * resolvable eligibility — keeps the body clean rather than printing
-   * a stub heading.
+   * The eligible approvers (roles + named users, and the addresses they
+   * expand to) per changed path, per the access tree on
+   * `origin/<targetBranch>` — the same tree the approval gate uses
+   * server-side, so what the body advertises and the listeners are told
+   * matches who can actually approve at merge time. Null when there are no
+   * touched paths or no resolvable eligibility: a missing affected-owners
+   * block is cosmetic, not a reason to abort the open.
    */
-  private async buildAffectedOwnersBlock(
+  private async eligibleWritersFor(
     workspaceId: string,
     targetBranch: string,
     paths: string[],
-  ): Promise<string> {
-    if (paths.length === 0) return '';
-    let resolved: Awaited<ReturnType<IAccessControl['eligibleWritersForPathsAtRef']>> = null;
+  ): Promise<EligibleWritersAtRef> {
+    if (paths.length === 0) return null;
     try {
-      resolved = await this.accessControl.eligibleWritersForPathsAtRef(
+      return await this.accessControl.eligibleWritersForPathsAtRef(
         workspaceId,
         `origin/${targetBranch}`,
         paths,
       );
     } catch (err) {
       log.warn('eligibleWritersForPathsAtRef failed:', { err });
+      return null;
     }
-    if (!resolved || resolved.size === 0) return '';
-
-    return formatAffectedOwnersBlock(paths, resolved);
   }
 
+  async updateBranch(
+    workspaceId: string,
+    user: AuthUser,
+    opts: { from?: string } & (
+      | { resolutions?: undefined; validateWrite?: undefined }
+      | { resolutions: MergeResolution[]; validateWrite: (wsPath: string, content: string) => void | Promise<void> }
+    ) = {},
+  ): Promise<UpdateBranchOutcome> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const from = opts.from ?? branch;
+    // A resolution writes on the draft: it is somebody's to gate, and a
+    // caller that brings none gates nothing (closed) — the type says so for
+    // a compiled caller, this for any other.
+    if ((opts.resolutions?.length ?? 0) > 0 && typeof opts.validateWrite !== 'function') {
+      throw new Error('updateBranch: resolutions need a `validateWrite` to be asked before the merge');
+    }
+    if (this.kb.isProtectedBranch(branch)) {
+      throw new WorkflowDomainError(
+        `"${branch}" is protected: it is changed through change requests, never merged into directly.`,
+        403,
+        { kind: 'protected-update-target', branch },
+      );
+    }
+    // The one merge a person makes: a change request's. An update that would
+    // land an OPEN request from `from` into this draft is that merge by
+    // another name, and `mergeBranch`'s gate refuses it here too — asked once
+    // before waiting, and again under the locks below, where the answer
+    // counts. (The other direction, the request's target into its source, is
+    // how a draft under review stays current, and is never blocked.)
+    if (from !== branch) {
+      const openBefore = await this.openRequestBlockingMerge(from, branch);
+      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);
+    }
+    // The merge takes what the REMOTE holds of `from`, and the push publishes
+    // the branch: writes still being committed on either would be missed by
+    // the first or swept up by the second. Waited for, as `mergeBranch` waits
+    // — outside the lifecycle locks, which must not be held for seconds of
+    // waiting on a queue.
+    for (const b of from === branch ? [branch] : [from, branch]) {
+      const settled = await this.awaitPendingCommits(b);
+      if (!settled.ok) {
+        const message = settled.needsAttention
+          ? `A commit queued on "${b}" failed and needs a person: ${settled.needsAttention} ` +
+            'Nothing was merged. Tell the user; update again once it has been resolved.'
+          : `${settled.pending} write(s) on "${b}" are still being committed. Nothing was merged. Retry shortly.`;
+        return {
+          kind: 'pending-commits',
+          branch: b,
+          pending: settled.pending,
+          ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
+          message,
+        };
+      }
+    }
+    // Under the lifecycle lock of both branches, as `mergeBranch` and
+    // `openChangeRequest` run: the "no open request" answer is only sound
+    // while nobody can open one mid-merge, and a branch being merged into is
+    // not one to delete or recreate meanwhile. A protected `from` takes no
+    // key, and the branch's own shared state (from = branch) takes the one.
+    return this.runOnBranchPair(from, branch, async () => {
+      if (from !== branch) {
+        const open = await this.openRequestBlockingMerge(from, branch);
+        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
+      }
+      if (!(await this.git.remoteBranchExists(workspaceId, from))) {
+        throw new WorkflowValidationError(`No branch named "${from}" on the shared repository.`);
+      }
+      const resolutions = opts.resolutions ?? [];
+      const subject = from === branch ? `Merge the shared ${branch} into the local one` : `Merge ${from} into ${branch}`;
+      const body =
+        (from === branch
+          ? `The branch had moved on the shared repository while this workspace held commits of its own; both are kept.`
+          : `Brings the latest ${from} into ${branch}.`) +
+        (resolutions.length > 0
+          ? ` Conflicts resolved by ${user.name} <${user.email}> in: ${resolutions.map((r) => r.path).join(', ')}.`
+          : '');
+      // Published inside the merge's own reservation: nothing lands between
+      // the merge commit and its push, and the push is EVERY workflow push's
+      // `pushWithRecovery`, run over the merge's own unlocked moves — a
+      // rejection replays the merge (kept as a merge) onto the moved branch
+      // and pushes again; a replay that conflicts or a host that refuses
+      // answers as every refused share answers, the banner noted and the
+      // typed hand-off thrown, naming the branch (no single file is at issue)
+      // and never a conflicted path. The merge commit stays local for the
+      // next push of the branch to carry.
+      return this.git.mergeIntoBranch(workspaceId, branch, from, user, {
+        subject,
+        body,
+        resolutions,
+        publish: (ops) =>
+          this.pushWithRecoveryVia(
+            { push: ops.push, pull: () => this.pullWorkspaceVia(ops.pullRebase, workspaceId) },
+            workspaceId,
+            branch,
+            branch,
+            user,
+          ),
+        // A resolution writes a file on the draft from what both branches
+        // hold of it. It is authorized inside the merge's reservation, after
+        // the fetch and before the merge touches the checkout — the draft's
+        // tree clean at its own commit, so the rules read from it are the
+        // draft's, never a rule file mid-merge: the caller must read the
+        // file at the draft's commit and at the source commit the merge is
+        // of, and may change it on the draft by the one rule every draft
+        // write takes — the change gate `acquireLock` asks, not a write
+        // permission a draft never requires.
+        authorizeResolutions: async ({ ours, theirs }) => {
+          for (const r of resolutions) {
+            const rel = r.path.startsWith(`${this.kbDirName}/`) ? r.path.slice(this.kbDirName.length + 1) : r.path;
+            // At the two COMMITS the merge is of — pinned by the merge itself,
+            // never at a ref a concurrent fetch can move between this verdict
+            // and the merge — by the one rule the tool shows a conflict by.
+            if (!(await readableAtCommits(this.accessControl, workspaceId, user.email, rel, [ours, theirs]))) {
+              throw new ReadOnBranchDeniedError(rel, from);
+            }
+            // The gate takes the WORKSPACE path, as `acquireLock` hands it
+            // one: a repository-relative path reads as outside the knowledge
+            // base there, which the gate waves through.
+            await this.changeGate.assertMayChange(workspaceId, user.email, `${this.kbDirName}/${rel}`, 'file');
+            // Content the resolution brings takes the caller's pre-disk write
+            // gate, as its file writes do before a byte lands; a side kept
+            // whole is a commit's own bytes and brings none.
+            if (r.content !== undefined && opts.validateWrite) await opts.validateWrite(`${this.kbDirName}/${rel}`, r.content);
+          }
+        },
+      });
+    });
+  }
+
+  fileAtBranch(
+    workspaceId: string,
+    path: string,
+    branch: string,
+    authorize: (commits: string[]) => Promise<void>,
+  ): Promise<{ sha: string; ref: string; content: string | null }> {
+    return this.git.readFileAtBranch(workspaceId, path, branch, authorize);
+  }
+
+  changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]> {
+    return this.git.changedPathsForPr(workspaceId, base, branch);
+  }
 }

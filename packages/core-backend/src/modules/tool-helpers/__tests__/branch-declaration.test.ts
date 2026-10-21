@@ -8,7 +8,6 @@ import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
@@ -24,6 +23,7 @@ import {
   type BranchDeclaration,
   type ToolDefSpec,
 } from '../index.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 const KB_DIR = 'knowledge-base';
@@ -116,7 +116,7 @@ describe('a tool declares how it treats its branch', () => {
     await runGit(seed, ['push', 'origin', 'HEAD:refs/heads/refs/heads/ghost']);
 
     kb = testKbContext({ kbDirName: KB_DIR });
-    const workspaces = new WorkspaceService(workspacesRoot, upstream, kb, new NodeFs());
+    const workspaces = newWorkspaceService(workspacesRoot, upstream, kb, new NodeFs());
     const resolve = createToolContextResolver({
       authService: {
         getUserById: async () => ({ id: 'u', email: 'alice@example.com', name: 'Alice' }),

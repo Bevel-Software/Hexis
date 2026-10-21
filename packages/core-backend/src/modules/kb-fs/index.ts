@@ -4,3 +4,6 @@
  * workspace needs only the shape of the gate every write passes first.
  */
 export type { WriteValidator } from './locking-filesystem.js';
+export { WorkspaceMutex, WorkspaceIdMutex } from './mutex.js';
+export { readRefSha, readRevSha, type RefFileAnswer } from './ref-files.js';
+export { gitDirOf, readGitfile } from './git-dir.js';

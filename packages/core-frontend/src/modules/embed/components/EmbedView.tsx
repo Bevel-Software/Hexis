@@ -5,6 +5,7 @@ import { useAppRegistry } from '../../../core/registry';
 import {
   CanDownloadContext,
   isViewOnlyFile,
+  kbFilePageUrl,
   kbFileUrl,
   pickFileRenderer,
   RendererSurfaceContext,
@@ -409,6 +410,7 @@ export function EmbedView() {
       // A path from a tree, verbatim — never through the link grammar, which
       // would read a `#` in a file name as an anchor.
       openWorkspacePath: (path) => openThroughHost(absolute(kbFileUrl(view.branch, path)), '', null),
+      openFilePage: (path) => openThroughHost(absolute(kbFilePageUrl(view.branch, path)), '', null),
       // A node id is handed to the host as the app's own copy-link address;
       // the app resolves it with the reader's session, which is the only
       // place that resolution can be done.

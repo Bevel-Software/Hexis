@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type {
   AuthUser,
@@ -15,15 +19,19 @@ import { PendingCommitsService, type PendingCommit } from '../pending-commits.se
 import { PendingCommitsWorker } from '../pending-commits.worker.js';
 import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
+import type { ChangeRequestOpenedEvent, IChangeRequestHooks } from '../change-request-hooks.js';
 import {
+  ChangeRequestConflictsError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowDomainError,
+  WorkflowValidationError,
 } from '../../../shared/domain-errors.js';
 import type { WorkflowEventBus } from '../event-bus.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import { ReadOnBranchDeniedError } from '../read-on-branch.js';
 import { hashEmail } from '../../../shared/email-identity.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
@@ -224,6 +232,8 @@ function makePrs(): PullRequestService {
     getPrDetail: vi.fn(),
     invalidateDetailCache: vi.fn(),
     setDetailEnricher: vi.fn(),
+    // No public address configured: the in-app path, with its note.
+    linkFor: vi.fn((number: number) => ({ url: `/change-requests/${number}`, urlNote: 'Set PUBLIC_FRONTEND_URL to get absolute links.' })),
   } as unknown as PullRequestService;
 }
 
@@ -274,6 +284,248 @@ describe('WorkflowService — branch delegation', () => {
   });
 });
 
+describe('WorkflowService.updateBranch', () => {
+  const user = { id: 'u1', email: 'ada@x.io', name: 'Ada' };
+  /** A git double whose merge answers `outcome`, with the source on the remote. */
+  const gitThatMerges = (outcome: unknown) => {
+    const git = makeGit();
+    (git as unknown as { remoteBranchExists: unknown }).remoteBranchExists = vi.fn().mockResolvedValue(true);
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn().mockResolvedValue(outcome);
+    return git;
+  };
+  const build = (git: GitService, pending = makePendingCommits()) =>
+    new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), pending, testKbContext(), openChangeGate());
+
+  it('refuses a protected branch before asking git anything', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    const err = await build(git).updateBranch('target-company-state', user).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowDomainError);
+    expect((err as WorkflowDomainError).status).toBe(403);
+    expect((err as WorkflowDomainError).payload).toMatchObject({ kind: 'protected-update-target' });
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it('refuses resolutions that come without a write gate, before asking git anything', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
+    const err = await build(git)
+      .updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions: [{ path: 'A.md', content: 'x' }] } as never)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/validateWrite/);
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+
+  it('refuses an update that would land an open change request from `from` into the draft, as the merge tool refuses it', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
+    const open = [{ number: 5, sourceBranch: 'target-company-state', targetBranch: 'ada/draft', state: 'open' }];
+    const svc = new WorkflowService(makeDb(open), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    const err = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, payload: { kind: 'open-change-request-blocks-merge', number: 5 } });
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+
+    // The other direction — the draft's own request, open INTO `from` — is
+    // how a draft under review stays current: never blocked.
+    const reverse = [{ number: 6, sourceBranch: 'ada/draft', targetBranch: 'target-company-state', state: 'open' }];
+    const syncing = new WorkflowService(makeDb(reverse), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    expect(await syncing.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' })).toMatchObject({ kind: 'merged' });
+  });
+
+  /**
+   * A merge that signals when the git layer is entered and finishes only when
+   * released: what the lock tests hold the workspace with. No timing — the
+   * test waits for the signal, never for a clock.
+   */
+  const heldMerge = (sha: string) => {
+    let enter: () => void = () => {};
+    let release: () => void = () => {};
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const merge = () =>
+      new Promise((resolve) => {
+        release = () => resolve({ kind: 'merged', sha, from: 'target-company-state', resolvedPaths: [] });
+        enter();
+      });
+    return { merge, entered, release: () => release() };
+  };
+  /** Every settled promise has run its continuations: a macrotask boundary, not a guess at a duration. */
+  const settled = () => new Promise<void>((r) => setImmediate(r));
+
+  it("holds the draft's lifecycle key around the merge, as the merge tool does, so nothing opens a request or recreates the branch mid-merge", async () => {
+    const git = gitThatMerges(null);
+    const held = heldMerge('m');
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn(held.merge);
+    (git.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ name: 'ada/draft' });
+    const svc = build(git);
+    const order: string[] = [];
+    const updating = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' }).then((o) => { order.push('merged'); return o; });
+    await held.entered;
+    const creating = svc.createBranch('ada%2Fdraft', 'ada/draft').then(() => { order.push('created'); });
+    // Without the key, the create (a resolved double) would be done by now.
+    await settled();
+    expect(order).toEqual([]);
+    held.release();
+    expect(await updating).toMatchObject({ kind: 'merged' });
+    await creating;
+    expect(order).toEqual(['merged', 'created']);
+  });
+
+  it("takes no key on a protected `from`: two drafts refreshing from the default branch do not wait on each other", async () => {
+    const git = gitThatMerges(null);
+    const held = heldMerge('m');
+    const merges: string[] = [];
+    (git as unknown as { mergeIntoBranch: unknown }).mergeIntoBranch = vi.fn((workspaceId: string) => {
+      merges.push(workspaceId);
+      return workspaceId === 'ada%2Fdraft'
+        ? held.merge()
+        : Promise.resolve({ kind: 'merged', sha: 'n', from: 'target-company-state', resolvedPaths: [] });
+    });
+    const svc = build(git);
+    const first = svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    await held.entered;
+    // The second draft's refresh from the same protected branch completes
+    // while the first still holds its merge (a key on `from` would hang it).
+    expect(await svc.updateBranch('bob%2Fdraft', user, { from: 'target-company-state' })).toMatchObject({ kind: 'merged', sha: 'n' });
+    expect(merges).toEqual(['ada%2Fdraft', 'bob%2Fdraft']);
+    held.release();
+    expect(await first).toMatchObject({ kind: 'merged', sha: 'm' });
+  });
+
+  it('merges the named branch into the draft as the user, published inside the merge\'s own reservation', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
+    const svc = build(git);
+    const resolutions = [{ path: 'A.md', content: 'resolved\n' }];
+    const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state', resolutions, validateWrite: async () => {} });
+    expect(outcome).toEqual({ kind: 'merged', sha: 'merge-1', from: 'target-company-state', resolvedPaths: ['A.md'] });
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    expect(merge).toHaveBeenCalledWith(
+      'ada%2Fdraft',
+      'ada/draft',
+      'target-company-state',
+      user,
+      expect.objectContaining({ subject: 'Merge target-company-state into ada/draft', resolutions, publish: expect.any(Function) }),
+    );
+    expect((merge.mock.calls[0] as unknown[])[4]).toMatchObject({ body: expect.stringContaining('A.md') });
+    // The git layer publishes while it still holds the workspace; no second push from here.
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it("publishes through the one push policy every workflow push takes, over the merge's own moves", async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: [] });
+    await build(git).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    type Ops = { push: () => Promise<void>; pullRebase: () => Promise<{ treeChanged: boolean }> };
+    const { publish } = (merge.mock.calls[0] as unknown[])[4] as { publish: (ops: Ops) => Promise<void> };
+
+    // A rejection: replayed onto the moved branch (the merge kept) and pushed again.
+    const push = vi.fn().mockRejectedValueOnce(new Error('! [rejected] non-fast-forward')).mockResolvedValue(undefined);
+    const pullRebase = vi.fn().mockResolvedValue({ treeChanged: true });
+    await publish({ push, pullRebase });
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(pullRebase).toHaveBeenCalledTimes(1);
+    // The workspace's own reserved moves are never taken from here: the merge holds the workspace.
+    expect(git.push).not.toHaveBeenCalled();
+    expect(git.pull).not.toHaveBeenCalled();
+
+    // A replay that conflicts: the hand-off every refused share answers with,
+    // naming the branch — no single file is at issue — and never a conflicted
+    // path, which the caller may not be allowed to see.
+    const conflict = new PullRebaseConflictError('ada/draft', ['Secret/Plan.md'], 'replay conflicted');
+    const diverged = await publish({
+      push: vi.fn().mockRejectedValue(new Error('! [rejected] non-fast-forward')),
+      pullRebase: vi.fn().mockRejectedValue(conflict),
+    }).catch((e: unknown) => e);
+    expect(diverged).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(diverged as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: 'ada/draft', cause: 'diverged' });
+    expect((diverged as Error).message).not.toContain('Secret/Plan.md');
+    expect(JSON.stringify((diverged as WorkflowDomainError).payload)).not.toContain('Secret/Plan.md');
+
+    // A host that refuses: the same hand-off, `refused`, no replay attempted.
+    const untouched = vi.fn();
+    const refused = await publish({ push: vi.fn().mockRejectedValue(new Error('remote: permission denied')), pullRebase: untouched }).catch(
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(refused as PushNeedsAgentResolutionError).toMatchObject({ branch: 'ada/draft', path: 'ada/draft', cause: 'refused' });
+    expect(untouched).not.toHaveBeenCalled();
+  });
+
+  it('authorizes each resolution inside the merge: readable on both branches as fetched, and the draft write rule every save takes', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'target-company-state', resolvedPaths: ['A.md'] });
+    const access = makeAccessControl();
+    (access.canReadAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const gate = openChangeGate();
+    const asked: unknown[][] = [];
+    gate.assertMayChange = async (...args: unknown[]) => {
+      asked.push(args);
+    };
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), testKbContext(), gate);
+    const validated: unknown[][] = [];
+    const validateWrite = vi.fn(async (...args: unknown[]) => { validated.push(args); });
+    await svc.updateBranch('ada%2Fdraft', user, {
+      from: 'target-company-state',
+      resolutions: [{ path: 'knowledge-base/A.md', content: 'x' }, { path: 'B.md', choose: 'theirs' }],
+      validateWrite,
+    });
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    const opts = (merge.mock.calls[0] as unknown[])[4] as { authorizeResolutions: (m: unknown) => Promise<void> };
+    await opts.authorizeResolutions({ ours: 'o', theirs: 't' });
+    // The caller's pre-disk write gate is asked with the workspace path and
+    // the content a resolution brings; a side kept whole brings none.
+    expect(validated).toEqual([['knowledge-base/A.md', 'x']]);
+    // Read at the two COMMITS the merge is of — never at a branch ref — then the change gate.
+    expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 'o', 'ada@x.io', 'A.md');
+    expect(access.canReadAtRef).toHaveBeenCalledWith('ada%2Fdraft', 't', 'ada@x.io', 'A.md');
+    expect((access.canReadAtRef as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).not.toContain('origin/target-company-state');
+    // The gate takes the workspace path, as every save hands it one — a
+    // repository-relative path would read as outside the knowledge base.
+    expect(asked).toEqual([['ada%2Fdraft', 'ada@x.io', 'knowledge-base/A.md', 'file'], ['ada%2Fdraft', 'ada@x.io', 'knowledge-base/B.md', 'file']]);
+
+    // The write gate's refusal refuses the update (a roles.yaml that would not parse, say).
+    validateWrite.mockRejectedValueOnce(new WorkflowDomainError('roles.yaml would be invalid', 422));
+    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toMatchObject({ status: 422 });
+
+    // Not readable at the draft's commit: refused before the change gate is asked.
+    (access.canReadAtRef as ReturnType<typeof vi.fn>).mockImplementation(async (_ws: string, ref: string) => ref !== 'o');
+    asked.length = 0;
+    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
+    expect(asked).toEqual([]);
+    // A commit whose rules cannot be read grants nothing.
+    (access.canReadAtRef as ReturnType<typeof vi.fn>).mockImplementation(async (_ws: string, ref: string) => (ref === 't' ? null : true));
+    await expect(opts.authorizeResolutions({ ours: 'o', theirs: 't' })).rejects.toBeInstanceOf(ReadOnBranchDeniedError);
+    expect(asked).toEqual([]);
+  });
+
+  it('takes the draft\'s own shared state when no source is named, and publishes nothing on conflicts', async () => {
+    const conflicts = { kind: 'conflicts', from: 'ada/draft', mergeBase: 'b', ours: 'o', theirs: 't', files: [], unresolved: ['A.md'] };
+    const git = gitThatMerges(conflicts);
+    const outcome = await build(git).updateBranch('ada%2Fdraft', user);
+    expect(outcome).toBe(conflicts);
+    const merge = (git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch;
+    expect(merge).toHaveBeenCalledWith('ada%2Fdraft', 'ada/draft', 'ada/draft', user, expect.objectContaining({ resolutions: [] }));
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it('answers pending-commits, merging nothing, while writes on the source are still being committed', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    const pending = makePendingCommits();
+    (pending.queuedOnBranch as ReturnType<typeof vi.fn>).mockImplementation(async (branch: string) =>
+      branch === 'target-company-state' ? { queued: 2, stuck: 0, needsAttention: null } : { queued: 0, stuck: 0, needsAttention: null },
+    );
+    const svc = build(git, pending);
+    svc.mergeWaitForPendingCommits = { timeoutMs: 30, pollMs: 5 };
+    const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    expect(outcome).toMatchObject({ kind: 'pending-commits', branch: 'target-company-state', pending: 2 });
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+
+  it('refuses a source the shared repository does not have', async () => {
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    (git as unknown as { remoteBranchExists: unknown }).remoteBranchExists = vi.fn().mockResolvedValue(false);
+    await expect(build(git).updateBranch('ada%2Fdraft', user, { from: 'nobody/such' })).rejects.toThrow(/No branch named "nobody\/such"/);
+    expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+});
+
 describe('WorkflowService — change delegation', () => {
   it('commitChange delegates to git.commit', async () => {
     const git = makeGit();
@@ -298,12 +550,15 @@ describe('WorkflowService — change delegation', () => {
 
   it('compareFile delegates to git.diffFileBetweenBranches', async () => {
     const git = makeGit();
-    (git.diffFileBetweenBranches as ReturnType<typeof vi.fn>).mockResolvedValue('@@ diff');
+    (git.diffFileBetweenBranches as ReturnType<typeof vi.fn>).mockResolvedValue({ diff: '@@ diff', from: 'a1', to: 'b1' });
 
     const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
-    const diff = await svc.compareFile('w1', 'Foo.md', 'a', 'b');
-    expect(diff).toBe('@@ diff');
-    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b');
+    // The caller's verdict travels down to the git layer, which asks it at
+    // the pinned commits; those commits travel back with the diff.
+    const authorize = vi.fn(async () => {});
+    const compared = await svc.compareFile('w1', 'Foo.md', 'a', 'b', authorize);
+    expect(compared).toEqual({ diff: '@@ diff', from: 'a1', to: 'b1' });
+    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b', authorize);
   });
 });
 
@@ -1391,6 +1646,254 @@ describe('WorkflowService.openChangeRequest — when the repository host refuses
     await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12 });
     expect(h.git.pull).toHaveBeenCalledWith('ali%2Fx', { preserveMerges: true });
     expect(push).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Opening a request tells the deployment's change-request listeners — once,
+ * here, whether a person or an agent opened it — and answers `notified`: the
+ * channels the listeners said reached the approvers. The approvers are the
+ * people the `## Affected owners` block lists, resolved to accounts and
+ * handed over once each; who could not be is counted.
+ */
+describe('WorkflowService.openChangeRequest — tells the change-request listeners', () => {
+  const INPUT = { sourceBranch: 'ali/x', targetBranch: 'main', title: '  Tidy the glossary  ' };
+  const PATHS = ['KnowledgeBase/Sales/Deal.md', 'KnowledgeBase/Legal/Terms.md'];
+  const ACCOUNTS: Record<string, { id: string; email: string; name: string }> = {
+    'dana@acme.test': { id: 'u-dana', email: 'dana@acme.test', name: 'Dana' },
+    'lena@acme.test': { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
+  };
+
+  function eligibility(
+    perPath: Record<string, { roles?: string[]; emails: string[] }>,
+  ): Map<string, { roles: string[]; users: { name: string; email: string }[]; emails: Set<string> }> {
+    const out = new Map<string, { roles: string[]; users: { name: string; email: string }[]; emails: Set<string> }>();
+    for (const [p, { roles = [], emails }] of Object.entries(perPath)) {
+      out.set(p, { roles, users: emails.map((email) => ({ name: '', email })), emails: new Set(emails) });
+    }
+    return out;
+  }
+
+  // A real repository, so the changed paths come from the `git diff` the
+  // service runs in production and not from a replaced helper: `main` is the
+  // base and the ref `origin/main` the diff is taken against; `ali/x` adds
+  // PATHS. The checkout sits under the knowledge-base folder name the test
+  // context gives, where the service looks for it.
+  let workspace: string;
+  beforeAll(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'hexis-open-tells-'));
+    const repo = path.join(workspace, testKbContext().kbDirName);
+    fs.mkdirSync(repo);
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.test', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('commit', '-q', '--allow-empty', '-m', 'base');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('checkout', '-q', '-b', 'ali/x');
+    for (const p of PATHS) {
+      fs.mkdirSync(path.dirname(path.join(repo, p)), { recursive: true });
+      fs.writeFileSync(path.join(repo, p), `# ${p}\n`);
+    }
+    git('add', '-A');
+    git('commit', '-q', '-m', 'the change');
+  });
+  afterAll(() => {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  function makeNotifyHarness(opts: {
+    eligible?: ReturnType<typeof eligibility> | null;
+    push?: ReturnType<typeof vi.fn>;
+    merge?: ReturnType<typeof vi.fn>;
+    detail?: ReturnType<typeof vi.fn>;
+    accounts?: { findActiveAccountsByEmail: ReturnType<typeof vi.fn> } | undefined;
+    link?: { url: string; urlNote?: string };
+  } = {}) {
+    const git = Object.assign(makeGit(), {
+      mergeFromOrigin: opts.merge ?? vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false }),
+      push: opts.push ?? vi.fn().mockResolvedValue(undefined),
+      pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+    }) as unknown as GitService;
+    const prs = makePrs();
+    (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    if (opts.detail) prs.getPrDetail = opts.detail as unknown as PullRequestService['getPrDetail'];
+    else (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ number: 12, branch: 'ali/x', base: 'main' });
+    if (opts.link) (prs.linkFor as ReturnType<typeof vi.fn>).mockReturnValue(opts.link);
+    const workspaces = makeWorkspaceService();
+    (workspaces.getWorkspacePath as ReturnType<typeof vi.fn>).mockResolvedValue(workspace);
+    const access = makeAccessControl();
+    (access.eligibleWritersForPathsAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.eligible ?? null);
+    const values = vi.fn(() => ({ returning: vi.fn(async () => [{ number: 12 }]) }));
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Database;
+    const run = vi.fn<(event: ChangeRequestOpenedEvent) => Promise<string[]>>(async () => ['email']);
+    const hooks: IChangeRequestHooks = { onChangeRequestOpened: vi.fn(), runChangeRequestOpened: run };
+    const accounts =
+      'accounts' in opts
+        ? opts.accounts
+        : {
+            findActiveAccountsByEmail: vi.fn(async (emails: readonly string[]) => {
+              const found = new Map<string, { id: string; email: string; name: string }>();
+              for (const email of emails) {
+                const account = ACCOUNTS[email];
+                if (account) found.set(email, account);
+              }
+              return found;
+            }),
+          };
+    const svc = new WorkflowService(
+      db, git, prs, makeReviewWorkflow(), workspaces, access,
+      makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
+      { emit: vi.fn() } as unknown as WorkflowEventBus, undefined, undefined, hooks, accounts,
+    );
+    return { svc, run, prs, access, accounts, values };
+  }
+
+  it('fires once, after the row exists, with the request, who opened it and the approvers as accounts — once each', async () => {
+    const h = makeNotifyHarness({
+      eligible: eligibility({
+        [PATHS[0]]: { roles: ['Sales'], emails: ['dana@acme.test', 'lena@acme.test'] },
+        // Lena again, by another spelling: one person.
+        [PATHS[1]]: { roles: ['Legal'], emails: ['LENA@acme.test'] },
+      }),
+    });
+    const user = makeUser({ id: 'u-ali', email: 'ali@acme.test', name: 'Ali' });
+    const answer = await h.svc.openChangeRequest('ali%2Fx', user, INPUT);
+
+    expect(h.run).toHaveBeenCalledTimes(1);
+    const [event] = h.run.mock.calls[0]!;
+    expect(event).toEqual({
+      number: 12,
+      title: 'Tidy the glossary',
+      sourceBranch: 'ali/x',
+      targetBranch: 'main',
+      openedBy: { id: 'u-ali', email: 'ali@acme.test', name: 'Ali' },
+      approvers: [
+        { id: 'u-dana', email: 'dana@acme.test', name: 'Dana' },
+        { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
+      ],
+      unresolvedApprovers: 0,
+      pushPending: false,
+    });
+    // No public address: no `url` at all, not a relative one.
+    expect(event).not.toHaveProperty('url');
+    // The accounts were read once, for the distinct canonical addresses.
+    expect(h.accounts!.findActiveAccountsByEmail).toHaveBeenCalledTimes(1);
+    expect(h.accounts!.findActiveAccountsByEmail.mock.calls[0]![0]).toEqual(['dana@acme.test', 'lena@acme.test']);
+    // The eligibility was asked for the paths the request changes — the
+    // `git diff` against the target's published ref, as in production.
+    const eligibleFor = h.access.eligibleWritersForPathsAtRef as ReturnType<typeof vi.fn>;
+    expect(eligibleFor).toHaveBeenCalledTimes(1);
+    expect(eligibleFor.mock.calls[0]!.slice(-1)[0]).toEqual([...PATHS].sort()); // as `git diff --name-only` orders them
+    // The row landed before anyone was told, and the answer says who was.
+    expect(h.values).toHaveBeenCalledTimes(1);
+    expect(h.values.mock.invocationCallOrder[0]).toBeLessThan(h.run.mock.invocationCallOrder[0]!);
+    expect(answer).toMatchObject({ number: 12, notified: ['email'] });
+  });
+
+  it('counts a person without an account and the built-in `everyone` as unresolved, and hands neither over', async () => {
+    const h = makeNotifyHarness({
+      eligible: eligibility({
+        [PATHS[0]]: { roles: ['everyone'], emails: ['dana@acme.test', 'nobody@acme.test'] },
+        [PATHS[1]]: { roles: ['everyone', 'Legal'], emails: ['dana@acme.test'] },
+      }),
+    });
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    const [event] = h.run.mock.calls[0]!;
+    expect(event.approvers).toEqual([{ id: 'u-dana', email: 'dana@acme.test', name: 'Dana' }]);
+    // `nobody@` once, `everyone` once however many paths grant it.
+    expect(event.unresolvedApprovers).toBe(2);
+  });
+
+  it('hands over the public address when one is configured', async () => {
+    const h = makeNotifyHarness({ link: { url: 'https://kb.acme.test/change-requests/12' } });
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ url: 'https://kb.acme.test/change-requests/12', approvers: [], unresolvedApprovers: 0 });
+  });
+
+  it('with no accounts to ask, or a read of them that fails, every approver is unresolved and the open goes on', async () => {
+    const eligible = eligibility({ [PATHS[0]]: { emails: ['dana@acme.test', 'lena@acme.test'] } });
+    const without = makeNotifyHarness({ eligible, accounts: undefined });
+    await without.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    expect(without.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const failing = makeNotifyHarness({
+        eligible,
+        accounts: { findActiveAccountsByEmail: vi.fn().mockRejectedValue(new Error('db down')) },
+      });
+      await expect(failing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ notified: ['email'] });
+      expect(failing.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('answers `notified: []` truthfully when the listeners reached nobody', async () => {
+    const h = makeNotifyHarness();
+    h.run.mockResolvedValue([]);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12, notified: [] });
+  });
+
+  it('tells the listeners even when the host refused the push, and says so: the request exists, its commits are still to land', async () => {
+    const h = makeNotifyHarness({
+      push: vi.fn().mockRejectedValue(new Error('git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)')),
+    });
+    const err = await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(h.run).toHaveBeenCalledTimes(1);
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ number: 12, sourceBranch: 'ali/x', targetBranch: 'main', pushPending: true });
+  });
+
+  it('tells the listeners once the branches\' lifecycle locks are released: a slow mailer holds up the answer, not a delete or a merge', async () => {
+    const h = makeNotifyHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    h.run.mockImplementation(async () => { await gate; return ['email']; });
+    const opening = h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    await vi.waitFor(() => { expect(h.run).toHaveBeenCalledTimes(1); });
+    // `createBranch` takes the branch's lifecycle lock — the one `deleteBranch`
+    // and `mergeBranch` take too — so it completing while the listener still
+    // waits shows the lock was released before the listeners were told.
+    const free = await Promise.race([
+      h.svc.createBranch('ali%2Fx', 'ali/x').then(() => 'free'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('held'), 300)),
+    ]);
+    expect(free).toBe('free');
+    release();
+    await expect(opening).resolves.toMatchObject({ number: 12, notified: ['email'] });
+  });
+
+  it('tells the listeners when the detail cannot be read back: the request exists, a retry would be a duplicate', async () => {
+    const failing = makeNotifyHarness({ detail: vi.fn().mockRejectedValue(new Error('detail store down')) });
+    await expect(failing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toThrow('detail store down');
+    expect(failing.run).toHaveBeenCalledTimes(1);
+    expect(failing.run.mock.calls[0]![0]).toMatchObject({ number: 12, pushPending: false });
+
+    const missing = makeNotifyHarness({ detail: vi.fn().mockResolvedValue(null) });
+    await expect(missing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(missing.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused open tells nobody: a validation failure, a conflicting auto-merge', async () => {
+    const invalid = makeNotifyHarness();
+    await expect(invalid.svc.openChangeRequest('ali%2Fx', makeUser(), { ...INPUT, title: '   ' })).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(invalid.run).not.toHaveBeenCalled();
+    expect(invalid.values).not.toHaveBeenCalled();
+
+    const conflicting = makeNotifyHarness({
+      merge: vi.fn().mockResolvedValue({ kind: 'conflicts', paths: ['KnowledgeBase/Sales/Deal.md'] }),
+    });
+    await expect(conflicting.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toBeInstanceOf(ChangeRequestConflictsError);
+    expect(conflicting.run).not.toHaveBeenCalled();
+    expect(conflicting.values).not.toHaveBeenCalled();
+  });
+
+  it('a refused open (a duplicate, say) tells nobody', async () => {
+    const h = makeNotifyHarness();
+    (h.prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([{ number: 3, branch: 'ali/x', base: 'main' }]);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toThrow();
+    expect(h.run).not.toHaveBeenCalled();
   });
 });
 

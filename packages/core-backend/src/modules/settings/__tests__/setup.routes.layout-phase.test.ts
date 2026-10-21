@@ -10,13 +10,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
-import { KbStartupRunner } from '../../workspace/startup/kb-startup-runner.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { TemplateFilesStep } from '../../workspace/startup/steps/template-files.step.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { defaultKbTemplateDir } from '../../../assets.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import { newKbStartupRunner } from '../../../__tests__/workspace-service.js';
 
 /**
  * The completing save and the REAL initialization phase, wired the way the
@@ -105,7 +105,7 @@ function boot() {
   // it: the completing save applies the admin's names to it, and the step
   // reads them from it when the phase runs.
   const kb = testKbContext();
-  const runner = new KbStartupRunner({
+  const runner = newKbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
     workspacesRoot: path.join(root, 'workspaces'),

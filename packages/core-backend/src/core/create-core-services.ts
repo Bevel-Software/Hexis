@@ -17,6 +17,8 @@ import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { KbRepository, repositoryDirFor } from '../modules/workspace/kb-repository.js';
+import type { IKbRepository } from '../modules/workspace/kb-repository.contract.js';
 import { AccountLinkService } from '../modules/embed/account-link.service.js';
 import type { EmbedService } from '../modules/embed/embed.service.js';
 import { composeEmbedService } from './compose-embed.js';
@@ -62,6 +64,8 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
+import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
+import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
@@ -113,7 +117,7 @@ import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
 import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
-import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
+import { WorkspaceIdMutex, WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import { assertGitVersion } from '../modules/workflow/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
 import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
@@ -123,6 +127,7 @@ import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
+import { ChangeRequestHooks, type IChangeRequestHooks } from '../modules/workflow/change-request-hooks.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
 import {
   PendingCommitsWorker,
@@ -243,6 +248,8 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
+  /** Runs a caller's `grep` pattern off the request thread under a budget; its workers end when the graph stops. */
+  patternMatcher: IPatternMatcher;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
    * session cookie — none when it carries none that verifies — so the
@@ -318,6 +325,12 @@ export interface CoreServices {
   reviewWorkflowService: ReviewWorkflowService;
   fileLockService: FileLockService;
   workflowService: WorkflowService;
+  /**
+   * The seam for "a change request was opened": a deployment registers here
+   * how the reviewers are told (the cloud's mail, say), and the open's answer
+   * says whether somebody did. Core registers nothing.
+   */
+  changeRequestHooks: IChangeRequestHooks;
   /** Remote sync (`POST /api/sync`): a git host or pipeline makes the clones catch up. */
   kbSyncService: KbSyncService;
   eventBus: WorkflowEventBus;
@@ -570,6 +583,32 @@ export async function createCoreServices(
    * Under the backups root: a persistent volume of its own, and one nothing
    * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
    */
+  // Shared mutex so git and diff operations on the same workspace serialize
+  // against each other — a backup-reseed races a concurrent commit otherwise.
+  // Keyed by the CANONICAL workspace id: a route's Express-decoded `:id` and
+  // a tool's encoded one reserve the same clone (see `WorkspaceIdMutex`).
+  const workspaceMutex = new WorkspaceIdMutex();
+  /**
+   * The knowledge base's ONE repository: every branch workspace is a worktree
+   * of it (see `kb-repository.ts`). One instance, handed to the workspace
+   * service, the startup phase and (through the workspace service) the git
+   * layer, so one fetch serves every workspace and the writes to its one
+   * config file are serialized in one place. Git operations in the worktrees
+   * are not serialized against each other beyond the workspace mutex: git's
+   * own locks cover a repository shared by worktrees.
+   *
+   * Under the backups root, like the set-aside copies: a persistent volume in
+   * every shipped compose file, so no new mount is needed, and outside the
+   * workspaces root, where the orphan sweep never sees it. The folder name
+   * starts with a dot, which no branch — and so no backup ledger's workspace
+   * id — can. On hexis-cloud every tenant has its own backups root: one
+   * repository per tenant.
+   */
+  const kbRepository: IKbRepository = new KbRepository({
+    dir: repositoryDirFor(config.workspacesRoot, kbDirName, path.join(config.backupsRoot, '.kb-repository')),
+    kbRepoUrl: () => repositorySource.url(),
+    gitRunner,
+  });
   const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
   /**
    * What must leave with a working copy that is set aside, whoever sets it
@@ -635,6 +674,7 @@ export async function createCoreServices(
             );
           });
       }),
+    kbRepository,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -672,6 +712,9 @@ export async function createCoreServices(
     // The same folder the workspace service sets aside into — see
     // `replacedWorkingCopiesRoot` above for why the two must agree.
     setAsideRoot: replacedWorkingCopiesRoot,
+    // The one repository every branch workspace is a worktree of — the same
+    // instance the workspace service holds (see `kbRepository` above).
+    repository: kbRepository,
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,
@@ -741,6 +784,7 @@ export async function createCoreServices(
       'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
       'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
   });
+  const patternMatcher = new WorkerPatternMatcher();
   const agentDownloadStore = new AgentDownloadStore({
     root: agentDownloadsRoot,
     publicBaseUrl: config.publicBackendUrl,
@@ -827,9 +871,6 @@ export async function createCoreServices(
   // registers its listener here, after this returns (see `AccountHooks`).
   const accountHooks = new AccountHooks();
 
-  // Shared mutex so git and diff operations on the same workspace serialize
-  // against each other — a backup-reseed races a concurrent commit otherwise.
-  const workspaceMutex = new WorkspaceMutex();
   // Workflow lifecycle hooks — the ONE registry this composition shares
   // between GitService (advisory commit validation), the agent-access gate
   // (the blocking agentRead / preWrite hooks), and the composition root,
@@ -916,6 +957,10 @@ export async function createCoreServices(
   // id-repair keeps the id namespace collision-free. Subscribers are registered
   // below, once the reacting services exist.
   const fileChangeNotifier = new FileChangeNotifier();
+  // Who tells the reviewers of an opened change request: the composition root
+  // of a distribution registers its listener here, after this returns (see
+  // `ChangeRequestHooks`).
+  const changeRequestHooks = new ChangeRequestHooks();
   const workflowService = new WorkflowService(
     db,
     gitService,
@@ -933,6 +978,11 @@ export async function createCoreServices(
     // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
     workflowHooks,
+    // Exposed as `changeRequestHooks`, the same instance, for the same reason.
+    changeRequestHooks,
+    // The opened event names the approvers as accounts; auth answers which
+    // of the addresses the access model names have one.
+    authService,
   );
   // The leftover-branch cleanup asks the Deployment page at every round, so
   // switching it off there applies without a restart.
@@ -1598,6 +1648,7 @@ export async function createCoreServices(
     spillStore,
     agentUploadStore,
     agentDownloadStore,
+    patternMatcher,
     agentDownloadFetcher,
     docExtractService,
     accessControl,
@@ -1633,6 +1684,7 @@ export async function createCoreServices(
     reviewWorkflowService,
     fileLockService,
     workflowService,
+    changeRequestHooks,
     kbSyncService,
     eventBus,
     fileChangeNotifier,

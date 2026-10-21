@@ -12,7 +12,6 @@ import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import { ManagedRepository } from '../managed-repository.js';
 import { RepositorySource } from '../repository-source.js';
-import { KbStartupRunner } from '../../workspace/startup/kb-startup-runner.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { TemplateFilesStep } from '../../workspace/startup/steps/template-files.step.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
@@ -20,6 +19,7 @@ import { defaultKbTemplateDir } from '../../../assets.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { KbContext } from '../../../shared/kb-context.js';
+import { newKbStartupRunner } from '../../../__tests__/workspace-service.js';
 
 /**
  * A repository the deployment keeps, and the REAL startup phase, wired the
@@ -89,7 +89,7 @@ function boot(kb: KbContext) {
   const gitRunner = new NodeGitRunner(60_000, source.credentials);
   const workspacesRoot = path.join(root, 'workspaces');
   const setAsideRoot = path.join(root, 'backups', 'replaced-working-copies');
-  const runner = new KbStartupRunner({
+  const runner = newKbStartupRunner({
     gitRunner,
     kbRepoUrl: () => source.url(),
     workspacesRoot,

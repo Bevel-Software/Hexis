@@ -352,6 +352,16 @@ export class PullRequestService implements IPullRequestService {
     this.linkBase = changeRequestLinkBase(publicFrontendUrl);
   }
 
+  /**
+   * The link to change request `number`, as every summary and detail carries
+   * it — absolute under the public address, else the in-app path with its
+   * note. Needs no read: a caller holding only the number (an open whose push
+   * was refused, say) builds the same link a listing would.
+   */
+  linkFor(number: number): { url: string; urlNote?: string } {
+    return changeRequestLink(number, this.linkBase);
+  }
+
   setDetailEnricher(enricher: PrDetailEnricher): void {
     this.detailEnricher = enricher;
   }

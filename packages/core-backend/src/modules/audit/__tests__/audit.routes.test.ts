@@ -5,6 +5,7 @@ import { createAuditRoutes } from '../audit.routes.js';
 import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
+  pagePrincipalId,
   type AuditPrincipal,
   type IAgentAuditService,
 } from '../audit.contract.js';
@@ -31,7 +32,9 @@ const ALICE_KEY: AuditPrincipal = {
 };
 
 /** Who owns what, as the fake service answers `ownerOf`. */
-const OWNERS: Record<string, string> = { [KEY_ID]: ALICE.id, [AGENT_ID]: BOB.id, [ALICE_AGENT_ID]: ALICE.id };
+/** A page Alice's views have called tools from; its id names a person by uuid, so it is minted for one. */
+const ALICE_PAGE_ID = pagePrincipalId('33333333-4444-4555-8666-777777777777', 'Dashboards/Roadmap.html');
+const OWNERS: Record<string, string> = { [KEY_ID]: ALICE.id, [AGENT_ID]: BOB.id, [ALICE_AGENT_ID]: ALICE.id, [ALICE_PAGE_ID]: ALICE.id };
 
 const audit = {
   listPrincipals: vi.fn(async () => [ALICE_KEY]),
@@ -103,6 +106,24 @@ describe('audit routes — events', () => {
     expect(audit.listEvents).toHaveBeenCalledWith({ kind: 'key', id: KEY_ID }, { before: '123.e-9', limit: 200 });
   });
 
+  it("serves a page's events to its viewer, and 404s an id that names no page", async () => {
+    const base = await listen(makeApp({ admin: false }));
+    const res = await fetch(`${base}/api/audit/principals/page/${ALICE_PAGE_ID}/events`);
+    expect(res.status).toBe(200);
+    expect(audit.listEvents).toHaveBeenCalledWith({ kind: 'page', id: ALICE_PAGE_ID }, { before: undefined, limit: 50 });
+    const notAPage = await fetch(`${base}/api/audit/principals/page/not-a-page/events`);
+    expect(notAPage.status).toBe(404);
+    expect(await notAPage.json()).toEqual({ error: 'No such agent, key or page' });
+  });
+
+  it('404s a page id whose path carries a line break of any kind', async () => {
+    const base = await listen(makeApp({ admin: false }));
+    for (const brk of ['\n', '\r', '\u0085', '\u2028', '\u2029']) {
+      const id = pagePrincipalId('33333333-4444-4555-8666-777777777777', `Dashboards/Road${brk}map.html`);
+      expect((await fetch(`${base}/api/audit/principals/page/${id}/events`)).status).toBe(404);
+    }
+  });
+
   it('answers a cursor the service does not recognise with 400, not 500', async () => {
     const base = await listen(makeApp({ admin: false }));
     audit.listEvents.mockRejectedValueOnce(new InvalidCursorError());
@@ -110,9 +131,23 @@ describe('audit routes — events', () => {
     expect(res.status).toBe(400);
   });
 
-  it("refuses another person's principal to a member, and serves it to an admin", async () => {
-    const asAlice = await listen(makeApp({ admin: false }));
-    expect((await fetch(`${asAlice}/api/audit/principals/agent/${AGENT_ID}/events`)).status).toBe(403);
+  it("refuses another person's principal to a member exactly as one that does not exist, and serves it to an admin", async () => {
+    const asBob = await listen(makeApp({ admin: false, as: BOB }));
+    const missingPage = pagePrincipalId('33333333-4444-4555-8666-777777777777', 'Dashboards/Nothing.html');
+    const refusals = [];
+    const missing = '00000000-0000-4000-8000-000000000000';
+    for (const path of [
+      `page/${ALICE_PAGE_ID}`,
+      `page/${missingPage}`,
+      `key/${KEY_ID}`,
+      `key/${missing}`,
+      `agent/${ALICE_AGENT_ID}`,
+      `agent/${missing}`,
+    ]) {
+      const res = await fetch(`${asBob}/api/audit/principals/${path}/events`);
+      refusals.push({ status: res.status, body: await res.json() });
+    }
+    expect(refusals).toEqual(Array(6).fill({ status: 404, body: { error: 'No such agent, key or page' } }));
     expect(audit.listEvents).not.toHaveBeenCalled();
     server.close();
 
@@ -166,7 +201,10 @@ describe('audit routes — revoke an agent', () => {
   it('404s when the connection vanished between the ownership check and the revoke', async () => {
     const base = await listen(makeApp({ admin: false, as: BOB }));
     audit.revokeConnection.mockRejectedValueOnce(new AuditPrincipalNotFoundError());
-    expect((await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' })).status).toBe(404);
+    const res = await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' });
+    expect(res.status).toBe(404);
+    // Only an agent revoke throws it, so it names an agent, as the route's other 404s do.
+    expect(await res.json()).toEqual({ error: 'No such agent' });
   });
 });
 

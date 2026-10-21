@@ -129,6 +129,11 @@ function lsTreeBuilds(): number {
   return spawnLog.filter((argv) => argv.includes('ls-tree')).length;
 }
 
+/** Ref resolutions through git: none, since the ref files answer. */
+function revParses(): number {
+  return spawnLog.filter((argv) => argv.includes('rev-parse')).length;
+}
+
 /** Batched reads of a commit's access tree: one per build. */
 function catFileBatches(): number {
   return spawnLog.filter((argv) => argv.includes('cat-file')).length;
@@ -190,6 +195,7 @@ describe('AccessControlService — at-ref model cache', () => {
   let repo: string;
   let other: string;
   let svc: AccessControlService;
+  let stub: WorkspaceService;
   const workspaceId = 'ws-atref-cache';
   const admin = 'razvan@bevel.software';
   const DOC = 'Team/Doc.md';
@@ -242,7 +248,7 @@ describe('AccessControlService — at-ref model cache', () => {
     await git(other, 'config', 'user.email', 'other@example.com');
     await git(other, 'config', 'user.name', 'Other');
 
-    const stub = {
+    stub = {
       getWorkspacePath: async () => workspaceDir,
       // The real service TTLs this at 30s; the stub always fetches so a push
       // from `other` is visible on the next gate call.
@@ -386,9 +392,11 @@ describe('AccessControlService — at-ref model cache', () => {
     // The seed holds roles.yaml and two access.md files; a read per file was
     // what the build used to cost, and what a server forking a large heap
     // cannot afford.
+    // One listing and one batch build the model; a second batch reads the
+    // asked path's own entries, once per commit and path (see the memo test).
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
     expect(lsTreeBuilds()).toBe(1);
-    expect(catFileBatches()).toBe(1);
+    expect(catFileBatches()).toBe(2);
     expect(fileShows()).toBe(0);
     // Both access files were read through the batch: Team's denial is seen.
     await pushFromOther('deny Admin in Team', () =>
@@ -396,7 +404,7 @@ describe('AccessControlService — at-ref model cache', () => {
     );
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
     expect(lsTreeBuilds()).toBe(2);
-    expect(catFileBatches()).toBe(2);
+    expect(catFileBatches()).toBe(4);
     expect(fileShows()).toBe(0);
   });
 
@@ -534,7 +542,139 @@ describe('AccessControlService — at-ref model cache', () => {
     // ...and nothing was pinned: the next call, with git answering in full,
     // builds again and answers.
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
-    expect(catFileBatches()).toBe(batchesBefore + 2);
+    // Three batches: the refused build, then the build that answered and the
+    // asked path's own entries.
+    expect(catFileBatches()).toBe(batchesBefore + 3);
+  });
+
+  it('resolves refs from the ref files and remembers own entries at a commit: a repeated gate call starts no git', async () => {
+    // First call at this commit: the model is built (two git calls) and the
+    // asked path's own entries are read (one batch). The refs themselves —
+    // `origin/main`, and the candidates a short name tries — come from the
+    // ref files, so no `rev-parse` runs at all.
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(new Map([[DOC, true]]));
+    expect(revParses()).toBe(0);
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(2);
+
+    // The same gate again, and the single-path gate for the same path: the
+    // model and the own entries are both remembered, so apart from the
+    // fixture's own fetch nothing is started.
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(new Map([[DOC, true]]));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, 'main', admin, DOC)).toBe(true);
+    expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+
+    // A path not asked before at this commit is read, and only that path.
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC, QUOTED_DOC])).toEqual(
+      new Map([
+        [DOC, true],
+        [QUOTED_DOC, false],
+      ]),
+    );
+    expect(catFileBatches()).toBe(1);
+    expect(revParses()).toBe(0);
+  });
+
+  it('asks git for a ref the files cannot decide, instead of reading it as missing', async () => {
+    // An annotated tag names a tag object, not a commit; the reader steps
+    // aside and the gate resolves it through `rev-parse <tag>^{commit}` —
+    // one process, the answer git gives, never "no such ref".
+    await git(repo, 'tag', '-a', 'v1', '-m', 'v1', 'origin/main');
+    expect(await svc.canWriteAtRef(workspaceId, 'v1', admin, DOC)).toBe(true);
+    expect(revParses()).toBe(1);
+    expect(lsTreeBuilds()).toBe(1);
+    // The same commit under its branch name: resolved from the files, the
+    // model already held.
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(revParses()).toBe(0);
+    expect(lsTreeBuilds()).toBe(0);
+  });
+
+  it('knows from the tree that a path is absent at a commit, and reads nothing for it', async () => {
+    // A change request that adds a file asks about it at the base, where it
+    // does not exist yet. The model's listing already named every path the
+    // commit carries, so the absence is a fact about the commit: remembered,
+    // and not read — on the first call or any later one.
+    const NEW = 'Team/New.md';
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [NEW])).toEqual(new Map([[NEW, true]]));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(0);
+    expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+  });
+
+  it("keeps a commit's tree up to the cap and not past it, as an absent path's cost shows", async () => {
+    // The seed carries seven paths. A service that may hold seven keeps the
+    // tree, so an absent path is answered without a read; one that may hold
+    // six does not keep it, so the same path is read on every call.
+    const NEW = 'Team/New.md';
+    const limited = (treeIndexMaxPaths: number) =>
+      new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, { treeIndexMaxPaths });
+    const keeps = limited(7);
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(0);
+    const drops = limited(6);
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(2);
+  });
+
+  it('lets the oldest models give their tree up past the budget, and they still answer', async () => {
+    // Seven paths at the first commit, eight at the second, a budget of ten:
+    // remembering the second puts the first past the budget. The first
+    // model keeps answering gates without a rebuild; only an absent path at
+    // it is read again, while at the second it costs nothing.
+    const NEW = 'Team/New.md';
+    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, {
+      treeIndexBudget: 10,
+    });
+    const first = await git(repo, 'rev-parse', 'origin/main');
+    expect(await budgeted.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    await pushFromOther('a later page', () => fs.writeFile(path.join(other, 'Team/Later.md'), '# later\n'));
+    expect(await budgeted.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    const second = await git(repo, 'rev-parse', 'origin/main');
+    expect(second).not.toBe(first);
+    spawnLog.length = 0;
+    expect(await budgeted.canWriteAtRef(workspaceId, second, admin, NEW)).toBe(true);
+    expect(lsTreeBuilds()).toBe(0);
+    expect(catFileBatches()).toBe(0);
+    spawnLog.length = 0;
+    expect(await budgeted.canWriteAtRef(workspaceId, first, admin, NEW)).toBe(true);
+    expect(lsTreeBuilds()).toBe(0);
+    expect(catFileBatches()).toBe(1);
+  });
+
+  it('remembers what a blob declares for itself, never a blob the batch could not read', async () => {
+    const SECRET = 'Team/Secret.md';
+    await pushFromOther('a page that denies the admin for itself', () =>
+      fs.writeFile(path.join(other, SECRET), '---\nwrite:\n  - deny Admin\n---\n# secret\n'),
+    );
+    // Build the model first, so the next batch is the own-entries read.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    // The own-entries batch loses the blob (a lost object reads as missing,
+    // exactly like an absent path): answered as no own entries, as before —
+    // the inherited write stands — but NOT remembered for the commit.
+    injected.rewriteNext = (argv) => (argv.includes('cat-file') ? rewriteBatchRecord(/:Team\/Secret\.md$/, 'missing') : null);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(true);
+    expect(injected.rewriteNext).toBeNull();
+    // The next call reads the blob again, and its own denial now holds...
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(false);
+    expect(catFileBatches()).toBe(1);
+    // ...and that answer, a fact about the commit, is remembered.
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(false);
+    expect(catFileBatches()).toBe(0);
   });
 
   it('holds the models of far more commits than one listing resolves', async () => {
