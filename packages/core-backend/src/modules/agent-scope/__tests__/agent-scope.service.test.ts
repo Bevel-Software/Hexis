@@ -83,6 +83,16 @@ describe('a connected .agent file narrows by its lists', () => {
     expect(scope.allowsPlatformTool('anything_at_all')).toBe(true);
   });
 
+  it.each([
+    ['written with no value', 'platformTools:\nskills: [Skills/x]'],
+    ['written as an empty list', 'platformTools: []\nskills: [Skills/x]'],
+  ])('platformTools %s: no platform tool, never every one', async (_label, body) => {
+    const scope = await service(kbWith({ 'a.agent': agentFile(body) })).resolve(ADA, 'a.agent');
+    expect(scope.isEverything()).toBe(false);
+    expect(scope.allowsPlatformTool('read_file')).toBe(false);
+    expect(scope.allowsPlatformTool('write_file')).toBe(false);
+  });
+
   it('skills: the skill folders it names, and nothing beside them', async () => {
     const scope = await service(kbWith(files)).resolve(ADA, 'Agents/narrow.agent');
     expect(scope.allowsSkill('Skills/Release/notes')).toBe(true);

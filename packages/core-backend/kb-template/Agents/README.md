@@ -49,7 +49,7 @@ which hold tool names. A folder means everything under it.
 | Key | What it holds | Absent |
 |-----|---------------|--------|
 | `harnessTools` | The tools the harness gives the session (its own, like `Read` or `Bash`, and the MCP servers it mounts). Read by the runner that starts the agent; the platform ignores it. Called `tools.allow` before; runners still read that name until every file has moved. | Up to the runner |
-| `platformTools` | Names of the platform's own tools, as `tools/list` shows them: `read_file`, `grep`, `list_skills`, … It decides which tools the agent is offered, not which skills it has: the skills the other lists name are its prompts either way. | Every platform tool |
+| `platformTools` | Names of the platform's own tools, as `tools/list` shows them: `read_file`, `grep`, `list_skills`, … It decides which tools the agent is offered, not which skills it has: the skills the other lists name are its prompts either way. Written with no value (`platformTools:` or `platformTools: []`), it offers no platform tools. | Every platform tool |
 | `connectors` | `.tool` files and MCP server definitions (`mcp.json`). A folder means every connector under it. | No connectors |
 | `skills` | Skill folders. A folder above several means every skill under it. | No skills |
 | `plugins` | Plugin folders. Each loads the plugin's connectors and skills, including the skills its manifest links from elsewhere. A folder above several means every plugin under it. | No plugins |

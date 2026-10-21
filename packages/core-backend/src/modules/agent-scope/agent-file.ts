@@ -12,7 +12,8 @@ export const AGENT_FILE_EXTENSION = '.agent';
  * runner's, and the platform reads none of it.
  *
  * A list that is ABSENT and a list that is EMPTY are different answers only
- * for `platformTools`, where absent means every platform tool. For the other
+ * for `platformTools`, where absent (the key not written) means every platform
+ * tool and empty (`platformTools:` with no value, or `[]`) means none. For the other
  * three, absent and empty both name nothing: a connection loads the union of
  * what the lists name, so an agent that names no skills loads none.
  */
@@ -27,7 +28,7 @@ export interface AgentFileDefinition {
   skills: string[];
   /** `.tool` files and MCP server definitions (a folder means every connector under it). */
   connectors: string[];
-  /** Names of the platform's own tools; null when the file names none (= all of them). */
+  /** Names of the platform's own tools; null when the key is not written (= all of them), empty when written empty (= none). */
   platformTools: string[] | null;
 }
 
@@ -71,7 +72,11 @@ export function parseAgentFile(content: string, repoPath: string): AgentFileDefi
     plugins: pathList(obj, 'plugins'),
     skills: pathList(obj, 'skills').map((p) => p.replace(/\/SKILL\.md$/i, '')),
     connectors: pathList(obj, 'connectors'),
-    platformTools: obj.platformTools === undefined || obj.platformTools === null ? null : names(obj, 'platformTools'),
+    // Only a key that is not written at all means every platform tool. A key
+    // written with no value (`platformTools:`, which YAML reads as null) or as
+    // `[]` is the author clearing the list, and loads none: an agent that meant
+    // to offer nothing must never be read as offering everything.
+    platformTools: Object.prototype.hasOwnProperty.call(obj, 'platformTools') ? names(obj, 'platformTools') : null,
   };
 }
 
