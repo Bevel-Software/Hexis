@@ -8,7 +8,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/index.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
-import { canonicalRoleName, pluginPrincipalKey } from '../access-model/access-grammar.js';
+import { canonicalRoleName, pluginPrincipalKey } from '../access-model/index.js';
 import type { PluginMembership } from './plugins.contract.js';
 import type { PluginSource } from './discovery/plugin-source.js';
 

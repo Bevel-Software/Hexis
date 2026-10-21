@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ESLint } from 'eslint';
@@ -22,6 +23,8 @@ const BACKEND = join(REPO_ROOT, 'packages', 'core-backend', 'src');
 const FRONTEND = join(REPO_ROOT, 'packages', 'core-frontend', 'src');
 const RULE = 'no-restricted-imports';
 const BOUNDARY = 'Modular Domain-Driven Design: reach another module through its index';
+/** Every message the rule gives starts so: the boundary itself, and the normal-form guard on it. */
+const RULE_NAME = 'Modular Domain-Driven Design:';
 
 /** One instance for the suite: loading the flat config and the parser is the slow part. */
 let instance: ESLint | null = null;
@@ -126,27 +129,80 @@ describe('lint: module boundaries', () => {
     expect(boundaryHits(reExport)).toHaveLength(1);
   });
 
-  it("sees a package import itself by name into another module's internals", async () => {
-    // Each package's `exports` lets it name itself: `./modules/*` in the
-    // backend, `./src/*` in the frontend.
-    for (const [path, spec, index] of [
-      [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/audit/request-audit.js', 'modules/audit/index.ts'],
-      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace/components/FileTree', 'modules/workspace/index.ts'],
-      [`${FE}/core/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/auth/state/auth.context', 'modules/auth/index.ts'],
-    ]) {
-      const messages = await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`);
-      expect(boundaryHits(messages), `${path} importing ${spec}`).toHaveLength(1);
-      expect(messages[0]).toContain(index);
+  it('refuses a relative path not in normal form, so no spelling slips past the count', async () => {
+    const specs = [
+      './../audit/request-audit.js',
+      '../mcp/../audit/request-audit.js',
+      '../audit/./request-audit.js',
+      '..//audit/request-audit.js',
+    ];
+    for (const spec of specs) {
+      const messages = await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, `import { a } from '${spec}';\nexport { a };\n`);
+      expect(
+        messages.filter((m) => m.includes('normal form')),
+        spec,
+      ).toHaveLength(1);
     }
-    for (const [path, spec] of [
-      [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/audit/index.js'],
-      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace'],
-      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace/index'],
-    ]) {
-      expect(await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`), `${path} importing ${spec}`).toEqual([]);
+    // A longer way round through `modules/` is still the same reach.
+    const around = await lintAs(
+      `${BE}/modules/mcp/__lint_fixture__.ts`,
+      "import { a } from '../../../../packages/core-backend/src/modules/audit/request-audit.js';\nexport { a };\n",
+    );
+    expect(boundaryHits(around)).toHaveLength(1);
+    // A trailing slash is the module's folder, which is its index.
+    expect(await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from '../audit/';\nexport { a };\n")).toEqual([]);
+    // Inside one module too: only the normal-form spelling of the same import passes.
+    const roundabout = await lintAs(
+      `${BE}/modules/mcp/__lint_fixture__.ts`,
+      "import { a } from './oauth/../mcp.routes.js';\nexport { a };\n",
+    );
+    expect(roundabout.filter((m) => m.includes('normal form'))).toHaveLength(1);
+    expect(await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from './mcp.routes.js';\nexport { a };\n")).toEqual([]);
+  });
+
+  it("rejects a package naming another module's internals through its own exports", async () => {
+    const cases = [
+      [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/', 'audit', 'request-audit.js'],
+      [`${BE}/modules/mcp/oauth/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/', 'audit', 'request-audit.js'],
+      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/', 'workspace', 'components/FileTree'],
+    ] as const;
+    for (const [file, prefix, other, internal] of cases) {
+      const deep = await lintAs(file, `import { a } from '${prefix}${other}/${internal}';\nexport { a };\n`);
+      expect(boundaryHits(deep), `${file}: ${prefix}${other}/${internal}`).toHaveLength(1);
+      expect(deep[0]).toContain(`modules/${other}/index.ts`);
+      for (const entry of [`${prefix}${other}`, `${prefix}${other}/index.js`]) {
+        expect(await lintAs(file, `import { a } from '${entry}';\nexport { a };\n`), entry).toEqual([]);
+      }
     }
   });
 
+  it('covers every folder depth a module has, with no ceiling', async () => {
+    // A throwaway tree: module `deep` nests eight folders, deeper than any today.
+    const { moduleBoundaries } = await boundaryModule();
+    const root = mkdtempSync(join(tmpdir(), 'module-boundaries-'));
+    try {
+      const nested = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      for (const pkg of ['core-backend', 'core-frontend']) {
+        mkdirSync(join(root, 'packages', pkg, 'src', 'modules', 'other'), { recursive: true });
+      }
+      mkdirSync(join(root, 'packages', 'core-backend', 'src', 'modules', 'deep', ...nested), { recursive: true });
+      const tseslint = (await import('typescript-eslint')).default;
+      const overrideConfig = [
+        { files: ['**/*.{ts,tsx}'], languageOptions: { parser: tseslint.parser } },
+        ...moduleBoundaries({ root }),
+      ] as ESLint.Options['overrideConfig'];
+      const bare = new ESLint({ cwd: root, overrideConfigFile: true, overrideConfig });
+      const file = join(root, 'packages', 'core-backend', 'src', 'modules', 'deep', ...nested, 'x.ts');
+      const lint = async (spec: string) =>
+        (await bare.lintText(`import { a } from '${spec}';\nexport { a };\n`, { filePath: file }))[0].messages.map((m) => m.message);
+      const out = '../'.repeat(nested.length + 1);
+      expect(boundaryHits(await lint(`${out}other/x.js`))).toHaveLength(1);
+      expect(await lint(`${out}other/index.js`)).toEqual([]);
+      expect(await lint(`${'../'.repeat(nested.length)}deep.service.js`)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('leaves shared/ and core/ alone: they are not modules', async () => {
     expect(
       await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from '../../shared/logging.js';\nexport { a };\n"),
@@ -197,12 +253,17 @@ describe('lint: module boundaries', () => {
       [`${FE}/core/__lint_fixture__.tsx`, '../modules/workspace/components/FileExplorer'],
       [`${FE}/__lint_fixture__.ts`, './modules/embed/mount'],
       [`${FE}/shared/components/__lint_fixture__.tsx`, '../../modules/auth/state/auth.context'],
+      [`${FE}/core/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/auth/state/auth.context'],
     ]) {
       const messages = await lintAs(path, `import { a } from '${spec}';\nexport { a };\n`);
       expect(boundaryHits(messages), `${path} importing ${spec}`).toHaveLength(1);
     }
+    const roundabout = await lintAs(`${FE}/core/__lint_fixture__.tsx`, "import { a } from './../modules/workspace/components/FileExplorer';\nexport { a };\n");
+    expect(roundabout.filter((m) => m.includes('normal form'))).toHaveLength(1);
     for (const [path, spec] of [
       [`${FE}/core/__lint_fixture__.tsx`, '../modules/workspace'],
+      [`${FE}/core/__lint_fixture__.tsx`, '../modules/workspace/'],
+      [`${FE}/core/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/workspace'],
       [`${FE}/__lint_fixture__.ts`, './modules/embed/index'],
       [`${FE}/core/__lint_fixture__.tsx`, './registry'],
     ]) {
@@ -216,7 +277,7 @@ describe('lint: module boundaries', () => {
     const results = await eslint().lintFiles(files);
     const hits = results.flatMap((r) =>
       r.messages
-        .filter((m) => m.ruleId === RULE && m.message.includes(BOUNDARY))
+        .filter((m) => m.ruleId === RULE && m.message.startsWith(RULE_NAME))
         .map((m) => `${relative(REPO_ROOT, r.filePath)}:${m.line} ${m.message}`),
     );
     expect(hits).toEqual([]);

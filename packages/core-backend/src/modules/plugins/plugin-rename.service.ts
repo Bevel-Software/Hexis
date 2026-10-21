@@ -16,7 +16,7 @@ import {
   canonicalPluginToken,
   hasAccessFrontmatterExtension,
   parsePluginPrincipalKey,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { PluginSource } from './discovery/plugin-source.js';

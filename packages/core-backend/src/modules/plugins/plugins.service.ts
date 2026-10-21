@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
 import path from 'node:path';
-import { isPrivateAccessMd } from '../access-model/access-grammar.js';
+import { isPrivateAccessMd } from '../access-model/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';

@@ -13,7 +13,7 @@ import {
   runToolChain,
   withCallExample,
 } from '@bevel-software/platform-mcp-core';
-import type { SpillStore } from '../workspace/spill-store.js';
+import type { SpillStore } from '../workspace/index.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
 /**

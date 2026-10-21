@@ -30,7 +30,7 @@ import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
+import type { IChangeReadGate } from '../access-model/index.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';

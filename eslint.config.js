@@ -143,10 +143,14 @@ export default defineConfig([
   // Map forbids.
   //
   // Imports inside one module, and of `shared/`, `core/`, `lib/` and
-  // packages, are untouched; so are tests, which may reach into another
-  // module's internals for a fixture. In core-frontend the files outside
-  // `modules/` (the shell in `core/`, the package entry) are held to the
-  // rule too; the backend's `core/` is not, being the composition root. `import()` expressions are not seen
+  // packages, are untouched, as long as a relative path is written in
+  // normal form (the rule refuses `./a/../b` in any module file, since a
+  // pattern cannot tell where such a path lands). A package naming its own
+  // `modules/<x>/...` export is held to the boundary like `../x/...`. Tests
+  // are untouched: they may reach into another module's internals for a
+  // fixture. In core-frontend the files outside `modules/` (the shell in
+  // `core/`, the package entry) are held to the rule too; the backend's
+  // `core/` is not, being the composition root. `import()` expressions are not seen
   // by `no-restricted-imports`. The files not yet held to the rule are
   // listed, each with its reason, in `eslint.module-boundaries.js`; that
   // list is the backlog and only ever shrinks.
