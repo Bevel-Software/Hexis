@@ -122,7 +122,7 @@ import { assertGitVersion } from '../modules/workflow/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
 import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
 import { FileLockService } from '../modules/workflow/file-lock.service.js';
-import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
+import { WorkflowEventBus } from '../modules/workflow/index.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';

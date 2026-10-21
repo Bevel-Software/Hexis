@@ -9,20 +9,23 @@ import { authFetch } from '../../../../lib/api';
  * the viewer's session, so a page sees and reaches exactly the tools the
  * viewer's own agent does — the same listing, the same refusals, nothing of
  * the enterprise agent's internal tools — and the server records it in the
- * Audit log under the page's path (`X-Bevel-Page`). The four members map to
+ * Audit log under the page's path (`X-Bevel-Page`). The five members map to
  * what an agent calls:
  *
- *   searchTools(query)   → `list_tools`, narrowed to the names that contain
- *                          every word of `query` (all of them for an empty one)
- *   toolsInfo(names)     → `tools_info`
- *   callTool(name, args) → `tools/call`
- *   callToolChain(code)  → `call_tool_chain`
+ *   searchTools(query)        → `list_tools`, narrowed to the names that
+ *                               contain every word of `query` (all of them
+ *                               for an empty one)
+ *   toolsInfo(names)          → `tools_info`
+ *   callTool(name, args)      → `tools/call`
+ *   callToolChain(code)       → `call_tool_chain`
+ *   uploadFile(file, options) → `request_file_upload`, the bytes POSTed to the
+ *                               upload endpoint, then `apply_file_upload`
  *
  * A call that only reads runs at once. A call that may write — a tool the
  * deployment's UTCP manual tags `write`, a tool the manual does not list (a
- * `.tool`'s, a plugin's MCP server's: nothing says they only read), and every
- * chain (a chain may call writers) — waits for the viewer's answer to one
- * card per page view. See {@link PageConsent}.
+ * `.tool`'s, a plugin's MCP server's: nothing says they only read), every
+ * chain (a chain may call writers) and every upload — waits for the viewer's
+ * answer to one card per page view. See {@link PageConsent}.
  */
 
 /** What a host that is the platform tells the HTML renderer: that tools are answered here, and for which page. */
@@ -64,14 +67,23 @@ export function useOpenPageInPlatform(): (() => void) | null {
   return useContext(OpenPageInPlatformContext);
 }
 
-/** The four members a page calls, by the name the frame posts. */
-export type PageToolFunction = 'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain';
+/** The five members a page calls, by the name the frame posts. */
+export type PageToolFunction = 'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain' | 'uploadFile';
 
-const PAGE_TOOL_FUNCTIONS: ReadonlySet<string> = new Set(['searchTools', 'toolsInfo', 'callTool', 'callToolChain']);
+const PAGE_TOOL_FUNCTIONS: ReadonlySet<string> = new Set([
+  'searchTools',
+  'toolsInfo',
+  'callTool',
+  'callToolChain',
+  'uploadFile',
+]);
 
 /** The code-mode meta-tools by the name a page may also `callTool` them under: two read, the chain may write. */
 const READING_META_TOOLS: ReadonlySet<string> = new Set(['list_tools', 'tools_info']);
 const CHAIN_TOOL = 'call_tool_chain';
+/** The agent upload path a page's `uploadFile` runs: the token, then the bytes, then the landing. */
+const UPLOAD_REQUEST_TOOL = 'request_file_upload';
+const UPLOAD_APPLY_TOOL = 'apply_file_upload';
 
 /** The answer a page gets when its viewer chose Deny. */
 export const DENIED = 'denied';
@@ -144,6 +156,72 @@ export class PageToolsClient {
   }
 
   /**
+   * Put a file into the knowledge base the way an agent does, with the
+   * viewer's session: `request_file_upload` for a token, the file's bytes
+   * POSTed as the raw body to the upload endpoint with the token in the
+   * `x-upload-token` header (never in the address, and never back to the
+   * page), then `apply_file_upload` into `destination` on `branch`.
+   *
+   * Resolves with what `apply_file_upload` answers, every path listed (the
+   * apply is asked with `all: true`). Rejects with the message
+   * of the step that failed: the upload endpoint's own (a file over the
+   * deployment's limit is refused there, naming it, before the apply runs),
+   * or the apply's — thrown whole (a destination the viewer may not write),
+   * or, when the upload landed no path at all, the first path's refusal with
+   * its code (`exists` under `create`, `missing` under `update`).
+   *
+   * The token is this call's alone — the page never sees it, so nobody can
+   * retry with it — so whenever no apply answered, it is given up at once
+   * (`DELETE` on the same endpoint, the token again in the header) and any
+   * bytes staged with it are deleted rather than left until it expires. An
+   * apply that answered has spent the token itself.
+   */
+  async uploadFile(file: unknown, options: unknown): Promise<unknown> {
+    const opts = (options && typeof options === 'object' ? options : {}) as Record<string, unknown>;
+    if (!(file instanceof Blob)) throw new PageToolError('uploadFile needs a File, or a Blob with a `name` option.');
+    const name = typeof opts.name === 'string' && opts.name !== '' ? opts.name : file instanceof File ? file.name : '';
+    if (name === '') throw new PageToolError('uploadFile needs a file name: pass a File, or a Blob with a `name` option.');
+    const { branch, destination, mode } = opts;
+    if (typeof branch !== 'string' || branch === '') throw new PageToolError('uploadFile needs `branch`.');
+    if (typeof destination !== 'string' || destination === '') {
+      throw new PageToolError('uploadFile needs `destination`, the folder the file lands in.');
+    }
+
+    const issued = (await this.callTool(UPLOAD_REQUEST_TOOL, { body: {} })) as { uploadUrl?: unknown; token?: unknown };
+    if (typeof issued?.uploadUrl !== 'string' || typeof issued.token !== 'string') {
+      throw new PageToolError('The upload could not start: the server answered no upload address.');
+    }
+    const token = issued.token;
+    const address = headerAddress(issued.uploadUrl);
+    let answer: { count?: unknown; files?: unknown };
+    try {
+      const sent = await this.fetchImpl(`${address}?filename=${encodeURIComponent(name)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'x-upload-token': token },
+        body: file,
+      });
+      if (!sent.ok) throw new PageToolError(await refusalOf(sent));
+      // `all: true`: the page gets every path's outcome, never the tool's
+      // 25-entry cut with a `truncated` flag it has no way to act on.
+      answer = (await this.callTool(UPLOAD_APPLY_TOOL, {
+        body: { branch, token, destination, all: true, ...(mode !== undefined ? { mode } : {}) },
+      })) as { count?: unknown; files?: unknown };
+    } catch (err) {
+      await this.discardUpload(address, token);
+      throw err;
+    }
+    const files = Array.isArray(answer?.files) ? (answer.files as Array<Record<string, unknown>>) : [];
+    if (answer?.count === 0 && files.length > 0) {
+      const refused = files[0]!;
+      throw new PageToolError(
+        typeof refused.message === 'string' ? refused.message : 'Nothing was written.',
+        typeof refused.error === 'string' ? refused.error : undefined,
+      );
+    }
+    return answer;
+  }
+
+  /**
    * `tools/call`, answered the way the page reads it: the tool's structured
    * content when it has some, else its text — parsed when it is JSON. A tool
    * that answers with an error, or a request the server refuses, rejects
@@ -163,7 +241,7 @@ export class PageToolsClient {
    */
   async mayWrite(fn: PageToolFunction, args: unknown[]): Promise<boolean> {
     if (fn === 'searchTools' || fn === 'toolsInfo') return false;
-    if (fn === 'callToolChain') return true;
+    if (fn === 'callToolChain' || fn === 'uploadFile') return true;
     const name = args[0];
     if (typeof name !== 'string') return false; // refused by callTool itself, before anything runs
     if (READING_META_TOOLS.has(name)) return false;
@@ -183,6 +261,15 @@ export class PageToolsClient {
       });
     } catch {
       // The refusal stands whether or not the log heard of it.
+    }
+  }
+
+  /** Give an unapplied upload token up, with its staged bytes. Best-effort: the refusal stands either way. */
+  private async discardUpload(address: string, token: string): Promise<void> {
+    try {
+      await this.fetchImpl(address, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    } catch {
+      // Unreached, the token still expires, and its bytes with it.
     }
   }
 
@@ -227,6 +314,26 @@ export class PageToolsClient {
     if (answer.error) throw new PageToolError(String(answer.error.message ?? 'The tool server refused the call.'));
     return answer.result;
   }
+}
+
+/**
+ * The upload endpoint's header-token address: `uploadUrl` without its token
+ * segment, on this app's own origin — the server builds `uploadUrl` from its
+ * public base URL, which the browser may reach under another name.
+ */
+function headerAddress(uploadUrl: string): string {
+  return new URL(uploadUrl, 'http://app.invalid').pathname.replace(/\/[^/]*$/, '');
+}
+
+/** The `{ error }` an HTTP refusal carries, or its status when it carries none. */
+async function refusalOf(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body?.error === 'string' && body.error !== '') return body.error;
+  } catch {
+    // Not JSON: say what the status says.
+  }
+  return `The upload was refused (HTTP ${res.status}).`;
 }
 
 interface RpcMessage {
@@ -361,8 +468,7 @@ export async function answerToolCall(
       // The view ended before the viewer chose: nothing ran, and nobody refused.
       if (allowed === null) return fail('The page was closed before the viewer answered.', 'closed');
       if (!allowed) {
-        const name = msg.fn === 'callToolChain' ? CHAIN_TOOL : String(msg.args[0] ?? '');
-        const args = msg.fn === 'callToolChain' ? { code: msg.args[0] } : msg.args[1];
+        const { name, args } = refusedCall(msg);
         void client.recordRefusal(name, args);
         return fail(DENIED, DENIED);
       }
@@ -378,11 +484,35 @@ export async function answerToolCall(
           ? await client.toolsInfo(a)
           : msg.fn === 'callToolChain'
             ? await client.callToolChain(a)
-            : await client.callTool(a, b);
+            : msg.fn === 'uploadFile'
+              ? await client.uploadFile(a, b)
+              : await client.callTool(a, b);
     return { type: 'bevel.tool.response', requestId: msg.requestId, ok: true, result };
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err), err instanceof PageToolError ? err.code : undefined);
   }
+}
+
+/**
+ * A refused call as the Audit log names it: the tool the page asked for, with
+ * the arguments it would have run with. An upload is refused as the
+ * `apply_file_upload` it would have ended in: its `body` holds only what that
+ * tool takes (no token, since none was asked for), and the file's name — not
+ * an argument of the tool, it travels with the bytes — sits beside it as
+ * `file`, so the record says what was refused without inventing an argument.
+ */
+function refusedCall(msg: ToolCallMessage): { name: string; args: unknown } {
+  const [a, b] = msg.args;
+  if (msg.fn === 'callToolChain') return { name: CHAIN_TOOL, args: { code: a } };
+  if (msg.fn === 'uploadFile') {
+    const opts = (b && typeof b === 'object' ? b : {}) as Record<string, unknown>;
+    const file = typeof opts.name === 'string' ? opts.name : a instanceof File ? a.name : undefined;
+    return {
+      name: UPLOAD_APPLY_TOOL,
+      args: { body: { branch: opts.branch, destination: opts.destination, mode: opts.mode }, file },
+    };
+  }
+  return { name: String(a ?? ''), args: b };
 }
 
 /** A page's display name: its file name without the extension. */
