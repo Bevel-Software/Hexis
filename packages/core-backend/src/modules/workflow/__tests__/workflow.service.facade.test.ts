@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type {
   AuthUser,
@@ -15,10 +19,13 @@ import { PendingCommitsService, type PendingCommit } from '../pending-commits.se
 import { PendingCommitsWorker } from '../pending-commits.worker.js';
 import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
+import type { ChangeRequestOpenedEvent, IChangeRequestHooks } from '../change-request-hooks.js';
 import {
+  ChangeRequestConflictsError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowDomainError,
+  WorkflowValidationError,
 } from '../../../shared/domain-errors.js';
 import type { WorkflowEventBus } from '../event-bus.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
@@ -225,6 +232,8 @@ function makePrs(): PullRequestService {
     getPrDetail: vi.fn(),
     invalidateDetailCache: vi.fn(),
     setDetailEnricher: vi.fn(),
+    // No public address configured: the in-app path, with its note.
+    linkFor: vi.fn((number: number) => ({ url: `/change-requests/${number}`, urlNote: 'Set PUBLIC_FRONTEND_URL to get absolute links.' })),
   } as unknown as PullRequestService;
 }
 
@@ -1637,6 +1646,254 @@ describe('WorkflowService.openChangeRequest — when the repository host refuses
     await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12 });
     expect(h.git.pull).toHaveBeenCalledWith('ali%2Fx', { preserveMerges: true });
     expect(push).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Opening a request tells the deployment's change-request listeners — once,
+ * here, whether a person or an agent opened it — and answers `notified`: the
+ * channels the listeners said reached the approvers. The approvers are the
+ * people the `## Affected owners` block lists, resolved to accounts and
+ * handed over once each; who could not be is counted.
+ */
+describe('WorkflowService.openChangeRequest — tells the change-request listeners', () => {
+  const INPUT = { sourceBranch: 'ali/x', targetBranch: 'main', title: '  Tidy the glossary  ' };
+  const PATHS = ['KnowledgeBase/Sales/Deal.md', 'KnowledgeBase/Legal/Terms.md'];
+  const ACCOUNTS: Record<string, { id: string; email: string; name: string }> = {
+    'dana@acme.test': { id: 'u-dana', email: 'dana@acme.test', name: 'Dana' },
+    'lena@acme.test': { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
+  };
+
+  function eligibility(
+    perPath: Record<string, { roles?: string[]; emails: string[] }>,
+  ): Map<string, { roles: string[]; users: { name: string; email: string }[]; emails: Set<string> }> {
+    const out = new Map<string, { roles: string[]; users: { name: string; email: string }[]; emails: Set<string> }>();
+    for (const [p, { roles = [], emails }] of Object.entries(perPath)) {
+      out.set(p, { roles, users: emails.map((email) => ({ name: '', email })), emails: new Set(emails) });
+    }
+    return out;
+  }
+
+  // A real repository, so the changed paths come from the `git diff` the
+  // service runs in production and not from a replaced helper: `main` is the
+  // base and the ref `origin/main` the diff is taken against; `ali/x` adds
+  // PATHS. The checkout sits under the knowledge-base folder name the test
+  // context gives, where the service looks for it.
+  let workspace: string;
+  beforeAll(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'hexis-open-tells-'));
+    const repo = path.join(workspace, testKbContext().kbDirName);
+    fs.mkdirSync(repo);
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.test', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('commit', '-q', '--allow-empty', '-m', 'base');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('checkout', '-q', '-b', 'ali/x');
+    for (const p of PATHS) {
+      fs.mkdirSync(path.dirname(path.join(repo, p)), { recursive: true });
+      fs.writeFileSync(path.join(repo, p), `# ${p}\n`);
+    }
+    git('add', '-A');
+    git('commit', '-q', '-m', 'the change');
+  });
+  afterAll(() => {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  function makeNotifyHarness(opts: {
+    eligible?: ReturnType<typeof eligibility> | null;
+    push?: ReturnType<typeof vi.fn>;
+    merge?: ReturnType<typeof vi.fn>;
+    detail?: ReturnType<typeof vi.fn>;
+    accounts?: { findActiveAccountsByEmail: ReturnType<typeof vi.fn> } | undefined;
+    link?: { url: string; urlNote?: string };
+  } = {}) {
+    const git = Object.assign(makeGit(), {
+      mergeFromOrigin: opts.merge ?? vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false }),
+      push: opts.push ?? vi.fn().mockResolvedValue(undefined),
+      pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+    }) as unknown as GitService;
+    const prs = makePrs();
+    (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    if (opts.detail) prs.getPrDetail = opts.detail as unknown as PullRequestService['getPrDetail'];
+    else (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ number: 12, branch: 'ali/x', base: 'main' });
+    if (opts.link) (prs.linkFor as ReturnType<typeof vi.fn>).mockReturnValue(opts.link);
+    const workspaces = makeWorkspaceService();
+    (workspaces.getWorkspacePath as ReturnType<typeof vi.fn>).mockResolvedValue(workspace);
+    const access = makeAccessControl();
+    (access.eligibleWritersForPathsAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.eligible ?? null);
+    const values = vi.fn(() => ({ returning: vi.fn(async () => [{ number: 12 }]) }));
+    const db = { insert: vi.fn(() => ({ values })) } as unknown as Database;
+    const run = vi.fn<(event: ChangeRequestOpenedEvent) => Promise<string[]>>(async () => ['email']);
+    const hooks: IChangeRequestHooks = { onChangeRequestOpened: vi.fn(), runChangeRequestOpened: run };
+    const accounts =
+      'accounts' in opts
+        ? opts.accounts
+        : {
+            findActiveAccountsByEmail: vi.fn(async (emails: readonly string[]) => {
+              const found = new Map<string, { id: string; email: string; name: string }>();
+              for (const email of emails) {
+                const account = ACCOUNTS[email];
+                if (account) found.set(email, account);
+              }
+              return found;
+            }),
+          };
+    const svc = new WorkflowService(
+      db, git, prs, makeReviewWorkflow(), workspaces, access,
+      makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
+      { emit: vi.fn() } as unknown as WorkflowEventBus, undefined, undefined, hooks, accounts,
+    );
+    return { svc, run, prs, access, accounts, values };
+  }
+
+  it('fires once, after the row exists, with the request, who opened it and the approvers as accounts — once each', async () => {
+    const h = makeNotifyHarness({
+      eligible: eligibility({
+        [PATHS[0]]: { roles: ['Sales'], emails: ['dana@acme.test', 'lena@acme.test'] },
+        // Lena again, by another spelling: one person.
+        [PATHS[1]]: { roles: ['Legal'], emails: ['LENA@acme.test'] },
+      }),
+    });
+    const user = makeUser({ id: 'u-ali', email: 'ali@acme.test', name: 'Ali' });
+    const answer = await h.svc.openChangeRequest('ali%2Fx', user, INPUT);
+
+    expect(h.run).toHaveBeenCalledTimes(1);
+    const [event] = h.run.mock.calls[0]!;
+    expect(event).toEqual({
+      number: 12,
+      title: 'Tidy the glossary',
+      sourceBranch: 'ali/x',
+      targetBranch: 'main',
+      openedBy: { id: 'u-ali', email: 'ali@acme.test', name: 'Ali' },
+      approvers: [
+        { id: 'u-dana', email: 'dana@acme.test', name: 'Dana' },
+        { id: 'u-lena', email: 'Lena@acme.test', name: 'Lena' },
+      ],
+      unresolvedApprovers: 0,
+      pushPending: false,
+    });
+    // No public address: no `url` at all, not a relative one.
+    expect(event).not.toHaveProperty('url');
+    // The accounts were read once, for the distinct canonical addresses.
+    expect(h.accounts!.findActiveAccountsByEmail).toHaveBeenCalledTimes(1);
+    expect(h.accounts!.findActiveAccountsByEmail.mock.calls[0]![0]).toEqual(['dana@acme.test', 'lena@acme.test']);
+    // The eligibility was asked for the paths the request changes — the
+    // `git diff` against the target's published ref, as in production.
+    const eligibleFor = h.access.eligibleWritersForPathsAtRef as ReturnType<typeof vi.fn>;
+    expect(eligibleFor).toHaveBeenCalledTimes(1);
+    expect(eligibleFor.mock.calls[0]!.slice(-1)[0]).toEqual([...PATHS].sort()); // as `git diff --name-only` orders them
+    // The row landed before anyone was told, and the answer says who was.
+    expect(h.values).toHaveBeenCalledTimes(1);
+    expect(h.values.mock.invocationCallOrder[0]).toBeLessThan(h.run.mock.invocationCallOrder[0]!);
+    expect(answer).toMatchObject({ number: 12, notified: ['email'] });
+  });
+
+  it('counts a person without an account and the built-in `everyone` as unresolved, and hands neither over', async () => {
+    const h = makeNotifyHarness({
+      eligible: eligibility({
+        [PATHS[0]]: { roles: ['everyone'], emails: ['dana@acme.test', 'nobody@acme.test'] },
+        [PATHS[1]]: { roles: ['everyone', 'Legal'], emails: ['dana@acme.test'] },
+      }),
+    });
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    const [event] = h.run.mock.calls[0]!;
+    expect(event.approvers).toEqual([{ id: 'u-dana', email: 'dana@acme.test', name: 'Dana' }]);
+    // `nobody@` once, `everyone` once however many paths grant it.
+    expect(event.unresolvedApprovers).toBe(2);
+  });
+
+  it('hands over the public address when one is configured', async () => {
+    const h = makeNotifyHarness({ link: { url: 'https://kb.acme.test/change-requests/12' } });
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ url: 'https://kb.acme.test/change-requests/12', approvers: [], unresolvedApprovers: 0 });
+  });
+
+  it('with no accounts to ask, or a read of them that fails, every approver is unresolved and the open goes on', async () => {
+    const eligible = eligibility({ [PATHS[0]]: { emails: ['dana@acme.test', 'lena@acme.test'] } });
+    const without = makeNotifyHarness({ eligible, accounts: undefined });
+    await without.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    expect(without.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const failing = makeNotifyHarness({
+        eligible,
+        accounts: { findActiveAccountsByEmail: vi.fn().mockRejectedValue(new Error('db down')) },
+      });
+      await expect(failing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ notified: ['email'] });
+      expect(failing.run.mock.calls[0]![0]).toMatchObject({ approvers: [], unresolvedApprovers: 2 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('answers `notified: []` truthfully when the listeners reached nobody', async () => {
+    const h = makeNotifyHarness();
+    h.run.mockResolvedValue([]);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).resolves.toMatchObject({ number: 12, notified: [] });
+  });
+
+  it('tells the listeners even when the host refused the push, and says so: the request exists, its commits are still to land', async () => {
+    const h = makeNotifyHarness({
+      push: vi.fn().mockRejectedValue(new Error('git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)')),
+    });
+    const err = await h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(h.run).toHaveBeenCalledTimes(1);
+    expect(h.run.mock.calls[0]![0]).toMatchObject({ number: 12, sourceBranch: 'ali/x', targetBranch: 'main', pushPending: true });
+  });
+
+  it('tells the listeners once the branches\' lifecycle locks are released: a slow mailer holds up the answer, not a delete or a merge', async () => {
+    const h = makeNotifyHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    h.run.mockImplementation(async () => { await gate; return ['email']; });
+    const opening = h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT);
+    await vi.waitFor(() => { expect(h.run).toHaveBeenCalledTimes(1); });
+    // `createBranch` takes the branch's lifecycle lock — the one `deleteBranch`
+    // and `mergeBranch` take too — so it completing while the listener still
+    // waits shows the lock was released before the listeners were told.
+    const free = await Promise.race([
+      h.svc.createBranch('ali%2Fx', 'ali/x').then(() => 'free'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('held'), 300)),
+    ]);
+    expect(free).toBe('free');
+    release();
+    await expect(opening).resolves.toMatchObject({ number: 12, notified: ['email'] });
+  });
+
+  it('tells the listeners when the detail cannot be read back: the request exists, a retry would be a duplicate', async () => {
+    const failing = makeNotifyHarness({ detail: vi.fn().mockRejectedValue(new Error('detail store down')) });
+    await expect(failing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toThrow('detail store down');
+    expect(failing.run).toHaveBeenCalledTimes(1);
+    expect(failing.run.mock.calls[0]![0]).toMatchObject({ number: 12, pushPending: false });
+
+    const missing = makeNotifyHarness({ detail: vi.fn().mockResolvedValue(null) });
+    await expect(missing.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(missing.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused open tells nobody: a validation failure, a conflicting auto-merge', async () => {
+    const invalid = makeNotifyHarness();
+    await expect(invalid.svc.openChangeRequest('ali%2Fx', makeUser(), { ...INPUT, title: '   ' })).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(invalid.run).not.toHaveBeenCalled();
+    expect(invalid.values).not.toHaveBeenCalled();
+
+    const conflicting = makeNotifyHarness({
+      merge: vi.fn().mockResolvedValue({ kind: 'conflicts', paths: ['KnowledgeBase/Sales/Deal.md'] }),
+    });
+    await expect(conflicting.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toBeInstanceOf(ChangeRequestConflictsError);
+    expect(conflicting.run).not.toHaveBeenCalled();
+    expect(conflicting.values).not.toHaveBeenCalled();
+  });
+
+  it('a refused open (a duplicate, say) tells nobody', async () => {
+    const h = makeNotifyHarness();
+    (h.prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([{ number: 3, branch: 'ali/x', base: 'main' }]);
+    await expect(h.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toThrow();
+    expect(h.run).not.toHaveBeenCalled();
   });
 });
 
