@@ -14,7 +14,7 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 import { SELF_HOLD_MESSAGE } from '../../workflow';
@@ -246,8 +246,11 @@ export function KbPageHeader({
           band cannot wrap, so something has to give first, and a file name
           the reader can still hover for (`title`, below) is a far cheaper
           loss than a Share button pushed off the side of the page. The
-          chips clip from the right in the order they are least urgent. */}
-      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+          chips clip from the right in the order they are least urgent. The
+          ink room is on this group as well as on the title inside it: the
+          group clips to the title's line box too, so the tails of g, y and p
+          that the title's own room uncovers would be cut off here instead. */}
+      <div className={`flex min-w-0 flex-1 items-center gap-3 overflow-hidden ${TITLE_INK_ROOM}`}>
         {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
             `.focus()` land on it — the standard way to hand focus to a region
             after a view swap. No focus ring: this is a programmatic landing
@@ -259,7 +262,7 @@ export function KbPageHeader({
           // a heading you cannot finish reading needs somewhere to say it. A
           // platform file shown by its plain name hovers its real one.
           title={fileNameTooltip(path, kbDirName) ?? titleOf(path, kbDirName)}
-          className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+          className={`min-w-0 truncate text-display font-semibold text-ink focus:outline-none ${TITLE_INK_ROOM}`}
         >
           {titleOf(path, kbDirName)}
         </h1>

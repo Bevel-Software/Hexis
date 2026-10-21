@@ -22,7 +22,6 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
-import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AgentDownloadStore, DOWNLOAD_TOKEN_REFUSAL } from '../agent-download.store.js';
 import { attachmentDisposition, createAgentDownloadRoutes, createDownloadFetcherIdentifier } from '../agent-download.routes.js';
@@ -31,6 +30,7 @@ import jwt from 'jsonwebtoken';
 import { buildDownload, DOWNLOAD_PERMISSION_REQUIRED, NOT_FOUND } from '../agent-download.builder.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * `request_file_download` end to end, over the REAL access resolver on a
@@ -136,7 +136,7 @@ async function start(options: StartOptions = {}): Promise<Started> {
     await mkdir(dirname(abs), { recursive: true });
     await writeFile(abs, contents);
   }
-  const workspaceService = new WorkspaceService(
+  const workspaceService = newWorkspaceService(
     root,
     'https://example.invalid/kb.git',
     testKbContext({ kbDirName: KB }),

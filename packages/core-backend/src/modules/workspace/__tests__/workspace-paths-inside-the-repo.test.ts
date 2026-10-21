@@ -16,8 +16,8 @@ import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * Nothing the platform accepts resolves outside the repository.
@@ -56,7 +56,7 @@ async function makeHarness(): Promise<Harness> {
   const workspaceDir = path.join(root, workspaceId);
   // The inner `.git` lets the service accept the workspace without cloning.
   await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+  const workspaceService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   await workspaceService.getWorkspacePath(workspaceId);
 
   const asked: string[] = [];

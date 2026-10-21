@@ -3,6 +3,7 @@ import path from 'node:path';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
 import {
   makeAgentRolesYamlWriteValidator,
@@ -76,6 +77,36 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
     if (!user) throw new ToolError('Your account is no longer available.', 401);
 
     const { loadActiveGroups } = deps;
+    const validatorCache = new Map<string, WriteValidator>();
+    /**
+     * The agent's pre-disk `roles.yaml` gate for `branch`'s workspace
+     * (cached): refuses a write that would leave the file unparseable (an
+     * app-wide admin lockout), that creates a role, or that adds a
+     * `- group:` entry naming no group — agents manage membership; roles are
+     * pre-set. ONE gate for every agent write to the workspace: the file
+     * tools take it before a byte lands, and `update_branch` takes it for a
+     * resolution's content before the merge.
+     */
+    const getWriteValidator = async (branch: string): Promise<WriteValidator> => {
+      assertBranchProvided(branch);
+      const cached = validatorCache.get(branch);
+      if (cached) return cached;
+      const ws = await deps.workspaceService.getOrCreateForUser(user, branch);
+      const basePath = await deps.workspaceService.getWorkspacePath(ws.id);
+      const validator = makeAgentRolesYamlWriteValidator(
+        deps.kbDirName,
+        () => readTextIfExists(path.join(basePath, deps.kbDirName, ROLES_YAML_BASENAME)),
+        loadActiveGroups &&
+          (async () => {
+            // A source that exists but cannot be read leaves group entries
+            // unchecked rather than refusing every one.
+            const active = await loadActiveGroups((file) => readTextIfExists(path.join(basePath, deps.kbDirName, file)));
+            return active.health.ok ? active : null;
+          }),
+      );
+      validatorCache.set(branch, validator);
+      return validator;
+    };
     const fsCache = new Map<string, LocalFilesystem>();
     const getFilesystem = async (branch: string): Promise<LocalFilesystem> => {
       // THE choke point: every knowledge-base tool resolves its workspace
@@ -94,6 +125,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       assertBranchProvided(branch);
       const cached = fsCache.get(branch);
       if (cached) return cached;
+      // (The write validator below is built through `getWriteValidator`.)
       const ws = await deps.workspaceService.getOrCreateForUser(user, branch);
       const workspaceId = ws.id;
       const basePath = await deps.workspaceService.getWorkspacePath(workspaceId);
@@ -107,24 +139,10 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 branch: branchForWorkspaceId(workspaceId),
                 user,
                 kbDirName: deps.kbDirName,
-                // Reject an agent write that would leave roles.yaml unparseable
-                // (app-wide admin lockout) or that creates a role before it
-                // reaches disk, or that adds a `- group:` entry naming no group
-                // — the agent gets a tool error and the file is untouched.
-                // Agents manage membership; roles are pre-set.
-                validateWrite: makeAgentRolesYamlWriteValidator(
-                  deps.kbDirName,
-                  () => readTextIfExists(path.join(basePath, deps.kbDirName, ROLES_YAML_BASENAME)),
-                  loadActiveGroups &&
-                    (async () => {
-                      // A source that exists but cannot be read leaves group
-                      // entries unchecked rather than refusing every one.
-                      const active = await loadActiveGroups((file) =>
-                        readTextIfExists(path.join(basePath, deps.kbDirName, file)),
-                      );
-                      return active.health.ok ? active : null;
-                    }),
-                ),
+                // The agent's pre-disk roles.yaml gate (`getWriteValidator`):
+                // the file tools and `update_branch`'s resolutions take the
+                // same one.
+                validateWrite: await getWriteValidator(branch),
                 creatorAccess: deps.creatorAccess,
               },
             )
@@ -155,6 +173,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       workflowService: deps.workflowService,
       events: deps.events,
       getFilesystem,
+      getWriteValidator,
     };
   };
 }

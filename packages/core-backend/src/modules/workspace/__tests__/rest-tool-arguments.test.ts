@@ -21,6 +21,11 @@ import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
 import { callLine, compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
+import { WorkerPatternMatcher } from '../bounded-matcher.js';
+
+/** The grep matcher this file's harness wires, closed once the file is done. */
+const patternMatcher = new WorkerPatternMatcher();
+afterAll(() => patternMatcher.close());
 
 /**
  * The REST route a script, a runner or a CI job calls with a connection key —
@@ -92,6 +97,15 @@ beforeAll(async () => {
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
+    // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    patternMatcher,
   );
   app.use('/api', router);
   server = await new Promise<HttpServer>((r) => {

@@ -27,7 +27,9 @@ import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
+import { WorkerPatternMatcher } from '../bounded-matcher.js';
 import { WorkspaceService } from '../workspace.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 const KB_DIR = 'knowledge-base';
@@ -69,6 +71,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let workspaces: WorkspaceService | null = null;
   let spillRoot = '';
   let docCacheDir = '';
+  let patternMatcher: WorkerPatternMatcher | undefined;
 
   afterEach(async () => {
     if (httpServer) {
@@ -78,6 +81,8 @@ describe('workspace tools — a branch that cannot be opened', () => {
       await new Promise<void>((r) => httpServer!.close(() => r()));
     }
     httpServer = undefined;
+    await patternMatcher?.close();
+    patternMatcher = undefined;
     workspaces = null;
     for (const dir of [root, spillRoot, docCacheDir]) {
       if (dir) await rm(dir, { recursive: true, force: true });
@@ -96,7 +101,13 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let internalTools: { name: string; inputs: unknown }[] = [];
 
   async function start(
-    opts: { repoUrl?: 'origin' | 'unreachable'; scope?: 'read' | 'write'; source?: 'internal' | 'external' } = {},
+    opts: {
+      repoUrl?: 'origin' | 'unreachable';
+      scope?: 'read' | 'write';
+      source?: 'internal' | 'external';
+      /** More files committed at the repository's root — `knowledge-base/<name>` to the tools. */
+      files?: Record<string, string>;
+    } = {},
   ): Promise<string> {
     root = await mkdtemp(join(tmpdir(), 'ws-tools-branch-'));
     spillRoot = await mkdtemp(join(tmpdir(), 'ws-tools-spill-'));
@@ -112,13 +123,16 @@ describe('workspace tools — a branch that cannot be opened', () => {
     await runGit(seed, ['remote', 'add', 'origin', upstream]);
     await mkdir(join(seed, KB_DIR));
     await writeFile(join(seed, KB_DIR, 'a.md'), 'hello\n', 'utf-8');
+    for (const [name, content] of Object.entries(opts.files ?? {})) {
+      await writeFile(join(seed, name), content, 'utf-8');
+    }
     await runGit(seed, ['add', '.']);
     await runGit(seed, ['commit', '-m', 'init']);
     await runGit(seed, ['checkout', '-b', 'alice/draft']);
     await runGit(seed, ['commit', '--allow-empty', '-m', 'draft']);
     await runGit(seed, ['push', 'origin', 'target-company-state', 'alice/draft']);
 
-    workspaces = new WorkspaceService(
+    workspaces = newWorkspaceService(
       workspacesRoot,
       opts.repoUrl === 'unreachable' ? join(root, 'no-such-repo.git') : upstream,
       testKbContext({ kbDirName: KB_DIR }),
@@ -185,6 +199,15 @@ describe('workspace tools — a branch that cannot be opened', () => {
       },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this file's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (patternMatcher = new WorkerPatternMatcher()),
     );
     app.use('/api', router);
     internalTools = (await registry.listInternal()) as unknown as { name: string; inputs: unknown }[];
@@ -435,9 +458,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
     const base = await start({ source: 'internal', scope: 'write' });
     const takesBranch = internalTools
       .map((t) => ({ name: t.name, body: (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body }))
-      .filter(({ body }) => (body?.required ?? []).includes('branch'))
-      // Resolves its own branch, and validates it itself first.
-      .filter(({ name }) => name !== 'execute_command');
+      .filter(({ body }) => (body?.required ?? []).includes('branch'));
 
     for (const { name: tool, body } of takesBranch) {
       // Every other argument the tool requires, so the call matches the tool
@@ -468,6 +489,51 @@ describe('workspace tools — a branch that cannot be opened', () => {
 
     expect(status).toBe(200);
     expect((body.entries as { name: string }[]).map((e) => e.name)).toContain(KB_DIR);
+  });
+
+  /**
+   * Not about branches, but this file holds the real chain harness: a grep
+   * called from inside `call_tool_chain` reaches the same route, so the same
+   * bound stops a catastrophic pattern there — the chain answers the worded
+   * 400 rather than waiting out its own timeout on a held event loop.
+   */
+  it('stops a too-expensive grep pattern from inside call_tool_chain, and a control pattern still matches', async () => {
+    const line = `${'a'.repeat(39)}!`;
+    const base = await start({ files: { 'redos.md': `${line}\n` } });
+    const client = await CodeModeUtcpClient.create(process.cwd(), {
+      variables: { bevel_API_URL: base, bevel_CONNECTION_KEY: 'internal-token' },
+    } as never);
+    try {
+      await client.registerManual(
+        new HttpCallTemplateSerializer().validateDict({
+          name: 'bevel',
+          call_template_type: 'http',
+          http_method: 'GET',
+          url: '${API_URL}/api/agent/internal/utcp',
+          content_type: 'application/json',
+          headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
+        }),
+      );
+      const { result } = await client.callToolChain(
+        `const grep = (pattern) => bevel.grep({ body: { branch: 'alice/draft', pattern, path: 'knowledge-base/redos.md' } });
+         let expensive;
+         const started = Date.now();
+         try { expensive = { ok: grep('^(a+)+$') }; } catch (err) { expensive = { failed: err.message }; }
+         const took = Date.now() - started;
+         return { expensive, took, control: grep('^a+!$') };`,
+        30_000,
+      );
+      // The search is stopped at the ticket's 5 s budget: timed around the call
+      // itself, inside the chain, so the chain runtime's own start-up (which
+      // varies by machine) is not what this measures.
+      expect(result.took).toBeLessThan(5_000 + 2_000);
+      expect(result.expensive.ok).toBeUndefined();
+      expect(result.expensive.failed).toContain('HTTP 400');
+      expect(result.expensive.failed).toContain('Pattern too expensive');
+      expect(result.control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
+    } finally {
+      await client.close();
+    }
   });
 
   it('500s an unreachable remote rather than blaming the branch', async () => {

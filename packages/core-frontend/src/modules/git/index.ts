@@ -13,3 +13,6 @@ import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from './branch-delete-menu-item';
  * branch-delete question is off.
  */
 export const GIT_MENU_ITEMS: readonly AdminMenuItem[] = [BRANCH_DELETE_CONFIRM_MENU_ITEM];
+
+/** The branch state a page reads (`useGit`), and the context a test provides it through. */
+export { GitContext, useGit, type GitContextValue } from './state/git.context';

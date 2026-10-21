@@ -65,7 +65,7 @@ export interface AgentOperationContext {
   sessionId?: string;
   /**
    * The workspace-relative path the operation targets. Absent for a
-   * write-capable operation with no resolvable target (`execute_command`).
+   * write-capable operation with no resolvable target.
    */
   wsPath?: string;
   /** The branch (draft) whose workspace the operation acts on. */

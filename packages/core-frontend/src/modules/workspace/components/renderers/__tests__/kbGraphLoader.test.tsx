@@ -8,6 +8,7 @@ const SURFACE: RendererSurface = {
   kbDirName: 'knowledge-base',
   openLink: () => undefined,
   openWorkspacePath: () => undefined,
+  openFilePage: () => undefined,
   openNodeId: () => undefined,
   canonicalUrlFor: () => null,
   rawUrl: () => '',
