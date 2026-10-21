@@ -323,10 +323,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * became the open tab's saved content (`applyReadBytes`, the
    * `file-changed` handler, the reads of `addTab` and `hydrateTabs` that
    * opened it), or of a write that completed (`markWritten`: a save of ours,
-   * a reverted or an accepted agent change). A read issued before it answers late with older bytes,
-   * and must not replace what that newer read or write brought. A read that
-   * left the tab alone (unsaved edits, a pending preview) does not count: the
-   * `file-changed` read after it still has to merge its bytes into the edits.
+   * a reverted or an accepted agent change). A read issued before it answers
+   * late with older bytes, and must not replace what that newer read or write
+   * brought; nor does its 404 mark the tab deleted (`applyReadGone`). A read
+   * that left the tab alone (unsaved edits, a pending preview) does not count:
+   * the `file-changed` read after it still has to merge its bytes into the
+   * edits.
    */
   const landedAtSeqRef = useRef<Map<string, number>>(new Map());
   const isStaleLanding = useCallback(
@@ -357,7 +359,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const thisGone = read.then(
       () => false,
       (err: unknown) => {
-        const isGone = err instanceof WorkspaceApiError && err.status === 404;
+        // A 404 older than bytes or a write that landed since is about a
+        // file since re-created: it refuses no save (see `applyReadGone`).
+        const isGone = err instanceof WorkspaceApiError && err.status === 404
+          && !isStaleLanding(readFrom, path, seq);
         if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
         return isGone;
       },
@@ -374,7 +379,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       if (existenceChecksRef.current.get(key) === gone) existenceChecksRef.current.delete(key);
     });
     return seq;
-  }, []);
+  }, [isStaleLanding]);
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
@@ -591,6 +596,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return next;
     });
   }, [isPendingDelete]);
+  /**
+   * A tracked read (`seq`, from `trackExistenceCheck`) answered 404 for an
+   * open tab: mark it deleted, under the one policy every such read shares,
+   * the counterpart of `applyReadBytes` for the answer "gone". Nothing is
+   * marked when the workspace moved on, or when bytes or a write landed after
+   * this read was issued (the tab closed and opened again, restored,
+   * reloaded, saved; `isStaleLanding`): the file is there, and this 404 is
+   * about a file since re-created. A newer read that only FOUND the file,
+   * leaving a dirty tab alone, does not outrank it: the server may have
+   * answered that one before the delete and this one after.
+   */
+  const applyReadGone = useCallback((readFrom: string, path: string, seq: number, name: string | null) => {
+    if (workspaceIdRef.current !== readFrom) return;
+    if (isStaleLanding(readFrom, path, seq)) return;
+    markTabDeleted(path, name);
+  }, [isStaleLanding, markTabDeleted]);
 
   const refreshFileTree = useCallback(async () => {
     if (!workspaceId) return null;
@@ -616,14 +637,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           if (checkedAt !== undefined && Date.now() - checkedAt < TREE_ABSENT_RECHECK_MS) continue;
           const readFrom = workspaceId;
           const read = readFile(readFrom, tab.path);
-          trackExistenceCheck(readFrom, tab.path, read);
+          const seq = trackExistenceCheck(readFrom, tab.path, read);
           read.then(
             () => treeAbsentCheckedAtRef.current.set(tab.path, Date.now()),
             () => treeAbsentCheckedAtRef.current.delete(tab.path),
           );
           read.catch((err) => {
-            if (workspaceIdRef.current !== readFrom) return;
-            if (err instanceof WorkspaceApiError && err.status === 404) markTabDeleted(tab.path, null);
+            if (err instanceof WorkspaceApiError && err.status === 404) applyReadGone(readFrom, tab.path, seq, null);
           });
         }
       }
@@ -632,7 +652,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       console.error('Failed to refresh file tree:', err);
       return null;
     }
-  }, [workspaceId, isPendingDelete, markTabDeleted, trackExistenceCheck]);
+  }, [workspaceId, isPendingDelete, applyReadGone, trackExistenceCheck]);
 
   // ── Tab CRUD ──────────────────────────────────────────────────────────────
 
@@ -681,7 +701,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           // it here would move the active tab under an address that still
           // names this file — the page would wait on it for good. Say what
           // happened instead; Close is the person's.
-          markTabDeleted(path, null);
+          applyReadGone(readFrom, path, seq, null);
         } else if (err instanceof WorkspaceApiError && err.status === 403) {
           // Read access was revoked — auto-close.
           dropTabByPath(path);
@@ -690,7 +710,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         }
       });
     }
-  }, [workspaceId, dropTabByPath, markTabDeleted, trackExistenceCheck, applyReadBytes]);
+  }, [workspaceId, dropTabByPath, applyReadGone, trackExistenceCheck, applyReadBytes]);
 
   const addTab = useCallback(async (relativePath: string): Promise<boolean> => {
     if (!workspaceId) return false;
@@ -1602,11 +1622,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // branches (workspaceIdRef.current changes). Applying old-branch bytes
     // to a new-branch tab would silently corrupt the buffer.
     const expectedWorkspaceId = workspaceId;
+    const read = readFile(expectedWorkspaceId, relativePath);
+    // Until this read answers, `saveFile` waits on it: a 404 marks the tab
+    // deleted, and an editor unmounting meanwhile must not write it back.
+    const seq = trackExistenceCheck(expectedWorkspaceId, relativePath, read);
     try {
-      const read = readFile(expectedWorkspaceId, relativePath);
-      // Until this read answers, `saveFile` waits on it: a 404 marks the tab
-      // deleted, and an editor unmounting meanwhile must not write it back.
-      const seq = trackExistenceCheck(expectedWorkspaceId, relativePath, read);
       const fresh = await read;
       // The caller (e.g. Edit-click) assumes the tab was clean when it asked
       // us to reload — if it isn't anymore, the user's newer state wins.
@@ -1619,13 +1639,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         // address that still named this file, and the page waited on it for
         // good. Say what happened instead, keeping any unsaved edits; Close
         // is the person's.
-        markTabDeleted(relativePath, null);
+        applyReadGone(expectedWorkspaceId, relativePath, seq, null);
         return;
       }
       console.warn(`[workspace] reloadTabFromDisk failed for "${relativePath}":`, err);
       throw err;
     }
-  }, [workspaceId, markTabDeleted, trackExistenceCheck, applyReadBytes]);
+  }, [workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes]);
 
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;
@@ -1814,13 +1834,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           // naming this file — the page then waited on "Opening …" for good.
           // A delete of our own closes it (and moves the address) itself;
           // anyone else's is said on the page (`markTabDeleted` skips ours).
-          markTabDeleted(activePath, null);
+          applyReadGone(expectedWorkspaceId, activePath, seq, null);
         } else {
           console.error('Failed to refetch active tab content:', err);
         }
       });
     }
-  }, [fsRevision, workspaceId, markTabDeleted, trackExistenceCheck, applyReadBytes]);
+  }, [fsRevision, workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes]);
 
   // ── Reset hydratedKey when persistenceBranch changes ──────────────────────
 
@@ -2063,7 +2083,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             // who, when the event named a person — a pull from the git host
             // ("Git sync", the `system` user) names nobody.
             const name = event.byUserId === 'system' || !event.byUserName ? null : event.byUserName;
-            markTabDeleted(event.path, name);
+            applyReadGone(subscribedWorkspaceId, event.path, seq, name);
             return;
           }
           console.warn(`[workspace] refetch on file-changed failed for "${event.path}":`, err);
@@ -2114,8 +2134,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           if (err instanceof WorkspaceApiError && err.status === 404) {
             // The lock was released by a delete: say so on the page, as the
             // other reads of an open tab do (`markTabDeleted` skips ours).
-            if (workspaceIdRef.current !== subscribedWorkspaceId) return;
-            markTabDeleted(event.path, null);
+            applyReadGone(subscribedWorkspaceId, event.path, seq, null);
             return;
           }
           console.warn(`[workspace] refetch on lock-released failed for "${event.path}":`, err);
@@ -2126,7 +2145,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       offFsTreeChanged();
       offLockReleased();
     };
-  }, [bus, workspaceId, refreshFileTree, dropTabByPath, markTabDeleted, trackExistenceCheck, isStaleFind, isStaleLanding, markLanded, forgetOwnDelete, applyReadBytes]);
+  }, [bus, workspaceId, refreshFileTree, dropTabByPath, applyReadGone, trackExistenceCheck, isStaleFind, isStaleLanding, markLanded, forgetOwnDelete, applyReadBytes]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 

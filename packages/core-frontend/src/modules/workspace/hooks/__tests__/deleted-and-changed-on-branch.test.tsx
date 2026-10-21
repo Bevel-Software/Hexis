@@ -1345,3 +1345,135 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(tab.changedOnBranch ?? null).toBeNull();
   });
 });
+
+describe('a late 404 about a file that came back since', () => {
+  const RESTORED = '# Draft\n\nRestored since.';
+
+  /** Hold the next read; `answer` rejects it with the 404 it would have had when it was issued. */
+  function holdNext404() {
+    const read: { answer: () => void } = { answer: () => { throw new Error('Held read was not started'); } };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      read.answer = () => reject(new WorkspaceApiError(404, 'Not found'));
+    }));
+    return read;
+  }
+
+  /** The file is back on the branch, and the tab is closed and opened again with its bytes. */
+  async function closeAndReopen(result: Hook) {
+    disk.set('KB/Draft.md', RESTORED);
+    await act(async () => { await result.current.closeTab(tabAt(result, 'KB/Draft.md')!, { skipConfirm: true }); });
+    await open(result, 'KB/Draft.md');
+    expect(result.current.activeTab?.content).toBe(RESTORED);
+  }
+
+  /** The file is back on the branch, and a newer reload brings its bytes into the tab. */
+  async function reloadLands(result: Hook) {
+    disk.set('KB/Draft.md', RESTORED);
+    await act(async () => { await result.current.reloadTabFromDisk('KB/Draft.md'); });
+    expect(result.current.activeTab?.content).toBe(RESTORED);
+  }
+
+  async function expectStillOpenAndSaves(result: Hook) {
+    await settle();
+    const tab = tabAt(result, 'KB/Draft.md');
+    expect(tab?.deletedBy).toBeFalsy();
+    expect(tab?.content).toBe(RESTORED);
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'saved after'); });
+    expect(disk.get('KB/Draft.md')).toBe('saved after');
+  }
+
+  it("a tree refresh's late 404 does not mark a tab closed and opened again since", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+    const read = holdNext404();
+    act(() => bus.emit(treeChanged()));
+    await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md'));
+
+    await closeAndReopen(result);
+    await act(async () => { read.answer(); });
+
+    await expectStillOpenAndSaves(result);
+  });
+
+  it("a switched-to tab's late 404 does not mark it once it was closed and opened again", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    await act(async () => { result.current.bumpFsRevision(); });
+    await settle();
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBeNull();
+
+    const read = holdNext404();
+    act(() => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    await closeAndReopen(result);
+    await act(async () => { read.answer(); });
+
+    await expectStillOpenAndSaves(result);
+  });
+
+  it("a reload's late 404 does not mark a tab closed and opened again since", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const read = holdNext404();
+    let reloading!: Promise<void>;
+    act(() => { reloading = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    await closeAndReopen(result);
+    await act(async () => { read.answer(); await reloading; });
+
+    await expectStillOpenAndSaves(result);
+  });
+
+  it("the eager refetch's late 404 does not mark a tab whose newer bytes already landed", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const read = holdNext404();
+    await act(async () => { result.current.bumpFsRevision(); });
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    await reloadLands(result);
+    await act(async () => { read.answer(); });
+
+    await expectStillOpenAndSaves(result);
+  });
+
+  it("a change's late 404 does not mark a tab whose newer bytes already landed, nor name anyone", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const read = holdNext404();
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    await reloadLands(result);
+    await act(async () => { read.answer(); });
+
+    await expectStillOpenAndSaves(result);
+  });
+
+  it("a lock release's late 404 does not mark a tab closed and opened again since", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    const read = holdNext404();
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
+
+    await closeAndReopen(result);
+    await act(async () => { read.answer(); });
+
+    await expectStillOpenAndSaves(result);
+  });
+
+  it('a 404 issued after the file came back still marks the tab deleted', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await reloadLands(result);
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+  });
+});
