@@ -11,9 +11,12 @@ export interface ExtractionJob {
 /**
  * One answer, worker → host. `retire` says the worker must not run another
  * job: a parser left a promise rejected behind it, so its state is no longer
- * something a next job should inherit.
+ * something a next job should inherit. `unattributed` says the rejection came
+ * while a worker that had served an earlier job was running this one, so it
+ * may be that earlier job's: the answer says nothing about this job's file,
+ * and the host runs the job again in a fresh worker.
  */
-export type ExtractionReply = { id: number; retire?: true } & ExtractResult;
+export type ExtractionReply = { id: number; retire?: true; unattributed?: true } & ExtractResult;
 
 /**
  * The worker side of document extraction: answer each job with what its
@@ -27,13 +30,19 @@ export type ExtractionReply = { id: number; retire?: true } & ExtractResult;
  * job's failure with that rejection's message. Nothing a parser does reaches
  * the server's process: the worker's events are the worker's.
  *
- * A rejection that arrives after the job was answered has nothing left to
- * fail; the worker ends itself instead of carrying it into the next job.
+ * A rejection is pinned on a job only when that job is the first this worker
+ * ran: no other job's parser has run here, so the rejection is the job's own.
+ * One arriving while a LATER job runs may be a straggler from an earlier one —
+ * the host hands a worker its next job the moment it answers — so it is
+ * answered `unattributed`, and the host runs the job again where it is first.
+ * One arriving between jobs has nothing left to fail; the worker ends itself
+ * instead of carrying it into the next job.
  */
 export function serveExtractions(extractors: Readonly<Record<string, ExtractFn>>): void {
   const port = parentPort;
   if (!port) throw new Error('serveExtractions runs inside a worker thread.');
   let current: number | undefined;
+  let served = 0;
 
   const answer = (reply: ExtractionReply): void => {
     if (current !== reply.id) return; // already answered — by a dangling rejection, say
@@ -45,13 +54,15 @@ export function serveExtractions(extractors: Readonly<Record<string, ExtractFn>>
     // no longer to be trusted, and left running it could pin the rejection on
     // the NEXT job's file. It ends itself; the pool replaces it.
     if (current === undefined) process.exit(0);
-    answer({ id: current, ok: false, message: couldNotBeExtracted(reason), retire: true });
+    const ownJob = served === 1;
+    answer({ id: current, ok: false, message: couldNotBeExtracted(reason), retire: true, ...(ownJob ? {} : { unattributed: true }) });
   };
   process.on('unhandledRejection', failCurrent);
   process.on('uncaughtException', failCurrent);
 
   port.on('message', (job: ExtractionJob) => {
     current = job.id;
+    served++;
     void (async () => {
       let result: ExtractResult;
       try {

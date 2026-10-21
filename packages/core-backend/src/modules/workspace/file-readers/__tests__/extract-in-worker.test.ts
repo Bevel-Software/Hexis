@@ -101,6 +101,26 @@ describe('WorkerDocumentExtractor — a parser that misbehaves', () => {
     expect(processSaw).toEqual([]);
   });
 
+  it('never pins an earlier job’s late rejection on the job the worker runs next — reused at once', async () => {
+    extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts'), poolMax: 1 });
+    expect(await extractor.extract('.straggler', Buffer.from('x'))).toMatchObject({ ok: true, text: 'answered first' });
+    // No pause: the one worker gets this job straight away, and the straggler lands while it runs.
+    expect(await extractor.extract('.slow-echo', Buffer.from('mine'))).toEqual({ ok: true, summary: 'echo', text: 'mine' });
+    expect(processSaw).toEqual([]);
+  });
+
+  it('still pins a rejection on its own job when the worker had served another first', async () => {
+    extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts'), poolMax: 1 });
+    expect(await extractor.extract('.echo', Buffer.from('warm'))).toMatchObject({ ok: true });
+    expect(await extractor.extract('.dangling', Buffer.from('x'))).toEqual({
+      ok: false,
+      failure: 'parser',
+      message: 'could not be extracted (XRefEntryException: Bad (uncompressed) XRef entry)',
+    });
+    expect(await extractor.extract('.echo', Buffer.from('after'))).toMatchObject({ ok: true, text: 'after' });
+    expect(processSaw).toEqual([]);
+  });
+
   it('answers a parser that throws with its message', async () => {
     extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts') });
     expect(await extractor.extract('.throw', Buffer.from('x'))).toEqual({

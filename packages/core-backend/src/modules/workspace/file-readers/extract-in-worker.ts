@@ -52,7 +52,9 @@ export interface WorkerDocumentExtractorOptions {
  * slice of Node's shared pool) is never detached. Past the budget the worker is
  * terminated, which stops a parser mid-loop, and the file answers the timeout
  * notice. A worker that answers with a dangling rejection, raises, or dies is
- * never reused; the pool replaces it.
+ * never reused; the pool replaces it. A rejection the worker cannot pin on
+ * this job — it had served another before (see `serveExtractions`) — runs the
+ * job again in a fresh worker, so one file's failure is never another's.
  */
 export class WorkerDocumentExtractor implements IDocumentExtractor {
   private readonly budgetMs: number;
@@ -75,15 +77,34 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
   }
 
   async extract(extension: string, bytes: Buffer): Promise<IsolatedExtraction> {
+    const started = Date.now();
+    const first = await this.attempt(extension, bytes, this.budgetMs, false);
+    if (!('unattributed' in first)) return first;
+    // A rejection came while a worker that had served another job ran this one,
+    // and may be that job's: run it again where it is the first job, so what
+    // the file is answered (and remembered) as is its own. Within the budget.
+    const left = this.budgetMs - (Date.now() - started);
+    if (left <= 0) return { ok: false, failure: 'timeout', message: extractionTimeoutNotice(this.budgetMs) };
+    const again = await this.attempt(extension, bytes, left, true);
+    // In a fresh worker the worker never answers `unattributed`; a crash of the moment if it ever did.
+    return 'unattributed' in again ? { ok: false, failure: 'crashed', message: again.message } : again;
+  }
+
+  private async attempt(
+    extension: string,
+    bytes: Buffer,
+    budgetMs: number,
+    fresh: boolean,
+  ): Promise<IsolatedExtraction | { unattributed: true; message: string }> {
     let w: Worker;
     try {
-      w = await this.pool.acquire();
+      w = await (fresh ? this.pool.acquireFresh() : this.pool.acquire());
     } catch {
       return busy();
     }
     const copy = new Uint8Array(bytes);
     const job: ExtractionJob = { id: this.nextJob++, extension, bytes: copy };
-    const outcome = await exchange<ExtractionReply>(w, job, this.budgetMs, [copy.buffer]);
+    const outcome = await exchange<ExtractionReply>(w, job, budgetMs, [copy.buffer]);
     if ('timeout' in outcome) {
       this.pool.discard(w);
       return { ok: false, failure: 'timeout', message: extractionTimeoutNotice(this.budgetMs) };
@@ -105,6 +126,7 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
     const { reply } = outcome;
     if (reply.retire) this.pool.discard(w);
     else this.pool.release(w);
+    if (reply.unattributed && !reply.ok) return { unattributed: true, message: reply.message };
     return reply.ok
       ? { ok: true, summary: reply.summary, text: reply.text }
       : { ok: false, failure: reply.transient ? 'crashed' : 'parser', message: reply.message };

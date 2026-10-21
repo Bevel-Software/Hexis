@@ -55,6 +55,27 @@ export class WorkerPool {
     return w;
   }
 
+  /**
+   * A worker that has run no job yet, for a job that must not share a thread
+   * with any other job's leftovers. An idle worker is swapped for a new one; a
+   * worker freed by another job is too, so this waits in the same queue.
+   */
+  async acquireFresh(): Promise<Worker> {
+    if (this.closed) throw this.busy();
+    const stale = this.all.size >= this.sizing.poolMax ? this.idle.pop() : undefined;
+    if (stale) this.discard(stale);
+    if (this.all.size < this.sizing.poolMax) {
+      const w = this.spawn();
+      w.ref();
+      return w;
+    }
+    const used = await this.acquire();
+    this.discard(used);
+    const w = this.spawn();
+    w.ref();
+    return w;
+  }
+
   /** A worker whose job ended cleanly goes to the next waiting job, or idles. */
   release(w: Worker): void {
     const next = this.waiting.shift();
@@ -67,10 +88,11 @@ export class WorkerPool {
   /**
    * A worker that must not run another job — over its budget, or left in a
    * state its job cannot vouch for — is terminated. Terminating is what stops
-   * a thread mid-computation; its exit takes it out of the pool and hands a
-   * fresh worker to the next waiting job.
+   * a thread mid-computation. It leaves the pool at once, and a fresh worker
+   * goes to the next waiting job.
    */
   discard(w: Worker): void {
+    this.leave(w);
     void w.terminate();
   }
 
@@ -86,16 +108,19 @@ export class WorkerPool {
   private spawn(): Worker {
     const w = this.spawnWorker();
     this.all.add(w);
-    // A worker that dies — terminated over budget, or out of memory — leaves the pool.
-    w.once('exit', () => {
-      this.all.delete(w);
-      const at = this.idle.indexOf(w);
-      if (at >= 0) this.idle.splice(at, 1);
-      if (this.closed) return;
-      const next = this.waiting.shift();
-      if (next) next.resolve(this.spawn());
-    });
+    // A worker that dies — out of memory, or ending itself — leaves the pool.
+    w.once('exit', () => this.leave(w));
     return w;
+  }
+
+  /** Takes `w` out of the pool, once, and hands its place to the next waiting job. */
+  private leave(w: Worker): void {
+    if (!this.all.delete(w)) return;
+    const at = this.idle.indexOf(w);
+    if (at >= 0) this.idle.splice(at, 1);
+    if (this.closed) return;
+    const next = this.waiting.shift();
+    if (next) next.resolve(this.spawn());
   }
 }
 

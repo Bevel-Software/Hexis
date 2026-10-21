@@ -28,4 +28,7 @@ serveExtractions({
   '.transient': () => ({ ok: false, transient: true, message: 'could not be read: the PDF reader did not load (gone)' }),
   '.exit': () => process.exit(3),
   '.echo': (bytes) => ({ ok: true, summary: 'echo', text: bytes.toString('utf8') }),
+  // Answers after a while: long enough for an earlier job's straggler to land during it.
+  '.slow-echo': (bytes) =>
+    new Promise((resolve) => setTimeout(() => resolve({ ok: true, summary: 'echo', text: bytes.toString('utf8') }), 150)),
 });
