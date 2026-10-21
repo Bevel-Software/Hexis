@@ -447,7 +447,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       await write(
         repo2,
         'team/access.md',
-        '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\nowner:\n  - group/Reviewer\n---\n',
+        '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\nowner:\n  - group/Reviewer\ndownload:\n  - deny Reviewer\n---\n',
       );
       const workspace = stubWorkspace(root2);
       const svc = new GroupsAdminService(
@@ -462,7 +462,12 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const roster = await svc.getRoster('rev@x.io');
       const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
       expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'owner' }]);
-      expect(reviewer.bareNameResolvesToRole).toEqual([{ path: 'team/access.md', verb: 'read' }]);
+      // A bare DENIAL changed meaning too (it now denies the role, not the
+      // group), so it is reported alongside the bare grant.
+      expect(reviewer.bareNameResolvesToRole).toEqual([
+        { path: 'team/access.md', verb: 'read' },
+        { path: 'team/access.md', verb: 'download' },
+      ]);
       // A group no role shares a name with keeps its bare hits, and has nothing
       // to report. ops@x.io is in Ops, so it can read ops/access.md.
       const ops = (await svc.getRoster('ops@x.io')).groups.find((g) => g.canonical === 'ops')!;
