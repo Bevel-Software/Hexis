@@ -127,8 +127,10 @@ export interface McpProxyOptions {
    * The deployment's read-only overrides, by tool name, read per listing so an
    * admin's change on the Tools page is in the next `tools/list`. Only the
    * code-mode meta-tools' are read from here — the KB tools' arrive as the
-   * `read-only` tag on the manual. Absent, the meta-tools list their built-in
-   * hints.
+   * `read-only` tag on the manual, and a cached surface built from an older
+   * manual is not reused: the overrides are part of the catalog revision the
+   * surface is keyed by (`catalog-revision.ts`). Absent, the meta-tools list
+   * their built-in hints.
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
 }

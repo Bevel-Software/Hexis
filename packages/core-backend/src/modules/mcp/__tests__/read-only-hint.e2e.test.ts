@@ -9,10 +9,9 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createMcpRoutes } from '../mcp.routes.js';
 import { McpService } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/spill-store.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { TOOL_READ_ONLY_SETTING, ToolReadOnlyHints } from '../../tool-registry/read-only-hints.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { TOOL_READ_ONLY_SETTING, ToolReadOnlyHints, ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
+import { createCatalogRevisionRoutes } from '../../../core/catalog-revision.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 
 /**
@@ -39,7 +38,7 @@ afterEach(async () => {
   for (const stop of stops.splice(0).reverse()) await stop().catch(() => {});
 });
 
-async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}) {
+async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catalogRevision?: boolean } = {}) {
   const registry = new ToolRegistry();
   registry.registerExternalTool(
     toolDef({ name: 'read_file', description: 'Read a file.', path: '/api/agent/tools/read_file', inputs: { type: 'object', properties: {} } }),
@@ -103,6 +102,25 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
   const stub = {} as never;
   app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   app.use('/api', createManualRoutes(registry, pass, undefined, hints));
+  // The route the endpoint keys its cached tool surface by. Served, a listing
+  // reuses the surface it built until the revision moves; absent (404), every
+  // request builds its own.
+  if (opts.catalogRevision) {
+    const asCaller: RequestHandler = (req, _res, next) => {
+      req.toolAuth = { userId: 'user-A' } as never;
+      next();
+    };
+    app.use(
+      '/api',
+      createCatalogRevisionRoutes({
+        toolManuals: { catalogFingerprints: async () => [] },
+        skills: { listSkills: async () => [] },
+        manualAuth: asCaller,
+        resolveUserEmail: async () => 'a@example.test',
+        readOnlyOverrides: () => hints.overrides(),
+      }),
+    );
+  }
   stops.push(async () => {
     service.onSecretsChanged(null);
     httpServer.closeAllConnections();
@@ -154,6 +172,23 @@ describe('the hosted MCP endpoint lists the read-only hint', () => {
     expect(listed.read_file).toEqual({ readOnlyHint: true });
     expect(listed.write_file).toEqual({ readOnlyHint: false });
     expect(listed.call_tool_chain).toEqual({ readOnlyHint: false });
+  });
+
+  it("lists an admin's change and its reset on the next tools/list when the tool surface is cached", async () => {
+    const { baseUrl, hints } = await startPlatform({ catalogRevision: true });
+    const client = await connect(baseUrl);
+    expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
+
+    await hints.set('read_file', false, '00000000-0000-4000-8000-00000000000a');
+    await hints.set('write_file', true, '00000000-0000-4000-8000-00000000000a');
+    let listed = await annotationsOf(client);
+    expect(listed.read_file).toEqual({ readOnlyHint: false });
+    expect(listed.write_file).toEqual({ readOnlyHint: true });
+
+    for (const name of ['read_file', 'write_file']) await hints.set(name, null, '00000000-0000-4000-8000-00000000000a');
+    listed = await annotationsOf(client);
+    expect(listed.read_file).toEqual({ readOnlyHint: true });
+    expect(listed.write_file).toEqual({ readOnlyHint: false });
   });
 
   it('leaves a tool from a plugin MCP server unannotated, as before', async () => {

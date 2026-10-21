@@ -9,7 +9,8 @@ const log = logger('catalog-revision');
 
 /**
  * A fingerprint of ONE caller's released catalog — every tool manual and every
- * skill the default branch serves them, right now.
+ * skill the default branch serves them, the MCP App views, and the admin's
+ * read-only overrides of the platform tools, right now.
  *
  * It exists for a client that holds a long-lived connection and cannot be told
  * anything: the local `hexis-mcp` server. The hosted endpoint reads it too, on
@@ -65,13 +66,23 @@ export function catalogRevision(
    * server already running keeps serving the view it read at startup.
    */
   views: readonly { uri: string; text: string }[] = [],
+  /**
+   * The admin's read-only overrides, by tool name (see `read-only-hints.ts`).
+   * They change what the agent manual says about a platform tool — its
+   * `read-only` tag — so a client holding the old manual, or a surface built
+   * from it, is owed a refresh. With none set the digest is what it was
+   * before overrides existed, so no deployment rebuilds for them unasked.
+   */
+  readOnlyOverrides: Readonly<Record<string, boolean>> = {},
 ): string {
+  const overrides = Object.entries(readOnlyOverrides).map(([name, readOnly]) => `${name}\u0000${readOnly}`);
   const lines = [
     ...[...manuals].sort(),
     '\u0001', // separates the lists, so a line can never migrate between them
     ...skills.map(skillFingerprint).sort(),
     '\u0001',
     ...views.map((v) => `${v.uri}\u0000${createHash('sha256').update(v.text).digest('hex')}`).sort(),
+    ...(overrides.length ? ['\u0001', ...overrides.sort()] : []),
   ];
   return createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 32);
 }
@@ -94,6 +105,8 @@ export function createCatalogRevisionRoutes(deps: {
   resolveUserEmail: (userId: string) => Promise<string | undefined>;
   /** The MCP App views served; absent on a deployment that serves none. */
   mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
+  /** The read-only overrides in effect (`IToolReadOnlyHints.overrides`); absent, none count. */
+  readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
 }): express.Router {
   const router = express.Router();
 
@@ -110,8 +123,11 @@ export function createCatalogRevisionRoutes(deps: {
       // A manifest that cannot be read counts as no views, which is also what
       // the MCP endpoint serves in that state.
       const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
+      // Overrides that cannot be read count as none, which is also what the
+      // agent manual serves in that state (its tools go out on built-in hints).
+      const overrides = deps.readOnlyOverrides ? await deps.readOnlyOverrides().catch(() => ({})) : {};
       res.json({
-        revision: catalogRevision(manuals, skills, views),
+        revision: catalogRevision(manuals, skills, views, overrides),
         tools: manuals.length,
         skills: skills.length,
       });

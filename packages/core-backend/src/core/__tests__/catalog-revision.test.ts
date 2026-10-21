@@ -104,6 +104,26 @@ describe('catalogRevision', () => {
    * otherwise renaming a skill to a departing tool's name would look like no
    * change at all.
    */
+  describe("an admin's read-only override", () => {
+    const base = catalogRevision([manualLine('serper')], [skill()]);
+
+    it('is the revision it was before overrides existed when none is set', () => {
+      expect(catalogRevision([manualLine('serper')], [skill()], [], {})).toBe(base);
+    });
+
+    it('moves when one is set, flipped or removed', () => {
+      const off = catalogRevision([manualLine('serper')], [skill()], [], { read_file: false });
+      const on = catalogRevision([manualLine('serper')], [skill()], [], { read_file: true });
+      expect(off).not.toBe(base);
+      expect(on).not.toBe(base);
+      expect(on).not.toBe(off);
+    });
+
+    it('does not move when the same overrides arrive in another order', () => {
+      expect(catalogRevision([], [], [], { a: true, b: false })).toBe(catalogRevision([], [], [], { b: false, a: true }));
+    });
+  });
+
   it('keeps the two catalogs apart', () => {
     const line = 'rfi\u0000Skills/Ops/rfi\u0000\u0000\u0000Answers RFIs.';
     expect(catalogRevision([line], [])).not.toBe(catalogRevision([], [skill()]));
@@ -125,6 +145,8 @@ describe('GET /agent/catalog-revision', () => {
     resolveUserEmail?: (userId: string) => Promise<string | undefined>;
     /** The served views, or a manifest read that fails. */
     mcpApps?: { manifest(): Promise<{ resources: { uri: string; text: string }[] }> };
+    /** The read-only overrides in effect, or a read that fails. */
+    readOnlyOverrides?: () => Promise<Record<string, boolean>>;
   }): Promise<{
     url: string;
     catalogFingerprints: ReturnType<typeof vi.fn>;
@@ -143,6 +165,7 @@ describe('GET /agent/catalog-revision', () => {
         },
         resolveUserEmail: deps.resolveUserEmail ?? (async () => 'someone@example.com'),
         ...(deps.mcpApps ? { mcpApps: deps.mcpApps } : {}),
+        ...(deps.readOnlyOverrides ? { readOnlyOverrides: deps.readOnlyOverrides } : {}),
       }),
     );
     http = app.listen(0);
@@ -207,6 +230,32 @@ describe('GET /agent/catalog-revision', () => {
         manifest: async () => {
           throw new Error('the view file is gone');
         },
+      },
+    });
+    const res = await fetch(`${url}/agent/catalog-revision`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { revision: string }).revision).toBe(catalogRevision([manualLine('serper')], [skill()]));
+  });
+
+  it("folds the read-only overrides into the revision, so an admin's change moves it", async () => {
+    const { url } = await mount({
+      manuals: [manualLine('serper')],
+      skills: [skill()],
+      userId: 'u1',
+      readOnlyOverrides: async () => ({ read_file: false }),
+    });
+    const body = (await (await fetch(`${url}/agent/catalog-revision`)).json()) as { revision: string };
+    expect(body.revision).toBe(catalogRevision([manualLine('serper')], [skill()], [], { read_file: false }));
+    expect(body.revision).not.toBe(catalogRevision([manualLine('serper')], [skill()]));
+  });
+
+  it('answers the no-overrides revision when the overrides cannot be read, as the manual lists built-in hints then', async () => {
+    const { url } = await mount({
+      manuals: [manualLine('serper')],
+      skills: [skill()],
+      userId: 'u1',
+      readOnlyOverrides: async () => {
+        throw new Error('connection terminated');
       },
     });
     const res = await fetch(`${url}/agent/catalog-revision`);

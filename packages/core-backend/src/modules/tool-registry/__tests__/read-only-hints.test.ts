@@ -3,26 +3,25 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { flattenManualTool, toListedTool } from '@bevel-software/platform-mcp-core';
-import { ToolRegistry } from '../tool-registry.js';
-import { createManualRoutes } from '../manual.routes.js';
 import {
   TOOL_READ_ONLY_SETTING,
   ToolReadOnlyHints,
+  ToolRegistry,
   UnknownToolError,
+  createManualRoutes,
   createToolHintsAgentRoutes,
   createToolHintsRoutes,
-} from '../read-only-hints.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+} from '../index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
 import { registerChangeRequestReadTools } from '../../workflow/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { registerSkillsTools } from '../../skills/skills.tools.js';
-import { registerPluginsTools } from '../../plugins/plugins.tools.js';
-import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
+import { registerSkillsTools } from '../../skills/index.js';
+import { registerPluginsTools } from '../../plugins/index.js';
+import { registerToolManualsTools } from '../../tool-manuals/index.js';
 import { registerEmbedTools } from '../../embed/embed.tools.js';
-import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import { parseToolReadOnlyOverrides } from '../../settings/deployment-settings.service.js';
+import { registerAgentGuideTool } from '../../agent-guide/index.js';
+import { ToolDescriptionNotes } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -119,6 +118,11 @@ function platformRegistry(): ToolRegistry {
     nothing,
     undefined,
     nothing,
+    undefined,
+    undefined,
+    // The pattern matcher: without one `grep` is not mounted. Its defs are all
+    // this reads, so the stand-in is never asked to search.
+    nothing,
   );
   registerSkillsTools(registry, express.Router(), pass, handler, nothing);
   registerPluginsTools(registry, kb);
@@ -163,7 +167,6 @@ function memorySettings(initial = '') {
       recordIfAbsent: async (_key: string, value: string, by: string | null) => {
         assertUuid(by);
         if (state.value) return false;
-        if (parseToolReadOnlyOverrides(value) === null) return false;
         state.value = value;
         state.writes += 1;
         state.updatedBy = by;
@@ -330,21 +333,6 @@ describe('an override', () => {
     const registry = platformRegistry();
     const hints = new ToolReadOnlyHints(registry, memorySettings('{"read_file":"yes"}').port);
     expect(await hints.overrides()).toEqual({});
-  });
-});
-
-describe('the setting holds only a map of tool names to booleans', () => {
-  it('accepts a map, and blank as no override', () => {
-    expect(parseToolReadOnlyOverrides('{"read_file":false,"call_tool_chain":true}')).toEqual({
-      read_file: false,
-      call_tool_chain: true,
-    });
-    expect(parseToolReadOnlyOverrides('')).toEqual({});
-    expect(Object.hasOwn(parseToolReadOnlyOverrides('{"__proto__":true}')!, '__proto__')).toBe(true);
-  });
-
-  it.each(['[]', 'true', '{"read_file":"false"}', '{"bad name":true}', 'not json'])('refuses %s', (raw) => {
-    expect(parseToolReadOnlyOverrides(raw)).toBeNull();
   });
 });
 

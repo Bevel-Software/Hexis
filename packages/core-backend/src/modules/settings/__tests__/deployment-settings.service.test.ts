@@ -8,11 +8,11 @@ import {
   CORE_SETTINGS,
   LEGACY_LAYOUT_ENV_VARS,
   retireMergedBranchesOn,
+  parseToolReadOnlyOverrides,
 } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
-import { ToolReadOnlyHints } from '../../tool-registry/read-only-hints.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { ToolReadOnlyHints, ToolRegistry } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 
 const ENC_KEY = randomBytes(32).toString('base64');
 
@@ -747,5 +747,20 @@ describe('DeploymentSettingsService — the read-only overrides', () => {
     await expect(settings.recordIfAbsent('toolReadOnlyOverrides', '{"write_file":"yes"}', null)).rejects.toBeInstanceOf(
       SettingsValidationError,
     );
+  });
+});
+
+describe('the read-only overrides setting holds only a map of tool names to booleans', () => {
+  it('accepts a map, and blank as no override', () => {
+    expect(parseToolReadOnlyOverrides('{"read_file":false,"call_tool_chain":true}')).toEqual({
+      read_file: false,
+      call_tool_chain: true,
+    });
+    expect(parseToolReadOnlyOverrides('')).toEqual({});
+    expect(Object.hasOwn(parseToolReadOnlyOverrides('{"__proto__":true}')!, '__proto__')).toBe(true);
+  });
+
+  it.each(['[]', 'true', '{"read_file":"false"}', '{"bad name":true}', 'not json'])('refuses %s', (raw) => {
+    expect(parseToolReadOnlyOverrides(raw)).toBeNull();
   });
 });
