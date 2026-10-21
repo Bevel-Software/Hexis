@@ -2104,6 +2104,24 @@ describe('FileViewer: the file changed on the branch while you were editing', ()
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Theirs instead.');
   });
 
+  it('says the merged edits were saved once a save has written them', async () => {
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+    await act(async () => {
+      injectRemoteChangeFromTest?.({
+        content: 'Upstream first line. Mine.',
+        savedContent: 'Upstream first line. Mine.',
+        outcome: 'merged',
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'This file changed on the branch while you were editing. Your edits were merged in and saved.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/save to keep them/)).not.toBeInTheDocument();
+  });
+
   it('Dismiss takes the banner away', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="First line." captureTyped />);

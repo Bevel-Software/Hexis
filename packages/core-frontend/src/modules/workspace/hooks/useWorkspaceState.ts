@@ -92,6 +92,22 @@ interface ExistenceAnswer {
   found: { seq: number; bytes: string } | null;
 }
 
+/**
+ * A tab whose edits a commit pulled from the git host replaced: it shows the
+ * pulled bytes, clean, and says whether the edits were discarded (or held by
+ * the pull already, `null`). The editor reloads its buffer.
+ */
+function takePulledOverEdits(tab: OpenTab, pulled: string, changedOnBranch: 'discarded' | null): OpenTab {
+  return {
+    ...tab,
+    content: pulled,
+    savedContent: pulled,
+    isDirty: false,
+    changedOnBranch,
+    remoteRevision: (tab.remoteRevision ?? 0) + 1,
+  };
+}
+
 /** The newer of two optional answers, by read number. */
 function newestOf<T>(a: T | null, b: T | null, seqOf: (x: T) => number): T | null {
   if (a === null) return b;
@@ -1721,7 +1737,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     if (found && editedFrom !== null && found.bytes !== editedFrom
       && !isStaleLanding(workspaceId, relativePath, found.seq)) {
       const merged = threeWayMerge(editedFrom, content, found.bytes);
-      if (merged === null || merged === found.bytes) return;
+      if (merged === null || merged === found.bytes) {
+        // The tab shows the pulled bytes and says what became of the edits.
+        // The `file-changed` read cannot always say it: Done marks the tab
+        // clean as the editor closes, so that read took the bytes as onto a
+        // clean tab, silently.
+        const pulled = found.bytes;
+        setOpenTabs((prev) => {
+          const idx = prev.findIndex((t) => t.path === relativePath);
+          if (idx < 0) return prev;
+          const t = prev[idx];
+          // Edits made since (Edit again, typing) are the person's newest.
+          if (t.isDirty || (t.savedContent !== editedFrom && t.savedContent !== pulled)) return prev;
+          const next = prev.slice();
+          next[idx] = takePulledOverEdits(t, pulled, merged === null ? 'discarded' : null);
+          return next;
+        });
+        return;
+      }
       toWrite = merged;
       mergedOntoPull = true;
     }
@@ -2097,17 +2130,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
                 // Merge the edits onto it; only when they collide are they
                 // given up, and the banner says which happened.
                 const merged = threeWayMerge(t.savedContent, t.content, content);
+                if (merged === null) return takePulledOverEdits(base, content, 'discarded');
                 const remoteRevision = (t.remoteRevision ?? 0) + 1;
-                if (merged === null) {
-                  return {
-                    ...base,
-                    content,
-                    savedContent: content,
-                    isDirty: false,
-                    changedOnBranch: 'discarded',
-                    remoteRevision,
-                  };
-                }
                 return {
                   ...base,
                   content: merged,

@@ -1595,7 +1595,10 @@ export function FileViewer() {
               <div className="flex items-center gap-2">
                 <span className="flex-1">
                   {changedOnBranch === 'merged'
-                    ? 'This file changed on the branch while you were editing. Your edits were merged in; save to keep them.'
+                    ? (openTab?.content !== openTab?.savedContent
+                      ? 'This file changed on the branch while you were editing. Your edits were merged in; save to keep them.'
+                      // A save that waited on the change has written the merge.
+                      : 'This file changed on the branch while you were editing. Your edits were merged in and saved.')
                     : 'This file changed on the branch while you were editing, and your edits could not be merged. They were discarded.'}
                 </span>
                 <Button variant="quiet" size="sm" title="Dismiss" onClick={() => clearChangedOnBranch(openFilePath)}>
