@@ -33,7 +33,9 @@ const apiMock = vi.hoisted(() => ({
  * callback the pane only reaches through an HTML page's frame (Open in the
  * platform). The pane itself renders as it always does.
  */
-const paneProps = vi.hoisted(() => ({ last: null as null | { onOpenInPlatform?: () => void } }));
+const paneProps = vi.hoisted(() => ({
+  last: null as null | { onOpenInPlatform?: () => void; linkHome?: { path: string; branch: string } },
+}));
 vi.mock('../components/skill-page/SkillFilePane', async (importOriginal) => {
   const real = await importOriginal<typeof import('../components/skill-page/SkillFilePane')>();
   return {
@@ -105,6 +107,7 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
   }) => (
     <div data-testid="md-view">
       {source}
+      <h2 id="steps">Steps</h2>
       <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
         link-probe
       </button>
@@ -1602,18 +1605,40 @@ describe('SkillPage: links and images in the file', () => {
     });
   });
 
-  it('follows a link to a section of the file on screen in this tab, by its fragment only', async () => {
+  it('follows a link to a section of the file on screen by scrolling to its heading, in this tab', async () => {
     const open = vi.spyOn(window, 'open');
+    // The page's address has no heading scroll of its own, so the click is
+    // what scrolls: the heading the fragment names comes into view, and the
+    // page neither opens a tab nor navigates.
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
     try {
       renderPage(false);
       await settled();
       fireEvent.click(screen.getByRole('button', { name: 'section-probe' }));
+      expect(scrolled).toEqual(['steps']);
       expect(open).not.toHaveBeenCalled();
       expect(screen.queryByTestId('navigated-to')).toBeNull();
       expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
     } finally {
       open.mockRestore();
+      Element.prototype.scrollIntoView = original;
     }
+  });
+
+  it("names the file's real home for an HTML page's links: its workspace path, on the default branch", async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+      ...git,
+      status: { ...git.status!, branch: 'alice/draft' },
+    });
+    await settled();
+    expect(paneProps.last?.linkHome).toEqual({
+      path: 'knowledge-base/Skills/newsletter/SKILL.md',
+      branch: DEFAULT_BRANCH,
+    });
   });
 
   it("serves a relative image from the default branch's workspace, under the skill folder", async () => {

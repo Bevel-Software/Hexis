@@ -525,8 +525,25 @@ describe('useFileNav.openLink', () => {
       href: '/skills-and-tools/skills/newsletter#steps',
       newTab: false,
     });
-    result.current.openLink('ref.md', base, 'main');
+    result.current.openLink('ref.md', base, { homeBranch: 'main' });
     expectNewTab('/workspace/main/knowledge-base/Skills/newsletter/ref.md');
+  });
+
+  // A host whose address does not scroll to a fragment (an HTML page's frame,
+  // the skill page) takes a section link itself: handed the fragment, while
+  // this tab stays where it is. Another file still opens a new tab.
+  it('hands a section link to the host that scrolls it, and moves nothing', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('main', 'knowledge-base', '/workspace/main/knowledge-base/Dashboards/Roadmap.html');
+    const base = 'knowledge-base/Dashboards/Roadmap.html';
+    const onSection = vi.fn();
+    result.current.openLink('Roadmap.html#q3', base, { onSection });
+    result.current.openLink('/workspace/main/knowledge-base/Dashboards/Roadmap.html#q4', base, { onSection });
+    expect(onSection.mock.calls).toEqual([['#q3'], ['#q4']]);
+    expect(navigateMock).not.toHaveBeenCalled();
+    result.current.openLink('Board.html#q3', base, { onSection });
+    expect(onSection).toHaveBeenCalledTimes(2);
+    expectNewTab('/workspace/main/knowledge-base/Dashboards/Board.html#q3');
   });
 });
 

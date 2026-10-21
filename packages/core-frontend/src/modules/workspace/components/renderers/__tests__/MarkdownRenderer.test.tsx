@@ -332,6 +332,23 @@ describe('MarkdownRenderer', () => {
     open.mockRestore();
   });
 
+  // ...and on that address the page scrolls the heading the fragment names
+  // into view: the other half of "a section link scrolls in place".
+  it('scrolls the heading a section address names into view, in full screen too', async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      renderPreview('# Intro\n\n## Goal\n\nText', 'Knowledge/Foo.md', '/workspace/alice%2Fdraft/foo-node?fullscreen=1#goal');
+      await waitFor(() => expect(scrolled).toEqual(['goal']));
+      expect(screen.getByTestId('location').textContent).toBe('/workspace/alice%2Fdraft/foo-node?fullscreen=1#goal');
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   // Ctrl/⌘/Shift-click on a new-tab link is the browser's to answer, as for
   // any `target="_blank"` anchor: the app neither cancels it nor opens a tab.
   it('leaves a modifier-click on a link to the browser', () => {
