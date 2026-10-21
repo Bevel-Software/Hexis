@@ -1468,6 +1468,39 @@ describe('a late 404 about a file that came back since', () => {
     await expectStillOpenAndSaves(result);
   });
 
+  it('a 404 from overlapping reads refuses no save once the tab was closed and opened again before the other read answered', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+    const reads: { gone: () => void; found: () => void } = {
+      gone: () => { throw new Error('Held reload was not started'); },
+      found: () => { throw new Error('Held change read was not started'); },
+    };
+    apiMocks.readFile.mockClear();
+    apiMocks.readFile
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        reads.gone = () => reject(new WorkspaceApiError(404, 'Not found'));
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        reads.found = () => resolve(RESTORED);
+      }));
+    let reloading!: Promise<void>;
+    act(() => { reloading = result.current.reloadTabFromDisk('KB/Draft.md'); });
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    expect(apiMocks.readFile).toHaveBeenCalledTimes(2);
+
+    await act(async () => { reads.gone(); await reloading; });
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
+
+    await closeAndReopen(result);
+    // The save waits on the read still out, which then finds the file.
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'saved after'); });
+    await act(async () => { reads.found(); await saving; });
+    expect(disk.get('KB/Draft.md')).toBe('saved after');
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeFalsy();
+  });
+
   it('a 404 issued after the file came back still marks the tab deleted', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');

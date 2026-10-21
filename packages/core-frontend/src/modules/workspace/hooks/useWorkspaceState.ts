@@ -296,12 +296,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * Reads in flight that decide whether an open tab's file still exists (a
    * `file-changed` refetch, a tree refresh's check), by workspace and path
    * (`existenceKey`), each settling
-   * to whether the file is gone (a 404). The tab is marked deleted only when
+   * to the number of the latest read that found the file gone (a 404), or
+   * null. The tab is marked deleted only when
    * the read settles; `saveFile` waits on it first, so an editor unmounting
    * meanwhile (a tab switch, the tab closing) cannot write the file back in
    * the window between the delete and the read that learns of it.
    */
-  const existenceChecksRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const existenceChecksRef = useRef<Map<string, Promise<number | null>>>(new Map());
   /**
    * When a tree refresh last read an open tab's file, missing from the tree,
    * and found it there after all (a file the tree leaves out: access-pruned,
@@ -357,22 +358,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const seq = ++existenceReadSeqRef.current;
     const key = existenceKey(readFrom, path);
     const thisGone = read.then(
-      () => false,
+      () => null,
       (err: unknown) => {
         // A 404 older than bytes or a write that landed since is about a
         // file since re-created: it refuses no save (see `applyReadGone`).
         const isGone = err instanceof WorkspaceApiError && err.status === 404
           && !isStaleLanding(readFrom, path, seq);
         if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
-        return isGone;
+        return isGone ? seq : null;
       },
     );
     // A read already in flight for the path still counts: the check answers
     // "gone" if ANY of them finds the file gone, so a later read that finds
-    // it cannot let a save through past an earlier one's 404.
+    // it cannot let a save through past an earlier one's 404. It answers with
+    // that 404's read number rather than a verdict, so bytes or a write that
+    // land while a later read is still out retire it (`isCheckGone`).
     const earlier = existenceChecksRef.current.get(key);
     const gone = earlier
-      ? Promise.all([earlier, thisGone]).then(([a, b]) => a || b)
+      ? Promise.all([earlier, thisGone]).then(([a, b]) => (a === null ? b : b === null ? a : Math.max(a, b)))
       : thisGone;
     existenceChecksRef.current.set(key, gone);
     void gone.then(() => {
@@ -380,6 +383,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     });
     return seq;
   }, [isStaleLanding]);
+  /** An existence check's answer (`trackExistenceCheck`) still says gone: no bytes or write landed after its 404. */
+  const isCheckGone = useCallback(
+    (readFrom: string, path: string, goneAtSeq: number | null) =>
+      goneAtSeq !== null && !isStaleLanding(readFrom, path, goneAtSeq),
+    [isStaleLanding],
+  );
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
@@ -1665,7 +1674,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const checkKey = existenceKey(workspaceId, relativePath);
     let existenceCheck = existenceChecksRef.current.get(checkKey);
     while (existenceCheck) {
-      if (await existenceCheck) {
+      if (isCheckGone(workspaceId, relativePath, await existenceCheck)) {
         throw new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
       }
       const newer = existenceChecksRef.current.get(checkKey);
@@ -1686,7 +1695,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return next;
     });
     bumpFs();
-  }, [workspaceId, bumpFs, markWritten]);
+  }, [workspaceId, bumpFs, markWritten, isCheckGone]);
 
   const clearChangedOnBranch = useCallback((relativePath: string) => {
     setOpenTabs((prev) => {
