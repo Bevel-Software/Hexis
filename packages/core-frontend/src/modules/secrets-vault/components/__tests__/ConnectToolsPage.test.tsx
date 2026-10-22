@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending } from '../../services/connect.api';
-import { ConnectToolsPage } from '../ConnectToolsPage';
+import { ConnectToolsPage } from '../..';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
 
 /**

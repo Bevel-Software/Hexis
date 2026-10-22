@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending, ConnectTool, ConnectToolOAuth } from '../../services/connect.api';
 import type { ToolSecrets, ToolVarStatus } from '../../services/tool-secrets.api';
 import { outstandingCount, standaloneOutstanding } from '../../utils/connect-status';
-import { ConnectToolsPage } from '../ConnectToolsPage';
+import { ConnectToolsPage } from '../..';
 import { attentionOf, type LibraryItem } from '../../../library/state/library-data';
 import { toolStatus } from '../../../library/utils/status';
 
@@ -481,6 +481,44 @@ describe('a tool the reader skipped stays skipped', () => {
     // Both halves are the reader's again: ticked, and the key field open.
     for (const row of await rows()) expect(within(row).getByRole('checkbox', { name: SKIP })).toBeChecked();
     expect(screen.getByLabelText('API_KEY value')).toBeInTheDocument();
+  });
+
+  it('undoes a skip whose saved key could not be removed, so Skip can be pressed again', async () => {
+    // A skipped row offers only Include. Left skipped, the key that did not
+    // come off would stay stored with no way to remove it from this page.
+    const catalog = [tool({ slug: 'clay', variables: [v({ name: 'API_KEY', key: 'clay_API_KEY', userConfigured: true })] })];
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    varsMock.deleteUserVar.mockRejectedValueOnce(new Error('The vault is unavailable.'));
+
+    renderPage();
+    fireEvent.click(within(await rowFor('clay')).getByRole('checkbox', { name: SKIP }));
+
+    expect(await screen.findByText('The vault is unavailable.')).toBeInTheDocument();
+    expect(connectMock.setToolSkipped.mock.calls).toEqual([
+      ['clay', true],
+      ['clay', false],
+    ]);
+    const clay = await rowFor('clay');
+    expect(within(clay).queryByText('Skipped by you')).not.toBeInTheDocument();
+    expect(within(clay).getByRole('checkbox', { name: SKIP })).toBeChecked();
+  });
+
+  it('says so when the undo fails too, and the row shows the skip the server kept', async () => {
+    const catalog = [tool({ slug: 'clay', variables: [v({ name: 'API_KEY', key: 'clay_API_KEY', userConfigured: true })] })];
+    connectMock.getConnectPending.mockImplementation(async () => withSkips(pendingFor(catalog)));
+    varsMock.deleteUserVar.mockRejectedValueOnce(new Error('The vault is unavailable.'));
+    connectMock.setToolSkipped.mockImplementation(async (slug: string, skip: boolean) => {
+      if (!skip) throw new Error('The server is unreachable.');
+      skippedOnServer.add(slug);
+    });
+
+    renderPage();
+    fireEvent.click(within(await rowFor('clay')).getByRole('checkbox', { name: SKIP }));
+
+    expect(
+      await screen.findByText('The vault is unavailable. The tool also stays skipped: The server is unreachable.'),
+    ).toBeInTheDocument();
+    expect(within(await rowFor('clay')).getByText('Skipped by you')).toBeInTheDocument();
   });
 });
 

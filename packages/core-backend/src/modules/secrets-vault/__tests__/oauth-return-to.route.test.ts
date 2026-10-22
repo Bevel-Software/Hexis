@@ -2,11 +2,8 @@ import type { Server as HttpServer } from 'node:http';
 import { createHmac } from 'node:crypto';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  createSecretsVaultRoutes,
-  createSecretsVaultPublicRoutes,
-  isSafeReturnPath,
-} from '../secrets-vault.routes.js';
+import { createSecretsVaultRoutes, createSecretsVaultPublicRoutes } from '../index.js';
+import { isSafeReturnPath } from '../secrets-vault.routes.js';
 import { FakeSkippedToolsService } from './fake-skipped-tools.js';
 
 /**

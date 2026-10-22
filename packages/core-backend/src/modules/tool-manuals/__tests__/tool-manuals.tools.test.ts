@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
 import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
 import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
 import { createToolContextResolver } from '../../tool-helpers/tool-context.js';

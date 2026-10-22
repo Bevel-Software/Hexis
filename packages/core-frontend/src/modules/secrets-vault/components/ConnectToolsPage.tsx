@@ -255,8 +255,10 @@ export function ConnectToolsPage() {
     setWiping((s) => new Set(s).add(slug));
     let removedAny = false;
     let failure: string | null = null;
+    let skipStored = false;
     try {
       await setToolSkipped(slug, skip);
+      skipStored = skip;
       if (skip) {
         for (const o of toolOAuth.filter((x) => x.slug === slug && x.authorized)) {
           await deleteUserVar(o.slug, o.varName);
@@ -271,6 +273,17 @@ export function ConnectToolsPage() {
       }
     } catch (err) {
       failure = err instanceof Error ? err.message : String(err);
+      // A skip whose credentials did not all come off is undone: a skipped
+      // row offers only Include, so a stored skip would leave the rest of
+      // the credentials where nobody can remove them. Back to actionable, the
+      // reader can press Skip again.
+      if (skipStored) {
+        try {
+          await setToolSkipped(slug, false);
+        } catch (undo) {
+          failure += ` The tool also stays skipped: ${undo instanceof Error ? undo.message : String(undo)}`;
+        }
+      }
     } finally {
       // Before this page's own refetch, not after it: the Library is a
       // different store with a different round-trip, and there is nothing

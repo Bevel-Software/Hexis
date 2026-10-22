@@ -2,7 +2,7 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { SkillSummary } from '../../modules/skills/skills.contract.js';
+import type { SkillSummary } from '../../modules/skills/index.js';
 import { catalogRevision, createCatalogRevisionRoutes } from '../catalog-revision.js';
 
 /**

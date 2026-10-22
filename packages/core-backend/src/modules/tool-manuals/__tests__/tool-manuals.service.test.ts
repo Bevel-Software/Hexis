@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+import { KbPluginSource } from '../../plugins/index.js';
 
 /** The one disk, as production wires it: the service and its discovery read the same one. */
 const disk = new NodeFs();
@@ -8,10 +8,10 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH, HEXIS_EXTENSION_NS } from '@bevel-software/platform-shared';
-import { ToolManualService } from '../tool-manuals.service.js';
+import { ToolManualService } from '../index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { IAccessControl } from '../../access/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';

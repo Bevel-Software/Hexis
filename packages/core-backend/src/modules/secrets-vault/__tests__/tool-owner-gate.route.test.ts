@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
+import { createSecretsVaultRoutes } from '../index.js';
 import { FakeSkippedToolsService } from './fake-skipped-tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 

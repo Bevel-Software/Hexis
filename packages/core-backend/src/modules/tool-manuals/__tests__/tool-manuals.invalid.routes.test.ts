@@ -6,13 +6,12 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
-import { createToolManualsBrowserRoutes } from '../tool-manuals.routes.js';
-import { createSecretsVaultRoutes } from '../../secrets-vault/secrets-vault.routes.js';
-import { ToolManualService } from '../tool-manuals.service.js';
+import { KbPluginSource } from '../../plugins/index.js';
+import { createToolManualsBrowserRoutes, ToolManualService } from '../index.js';
+import { createSecretsVaultRoutes } from '../../secrets-vault/index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { IAccessControl } from '../../access/index.js';
 import { FakeSkippedToolsService } from '../../secrets-vault/__tests__/fake-skipped-tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
