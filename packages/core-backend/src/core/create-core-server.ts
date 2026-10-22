@@ -688,6 +688,7 @@ export async function createCoreServer(
   const eventDelivery = new EventDelivery(createEventAccess({
     accessControl: core.accessControl,
     kbDirName: core.kbDirName,
+    getChangeRequest: (number) => core.workflowService.getChangeRequest(number),
     workspaces: {
       hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
       anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
