@@ -53,7 +53,6 @@ const READERS = [
   'get_change_request',
   'list_change_requests',
   'list_change_request_files',
-  'list_change_request_comments',
   'list_change_request_reviews',
   'get_agent_guide',
 ];
@@ -87,7 +86,6 @@ const WRITERS = [
   'commit_change',
   'share_current_branch',
   'open_change_request',
-  'post_change_request_comment',
   'create_plugin',
   'my_plugin',
 ];
