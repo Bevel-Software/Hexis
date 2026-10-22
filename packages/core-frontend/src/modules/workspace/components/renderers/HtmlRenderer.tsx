@@ -70,8 +70,6 @@ export function HtmlRenderer({
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [bundledSrcdoc, setBundledSrcdoc] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const prevFilePathRef = useRef(filePath);
@@ -110,17 +108,23 @@ export function HtmlRenderer({
     onSaveStateChange?.(saveState);
   }, [saveState, onSaveStateChange]);
 
-  // Build the iframe document whenever we enter preview mode or the saved
-  // content changes. The agent's HTML is sanitized to strip any external URLs
-  // (defense in depth — CSP also blocks them at runtime), then bundled with
-  // the KB's JS library inlined as a `<script type="module">`. The result is a
-  // fully self-contained srcdoc — the iframe makes no network calls of any kind.
-  useEffect(() => {
-    if (mode !== 'preview') return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- safe transient reset before rebuild
-    setPreviewError(null);
+  // Build the iframe document for the view on screen: in preview, from the
+  // saved content and the bridge's identity for this view. The agent's HTML
+  // is sanitized to strip any external URLs (defense in depth — CSP also
+  // blocks them at runtime), then bundled with the KB's JS library inlined as
+  // a `<script type="module">`. The result is a fully self-contained srcdoc —
+  // the iframe makes no network calls of any kind.
+  //
+  // Built DURING render, never in an effect after it: a new view (Refresh
+  // remounts the frame) must mount its frame with its own document. Built
+  // after the commit, the new frame first loaded the previous view's document
+  // and had the new one swapped in mid-load, and Chromium leaves a sandboxed
+  // frame whose srcdoc is replaced that early unpainted — blank on every
+  // Refresh.
+  const preview = useMemo((): { srcdoc: string; error: null } | { srcdoc: null; error: string } | null => {
+    if (mode !== 'preview') return null;
     try {
-      const doc = buildSandboxedHtml({
+      const srcdoc = buildSandboxedHtml({
         title: filePath,
         // Core ships no inlined vendor libraries. (The enterprise build inlines
         // d3 + mermaid and the KB graph client here — the knowledge system,
@@ -130,11 +134,13 @@ export function HtmlRenderer({
         bodyHtml: sanitizeAgentHtml(savedValue),
         toolBridge,
       });
-      setBundledSrcdoc(doc);
+      return { srcdoc, error: null };
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : 'Failed to build preview');
+      return { srcdoc: null, error: err instanceof Error ? err.message : 'Failed to build preview' };
     }
-  }, [mode, savedValue, filePath, reloadKey, toolBridge]);
+  }, [mode, savedValue, filePath, toolBridge]);
+  const bundledSrcdoc = preview?.srcdoc ?? null;
+  const previewError = preview?.error ?? null;
 
   // (The enterprise build additionally installs a postMessage bridge here that
   // serves the iframe's KB-graph client from `/api/workspace/:id/graph` — the
