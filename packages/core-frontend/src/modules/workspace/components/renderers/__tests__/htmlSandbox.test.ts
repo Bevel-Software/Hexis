@@ -653,6 +653,33 @@ describe('window.bevel.tools in the frame', () => {
     expect(new Set(posted.map((m) => m.requestId)).size).toBe(5);
   });
 
+  it('stamps every message with the identity the app built the document with, and none without one', async () => {
+    // The real runtime, given the identity the app minted for this document:
+    // tool calls and requireTools alike carry it, so the app can tell this
+    // document's messages from a replaced document's. Built with `true`, the
+    // runtime posts no identity; built with `tools: false`, the document has
+    // no tools but still asks `requireTools` as itself.
+    const named = runBridge({}, { toolBridge: { documentId: 'doc-abc' } });
+    void toolsOf(named)!.callTool('read_file', { body: { path: 'a.md' } });
+    void (named.bevel.requireTools as () => Promise<boolean>)();
+    expect((named.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tool.call', 'doc-abc'],
+      ['bevel.tools.require', 'doc-abc'],
+    ]);
+
+    const anonymous = runBridge({}, { toolBridge: true });
+    void toolsOf(anonymous)!.callTool('read_file', {});
+    void (anonymous.bevel.requireTools as () => Promise<boolean>)();
+    expect((anonymous.posted as Array<Record<string, unknown>>).every((m) => !('documentId' in m))).toBe(true);
+
+    const toolless = runBridge({}, { toolBridge: { documentId: 'doc-xyz', tools: false } });
+    expect(toolsOf(toolless)).toBeNull();
+    void (toolless.bevel.requireTools as () => Promise<boolean>)();
+    expect((toolless.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tools.require', 'doc-xyz'],
+    ]);
+  });
+
   it("resolves with the parent's answer and rejects with its error and code, matched by request id", async () => {
     const bridge = runBridge({}, { toolBridge: true });
     const tools = toolsOf(bridge)!;

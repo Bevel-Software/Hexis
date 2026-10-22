@@ -44,10 +44,9 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
-import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
+import { PageToolsContext, getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
 import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
-import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
@@ -989,6 +988,14 @@ export function FileViewer() {
     setReadingWidth(null);
     leaveFullScreenView();
   }, [leaveFullScreenView]);
+  // The banners that need the reader's hand — a refused save with what to
+  // fix, an agent's update to accept or reject — render in the shell the
+  // filled view covers. The view gives way so they are seen, rather than
+  // leave the reader pressing Save at a surface that answers nothing.
+  useEffect(() => {
+    if (filling && (saveError || isReviewingPending || waitingOnAgentUpdate)) leaveFullScreen();
+  }, [filling, saveError, isReviewingPending, waitingOnAgentUpdate, leaveFullScreen]);
+
   useLayoutEffect(() => {
     const offset = readingOffsetRef.current;
     readingOffsetRef.current = null;
