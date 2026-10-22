@@ -923,7 +923,21 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const requestId = ++addRequestIdRef.current;
     const hydrateId = ++hydrateRequestIdRef.current;
 
-    if (uniqPaths.length === 0) {
+    // The strip already holds this key's tabs: the route remounted (Knowledge
+    // left for another page and back), it did not open the branch. A tab whose
+    // file someone else deleted, or with unsaved edits, is the only copy of
+    // what it holds — the deleted notice and Copy edits read it until Close —
+    // so it stays as it is, whatever its read answered, unless the read is a
+    // 403: a file this person may no longer read closes like any other.
+    const liveTabsNow = () =>
+      hydratedKey !== null && hydratedKeyRef.current === hydratedKey
+        ? new Map(openTabsRef.current.filter((t) => t.deletedBy || t.isDirty).map((t) => [t.path, t]))
+        : new Map<string, OpenTab>();
+    // Read them too, even when the persisted list has not caught up with them
+    // (or is empty), so the 403 rule below holds for every tab kept.
+    const readPaths = [...uniqPaths, ...[...liveTabsNow().keys()].filter((p) => !uniqPaths.includes(p))];
+
+    if (readPaths.length === 0) {
       setOpenTabs([]);
       setActiveTabPath(null);
       hydratedKeyRef.current = hydratedKey;
@@ -938,9 +952,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // caller can show "file-load-failed".
     // Numbered like refresh reads, so one issued before them lands on nothing
     // once these bytes open the tabs.
-    const seqs = uniqPaths.map(() => ++existenceReadSeqRef.current);
+    const seqs = readPaths.map(() => ++existenceReadSeqRef.current);
     const issuedAt = Date.now();
-    const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
+    const results = await Promise.allSettled(readPaths.map((p) => readFile(workspaceId, p)));
     // The strip is no longer this hydration's to write: the workspace moved to
     // another branch, or a newer restore started while these reads were in
     // flight. Report what we read so the caller can still classify its
@@ -951,24 +965,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
     // strip: its file still has to sit alongside the restored ones.
     const outranked = requestId !== addRequestIdRef.current;
-    // The strip already holds this key's tabs: the route remounted (Knowledge
-    // left for another page and back), it did not open the branch. A tab whose
-    // file someone else deleted, or with unsaved edits, is the only copy of
-    // what it holds — the deleted notice and Copy edits read it until Close —
-    // so it stays as it is, whatever its read answered.
-    const liveTabs = hydratedKey !== null && hydratedKeyRef.current === hydratedKey
-      ? new Map(openTabsRef.current.filter((t) => t.deletedBy || t.isDirty).map((t) => [t.path, t]))
-      : new Map<string, OpenTab>();
+    // As they are now: a tab may have been edited or marked while reads ran.
+    const liveTabs = liveTabsNow();
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
     const landed: { path: string; seq: number }[] = [];
     const dropped: string[] = [];
     const denied: string[] = [];
-    for (let i = 0; i < uniqPaths.length; i++) {
-      const path = uniqPaths[i];
+    for (let i = 0; i < readPaths.length; i++) {
+      const path = readPaths[i];
       const res = results[i];
       const live = liveTabs.get(path);
-      if (live) {
+      if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 403) {
+        // Denied first: no longer readable, so nothing of it is kept.
+        liveTabs.delete(path);
+        denied.push(path);
+      } else if (live) {
         liveTabs.delete(path);
         survivors.push(live);
         surviving.push(path);
@@ -1003,7 +1015,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return { surviving, dropped, denied, superseded: true };
     }
 
-    // Live tabs the persisted list had not caught up with yet stay too.
+    // Live tabs that became so while the reads ran stay too.
     for (const [path, live] of liveTabs) {
       survivors.push(live);
       surviving.push(path);

@@ -1742,6 +1742,62 @@ describe('the Knowledge page mounted again while a deleted tab is open', () => {
     expect(tabAt(result, 'KB/Keep.md')?.isDirty).toBe(true);
   });
 
+  it('keeps a deleted, edited tab when the saved tab list is empty', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Draft.md'], 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nMy edit.');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
+
+    await remount(result, [], 'KB/Draft.md');
+
+    const tab = tabAt(result, 'KB/Draft.md');
+    expect(tab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
+    expect(tab?.content).toBe('# Draft\n\nMy edit.');
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    await act(async () => { await result.current.closeTab(tab!, { skipConfirm: true }); });
+    expect(result.current.openTabs).toEqual([]);
+  });
+
+  it.each([
+    ['in the saved tab list', ['KB/Keep.md', 'KB/Draft.md']],
+    ['missing from the saved tab list', ['KB/Keep.md']],
+  ])('closes a deleted, edited tab that is no longer readable (%s) and reports it denied', async (_label, paths) => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nMy edit.');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
+    const read = apiMocks.readFile.getMockImplementation()!;
+    apiMocks.readFile.mockImplementation(async (ws: string, path: string) => {
+      if (path === 'KB/Draft.md') throw new WorkspaceApiError(403, 'Forbidden');
+      return read(ws, path);
+    });
+
+    let outcome!: { denied: string[]; surviving: string[] };
+    await act(async () => { outcome = await result.current.hydrateTabs(paths, 'KB/Keep.md'); });
+
+    expect(outcome.denied).toEqual(['KB/Draft.md']);
+    expect(outcome.surviving).toEqual(['KB/Keep.md']);
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    expect(result.current.openTabs.map((t) => t.content)).not.toContain('# Draft\n\nMy edit.');
+  });
+
+  it('closes a dirty tab whose file is no longer readable', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+    await typeInto(result, 'keep, edited');
+    apiMocks.readFile.mockImplementation(async () => { throw new WorkspaceApiError(403, 'Forbidden'); });
+
+    let outcome!: { denied: string[] };
+    await act(async () => { outcome = await result.current.hydrateTabs(['KB/Keep.md'], 'KB/Keep.md'); });
+
+    expect(outcome.denied).toEqual(['KB/Keep.md']);
+    expect(result.current.openTabs).toEqual([]);
+  });
+
   it('still drops a persisted tab whose file is gone when the branch is first opened', async () => {
     const result = await mountReady();
     disk.delete('KB/Draft.md');

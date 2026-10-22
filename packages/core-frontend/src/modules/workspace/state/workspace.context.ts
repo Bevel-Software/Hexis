@@ -321,7 +321,9 @@ export interface WorkspaceContextValue {
    * Called again for the key the strip already holds (the file route mounted
    * again), a tab marked deleted (`deletedBy`) or with unsaved edits stays as
    * it is, whatever its read answered: it is the only copy of what it holds
-   * until Close.
+   * until Close. That holds when `paths` has not caught up with it, `[]`
+   * included: such tabs are read as well. A 403 still wins: a tab no longer
+   * readable closes, kept or not, and is reported in `denied`.
    */
   hydrateTabs: (
     paths: string[],
