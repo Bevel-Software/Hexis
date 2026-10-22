@@ -45,3 +45,10 @@ export { SpillStore } from './spill-store.js';
 export { DocExtractService } from './file-readers/doc-extract.service.js';
 export type { IDocumentExtractor } from './file-readers/document-extractor.contract.js';
 export { WorkerDocumentExtractor } from './file-readers/extract-in-worker.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { isTextBytes } from './file-readers/text-reader.js';
+export { isUntouchedStarterPage, knowledgeFolderIsNew } from './first-run.js';
+export type { FirstRunStarter, FirstRunStarterSource, MayRead } from './first-run.js';
+export type { WorkspaceService } from './workspace.service.js';
+export { sessionIdInputOf } from './workspace.tools.js';
+export type { ReadForTool } from './workspace.tools.js';

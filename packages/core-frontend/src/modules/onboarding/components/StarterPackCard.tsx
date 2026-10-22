@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button } from '../../../shared/components';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { useStarterPacks } from '../state/starter-packs';
 import { SKIP_STARTER_PACK, type StarterPackApplied, type StarterPackSummary } from '../services/starter-packs.api';
 

@@ -2,10 +2,10 @@ import { Fragment, useCallback, useRef, useState } from 'react';
 import { ChevronDown, LogOut } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { useAuth } from '../../auth/state/auth.context';
-import { useAdmin } from '../../admin/state/admin.context';
+import { useAuth } from '../../auth';
+import { useAdmin } from '../../admin';
 import type { AdminMenuItem } from '../../../core/registry';
-import { useMenuSections } from '../../settings/settings-nav-items';
+import { useMenuSections } from '../../settings';
 import {
   MenuItem,
   MenuLabel,

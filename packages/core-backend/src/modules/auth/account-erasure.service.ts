@@ -4,8 +4,8 @@ import { logger } from '../../shared/logging.js';
 const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import { isEncryptedBlob } from '../../shared/column-crypto.js';
-import type { Database } from '../database/connection.js';
-import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
+import type { Database } from '../database/index.js';
+import type { IReviewWorkflowService } from '../workflow/index.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -17,7 +17,7 @@ import {
   prFileApprovals,
   prMergeLog,
   users,
-} from '../database/schema.js';
+} from '../database/index.js';
 
 /** The anonymised id of one erasure — how a commit or log may name the account. */
 export function erasedAccountId(erasureId: string): string {

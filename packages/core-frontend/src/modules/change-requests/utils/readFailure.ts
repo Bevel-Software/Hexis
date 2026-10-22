@@ -1,4 +1,4 @@
-import type { AccessResponse, GrantSources } from '../../access/api';
+import type { AccessResponse, GrantSources } from '../../access';
 
 /**
  * WHY a copy of a file could not be read.

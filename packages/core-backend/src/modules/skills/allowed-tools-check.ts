@@ -1,8 +1,7 @@
 import { logger } from '../../shared/logging.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IToolRegistry } from '../tool-registry/tool.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME, type IToolManualService } from '../tool-manuals/index.js';
-import { MAX_CAPABILITIES } from '../tool-manuals/tool-manuals.contract.js';
+import type { IToolRegistry } from '../tool-registry/index.js';
+import { EXTERNAL_KB_MANUAL_NAME, type IToolManualService, MAX_CAPABILITIES } from '../tool-manuals/index.js';
 import { parseSkillFrontmatter } from './skills.service.js';
 
 const log = logger('skills');

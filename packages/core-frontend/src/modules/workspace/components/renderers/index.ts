@@ -21,6 +21,16 @@ export {
 // and a renderer is tested through this module's entry, never its files.
 export { RendererSurfaceContext, useRendererSurface, type RendererRawRead, type RendererSurface } from './rendererSurface';
 export { CanDownloadContext } from './DownloadFileButton';
+// The page tool bridge, for every renderer that shows an HTML page: the one
+// controller a renderer calls for a page's `window.bevel.tools`, and the two
+// contexts a host provides it through (the file page's tools; a skill
+// page's way to the platform). A renderer and its tests need nothing else.
+export {
+  useHtmlToolBridge,
+  type HtmlToolBridgeOptions,
+  type HtmlToolBridgeResult,
+} from './useHtmlToolBridge';
+export { OpenPageInPlatformContext, PageToolsContext, type PageTools } from './htmlToolBridge';
 export { useKbGraphLoader } from './kbGraphLoader';
 
 /**

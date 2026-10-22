@@ -1,11 +1,8 @@
 import { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { libraryUploadTarget, useWorkspace } from '../../workspace/state/workspace.context';
-import { checkoutRoot } from '../../workspace/utils/fileTree';
-import { kbFileUrl } from '../../workspace';
+import { libraryUploadTarget, useWorkspace, checkoutRoot, kbFileUrl, useMergedWorkspaceTree } from '../../workspace';
 import { libraryItemWorkspacePath } from '../routes/library-paths';
-import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { Puzzle } from 'lucide-react';
 import {
   EmptyTreeNotice,

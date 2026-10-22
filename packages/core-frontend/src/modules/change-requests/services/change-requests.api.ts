@@ -4,8 +4,8 @@ import type {
   PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
-import { getOrCreateWorkspace, readFile } from '../../workspace/services/workspace.api';
+import { handleApiResponse } from '../../git';
+import { getOrCreateWorkspace, readFile } from '../../workspace';
 import { BranchUnavailableError } from '../utils/readFailure';
 
 /**

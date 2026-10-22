@@ -1,7 +1,7 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
-import { requireInternalSource } from '../tool-auth/tool-auth.middleware.js';
+import { requireInternalSource } from '../tool-auth/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */

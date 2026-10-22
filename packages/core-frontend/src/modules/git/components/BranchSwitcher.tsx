@@ -13,12 +13,10 @@ import { useGit } from '../state/git.context';
 import { isBranchDeleteConfirmSkipped, skipBranchDeleteConfirm } from '../state/branch-delete-confirm';
 import { useConfirm } from '../../../shared/components';
 import { parseGitError, type GitErrorInfo } from '../services/error-messages';
-import { useAuth } from '../../auth/state/auth.context';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { kbFileUrl } from '../../workspace';
-import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { useAuth } from '../../auth';
+import { useWorkspace, kbFileUrl, KB_ROUTE_PREFIX } from '../../workspace';
 import { useCrCreationPort } from '../../../core/registry';
-import { fetchFileAccess } from '../../access/api';
+import { fetchFileAccess } from '../../access';
 
 /**
  * Convert a free-text "what are you changing?" answer into a branch name slug.

@@ -13,8 +13,8 @@ import { branchHandlingFor, type BranchHandling } from './tool-def.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
-import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
-import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
+import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/index.js';
+import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 
 function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
   return (

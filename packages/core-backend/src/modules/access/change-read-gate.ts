@@ -18,11 +18,9 @@ import path from 'node:path';
 import { creatableRootDirNames, type KbLayout } from '@bevel-software/platform-shared';
 import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { AccessConfigError, AccessDeniedError } from '../access-model/index.js';
-import { SYNCED_GROUPS_YAML } from '../access-model/group-files.js';
-import { toKbRelative } from '../access-model/kb-read-filter.js';
+import { AccessConfigError, AccessDeniedError, SYNCED_GROUPS_YAML, toKbRelative } from '../access-model/index.js';
 import type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from '../access-model/index.js';
 
 /**

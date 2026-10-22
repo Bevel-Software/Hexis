@@ -1,15 +1,11 @@
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useActiveAppId, useAppRegistry } from '../../../core/registry';
-import { useAdmin } from '../../admin/state/admin.context';
-import { useAuth } from '../../auth/state/auth.context';
-import { useMenuSections } from '../../settings/settings-nav-items';
-import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
-import { useOnboarding } from '../../onboarding/state/onboarding';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useEditablePage } from '../../workspace/state/editable-page';
-import { useFileNav } from '../../workspace/routing/kb-routes';
-import { useCreatePage } from '../../workspace/hooks/useCreatePage';
+import { useAdmin } from '../../admin';
+import { useAuth } from '../../auth';
+import { useMenuSections } from '../../settings';
+import { useInviteDialog, useOnboarding } from '../../onboarding';
+import { useWorkspace, useEditablePage, useFileNav, useCreatePage } from '../../workspace';
 import {
   coreCommandActions,
   mergeCommandActions,

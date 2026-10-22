@@ -48,9 +48,13 @@ export {
   type BranchDeclaration,
 } from './tool-def.js';
 export { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from './tool.contract.js';
-export type { JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
+export type { JsonSchema, UtcpTool } from '../tool-registry/index.js';
 export {
   CAN_WRITE_CLAUSE,
   defaultBranchWriteVerdicts,
   type DefaultBranchWriteDeps,
 } from './default-branch-write.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { argumentsRefusal } from './route-argument-check.js';
+export { bodyEnvelope, declareRouteTool } from './route-tool-schemas.js';
+export type { ToolHandlerFactory } from './tool-handler.js';

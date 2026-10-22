@@ -30,6 +30,10 @@
  *    to the file page when it needs tools and the viewer picks Open in the
  *    platform (a skill page provides it; without it the renderer opens the
  *    file's own address).
+ *  - `useHtmlToolBridge`, `PageToolsContext` and their types: the page
+ *    tool bridge a distribution's own HTML renderer calls to answer a page's
+ *    `window.bevel.tools` exactly as the app's renderer does, and the
+ *    file page's provider its tests mount it under.
  *
  * Its routing contract (the Knowledge URL prefix and the segment decode),
  * where the page lands once the file on screen has closed, the "This file
@@ -40,23 +44,37 @@
 export {
   CanDownloadContext,
   isViewOnlyFile,
+  OpenPageInPlatformContext,
+  PageToolsContext,
   pickFileRenderer,
   RendererSurfaceContext,
+  useHtmlToolBridge,
   useKbGraphLoader,
   useRendererSurface,
+  type HtmlToolBridgeOptions,
+  type HtmlToolBridgeResult,
+  type PageTools,
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
-export {
-  asksForFilePage,
-  KB_ROUTE_PREFIX,
-  kbFilePageUrl,
-  kbFileUrl,
-  resolveKbHref,
-  safeDecode,
-} from './routing/kb-routes';
-export { OpenPageInPlatformContext, PageToolsContext } from './components/renderers/htmlToolBridge';
+export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
+// Reached by other modules; exported here so they stop importing the files.
+export { useCreatePage } from './hooks/useCreatePage';
+export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
+export { useOpenChangeRequests } from './hooks/useOpenChangeRequests';
+export { useWorkspaceImageResolver } from './hooks/useWorkspaceImageResolver';
+export { KB_ROUTE_PREFIX, openExternalHref, safeDecode, stripJunkBeforeKbDir, useFileNav, useNodeIdNav } from './routing/kb-routes';
+export { WorkspaceApiError, deleteFile, getOrCreateWorkspace, listFiles, readFile, writeFile } from './services/workspace.api';
+export type { SkillToolWarning } from './services/workspace.api';
+export { useEditablePage } from './state/editable-page';
+export { WorkspaceContext, libraryUploadTarget, useWorkspace } from './state/workspace.context';
+export type { WorkspaceContextValue } from './state/workspace.context';
+export { computeDiff } from './utils/diff';
+export type { DiffLine } from './utils/diff';
+export { displayFileName, fileNameTooltip } from './utils/display-file-name';
+export { checkoutRoot, findEntryByPath, knowledgeFiles, pathExistsInTree } from './utils/fileTree';
+export { labelFor, parseFrontmatter } from './utils/frontmatter';
+export type { FrontmatterData } from './utils/frontmatter';
 export { landingAfterClose } from './routing/landing';
 export { DeletedFileNotice } from './components/DeletedFileNotice';
 export { useItemDeletedElsewhere } from './hooks/useItemDeletedElsewhere';
-export { WorkspaceContext } from './state/workspace.context';
