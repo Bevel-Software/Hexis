@@ -2107,6 +2107,22 @@ describe('FileViewer full screen', () => {
     expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
   });
 
+  it("gives way to an agent update that waits for the reader's answer", async () => {
+    render(<ViewerHarness renderers={stubFor('.md')} routeSearch="?fullscreen=1" pendingValue="agent replacement" />);
+    await screen.findByTestId('stub-renderer');
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+
+    await act(async () => {
+      injectPendingFromTest?.();
+    });
+
+    // Accept and Reject sit in the shell the filled view covered: the view
+    // gives way, and the entry is taken off the URL as a manual exit would.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Exit full screen' })).toBeNull());
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(await screen.findByText(/Previewing agent's changes/i)).toBeInTheDocument();
+  });
+
   it('keeps the rest of the query when it enters and leaves', async () => {
     const user = userEvent.setup();
     render(
