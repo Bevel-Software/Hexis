@@ -1,5 +1,8 @@
 import { vi } from 'vitest';
 
+/** Everything the app posted to a frame window, shared by every channel taken on it. */
+const postedTo = new WeakMap<Window, Array<Record<string, unknown>>>();
+
 /**
  * The two ends of the page tool bridge a test drives, shared by the app's
  * renderer suite and the controller's own: the frame (what its runtime posts,
@@ -17,10 +20,23 @@ import { vi } from 'vitest';
 export function frameChannel(iframe: HTMLIFrameElement) {
   const win = iframe.contentWindow!;
   const documentId = /documentId\s*=\s*"([^"]+)"/.exec(iframe.getAttribute('srcdoc') ?? '')?.[1];
-  const replies: Array<Record<string, unknown>> = [];
-  vi.spyOn(win, 'postMessage').mockImplementation(((msg: Record<string, unknown>) => void replies.push(msg)) as never);
+  // One collector per window, however many channels are taken on it: a
+  // channel's `replies` are what the app posted to the window since the
+  // channel was taken, so a reply meant for a replaced document shows up on
+  // the old channel AND the new one, and neither assertion is vacuous.
+  let posted = postedTo.get(win);
+  if (!posted) {
+    posted = [];
+    postedTo.set(win, posted);
+    const all = posted;
+    vi.spyOn(win, 'postMessage').mockImplementation(((msg: Record<string, unknown>) => void all.push(msg)) as never);
+  }
+  const since = posted.length;
+  const all = posted;
   return {
-    replies,
+    get replies(): Array<Record<string, unknown>> {
+      return all.slice(since);
+    },
     documentId,
     post: (data: unknown) =>
       window.dispatchEvent(

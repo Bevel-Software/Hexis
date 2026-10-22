@@ -135,6 +135,7 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     await settled();
     expect(screen.queryByText(/only available in the platform/)).toBeNull();
     expect(old.replies).toEqual([]);
+    expect(current.replies).toEqual([]);
 
     current.post({ type: 'bevel.tools.require', requestId: 'q2' });
     expect(await screen.findByText('Roadmap uses tools that are only available in the platform')).toBeTruthy();
@@ -153,7 +154,9 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     old.post({ type: 'bevel.tools.require', requestId: 'q1' });
     await settled();
     expect(screen.queryByRole('dialog')).toBeNull();
+    // Nothing posted to the window at all: neither the old channel nor the new one hears a reply.
     expect(old.replies).toEqual([]);
+    expect(current.replies).toEqual([]);
     expect(server.mcp).toEqual([]);
 
     current.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
