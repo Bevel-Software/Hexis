@@ -85,7 +85,6 @@ function detail(over: Record<string, unknown> = {}) {
         rawUrl: '',
       },
     ],
-    comments: [],
     approvals: [approval],
     mergeableInBevel: true,
     mergeBlockedReasons: [],

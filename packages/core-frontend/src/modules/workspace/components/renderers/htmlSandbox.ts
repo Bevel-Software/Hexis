@@ -393,6 +393,38 @@ const NAV_BRIDGE = `
 `;
 
 /**
+ * Runtime that hands an Escape the page did not use to the parent.
+ *
+ * A key pressed while focus is inside the frame never reaches the app: the
+ * frame is its own document, and the sandbox gives the parent no way to
+ * listen in. So once a reader has clicked into a page, the app's Escape — a
+ * card's close, the file page's way out of full screen — went deaf. The frame
+ * posts `bevel.key` instead, and the parent decides what Escape means there
+ * (see `ExitFullScreenButton`).
+ *
+ * Only Escape, and only one the page left alone: an Escape one of the page's
+ * handlers cancelled (closing the page's own popup) is the page's. Which
+ * handlers run before this one is not the bridge's to choose — a handler the
+ * page adds to the window after the bridge ran (a module of its own, a popup
+ * that listens only while open) comes after it in the same phase — so the
+ * bridge does not decide while the key is still being dispatched. It looks
+ * on the next task, once the dispatch is over, every handler of the page's
+ * has had its turn and `defaultPrevented` is final.
+ */
+const KEY_BRIDGE = `
+;(function () {
+  if (typeof globalThis.addEventListener !== 'function') return;
+  globalThis.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    setTimeout(function () {
+      if (e.defaultPrevented) return;
+      parent.postMessage({ type: 'bevel.key', key: 'Escape' }, '*');
+    }, 0);
+  });
+})();
+`;
+
+/**
  * How long a page waits for the app to answer one of its tool calls. Long,
  * because the answer may wait on a person: the first writing call shows a
  * card, and nothing answers until they choose. A chain runs for up to two
@@ -412,6 +444,12 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * after asking the viewer, on the first call that writes. Nothing about the
  * consent lives in the frame: the card is the app's, drawn outside it, and a
  * page can neither see nor answer it.
+ *
+ * `uploadFile(file, options)` posts the `File` (or `Blob`) itself, by
+ * structured clone, beside the four options it reads (`name`, `branch`,
+ * `destination`, `mode`); the parent judges both, runs the agent upload path
+ * and posts back only `apply_file_upload`'s answer — the upload token never
+ * enters the frame.
  *
  * `tools` exists only where the app can answer it — the app's file page.
  * Everywhere else (the embed, a skill page, any other preview) it is `null`,
@@ -468,7 +506,11 @@ function toolBridgeRuntime(enabled: boolean): string {
     searchTools: function (query) { return call('searchTools', [query === undefined ? '' : query]); },
     toolsInfo: function (names) { return call('toolsInfo', [names]); },
     callTool: function (name, args) { return call('callTool', [name, args === undefined ? {} : args]); },
-    callToolChain: function (code) { return call('callToolChain', [code]); }
+    callToolChain: function (code) { return call('callToolChain', [code]); },
+    uploadFile: function (file, options) {
+      var o = options && typeof options === 'object' ? options : {};
+      return call('uploadFile', [file, { name: o.name, branch: o.branch, destination: o.destination, mode: o.mode }]);
+    }
   })` : 'null'};
   globalThis.bevel.requireTools = function () {
     return request('bevel.tools.require', {}).then(function (answer) { return answer === true; });
@@ -508,7 +550,7 @@ interface BuildSandboxedHtmlOptions {
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
   const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + toolBridgeRuntime(opts.toolBridge === true));
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge === true));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent
