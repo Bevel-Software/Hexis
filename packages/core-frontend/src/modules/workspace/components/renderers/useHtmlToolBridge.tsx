@@ -28,9 +28,12 @@ export interface HtmlToolBridgeOptions {
    * The page VIEW's identity, compared with `Object.is`: change it whenever
    * the frame's document goes — a reload, a rebuilt document, the frame
    * unmounted (Edit). The viewer's answer about writes holds for one view;
-   * when the key changes an open card closes and every call the old view
-   * made that has not yet run is answered `closed` and runs nothing. A key
-   * that does not change across a reload keeps the consent across it.
+   * when the key changes an open card closes, every call the old view made
+   * that has not yet run is answered `closed` and runs nothing, and no reply
+   * to the old view's calls is posted into the new one — a document rebuilt
+   * in the same frame keeps the frame's window, so the window alone cannot
+   * tell the two apart. A key that does not change across a reload keeps the
+   * consent across it.
    */
   viewKey: unknown;
 }
@@ -64,6 +67,15 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
   // The viewer's answer about this page's writes holds for one VIEW of it: a
   // new frame document (a reload, a saved edit, another file) asks again.
   const consentRef = useRef<PageConsent | null>(null);
+  // Which view this is, as a count that advances with `viewKey`: a call
+  // remembers the generation it was made in, and its reply is posted only
+  // while that is still the current one. The window is not enough — a
+  // document rebuilt in the same frame element keeps the frame's window.
+  // Read and written at event time only, never during a render.
+  const generationRef = useRef(0);
+  useEffect(() => {
+    generationRef.current += 1;
+  }, [viewKey]);
 
   /** Show one of the app's cards over the page and resolve with the viewer's answer. A card already up answers this ask too. */
   const showCard = useCallback((kind: PageCard['kind']): Promise<boolean | null> => {
@@ -112,9 +124,14 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
     function onToolMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
       if (!iframeWin || event.source !== iframeWin) return;
+      const asked = generationRef.current;
       const reply = (message: unknown) => {
-        // Only to the document that asked: a reloaded frame is a new window.
-        if (iframeRef.current?.contentWindow === iframeWin) iframeWin.postMessage(message, '*');
+        // Only to the view that asked: a reloaded frame is a new window, and
+        // a document rebuilt in the same window is a later generation. A
+        // reply to a view that is gone reaches nobody.
+        if (generationRef.current === asked && iframeRef.current?.contentWindow === iframeWin) {
+          iframeWin.postMessage(message, '*');
+        }
       };
       const data = event.data as { type?: unknown; requestId?: unknown } | null;
       if (data && data.type === 'bevel.tools.require' && typeof data.requestId === 'string') {

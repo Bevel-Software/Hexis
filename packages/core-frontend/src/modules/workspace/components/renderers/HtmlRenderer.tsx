@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Pencil, Eye, RotateCw } from 'lucide-react';
 import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
@@ -78,12 +78,13 @@ export function HtmlRenderer({
 
   // The page tool bridge: a page's `window.bevel.tools` and `requireTools()`,
   // answered for one view of the page — a new frame document (a reload, a
-  // saved edit, another file) or the frame gone (Edit) is a new view.
-  const { toolBridge, cards } = useHtmlToolBridge({
-    iframeRef,
-    filePath,
-    viewKey: `${reloadKey}|${mode}|${bundledSrcdoc ?? ''}`,
-  });
+  // saved edit, another file) or the frame gone (Edit) is a new view. The
+  // view's key is a fresh identity whenever one of those changes, never the
+  // document itself: a distribution's document carries its inlined
+  // libraries, and a key built from it would be rebuilt and compared on
+  // every render.
+  const viewKey = useMemo(() => ({ reloadKey, mode, document: bundledSrcdoc }), [reloadKey, mode, bundledSrcdoc]);
+  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath, viewKey });
 
   const dirty = !readOnly && value !== savedValue;
 

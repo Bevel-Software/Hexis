@@ -155,31 +155,40 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     expect(await screen.findByText(CARD)).toBeTruthy();
   });
 
-  it('closes an open card when the view ends: the call is answered closed and nothing runs', async () => {
+  // The frame keeps its window across `nextView` here, as a browser's does
+  // when a document is rebuilt in the same frame element. So these cases
+  // show the whole of what an ended view's calls get: no card, nothing run,
+  // and no reply posted into the next view — the window alone would let one
+  // through. (`closed` is what `answerToolCall` decides; nobody is left to
+  // hear it.)
+  const settled = () => new Promise((r) => setTimeout(r, 50));
+
+  it('closes an open card when the view ends: nothing runs, and the next view hears nothing of it', async () => {
     const server = stubServer();
     const { frame, nextView } = mount('file page');
     frame.post(write('w1'));
     expect(await screen.findByText(CARD)).toBeTruthy();
     nextView();
-    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: false, code: 'closed' }));
     await waitFor(() => expect(screen.queryByText(CARD)).toBeNull());
+    await settled();
+    expect(frame.replies).toEqual([]);
     expect(server.mcp).toEqual([]);
   });
 
-  it('answers a call decided after its view ended closed, with no card and nothing run', async () => {
+  it('a call decided after its view ended shows no card, runs nothing, and is not answered into the next view', async () => {
     const server = stubServer({ holdManual: true });
     const { frame, nextView } = mount('file page');
     frame.post(write('w1'));
     frame.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
     nextView();
     server.releaseManual();
-    await waitFor(() => expect(frame.replies).toHaveLength(2));
-    for (const reply of frame.replies) expect(reply).toMatchObject({ ok: false, code: 'closed' });
+    await settled();
+    expect(frame.replies).toEqual([]);
     expect(screen.queryByText(CARD)).toBeNull();
     expect(server.mcp).toEqual([]);
   });
 
-  it('answers closed and runs nothing for calls still being decided when the view ends, even after its Allow', async () => {
+  it('runs nothing for calls still being decided when the view ends, even after its Allow, and answers none of them', async () => {
     const server = stubServer();
     const { frame, nextView } = mount('file page');
     frame.post({ type: 'bevel.tool.call', requestId: 'c1', fn: 'callToolChain', args: ['return 1'] });
@@ -190,10 +199,22 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     frame.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
     frame.post({ type: 'bevel.tool.call', requestId: 'c2', fn: 'callToolChain', args: ['return 2'] });
     nextView();
-    await waitFor(() => expect(frame.replies).toHaveLength(4));
-    for (const reply of frame.replies.slice(1)) expect(reply).toMatchObject({ ok: false, code: 'closed' });
+    await settled();
+    expect(frame.replies).toHaveLength(1);
     expect(screen.queryByText(CARD)).toBeNull();
     expect(server.mcp).toEqual(['call_tool_chain']);
+  });
+
+  it('answers the new view\'s own calls after an older view\'s are dropped', async () => {
+    const server = stubServer();
+    const { frame, nextView } = mount('file page');
+    frame.post(write('w1'));
+    expect(await screen.findByText(CARD)).toBeTruthy();
+    nextView();
+    await waitFor(() => expect(screen.queryByText(CARD)).toBeNull());
+    frame.post({ type: 'bevel.tool.call', requestId: 'r2', fn: 'callTool', args: ['read_file', {}] });
+    await waitFor(() => expect(frame.replies).toEqual([{ type: 'bevel.tool.response', requestId: 'r2', ok: true, result: { ran: 'read_file' } }]));
+    expect(server.mcp).toEqual(['read_file']);
   });
 
   it('answers requireTools true on the file page with nothing shown', async () => {
