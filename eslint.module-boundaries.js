@@ -340,6 +340,8 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'access has no index.ts; tool-helpers/index.ts does not export ToolHandlerFactory, declareRouteTool; tool-registry has no index.ts',
   'packages/core-backend/src/modules/tool-registry/manual.routes.ts':
     'tool-auth has no index.ts',
+  'packages/core-backend/src/modules/tool-registry/read-only-hints.ts':
+    'admin has no index.ts; settings has no index.ts',
   'packages/core-backend/src/modules/update-check/update-check.routes.ts':
     'admin has no index.ts',
   'packages/core-backend/src/modules/workflow/agent-tools/change-request-read.tools.ts':
