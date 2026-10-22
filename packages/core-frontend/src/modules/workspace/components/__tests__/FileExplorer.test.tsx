@@ -18,7 +18,7 @@ import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.con
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { PR_STALE_EVENT } from '../../../../core/events';
-import { EventBusContext, type EventBusContextValue } from '../../../workflow';
+import { EventBusProvider } from '../../../workflow';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,
@@ -4193,44 +4193,64 @@ describe('FileExplorer: a document the server could not read', () => {
     ],
   };
 
-  /** The app's event bus, reduced to what the tree uses: a subscription per kind, and a way to push. */
-  function fakeBus() {
-    const handlers = new Map<string, Set<(event: WorkflowEvent) => void>>();
-    const bus: EventBusContextValue = {
-      subscribe: (kind, handler) => {
-        const set = handlers.get(kind) ?? new Set();
-        set.add(handler as (event: WorkflowEvent) => void);
-        handlers.set(kind, set);
-        return () => set.delete(handler as (event: WorkflowEvent) => void);
-      },
-      setFocus: () => {},
-      watchWorkspace: () => () => {},
-    };
-    let id = 1;
-    const push = (payload: { workspaceId: string; path: string; reason: string }) =>
-      act(() => {
-        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as WorkflowEvent;
-        for (const h of handlers.get('document-unreadable') ?? []) h(event);
-      });
-    return { bus, push };
+  /**
+   * The app's own event bus, driven as the server drives it. jsdom ships no
+   * EventSource, so the provider gets this stand-in for the stream it opens
+   * on mount; `deliver` hands it one server event the way the stream would.
+   */
+  class FakeEventSource {
+    static current: FakeEventSource | null = null;
+    private readonly listeners = new Map<string, ((e: Event) => void)[]>();
+    constructor() {
+      FakeEventSource.current = this;
+    }
+    addEventListener(type: string, fn: (e: Event) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+    }
+    removeEventListener(type: string, fn: (e: Event) => void) {
+      this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
+    }
+    close() {}
+    deliver(event: WorkflowEvent) {
+      for (const fn of [...(this.listeners.get('message') ?? [])]) {
+        fn(new MessageEvent('message', { data: JSON.stringify(event) }));
+      }
+    }
   }
 
+  beforeEach(() => {
+    FakeEventSource.current = null;
+    vi.stubGlobal('EventSource', FakeEventSource);
+    // The provider posts its focus to the server; nothing here reads the answer.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'ok' }), { status: 200 })));
+    window.sessionStorage.setItem('bevel-event-bus-session-id', 'sess-explorer');
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.sessionStorage.clear();
+  });
+
   function renderWithBus() {
-    const { bus, push } = fakeBus();
     const workspace = makeWorkspaceFixture({ fileTree: inCheckout(TREE) });
     render(
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <EventBusContext.Provider value={bus}>
+              <EventBusProvider>
                 <FileExplorer />
-              </EventBusContext.Provider>
+              </EventBusProvider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
       </MemoryRouter>,
     );
+    let id = 1;
+    const push = (payload: { workspaceId: string; path: string; reason: string }) =>
+      act(() => {
+        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as WorkflowEvent;
+        FakeEventSource.current!.deliver(event);
+      });
     return { push };
   }
 

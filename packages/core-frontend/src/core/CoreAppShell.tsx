@@ -18,7 +18,7 @@ import { GitContext } from '../modules/git/state/git.context';
 import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
 import { useGitState } from '../modules/git/hooks/useGitState';
 import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
-import { EventBusProvider } from '../modules/workflow/state/EventBusProvider';
+import { EventBusProvider } from '../modules/workflow';
 import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
 import { ChangeRequestStaleBinder } from '../modules/workflow/state/ChangeRequestStaleBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
