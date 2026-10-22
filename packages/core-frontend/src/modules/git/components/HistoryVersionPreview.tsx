@@ -8,20 +8,12 @@ import { friendlyGitError } from '../services/error-messages';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { FilePaneCard } from '../../workspace/components/FilePaneCard';
-import {
-  CanDownloadContext,
-  DownloadFileButton,
-} from '../../workspace/components/renderers/DownloadFileButton';
+import { CanDownloadContext } from '../../workspace';
+import { DownloadFileButton } from '../../workspace/components/renderers/DownloadFileButton';
 import { RetryReadButton } from '../../workspace/components/renderers/RetryReadButton';
 import { READ_PANE } from '../../workspace/components/renderers/readPane';
-import {
-  RendererWorkspaceContext,
-  getFileRenderer,
-  getRendererLayout,
-  hasFileViewer,
-  isBinaryFile,
-  type RendererFileRef,
-} from '../../workspace/components/renderers';
+import { RendererWorkspaceContext } from '../../workspace';
+import { getFileRenderer, getRendererLayout, hasFileViewer, isBinaryFile, type RendererFileRef } from '../../workspace/components/renderers';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { displayFileName, fileNameTooltip } from '../../workspace/utils/display-file-name';
 

@@ -2,8 +2,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import type { VirtualTree } from '../plugins/compile/compile-marketplace.js';
+import { WorkspaceMutex } from '../kb-fs/index.js';
+import type { VirtualTree } from '../plugins/index.js';
 import { type IGitRunner } from '../../shared/git.contract.js';
 
 /** What the repo service asks the compiler for — the one seam it has. */

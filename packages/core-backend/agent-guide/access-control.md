@@ -249,6 +249,11 @@ File-level write access decides how a change lands on the default branch:
   `url`. Reviewing, approving and merging a change request happen in the app,
   by a person — no agent tool approves a file, bypasses approval, or merges a
   request. `merge_change_request` no longer exists.
+- **Edit** an open request's title or description with `update_change_request`
+  — its author, or anyone who may merge it (an Admin, or someone who may
+  approve every file it changes); anyone else is refused, and so is a merged or
+  closed request. `description` replaces the request's description (the `body`
+  `get_change_request` answers) whole; readers see the new text at once.
 - **Sync** a draft with `update_branch` on the draft, `from` = the branch the
   request targets. This is allowed while the draft's request is open, and is
   how you bring it up to date. Left out, `from` is the draft's own shared

@@ -45,6 +45,8 @@ import {
   canonicalRoleName,
   splitPrincipalToken,
   accessFrontmatterExtensionList,
+} from '../access-model/index.js';
+import {
   spliceRevoke,
   spliceGrant,
   validatePrincipal,

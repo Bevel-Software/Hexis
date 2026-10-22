@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { formatRelativeTime } from '../../../lib/utils';
 
 export interface LastCommit {

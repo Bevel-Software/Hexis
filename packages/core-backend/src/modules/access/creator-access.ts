@@ -37,7 +37,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { spliceGrant, type Principal } from '../access-model/access-splice.js';
-import { isAccessMdPath } from '../access-model/access-grammar.js';
+import { isAccessMdPath } from '../access-model/index.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';
 import {
   creatorPrincipal,

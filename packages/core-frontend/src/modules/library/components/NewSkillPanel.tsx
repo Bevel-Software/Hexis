@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Surface, TextField } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace';
 import { createEmptySkill } from '../services/library.api';
 import { useLibraryReload } from '../state/library-context';
 import { useLibraryToast } from '../state/toast.context';

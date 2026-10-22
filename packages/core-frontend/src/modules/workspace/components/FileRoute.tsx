@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { readPersistedTabs } from '../utils/tab-persistence';
 import { syncFileTraceFlag, traceFiles } from '../utils/file-trace';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
@@ -134,7 +134,11 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // the entry's router state — a `startEditing` request (or `rawFile`) not yet
   // acted on must survive it. Read through a ref, at the moment of the swap,
   // so a request the viewer has consumed in the meantime is not put back.
+  // The query rides along for the same reason: it is the entry's view
+  // (`?fullscreen=1`), and a link that asked for it must still have it once
+  // the path has become an id.
   const routerStateRef = useLatestRef<unknown>(location.state);
+  const searchRef = useLatestRef(location.search);
   useEffect(() => {
     if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
     if (openFilePath !== segment) return;
@@ -142,13 +146,16 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
       if (!cancelled && nodeId) {
-        navigate(kbNodeUrl(branchFromUrl, nodeId) + location.hash, { replace: true, state: routerStateRef.current });
+        navigate(kbNodeUrl(branchFromUrl, nodeId) + searchRef.current + location.hash, {
+          replace: true,
+          state: routerStateRef.current,
+        });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef, searchRef]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 

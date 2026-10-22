@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DocExtractService } from '../doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../extract-in-worker.js';
 import { DocumentReader } from '../document-reader.js';
 import { EmailReader } from '../email-reader.js';
 import { FileReaderRegistry, type FileReader, type ReadResult } from '../file-reader.js';
@@ -21,7 +22,7 @@ import { accessFrontmatterExtensionList } from '../../../access-model/access-gra
  */
 
 const registry = createFileReaderRegistry(
-  new DocExtractService(join(tmpdir(), 'bevel-test-file-reader-registry')),
+  new DocExtractService(join(tmpdir(), 'bevel-test-file-reader-registry'), new WorkerDocumentExtractor()),
 );
 
 describe('file-reader registry routing', () => {

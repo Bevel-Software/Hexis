@@ -14,8 +14,8 @@ import {
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
   GROUP_TOKEN_PREFIX,
+  type Verb,
 } from '../access-model/index.js';
-import type { Verb } from '../access-model/index.js';
 
 /**
  * The resolved access view of one target, as the Manage access dialog reads it

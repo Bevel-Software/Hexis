@@ -15,7 +15,7 @@
  * The executor sets the restriction before streaming and clears it after.
  */
 
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 
 export interface IRoutineWritePolicy {
   /**

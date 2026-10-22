@@ -48,7 +48,8 @@
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 
-import { LockingFilesystem, type WriteValidator } from '../kb-fs/locking-filesystem.js';
+import { type WriteValidator } from '../kb-fs/index.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';

@@ -26,17 +26,7 @@ import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import {
-  AccessDeniedError,
-  canonicalRoleName,
-  EVERYONE_CANONICAL,
-  PLUGIN_TOKEN_PREFIX,
-  PLUGIN_TOKEN_VERBS,
-  ROLE_TOKEN_PREFIX,
-  GROUP_TOKEN_PREFIX,
-  splitPrincipalToken,
-} from '../access-model/index.js';
-import type { PluginTokenVerb, Verb, Principal } from '../access-model/index.js';
+import { AccessDeniedError } from '../access-model/index.js';
 import {
   AccessMutationService,
   AccessMutationError,
@@ -46,6 +36,18 @@ import {
   governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
+import {
+  canonicalRoleName,
+  EVERYONE_CANONICAL,
+  PLUGIN_TOKEN_PREFIX,
+  PLUGIN_TOKEN_VERBS,
+  ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
+  type PluginTokenVerb,
+  type Principal,
+  type Verb,
+} from '../access-model/index.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView } from './access-view.js';
 import type { AccessView, LabelledAccessView } from './access-view.js';
@@ -54,7 +56,7 @@ import { RolesAdminService } from './roles-admin.service.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import '../auth/auth.middleware.js';
+import '../auth/index.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
 const GRANTABLE_VERBS = new Set<string>(['read', 'write', 'owner', 'download']);

@@ -5,7 +5,7 @@ import {
   parseOwnAccessEntries,
   type ParsedEntry,
   type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import type { TargetKind } from '../access/access-mutation.service.js';
 
 /**

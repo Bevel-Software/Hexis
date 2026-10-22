@@ -56,8 +56,13 @@ import {
   parseRolesYaml,
   requiredVerbsFor,
   sourceVerbsFor,
+  type GroupsIndex,
+  type AccessFile,
+  type OwnEntries,
+  type ParsedEntry,
+  type RolesIndex,
+  type Verb,
 } from '../access-model/index.js';
-import type { GroupsIndex, AccessFile, OwnEntries, ParsedEntry, RolesIndex, Verb } from '../access-model/index.js';
 import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,

@@ -1,7 +1,7 @@
 import { resolveKbLayout, type KbLayout } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
-import { toolDef } from '../tool-helpers/tool-def.js';
+import { toolDef } from '../tool-helpers/index.js';
 
 /**
  * The two plugin tools an agent has, both surfaces — DESCRIPTIONS of the
@@ -112,7 +112,7 @@ export function myPluginDef(layout: KbLayout): UtcpTool {
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: PROVISIONED_OUTPUT,
     // `write`: both make folders and commit — a read-scoped caller's manual
-    // must not advertise them (see `isWriteTool` in the manual routes).
+    // must not advertise them (see `declaresWrite` in `tool.contract.ts`).
     tags: ['plugins', 'skills', 'write'],
   });
 }
@@ -143,6 +143,6 @@ export const CREATE_PLUGIN: UtcpTool = toolDef({
   },
   outputs: PROVISIONED_OUTPUT,
   // `write`: both make folders and commit — a read-scoped caller's manual
-  // must not advertise them (see `isWriteTool` in the manual routes).
+  // must not advertise them (see `declaresWrite` in `tool.contract.ts`).
   tags: ['plugins', 'skills', 'write'],
 });

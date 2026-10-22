@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import AdmZip from 'adm-zip';
-import { hasHttpStatus, ToolError } from '../tool-helpers/tool.contract.js';
+import { hasHttpStatus, ToolError } from '../tool-helpers/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { DownloadArtifact } from './agent-download.store.js';
 

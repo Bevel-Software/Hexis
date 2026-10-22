@@ -26,6 +26,7 @@ import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { WorkerPatternMatcher } from '../bounded-matcher.js';
 import { WorkspaceService } from '../workspace.service.js';
@@ -189,7 +190,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
         isMissing: (branch) => workspaces!.isBranchMissing(branch),
       }),
       new SpillStore(spillRoot),
-      new DocExtractService(docCacheDir),
+      new DocExtractService(docCacheDir, new WorkerDocumentExtractor()),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
       {

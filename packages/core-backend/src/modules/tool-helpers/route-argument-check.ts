@@ -4,7 +4,7 @@ import {
   argumentsDoNotMatchMessage,
   checkFor,
 } from '@bevel-software/platform-mcp-core';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import { branchProvided } from '../../shared/domain-errors.js';
 import { logger } from '../../shared/logging.js';
 import { ToolError } from './tool.contract.js';

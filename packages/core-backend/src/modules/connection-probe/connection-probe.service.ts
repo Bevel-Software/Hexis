@@ -7,12 +7,10 @@ import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (remote MCP `.t
 import { CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { registerManual } from '@bevel-software/platform-mcp-core';
-import type { IToolManualService, ToolHealthCheck, ToolProbeTarget } from '../tool-manuals/tool-manuals.contract.js';
-import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
-// The concrete module, NOT the `secrets-vault` barrel: that barrel re-exports
-// the routes, and the routes import this module's contract — so going through
-// it would close an import cycle between the two modules.
-import { bevelSecretsLoaderConfig } from '../secrets-vault/secrets-variable-loader.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
+import type { ToolHealthCheck, ToolProbeTarget } from '../tool-manuals/tool-manuals.contract.js';
+import type { ISecretsVaultService } from '../secrets-vault/index.js';
+import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import type { IConnectionProbeService, ProbeStatus, ProbeVerdict } from './connection-probe.contract.js';
