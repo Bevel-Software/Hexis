@@ -119,7 +119,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/access/access-requests.service.ts':
     'access-model/index.ts does not export spliceGrant; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/access/access.routes.ts':
-    'access-model/index.ts does not export Principal; auth/index.ts does not export AuthService, IAccountSwitchGuard; database has no index.ts; workflow/index.ts does not export WorkflowEventBus, WorkflowService; workspace/index.ts does not export WorkspaceService',
+    'access-model/index.ts does not export Principal; auth/index.ts does not export AuthService, IAccountSwitchGuard; database internals are imported, not database/index.ts; workflow/index.ts does not export WorkflowEventBus, WorkflowService; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/access/admin-locked-commit.ts':
     'kb-fs/index.ts does not export LockingFilesystem',
   'packages/core-backend/src/modules/access/change-read-gate.ts':
@@ -127,7 +127,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/access/creator-access.ts':
     'access-model/index.ts does not export CreationGrantPlan, Creator, ICreatorAccess and 4 more; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/access/directory-sync-bot.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/access/groups-admin.service.ts':
     'access-model/index.ts does not export GROUPS_YAML, SYNCED_GROUPS_YAML, makeRolesYamlWriteValidator and 1 more; workflow/index.ts does not export WorkflowEventBus',
   'packages/core-backend/src/modules/access/groups-edit.ts':
@@ -149,19 +149,19 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/agent-instructions/read-preamble.ts':
     'workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/audit/agent-audit.service.ts':
-    'database has no index.ts; tool-auth has no index.ts',
+    'database internals are imported, not database/index.ts; tool-auth has no index.ts',
   'packages/core-backend/src/modules/audit/agent-rest-audit.middleware.ts':
     'tool-auth has no index.ts',
   'packages/core-backend/src/modules/audit/audit.routes.ts':
     'tool-auth has no index.ts',
   'packages/core-backend/src/modules/auth/account-erasure.service.ts':
-    'database has no index.ts; workflow/index.ts does not export IReviewWorkflowService',
+    'database internals are imported, not database/index.ts; workflow/index.ts does not export IReviewWorkflowService',
   'packages/core-backend/src/modules/auth/account-switch-lock.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/auth/account.routes.ts':
     'access/index.ts does not export the symbols account.routes.ts reaches for',
   'packages/core-backend/src/modules/auth/auth.service.ts':
-    'access has no index.ts; database has no index.ts; workflow/index.ts does not export RECOVERY_BOT_EMAIL',
+    'access has no index.ts; database internals are imported, not database/index.ts; workflow/index.ts does not export RECOVERY_BOT_EMAIL',
   'packages/core-backend/src/modules/connection-probe/connection-probe.service.ts':
     'tool-manuals/index.ts does not export ToolHealthCheck, ToolProbeTarget',
   'packages/core-backend/src/modules/diff/diff.routes.ts':
@@ -169,7 +169,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/diff/diff.service.ts':
     'workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/embed/account-link.service.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/embed/embed.service.ts':
     'access has no index.ts',
   'packages/core-backend/src/modules/embed/embed.tools.ts':
@@ -185,9 +185,9 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/marketplace/git-http.routes.ts':
     'tool-auth has no index.ts',
   'packages/core-backend/src/modules/marketplace/github-facade/github-facade-codes.store.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/marketplace/github-facade/github-facade-credentials.service.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/marketplace/github-facade/github-facade.routes.ts':
     'tool-auth has no index.ts',
   'packages/core-backend/src/modules/marketplace/github-facade/github-facade.service.ts':
@@ -199,7 +199,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/mcp/mcp.service.ts':
     'secrets-vault/index.ts does not export scopesCovered; tool-auth has no index.ts; tool-registry has no index.ts',
   'packages/core-backend/src/modules/mcp/oauth/bevel-oauth-provider.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/onboarding/starter-pack.service.ts':
     'access/index.ts does not export the symbols starter-pack.service.ts reaches for; kb-fs/index.ts does not export FileChangeNotifier, LockingFilesystem; workspace/index.ts does not export FirstRunStarter, FirstRunStarterSource, MayRead and 2 more',
   'packages/core-backend/src/modules/plugins/compile/compile-marketplace.ts':
@@ -213,7 +213,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/plugins/join-request-jobs.service.ts':
     'access-model/index.ts does not export spliceGrant; workflow/index.ts does not export sanitizeError; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/plugins/join-request-records.store.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/plugins/join-requests.service.ts':
     'access has no index.ts; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/plugins/plugin-links.service.ts':
@@ -235,13 +235,13 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/plugins/teams.routes.ts':
     'access has no index.ts',
   'packages/core-backend/src/modules/secrets-vault/db-secrets-vault.service.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/secrets-vault/secrets-vault.routes.ts':
     'access has no index.ts; tool-manuals/index.ts does not export ToolVariable',
   'packages/core-backend/src/modules/settings/connection-check.ts':
     'workflow/index.ts does not export NodeGitRunner',
   'packages/core-backend/src/modules/settings/deployment-settings.service.ts':
-    'database has no index.ts; kb-fs/index.ts does not export assertKbDirNameFree, hasControlCharacter',
+    'database internals are imported, not database/index.ts; kb-fs/index.ts does not export assertKbDirNameFree, hasControlCharacter',
   'packages/core-backend/src/modules/settings/git-root-folders.ts':
     'workflow/index.ts does not export NodeGitRunner',
   'packages/core-backend/src/modules/settings/setup.routes.ts':
@@ -257,7 +257,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/skills/skills.tools.ts':
     'tool-helpers/index.ts does not export ToolHandlerFactory, bodyEnvelope, declareRouteTool; tool-registry has no index.ts',
   'packages/core-backend/src/modules/tool-auth/external-api-key.service.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/tool-auth/tool-auth.middleware.ts':
     'auth/index.ts does not export AuthService',
   'packages/core-backend/src/modules/tool-helpers/default-branch-write.ts':
@@ -295,27 +295,27 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/workflow/agent-tools/workflow.tools.ts':
     'access has no index.ts; kb-fs/index.ts does not export assertInsideRepo, normalizePathArgs; tool-auth has no index.ts; tool-helpers/index.ts does not export ToolHandlerFactory; tool-registry has no index.ts',
   'packages/core-backend/src/modules/workflow/file-lock.service.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/workflow/git/git.service.ts':
     'access has no index.ts; kb-fs/index.ts does not export SAFE_IMPLICIT_FETCH_ARGS, assertInsideRepo, assertValidBranchName and 4 more; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/workflow/git/node-git-runner.ts':
     'kb-fs/index.ts does not export credentialHelperValue',
   'packages/core-backend/src/modules/workflow/git/pull-request.service.ts':
-    'access has no index.ts; database has no index.ts; workspace/index.ts does not export WorkspaceService',
+    'access has no index.ts; database internals are imported, not database/index.ts; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/workflow/pending-commits.service.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/workflow/read-on-branch.ts':
     'access has no index.ts',
   'packages/core-backend/src/modules/workflow/recovery-bot.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/workflow/review-workflow/approval-lock.ts':
-    'database has no index.ts',
+    'database internals are imported, not database/index.ts',
   'packages/core-backend/src/modules/workflow/review-workflow/review-workflow.service.ts':
-    'access has no index.ts; database has no index.ts; workspace/index.ts does not export WorkspaceService',
+    'access has no index.ts; database internals are imported, not database/index.ts; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/workflow/workflow.routes.ts':
     'access has no index.ts; access-model/index.ts does not export canReadWorkspacePath, toKbRelative; auth/index.ts does not export AuthService; kb-fs/index.ts does not export assertValidRelativePath; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/workflow/workflow.service.ts':
-    'access has no index.ts; database has no index.ts; kb-fs/index.ts does not export FileChangeNotifier, assertValidBranchName; workspace/index.ts does not export WorkspaceService',
+    'access has no index.ts; database internals are imported, not database/index.ts; kb-fs/index.ts does not export FileChangeNotifier, assertValidBranchName; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/workspace/agent-access.gate.ts':
     'tool-registry has no index.ts; workflow/index.ts does not export WorkflowHooks',
   'packages/core-backend/src/modules/workspace/first-run.ts':

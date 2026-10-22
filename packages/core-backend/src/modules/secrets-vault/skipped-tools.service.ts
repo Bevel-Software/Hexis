@@ -1,6 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { skippedTools } from '../database/schema.js';
+import { skippedTools, type Database } from '../database/index.js';
 
 /**
  * The tools each person took out of their agent on the Connect page.
