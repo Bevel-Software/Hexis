@@ -67,6 +67,8 @@ async function paintedHeight(page: Page): Promise<number> {
 // for; full Chromium (what a reader's browser is) leaves it blank. `playwright
 // install chromium` installs both.
 test.use({ channel: 'chromium' });
+// Bundling the renderer with vite takes most of this, more under a parallel run.
+test.setTimeout(90_000);
 
 test('the page is painted on first view and after every Refresh', async ({ page }) => {
   await mount(page);
