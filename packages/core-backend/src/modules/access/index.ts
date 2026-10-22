@@ -6,11 +6,11 @@
 export type { IAccessControl } from './access-control.interface.js';
 // Reached by other modules; exported here so they stop importing the files.
 export type { AccessDecisionSource, AccessTargetKind } from './access-control.interface.js';
-export { AccessMutationService, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from './access-mutation.service.js';
-export type { TargetKind } from './access-mutation.service.js';
+export { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from './access-mutation.service.js';
+export type { AccessMutationService, IAccessMutation, TargetKind } from './access-mutation.service.js';
 export { folderTarget, rulesFileFor } from './access-requests.contract.js';
 export type { AccessRequestTarget, IAccessRequestLifecycle } from './access-requests.contract.js';
-export { AccessRequestsService } from './access-requests.service.js';
+export type { AccessRequestsService, IAccessRequests } from './access-requests.service.js';
 export { accessRoster, resolveAccessView } from './access-view.js';
 export { sendError } from './admin-route-helpers.js';
 export { DIRECTORY_SYNC_BOT_EMAIL } from './directory-sync-bot.js';

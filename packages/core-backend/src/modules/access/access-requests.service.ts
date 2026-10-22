@@ -370,3 +370,9 @@ export class AccessRequestsService {
     return lines.join('\n');
   }
 }
+
+/**
+ * What another module needs of the access-request service: to open one.
+ * Injected by the composition root, which owns the implementation.
+ */
+export type IAccessRequests = Pick<AccessRequestsService, 'open'>;

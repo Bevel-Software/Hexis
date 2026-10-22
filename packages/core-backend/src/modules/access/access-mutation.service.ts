@@ -610,3 +610,9 @@ export class AccessMutationService {
     return new AccessMutationError(err instanceof Error ? err.message : 'mutation failed', 500);
   }
 }
+
+/**
+ * What another module needs of the mutation service: to grant and to revoke.
+ * Injected by the composition root, which owns the implementation.
+ */
+export type IAccessMutation = Pick<AccessMutationService, 'grant' | 'revoke'>;
