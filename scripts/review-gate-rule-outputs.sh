@@ -30,6 +30,8 @@
 # Markup is stripped twice: every complete tag, and then a tag the 2,000-
 # character window cut open (`<a href="…` with no `>` in the window), so a
 # block of nothing but a long tag never passes as substance.
+# A non-breaking space written as an entity (`&nbsp;`, `&#160;`, `&#xa0;`)
+# renders blank, so it is turned into a space before the substance test.
 #
 # ALL whitespace is collapsed to single spaces BEFORE the match, so the
 # pattern never needs a newline-crossing mode and carries only the `i` flag:
@@ -44,5 +46,5 @@ if [ $# -ne 1 ] || [ ! -f "$1" ]; then
 fi
 ro_pattern="<pre [^>]*class=[\"']rule-outputs[\"'][^>]*>((?:(?!</pre>).){1,2000})"
 jq -e --arg pat "$ro_pattern" \
-  '(.content? // "") | tostring | gsub("[[:space:]]+"; " ") | [scan($pat; "i")] | flatten | map(tostring | gsub("<[^>]*>"; "") | gsub("<[^>]*$"; "")) | any(test("[^ ]"))' \
+  '(.content? // "") | tostring | gsub("[[:space:]]+"; " ") | [scan($pat; "i")] | flatten | map(tostring | gsub("<[^>]*>"; "") | gsub("<[^>]*$"; "") | gsub("&(nbsp|#160|#xa0);"; " ")) | any(test("[^ ]"))' \
   "$1" >/dev/null 2>&1

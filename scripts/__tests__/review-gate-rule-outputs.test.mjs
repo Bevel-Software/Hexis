@@ -53,6 +53,9 @@ describe('review gate — a one-pager must carry a non-empty Rule outputs block'
   test('refuses a page with no block, and a block of nothing but spaces', needsJq, () => {
     assert.equal(gate('<html><body><h2>Rule outputs</h2><p>Intent: narrated in prose only.</p></body></html>'), 1);
     assert.equal(gate(`<html><body>${open}   \n\t  </pre><p>prose</p></body></html>`), 1);
+    // Blank once rendered: a non-breaking space spelled as an entity is not substance either.
+    assert.equal(gate(`<html><body>${open}&nbsp; &#160;
+&#xa0;</pre></body></html>`), 1);
   });
 
   test('refuses a block of nothing but markup — complete tags, and a tag the window cuts open', needsJq, () => {
