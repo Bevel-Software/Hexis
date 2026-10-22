@@ -22,6 +22,7 @@ import {
   assertInsideRepo,
   assertRepoRootNameFree,
   assertRepoRootNameFreeArgs,
+  hasControlCharacter,
   isInsideRepo,
   normalizePathArgs,
   normalizeWorkspacePath,
@@ -838,15 +839,14 @@ async function grepTree(
     const reader = readerOf(ext);
     return reader instanceof DocumentReader || reader.greppableText !== undefined;
   });
-  // A name holding a line break cannot be named to ripgrep exactly, so its
-  // text is read and matched the way a document's is.
-  const nameable = (p: string): boolean => !/[\r\n]/.test(p);
   const out: GrepMatch[] = [];
 
   // Every file the walk covers, in path order. Only what is shown is ever
-  // judged, so what is judged readable is what may be answered.
-  const all = (await search.list(scope)).filter((p) => shown(at(p)));
-  const raw = all.filter((p) => !ownedBy(p, notRaw) && nameable(p));
+  // judged, so what is judged readable is what may be answered. A name
+  // holding a control character is no file name to the platform — no tool
+  // reads or writes one — so it is not searched either.
+  const all = (await search.list(scope)).filter((p) => shown(at(p)) && !hasControlCharacter(p));
+  const raw = all.filter((p) => !ownedBy(p, notRaw));
   // The text pass: a batch of files is judged, then its readable files, and
   // only they, are searched. A batch is judged before ripgrep opens any of
   // it, and the pass stops at the `max`-th line, so the verdicts asked for are
@@ -876,7 +876,7 @@ async function grepTree(
 
   const last = out.length >= max ? out[out.length - 1]!.path : undefined;
   const candidates = all
-    .filter((p) => ownedBy(p, readerOwned) || (!ownedBy(p, notRaw) && !nameable(p)))
+    .filter((p) => ownedBy(p, readerOwned))
     .map(at)
     .filter((p) => last === undefined || compareSearchPaths(p, last) <= 0);
   const readable = await readableFiles(gate, candidates);
