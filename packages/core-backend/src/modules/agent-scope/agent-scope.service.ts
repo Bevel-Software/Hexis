@@ -97,6 +97,9 @@ export class AgentScopeService implements IAgentScopeResolver {
     const found = await this.disk.walkFiles(located.kbRoot, (name) => name.endsWith(AGENT_FILE_EXTENSION));
     const candidates = found.map((p) => p.split(path.sep).join('/'));
     if (candidates.length === 0) return [];
+    // Knowledge-base-relative, as the walk returns them: the read gate judges
+    // paths under the knowledge-base folder (its rules are `Agents/access.md`,
+    // not `knowledge-base/Agents/access.md`), exactly as the skill catalog asks.
     const readable = await this.accessControl.canReadBatch(located.wsId, userEmail, candidates);
     const choices: AgentChoice[] = [];
     for (const rel of candidates) {
