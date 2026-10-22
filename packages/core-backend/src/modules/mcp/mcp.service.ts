@@ -37,6 +37,7 @@ import {
   installSessionRecovery,
   flattenManualTool,
   toListedTool,
+  withReadOnlyOverride,
   toolError,
   retiredToolMessage,
   needsAuthorizationResult,
@@ -123,6 +124,16 @@ export interface McpProxyOptions {
    * knowledge base's.
    */
   secretsScope?: string;
+  /**
+   * The deployment's read-only overrides, by tool name, read per listing so an
+   * admin's change on the Tools page is in the next `tools/list`. Joined on
+   * here, at listing time, for the platform tools and the code-mode meta-tools
+   * alike: the platform tools' BUILT-IN hint arrives as the manual's
+   * `read-only` tag, in a surface that is cached across requests, so an
+   * override baked into it would outlive the toggle that set it. Absent, every
+   * tool lists its built-in hint.
+   */
+  readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -553,7 +564,15 @@ export class McpService {
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => inRequest(async () => {
-      const [{ tools, catalogNames }, { toolPrefix }] = await Promise.all([requestSurface(), agentInstructions()]);
+      const [{ tools, catalogNames }, { toolPrefix }, readOnly] = await Promise.all([
+        requestSurface(),
+        agentInstructions(),
+        // A failed read lists the built-in hints rather than no listing at all.
+        this.opts.readOnlyOverrides?.().catch((err: unknown) => {
+          log.warn('tools/list: could not read the read-only overrides; listing built-in hints.', { err });
+          return undefined;
+        }),
+      ]);
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
@@ -590,7 +609,9 @@ export class McpService {
         // place for it), so it is joined on here — the one point where a
         // discovered tool becomes a listing entry.
         const ui = apps && Object.hasOwn(apps.tools, t.mcpName) ? apps.tools[t.mcpName] : undefined;
-        const entry = toListedTool(ui ? { ...t, ui } : t); // logs its own reason on a name/schema drop
+        // An admin's override of a platform tool's hint, read for THIS listing.
+        const hinted = withReadOnlyOverride(t, readOnly);
+        const entry = toListedTool(ui ? { ...hinted, ui } : hinted); // logs its own reason on a name/schema drop
         if (!entry) {
           dropped.push(t.mcpName);
           continue;
@@ -641,6 +662,7 @@ export class McpService {
       // built here, so here it is.
       const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
         sharedRulesPointer: '',
+        ...(readOnly ? { readOnly } : {}),
       }).map((tool) => ({ ...tool, description: guideFirstDescription(tool.description) }));
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide

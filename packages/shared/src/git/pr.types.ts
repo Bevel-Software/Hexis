@@ -1,5 +1,8 @@
 export type PullRequestState = 'open' | 'merged' | 'closed';
 
+/** The level an access request asks for: Can edit, or Owner. */
+export type AccessRequestLevel = 'write' | 'owner';
+
 export interface PullRequestAuthor {
   login: string;
   name?: string;
@@ -44,9 +47,10 @@ export interface PullRequestSummary {
   /**
    * The latest moment the change-request ROW records: the latest of its
    * creation time, its `updated_at` stamp (written when the row itself
-   * changes — a merge, a close, a recorded apply failure) and its close time.
+   * changes — a merge, a close, a recorded apply failure, an edit of its title
+   * or description) and its close time.
    * GitHub's `updated_at` on a pull request means "when anything about it
-   * last changed"; comments and approvals carry their own times here and do
+   * last changed"; approvals carry their own times here and do
    * not move this one, so this is as close as the row can honestly answer —
    * never a time guessed from elsewhere. Absent only on a summary built by
    * something other than a change-request row (test doubles).
@@ -196,38 +200,6 @@ export interface PullRequestFile {
 }
 
 /**
- * One comment in the Bevel-owned PR discussion. GitHub never sees these —
- * they live only in our DB, attributed to the authenticated user. Shape
- * encodes three comment kinds:
- *
- *   General         → path undefined, line undefined
- *   File-level      → path set,      line undefined
- *   Inline (line)   → path set,      line set
- *
- * Threading: `parentId` points at the root of the thread; top-level comments
- * have it undefined.
- */
-export interface PrReviewComment {
-  id: string;
-  author: { email: string; name: string };
-  body: string;
-  path?: string;
-  line?: number;
-  /** The head SHA the comment was authored against — lets the UI grey out stale inline pins. */
-  headSha: string;
-  parentId?: string;
-  createdAt: string;
-  updatedAt?: string;
-}
-
-export interface PostPrCommentInput {
-  body: string;
-  path?: string;
-  line?: number;
-  parentId?: string;
-}
-
-/**
  * One owner's approval on one file. Stored straight from the
  * `pr_file_approvals` row, with derived flags the UI needs.
  */
@@ -304,15 +276,26 @@ export interface FileApprovalState {
 
 /**
  * Full read-only PR detail for the in-app viewer. Extends the summary with
- * body, SHAs, file list, and the Bevel-owned comments. Later phases add
+ * body, SHAs and file list. Later phases add
  * `approvals` and merge-gate fields — this shape grows incrementally.
  */
 export interface PullRequestDetail extends PullRequestSummary {
+  /**
+   * The request's description — the whole body, exactly as its author (or a
+   * later edit) left it. Hexis writes nothing of its own into it: who must
+   * approve each file is resolved live and answered per file in `approvals`,
+   * and an access request's level and note are `accessRequest`'s.
+   */
   body: string;
+  /**
+   * Set on a request the access-request flow opened: the level the person
+   * asked for, and their note when they wrote one. Absent on every other
+   * request.
+   */
+  accessRequest?: { level: AccessRequestLevel; note?: string };
   headSha: string;
   baseSha: string;
   files: PullRequestFile[];
-  comments: PrReviewComment[];
   /**
    * One entry per file in `files`, same order. Empty when the caller had no
    * resolvable workspace to do the owner lookup against.
@@ -426,7 +409,62 @@ export interface PullRequestDetail extends PullRequestSummary {
    * `DELETE /api/workflow/change-requests/:number` re-checks server-side.
    */
   viewerCanDelete: boolean;
+  /**
+   * True iff the viewer may change the request's title and description: the
+   * request is open AND the viewer is its author or someone who may merge it
+   * (an admin, or the holder of write on every changed file) — exactly
+   * `viewerCanCancel`'s grants, since what is asked belongs to the same people
+   * who may close it. A UX hint — `PATCH /api/workflow/change-requests/:number`
+   * re-checks server-side.
+   */
+  viewerCanEdit: boolean;
 }
+
+/**
+ * Body of `PATCH /api/workflow/change-requests/:number`. At least one field;
+ * an absent field keeps its current text. `description` replaces the
+ * request's description whole — the body is nothing but the description.
+ * `appendDescription` instead adds a paragraph after the description as the
+ * server holds it at the moment of the write, so two appends racing each
+ * other both land (never together with `description`). A title is at most
+ * {@link CHANGE_REQUEST_TITLE_MAX} characters and a description, after an
+ * append as much as after a replacement, at most
+ * {@link CHANGE_REQUEST_DESCRIPTION_MAX}.
+ *
+ * A union of the allowed shapes, so a client cannot build `{}` or a
+ * `description` together with `appendDescription`. The server reads the
+ * body as untrusted JSON all the same — as {@link UpdateChangeRequestFields}
+ * — and answers any other shape with a worded 400.
+ */
+export type UpdateChangeRequestInput =
+  | { title: string; description?: string; appendDescription?: never }
+  | { title?: string; description: string; appendDescription?: never }
+  | { title?: string; description?: never; appendDescription: string };
+
+/**
+ * The fields of a `PATCH /api/workflow/change-requests/:number` body as the
+ * server receives them — any combination, since the body is untrusted JSON.
+ * `WorkflowService.updateChangeRequest` checks the shape and refuses what
+ * {@link UpdateChangeRequestInput} rules out with a worded 400.
+ */
+export interface UpdateChangeRequestFields {
+  title?: string;
+  description?: string;
+  appendDescription?: string;
+}
+
+/** Longest title a change request may carry — the route and the agent tool alike. */
+export const CHANGE_REQUEST_TITLE_MAX = 256;
+
+/**
+ * Longest description a change request may carry, in characters — on
+ * opening, on a replacement and on what an append leaves, for the routes and
+ * the agent tools alike. The body is decrypted by every listing and every
+ * detail read, and the propose flow appends a note on each later round, so
+ * without a ceiling a request's body grows for as long as it is open. The
+ * same ceiling comments had.
+ */
+export const CHANGE_REQUEST_DESCRIPTION_MAX = 64_000;
 
 /**
  * Result of a successful merge via the in-app gate. `sha` is the merge commit

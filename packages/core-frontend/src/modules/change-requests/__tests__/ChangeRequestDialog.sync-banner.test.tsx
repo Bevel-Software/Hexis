@@ -65,7 +65,6 @@ const DETAIL = {
   headSha: 'h',
   baseSha: 'b',
   files: [{ path: 'Docs/a.md', status: 'modified', additions: 1, deletions: 0, isBinary: false, sha: '', rawUrl: '' }],
-  comments: [],
   approvals: [APPROVAL],
   mergeableInBevel: true,
   mergeBlockedReasons: [],

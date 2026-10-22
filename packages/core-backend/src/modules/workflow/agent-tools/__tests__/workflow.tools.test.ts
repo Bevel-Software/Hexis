@@ -72,7 +72,6 @@ function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
     headSha: 'head-1',
     baseSha: 'base-1',
     files,
-    comments: [],
     approvals: files.map((f) => approvalOf(f.path as string)),
     mergeableInBevel: false,
     mergeBlockedReasons: files.map((f) => `${f.path as string} is not approved`),
@@ -94,8 +93,6 @@ const externalApiKeyService = {
     t === 'bevel_key' ? { user: { id: 'user-A', email: 'e@x', name: 'N' }, tokenId: 'tok' } : null,
 } as never;
 const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
-/** A declined change request: no sha records what it proposed, so it has no head. */
-const DECLINED_CR = 21;
 
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
@@ -129,15 +126,12 @@ const workflowService = {
   releaseLock: async (ws: string, branch: string, path: string) => {
     calls.push(['releaseLock', ws, branch, path]);
   },
-  // #21 is DECLINED: the service reads such a row from nothing (no sha records
-  // what it proposed), so its detail carries no head — which is what the comment
-  // tool has to anchor to. Every other number is an ordinary open request.
   getChangeRequestDetail: async (number: number) => ({
     number,
     url: `https://bevel.example.com/change-requests/${number}`,
-    headSha: number === DECLINED_CR ? '' : 'head-1',
+    headSha: 'head-1',
     approvals: [],
-    state: number === DECLINED_CR ? 'closed' : 'open',
+    state: 'open',
     title: 'T',
     base: 'main',
   }),
@@ -180,10 +174,6 @@ const workflowService = {
       return { kind: 'preview', branch: name, exists: true, canDelete: true, refusals: [], unmergedCommits: 0, openChangeRequests: [], lastCommit: 'tip-1' };
     }
     return { kind: 'deleted', branch: name, lastCommit: 'tip-1', discardedCommits: name === 'me/unmerged' ? 3 : 0 };
-  },
-  postComment: async (number: number, _user: unknown, input: { path?: string }) => {
-    calls.push(['postComment', number, input.path]);
-    return { id: 'c-1' };
   },
   // The history and syncing reads, answered from a fixed script.
   listChangesForFile: async (ws: string, path: string, limit?: number) => {
@@ -371,51 +361,6 @@ describe('registerWorkflowTools', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ change: { id: 'change-1', summary: 'fix typo' } });
     expect(calls).toContainEqual(['commitChange', WS, 'user-A', { summary: 'fix typo', description: undefined }]);
-  });
-
-  // A change request's files are repository-relative; the Copy path form
-  // carries the clone folder, which is dropped so the comment lands on the file.
-  it('post_change_request_comment anchors a copied workspace path to the repository-relative file', async () => {
-    const base = await start();
-    for (const path of ['/knowledge-base/KnowledgeBase/Foo.md', 'knowledge-base/KnowledgeBase/Foo.md', 'KnowledgeBase/Foo.md']) {
-      const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi', path });
-      expect(res.status, path).toBe(200);
-    }
-    expect(calls.filter((c) => c[0] === 'postComment')).toEqual([
-      ['postComment', 3, 'KnowledgeBase/Foo.md'],
-      ['postComment', 3, 'KnowledgeBase/Foo.md'],
-      ['postComment', 3, 'KnowledgeBase/Foo.md'],
-    ]);
-  });
-
-  // An agent hands the change request's link to a person, so the tools that
-  // act on one by number return its `{ number, url }` beside their own payload.
-  it('post_change_request_comment returns the change request link', async () => {
-    const base = await start();
-    const comment = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi' });
-    expect(comment.status).toBe(200);
-    const commentBody = await comment.json();
-    expect(commentBody).toMatchObject({
-      comment: { id: 'c-1' },
-      changeRequest: { number: 3, url: 'https://bevel.example.com/change-requests/3' },
-    });
-    // A configured address yields an absolute link, so no note rides along.
-    expect(commentBody.changeRequest).not.toHaveProperty('urlNote');
-  });
-
-  // A comment anchors to a commit. A declined request records none — nothing
-  // durable says what it proposed, so it is read from nothing and its detail
-  // carries no head. Say so, rather than letting the service's `head sha is
-  // required` come back as a 400 about an argument the caller never passed.
-  it('post_change_request_comment says why a declined request takes no comment', async () => {
-    const base = await start();
-    const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: DECLINED_CR, body: 'why was this turned down?' });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toMatch(
-      new RegExp(`#${DECLINED_CR} is closed and has no commit to anchor a comment to`),
-    );
-    // Nothing was written: the refusal happens before the service is asked.
-    expect(calls.some((c) => c[0] === 'postComment')).toBe(false);
   });
 
   describe('delete_branch', () => {

@@ -22,11 +22,11 @@ const ROW = {
   closedAt: null,
 };
 
-function makeDb(): Database {
+function makeDb(row: Record<string, unknown> = ROW): Database {
   return {
     select: () => ({
       from: () => ({
-        where: () => ({ limit: async () => [ROW] }),
+        where: () => ({ limit: async () => [row] }),
       }),
     }),
   } as unknown as Database;
@@ -42,10 +42,10 @@ const FORK = 'c'.repeat(40);
  * both refs), so the file list must be pinned to those same commits rather
  * than fetch and resolve again. The SHAs and the file list are read on every
  * call (a new head must show); what the detail cache saves is the DB
- * enrichment (comments, approvals), so that is where "cached" is observed.
+ * enrichment (approvals), so that is where "cached" is observed.
  */
 describe('PullRequestService.getPrDetail — git work per read', () => {
-  function harness() {
+  function harness(row: Record<string, unknown> = ROW) {
     const resolvePrShas = vi.fn(async () => ({ baseSha: BASE, headSha: HEAD }));
     const changedFilesForPr = vi.fn(async () => []);
     const forkPointForPr = vi.fn(async () => ({ mergeBaseSha: FORK, behind: true }));
@@ -61,11 +61,9 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
     const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
-    const svc = new PullRequestService(makeDb(), workspace, access, git);
-    const listComments = vi.fn(async () => []);
+    const svc = new PullRequestService(makeDb(row), workspace, access, git);
     const getApprovalStates = vi.fn(async () => []);
     svc.setDetailEnricher({
-      listComments,
       getApprovalStates,
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });
@@ -78,6 +76,25 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
       getApprovalStates,
     };
   }
+
+  it('carries the body as stored, and an access request\'s level and note off the row — absent on an ordinary request', async () => {
+    const plain = await harness().svc.getPrDetail(7, { fresh: true });
+    expect(plain?.body).toBe('');
+    expect(plain).not.toHaveProperty('accessRequest');
+
+    const asked = await harness({
+      ...ROW,
+      body: 'Rita asked for **Owner** on Research.',
+      accessRequestLevel: 'owner',
+      accessRequestNote: 'I maintain these pages now',
+    }).svc.getPrDetail(7, { fresh: true });
+    expect(asked?.body).toBe('Rita asked for **Owner** on Research.');
+    expect(asked?.accessRequest).toEqual({ level: 'owner', note: 'I maintain these pages now' });
+
+    // A level with no note: the note never stands alone, and never as ''.
+    const noNote = await harness({ ...ROW, accessRequestLevel: 'write', accessRequestNote: null }).svc.getPrDetail(7, { fresh: true });
+    expect(noNote?.accessRequest).toEqual({ level: 'write' });
+  });
 
   it('pins the file list to the SHAs it just resolved, and keeps patches for a client read', async () => {
     const { svc, resolvePrShas, changedFilesForPr } = harness();
@@ -164,7 +181,6 @@ describe('PullRequestService — change request link', () => {
     const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
     const svc = new PullRequestService(makeDb(), workspace, access, git, publicFrontendUrl);
     svc.setDetailEnricher({
-      listComments: async () => [],
       getApprovalStates: async () => [],
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });
@@ -244,7 +260,6 @@ describe('PullRequestService.getPrDetail — needsUpdate', () => {
     } as unknown as Database;
     const svc = new PullRequestService(db, workspace, access, git);
     svc.setDetailEnricher({
-      listComments: async () => [],
       getApprovalStates: async () => [],
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });
