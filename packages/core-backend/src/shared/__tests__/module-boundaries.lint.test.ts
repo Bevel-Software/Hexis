@@ -277,7 +277,7 @@ describe('lint: module boundaries', () => {
     const results = await eslint().lintFiles(files);
     const hits = results.flatMap((r) =>
       r.messages
-        .filter((m) => m.ruleId === RULE && m.message.startsWith(RULE_NAME))
+        .filter((m) => m.ruleId === RULE && m.message.includes(RULE_NAME))
         .map((m) => `${relative(REPO_ROOT, r.filePath)}:${m.line} ${m.message}`),
     );
     expect(hits).toEqual([]);

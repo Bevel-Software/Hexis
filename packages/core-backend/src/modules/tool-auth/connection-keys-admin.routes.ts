@@ -2,7 +2,7 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('connection-keys');
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import { TokenNotFoundError } from './external-api-key.errors.js';
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import '../auth/index.js'; // Express Request augmentation

@@ -9,7 +9,7 @@ import type { AuthService } from './auth.service.js';
 import type { IAccountHooks } from './account-hooks.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import type { UserAccessRemovalService } from '../access/user-access-removal.service.js';
 import { sendError } from '../access/admin-route-helpers.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';

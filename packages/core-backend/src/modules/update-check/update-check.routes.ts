@@ -1,5 +1,5 @@
 import express from 'express';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import type { UpdateCheckService } from './update-check.service.js';
 import '../auth/index.js'; // Express Request augmentation
 

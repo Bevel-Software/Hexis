@@ -8,7 +8,7 @@ import { AUTH_COOKIE_MAX_AGE_S } from './auth.routes.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js';
 import type { AuthService } from './auth.service.js';
 import { AccountAdmissionRefusedError, AccountDeactivatedError } from './account-admission.js';
-import { normalizeIssuerUrl } from '../settings/oidc-check.js';
+import { normalizeIssuerUrl } from '../settings/index.js';
 
 // Short-lived CSRF state + PKCE verifier for the OAuth round-trip: set before
 // redirecting to the provider, verified/consumed on callback.

@@ -6,8 +6,8 @@ import type {
   ToolReadOnlyEntry,
   ToolReadOnlySettingsStore,
 } from './read-only-hints.contract.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
-import { parseToolReadOnlyOverrides } from '../settings/deployment-settings.service.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import { parseToolReadOnlyOverrides } from '../settings/index.js';
 import { logger } from '../../shared/logging.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId, req.userEmail), through auth's public entry
 

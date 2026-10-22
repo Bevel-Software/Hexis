@@ -1,6 +1,6 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import { canonicalRoleName } from '../access-model/index.js';
 import { sendError as sharedSendError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import type { GroupsAdminService } from './groups-admin.service.js';

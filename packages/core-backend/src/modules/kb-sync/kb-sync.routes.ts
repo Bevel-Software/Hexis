@@ -2,7 +2,7 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('sync');
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import type { IKbSyncService, SyncResult } from './kb-sync.interface.js';
 import { parseSyncPayload, type SyncPayloadSource } from './sync-payload.js';
