@@ -44,4 +44,14 @@ serveExtractions({
   // Answers after a while: long enough for an earlier job's straggler to land during it.
   '.slow-echo': (bytes) =>
     new Promise((resolve) => setTimeout(() => resolve({ ok: true, summary: 'echo', text: bytes.toString('utf8') }), 150)),
+  // Answers, then leaves a rejection behind well into the next job — late
+  // enough that the budget the next job has left is less than that job needs.
+  '.straggler-late': () => {
+    setTimeout(() => void Promise.reject(new Error('late')), 600);
+    return { ok: true, summary: 'straggler', text: 'answered first' };
+  },
+  // A sound document that takes most of a budget: more than what is left
+  // after `.straggler-late` lands, less than the budget whole.
+  '.slow-echo-long': (bytes) =>
+    new Promise((resolve) => setTimeout(() => resolve({ ok: true, summary: 'echo', text: bytes.toString('utf8') }), 1100)),
 });

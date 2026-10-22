@@ -118,6 +118,18 @@ describe('WorkerDocumentExtractor — a parser that misbehaves', () => {
     expect(processSaw).toEqual([]);
   });
 
+  it('gives a job rerun over another file’s straggler the whole budget again, not what was left', async () => {
+    // Budget 1500 ms. The straggler lands 600 ms into the next job, which
+    // needs 1100 ms: the 900 ms the budget had left would not do, the whole
+    // budget does. A rerun on the leftover would time out a sound document
+    // and remember that timeout for an hour.
+    extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts'), poolMax: 1, budgetMs: 1500 });
+    expect(await extractor.extract('.straggler-late', Buffer.from('x'))).toMatchObject({ ok: true, text: 'answered first' });
+    // No pause: the one worker gets this job straight away, and the straggler lands while it runs.
+    expect(await extractor.extract('.slow-echo-long', Buffer.from('mine'))).toEqual({ ok: true, summary: 'echo', text: 'mine' });
+    expect(processSaw).toEqual([]);
+  }, 10_000);
+
   it('still pins a rejection on its own job when the worker had served another first', async () => {
     extractor = new WorkerDocumentExtractor({ entry: fixtureEntry('misbehaving-extract.worker.ts'), poolMax: 1 });
     expect(await extractor.extract('.echo', Buffer.from('warm'))).toMatchObject({ ok: true });
