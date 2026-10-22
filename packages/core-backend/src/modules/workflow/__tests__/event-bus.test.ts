@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
-import { WorkflowEventBus } from '../event-bus.js';
+import { WorkflowEventBus } from '../index.js';
 
 /**
  * Make a `Subscriber`-compatible spy. Returns the spy + a getter for
@@ -134,6 +134,19 @@ describe('WorkflowEventBus', () => {
       bus.subscribe(onAlice);
       bus.subscribe(onBob);
 
+      bus.emit({ kind: 'agent-connected', forUserId: 'u-alice', client: 'claude', agentKind: 'agent', at: '2026-10-19T00:00:00.000Z' });
+
+      expect(onAlice.push).toHaveBeenCalledTimes(1);
+      expect(onBob.push).not.toHaveBeenCalled();
+    });
+
+    it("delivers an agent's tool call only to the person whose agent made it", () => {
+      const bus = new WorkflowEventBus();
+      const onAlice = makeSubscriber('s-alice', 'u-alice');
+      const onBob = makeSubscriber('s-bob', 'u-bob');
+      bus.subscribe(onAlice);
+      bus.subscribe(onBob);
+
       bus.emit({
         kind: 'agent-tool-call',
         forUserId: 'u-alice',
@@ -178,7 +191,6 @@ describe('WorkflowEventBus', () => {
         source: 'feat',
         target: 'target-company-state',
         authorIdHash: 'h',
-        title: 'Add Foo',
       });
 
       expect(onA.push).toHaveBeenCalledTimes(1);

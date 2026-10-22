@@ -50,71 +50,13 @@ export function itemNameOf(repoRelPath: string): string {
 /**
  * Neutralise every character a markdown renderer would read as structure.
  *
- * The note is somebody's free text and it lands in a change request's
+ * The note is somebody's free text and it is quoted in a change request's
  * description, which IS rendered. Escaping it is what makes "plain text" true:
  * without this a note can carry a heading, a link, or an image pointing at a
  * URL that logs whoever opens the request.
  */
 export function escapeMarkdown(text: string): string {
   return text.replace(/[\\`*_{}[\]()#+\-.!|<>~]/g, (c) => `\\${c}`);
-}
-
-/** The exact inverse of {@link escapeMarkdown} — only our own backslashes go. */
-function unescapeMarkdown(text: string): string {
-  return text.replace(/\\([\\`*_{}[\]()#+\-.!|<>~])/g, '$1');
-}
-
-/**
- * The fence the note sits behind in a request's description.
- *
- * The description is the note's only home — there is no column for it — so the
- * editors' banner has to read it back out of prose. Marking the block means
- * that read is exact rather than a guess at which paragraph was the note, and
- * an HTML comment is invisible in every surface that renders the description.
- */
-const NOTE_OPEN = '<!--hexis:access-request-note-->';
-const NOTE_CLOSE = '<!--/hexis:access-request-note-->';
-
-/**
- * The level, recorded on the change request itself.
- *
- * The branch says what is proposed, but only while it can be read — and a
- * clone whose refs are a few seconds stale cannot read a branch cut moments
- * ago. The request's own row always can. "Requested: <level>" is a promise
- * about a request, so it is answered from the request, not from a file at a
- * ref that may not have arrived yet.
- */
-const LEVEL_MARK = /<!--hexis:access-request-level:(write|owner)-->/;
-
-/**
- * The requester's own words, back out of a request's description, or
- * undefined when they wrote none. Unescaped exactly as they were escaped, so
- * what the banner shows is what was typed.
- */
-/**
- * The level a request asks for, off its own description. Undefined for a
- * request opened before this marker existed — those are the skill route's,
- * and the skill route only ever asked for `write`.
- */
-export function extractRequestLevel(body: string | null | undefined): RequestLevel | undefined {
-  const hit = body ? LEVEL_MARK.exec(body) : null;
-  return hit ? (hit[1] as RequestLevel) : undefined;
-}
-
-export function extractRequestNote(body: string | null | undefined): string | undefined {
-  if (!body) return undefined;
-  const start = body.indexOf(NOTE_OPEN);
-  if (start < 0) return undefined;
-  const end = body.indexOf(NOTE_CLOSE, start);
-  if (end < 0) return undefined;
-  const note = body
-    .slice(start + NOTE_OPEN.length, end)
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('>'))
-    .map((line) => unescapeMarkdown(line.replace(/^>\s?/, '')))
-    .join('\n')
-    .trim();
-  return note || undefined;
 }
 
 /**
@@ -261,11 +203,15 @@ export class AccessRequestsService {
     }
 
     try {
+      // The level and the note are the request's own columns — what the
+      // dialog and the editors' banner read back. The description is for the
+      // people who read the request, and says the same things in prose.
       const detail = await workflow.openChangeRequest(ws.id, user, {
         sourceBranch: branch,
         targetBranch: kb.defaultBranch,
         title: `Access request: ${itemName}`,
         description: this.describe({ user, target, level, note }),
+        accessRequest: { level, ...(note ? { note } : {}) },
       });
       return { number: detail.number, level };
     } catch (err) {
@@ -331,18 +277,21 @@ export class AccessRequestsService {
   }
 
   /**
-   * The level change request `number` asks for, off its own description.
+   * The level change request `number` asks for, off the request's own row.
    *
-   * `write` when the description does not say: every request that predates the
-   * marker came from the skill page's "Request write access", which asks for
-   * exactly that. A detail that cannot be fetched falls there too — the line
-   * it feeds says which level was asked for, and Can edit is the lesser claim.
+   * The branch says what is proposed, but only while it can be read — and a
+   * clone whose refs are a few seconds stale cannot read a branch cut moments
+   * ago. The request's row always can. `write` when the row does not say:
+   * every request that predates the column came from the skill page's
+   * "Request write access", which asks for exactly that. A detail that cannot
+   * be fetched falls there too — the line it feeds says which level was asked
+   * for, and Can edit is the lesser claim.
    */
   private async levelOf(number: number): Promise<RequestLevel> {
     const detail = await this.deps.workflow
       .getChangeRequestDetail(number, { patches: false })
       .catch(() => null);
-    return extractRequestLevel(detail?.body) ?? 'write';
+    return detail?.accessRequest?.level ?? 'write';
   }
 
   /**
@@ -390,7 +339,12 @@ export class AccessRequestsService {
     }
   }
 
-  /** The description an editor reads: who, what, where, the note, and how to answer. */
+  /**
+   * The description an editor reads: who, what, where, the note, and how to
+   * answer. Prose only — the level and the note the platform reads back are
+   * the request's own columns, so nothing hidden is written here and an edit
+   * of the description loses nothing.
+   */
   private describe(input: {
     user: AuthUser;
     target: AccessRequestTarget;
@@ -400,14 +354,12 @@ export class AccessRequestsService {
     const { user, target, level, note } = input;
     const who = escapeMarkdown(user.name || user.email);
     const lines = [
-      `<!--hexis:access-request-level:${level}-->`,
       `${who} (${escapeMarkdown(user.email)}) asked for **${LEVEL_LABEL[level]}** on ` +
         `${escapeMarkdown(target.path || 'the workspace')}.`,
     ];
     if (note) {
-      lines.push('', `Note from ${who}:`, '', NOTE_OPEN);
+      lines.push('', `Note from ${who}:`, '');
       for (const line of note.split(/\r?\n/)) lines.push(`> ${escapeMarkdown(line)}`);
-      lines.push(NOTE_CLOSE);
     }
     lines.push(
       '',
