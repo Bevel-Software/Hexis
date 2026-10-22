@@ -92,7 +92,10 @@ function governedFolderLabel(folder: string, kbDirName: string | null): string {
  * which has no card and scrolls inside its own renderer.
  */
 function readingAnchorIn(pane: HTMLElement | null): HTMLElement | null {
-  return pane?.querySelector<HTMLElement>(':scope > [data-testid="file-pane-card"] > [data-file-pane-body]') ?? null;
+  // The body of the pane's own card (its direct child), found by the body's
+  // own marker: a test id is the tests' to rename, and a selector hung on it
+  // would stop the carry silently the day one is.
+  return pane?.querySelector<HTMLElement>(':scope > * > [data-file-pane-body]') ?? null;
 }
 
 /** The folder a page sits in, or '' for one that sits at a root. */
