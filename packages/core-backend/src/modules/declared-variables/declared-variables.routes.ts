@@ -6,7 +6,6 @@ import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
 import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
-import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
 type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
 
