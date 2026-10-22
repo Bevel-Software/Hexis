@@ -45,11 +45,14 @@ function frameOf(container: HTMLElement) {
   });
 }
 
-/** Post a link click from the frame, as its nav bridge does. */
-async function clickInFrame(container: HTMLElement, href: string) {
+/** Post a link click from the frame, as its nav bridge does; `newTab` for a modified or middle click. */
+async function clickInFrame(container: HTMLElement, href: string, newTab = false) {
   const iframe = await frameOf(container);
   window.dispatchEvent(
-    new MessageEvent('message', { data: { type: 'bevel.navigate', href }, source: iframe.contentWindow }),
+    new MessageEvent('message', {
+      data: newTab ? { type: 'bevel.navigate', href, newTab } : { type: 'bevel.navigate', href },
+      source: iframe.contentWindow,
+    }),
   );
 }
 
@@ -142,6 +145,34 @@ describe('a link inside an HTML page', () => {
     expect(post).toHaveBeenCalledWith({ type: 'bevel.jump', hash: '#steps' }, '*');
     expect(open).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('location').textContent).toBe('/library/skills/report');
+  });
+
+  // A modified or middle click in the page, relayed by the bridge: the
+  // browser would open the link in a new tab, so the app does, a section of
+  // this page included (where it would otherwise scroll in place), at the
+  // plain address; this tab and its full-screen view stay.
+  it('opens a modified click in a new tab at the plain address, a section of this page too', async () => {
+    const open = stubWindowOpen();
+    const { container } = onFilePage(`${AT}?fullscreen=1`);
+    const frame = await frameOf(container);
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    await clickInFrame(container, 'Board.html', true);
+    await clickInFrame(container, '#q3', true);
+    await clickInFrame(container, 'Roadmap.html#q4', true);
+    expect(open.mock.calls).toEqual([
+      ['/workspace/main/knowledge-base/Dashboards/Board.html', '_blank'],
+      [`${AT}#q3`, '_blank'],
+      [`${AT}#q4`, '_blank'],
+    ]);
+    expect(post).not.toHaveBeenCalled();
+    expect(screen.getByTestId('location').textContent).toBe(`${AT}?fullscreen=1`);
+  });
+
+  it('opens a modified click on an external link in a new tab, as a plain one', async () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { container } = onFilePage(AT);
+    await clickInFrame(container, 'https://example.com/docs', true);
+    expect(open).toHaveBeenCalledWith('https://example.com/docs', '_blank', 'noopener,noreferrer');
   });
 
   it('opens an external link as before, with no referrer', async () => {

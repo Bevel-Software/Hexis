@@ -328,6 +328,22 @@ describe('useFileNav.openLink', () => {
     expectNewTab('/workspace/target-company-state/knowledge-base/x.md');
   });
 
+  // A new tab the reader asked for (a modified or middle click a host had to
+  // relay): every in-app destination opens in one at its plain address, a
+  // section of this file included, and `onSection` does not scroll this tab.
+  it('opens every in-app destination in a new tab when the reader asked for one', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    const onSection = vi.fn();
+    result.current.openLink('#goal', 'knowledge-base/Knowledge/Foo.md', { newTab: true, onSection });
+    expectNewTab('/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md#goal');
+    openMock.mockClear();
+    result.current.openLink('Other.md', 'knowledge-base/Knowledge/Foo.md', { newTab: true, homeBranch: 'main', onSection });
+    expectNewTab('/workspace/main/knowledge-base/Knowledge/Other.md');
+    expect(onSection).not.toHaveBeenCalled();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
   // Every caller reaches `openLink` by CANCELLING the browser's navigation
   // first — the HTML sandbox `preventDefault`s each anchor and posts the href
   // up, the frontmatter panel does the same. So "leave it to the browser" is

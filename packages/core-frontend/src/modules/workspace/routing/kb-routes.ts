@@ -392,6 +392,14 @@ export interface OpenLinkOptions {
   homeBranch?: string;
   /** Follow a link to a section of the same file here, given its fragment, instead of moving this tab. */
   onSection?(hash: string): void;
+  /**
+   * The reader asked for a new tab — a modified or middle click a host had
+   * to relay, because it could not leave the click to the browser (the HTML
+   * page's sandboxed frame). Every in-app destination then opens in a new
+   * tab at its plain address, a section of this file included, as the
+   * browser opens a new-tab link: this tab stays as it is.
+   */
+  newTab?: boolean;
 }
 
 /**
@@ -548,6 +556,11 @@ export function useFileNav() {
         openExternalHref(href);
         return;
       }
+      if (options.newTab && resolved) {
+        const onBranch = resolved.branch ?? options.homeBranch ?? branch;
+        if (onBranch) openInNewTab(kbFileUrl(onBranch, resolved.path) + resolved.hash);
+        return;
+      }
       const target = linkTarget(href, basePath, options.homeBranch);
       if (target && !target.newTab && resolved && options.onSection) {
         options.onSection(resolved.hash);
@@ -555,7 +568,7 @@ export function useFileNav() {
       }
       followLinkTarget(target, navigate);
     },
-    [kbDirName, linkTarget, navigate],
+    [branch, kbDirName, linkTarget, navigate],
   );
 
   /**

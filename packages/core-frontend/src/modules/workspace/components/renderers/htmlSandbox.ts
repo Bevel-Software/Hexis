@@ -383,21 +383,34 @@ const NAV_BRIDGE = `
     var hash = normalize(msg.hash);
     if (hash.charAt(0) === '#') jumpTo(hash);
   });
+  // A click the reader asked a NEW TAB of — Ctrl, Cmd or Shift held, or the
+  // middle button (an 'auxclick'; it never fires 'click') — is what a browser
+  // opens a new tab for. The frame cannot: the sandbox has no allow-popups,
+  // so left to the browser it opens nothing, or navigates the frame away.
+  // The parent is asked instead, for any destination, a fragment of this
+  // page included (the parent opens this page at that section).
+  function followLink(e) {
+    if (e.type === 'auxclick' && e.button !== 1) return;
+    var el = e.target;
+    var a = el && el.closest ? el.closest('a[href]') : null;
+    if (!a) return;
+    // A handler of the page's own that already cancelled this click owns
+    // it (a toggle, a hash router); the bridge stays out of its way.
+    if (e.defaultPrevented) return;
+    // Cancelled even when there is nowhere to go: left to the browser, an
+    // empty href reloads the frame against the app's URL, as '#…' would.
+    e.preventDefault();
+    var href = normalize(a.getAttribute('href') || '');
+    if (!href) return;
+    if (e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey) {
+      parent.postMessage({ type: 'bevel.navigate', href: href, newTab: true }, '*');
+      return;
+    }
+    navigate(href);
+  }
   if (typeof document !== 'undefined') {
-    document.addEventListener('click', function (e) {
-      var el = e.target;
-      var a = el && el.closest ? el.closest('a[href]') : null;
-      if (!a) return;
-      // A handler of the page's own that already cancelled this click owns
-      // it (a toggle, a hash router); the bridge stays out of its way.
-      if (e.defaultPrevented) return;
-      // Cancelled even when there is nowhere to go: left to the browser, an
-      // empty href reloads the frame against the app's URL, as '#…' would.
-      e.preventDefault();
-      var href = normalize(a.getAttribute('href') || '');
-      if (!href) return;
-      navigate(href);
-    });
+    document.addEventListener('click', followLink);
+    document.addEventListener('auxclick', followLink);
   }
 })();
 `;

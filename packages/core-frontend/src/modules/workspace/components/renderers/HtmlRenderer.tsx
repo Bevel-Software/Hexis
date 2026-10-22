@@ -184,12 +184,15 @@ export function HtmlRenderer({
     function onNavMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
       if (!iframeWin || event.source !== iframeWin) return;
-      const msg = event.data as { type?: unknown; href?: unknown } | null;
+      const msg = event.data as { type?: unknown; href?: unknown; newTab?: unknown } | null;
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.navigate') return;
       const href = typeof msg.href === 'string' ? msg.href : null;
       if (!href) return;
       openLink(href, linkHome?.path ?? filePath, {
         homeBranch: linkHome?.branch,
+        // A modified or middle click in the page, which the frame cannot
+        // open a tab for itself (see the nav bridge in `htmlSandbox.ts`).
+        newTab: msg.newTab === true,
         onSection: (hash) => {
           if (hash) iframeWin.postMessage({ type: 'bevel.jump', hash }, '*');
         },

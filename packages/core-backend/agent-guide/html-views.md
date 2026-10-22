@@ -191,3 +191,8 @@ or `window.bevel.navigate(href)`:
 A click that a handler of the page has already cancelled with
 `event.preventDefault()` is left to that handler: the bridge neither scrolls
 nor opens anything for it.
+
+A click on a link with Ctrl, Cmd or Shift held, or with the middle button,
+opens its destination in a new tab, as a browser does with a link: a bare
+fragment opens the page's own file at that section in a new tab, and the
+page stays where it is.

@@ -119,6 +119,20 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(bridge.posted).toEqual([]);
   });
 
+  it('says a modified or middle click opens a new tab, and the bridge asks the app for one', () => {
+    expect(flat).toContain(
+      'A click on a link with Ctrl, Cmd or Shift held, or with the middle button, opens its destination in a new tab, as a browser does with a link: a bare fragment opens the page\'s own file at that section in a new tab, and the page stays where it is.',
+    );
+    const bridge = runBridge({ ids: ['totals'] });
+    bridge.click('#totals', { ctrlKey: true });
+    bridge.click('../Knowledge/Alice.md', { button: 1 });
+    expect(bridge.scrolled).toEqual([]);
+    expect(bridge.posted).toEqual([
+      { type: 'bevel.navigate', href: '#totals', newTab: true },
+      { type: 'bevel.navigate', href: '../Knowledge/Alice.md', newTab: true },
+    ]);
+  });
+
   it('names the addresses only a script may open, and the app opens exactly those beyond the markup', () => {
     expect(flat).toContain(
       'A call from a script may also open `tel:`, `sms:`, `geo:` and a protocol-relative `//host/path` address in a new tab, though a link written in the markup cannot keep one.',
