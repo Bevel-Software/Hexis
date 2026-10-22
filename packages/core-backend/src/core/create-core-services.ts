@@ -67,9 +67,11 @@ import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-down
 import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
 import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
-import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
-import type { IDocumentExtractor } from '../modules/workspace/file-readers/document-extractor.contract.js';
-import { WorkerDocumentExtractor } from '../modules/workspace/file-readers/extract-in-worker.js';
+import {
+  DocExtractService,
+  WorkerDocumentExtractor,
+  type IDocumentExtractor,
+} from '../modules/workspace/index.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
