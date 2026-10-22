@@ -5,6 +5,17 @@ it in a sandboxed frame, scripts and all. Write one when a reader is better
 served by something interactive — a dashboard, a filterable table, a chart —
 than by a markdown document.
 
+No skill or template is required. Ordinary HTML with inline CSS and JavaScript
+is enough; put known data in the file, or use only the data and tool members
+of `window.bevel` that this guide names. This section is the platform contract:
+a skill may add a design or authoring workflow, but it does not change how the
+page runs.
+
+**Data copied into the HTML is governed by the HTML file's access.** Graph and
+tool calls filter their answers for the current viewer; literal data embedded
+in the page does not. Anyone who may read the page receives those bytes, so do
+not copy data from a source whose read audience is narrower than the page's.
+
 ### The frame
 
 - **No network.** The page cannot fetch, load or send anything: no `fetch`, no
@@ -15,6 +26,10 @@ than by a markdown document.
   `<object>`, `<embed>`, `<base>` and `<meta>` are removed. Write CSS in a
   `<style>` element and code in an inline `<script>`. An image is a `data:`
   URL.
+- **The body is the page.** The renderer wraps the sanitized contents of
+  `<body>` in its own document. It keeps inline `<style>` and `<script>` from
+  `<head>`, but ignores document metadata and attributes on `<html>` or
+  `<body>`.
 - **Scripts run as ES modules**, in source order, after the document is
   parsed: `document.getElementById` works without waiting for
   `DOMContentLoaded`, top-level `await` works, and a top-level declaration is
