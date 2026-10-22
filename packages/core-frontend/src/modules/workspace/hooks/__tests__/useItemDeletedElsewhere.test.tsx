@@ -102,7 +102,7 @@ describe('useItemDeletedElsewhere', () => {
 
     ownDeletes.add(TOOL_A);
     act(() => bus.emit(changed(TOOL_A)));
-    await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A));
+    await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A, expect.any(Number)));
     expect(readFile).toHaveBeenCalledTimes(1);
     expect(ownDeletes.has(TOOL_A)).toBe(false);
 
@@ -121,12 +121,37 @@ describe('useItemDeletedElsewhere', () => {
     readFile.mockResolvedValue('{}');
     const { result } = mount(bus, { isOwnDelete, forgetOwnDelete });
 
-    await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A));
+    await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalledWith(TOOL_A, expect.any(Number)));
     expect(result.current).toBeNull();
 
     readFile.mockRejectedValue(new WorkspaceApiError(404));
     act(() => bus.emit(changed(TOOL_A)));
     await waitFor(() => expect(result.current?.name).toBe('Sam Rivera'));
+  });
+
+  // Our own delete answered while a read sent before it was still out: that
+  // read found the file as it was before the delete, so the delete stays ours.
+  it('keeps our own delete when the read that found the item was sent before it', async () => {
+    const bus = makeFakeBus();
+    // The workspace's rule: a marker set at or after the read was sent stays.
+    const ownDeletes = new Map<string, number>();
+    const isOwnDelete = vi.fn((path: string) => ownDeletes.has(path));
+    const forgetOwnDelete = vi.fn((path: string, readIssuedAt?: number) => {
+      const at = ownDeletes.get(path);
+      if (at !== undefined && (readIssuedAt === undefined || at < readIssuedAt)) ownDeletes.delete(path);
+    });
+    let answer!: () => void;
+    readFile.mockImplementationOnce(() => new Promise((resolve) => { answer = () => resolve('{}'); }));
+    mount(bus, { isOwnDelete, forgetOwnDelete });
+
+    act(() => bus.emit(changed(TOOL_A)));
+    await waitFor(() => expect(answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    ownDeletes.set(TOOL_A, Date.now());
+    await act(async () => { answer(); });
+
+    await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalled());
+    expect(ownDeletes.has(TOOL_A)).toBe(true);
   });
 
   it('reads nothing on open when no delete of ours covers the item', () => {

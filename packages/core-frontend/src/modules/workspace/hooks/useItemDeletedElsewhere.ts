@@ -74,11 +74,14 @@ export function useItemDeletedElsewhere({
         return;
       }
       inFlight = true;
+      // When it was sent: a find sent before our own delete answered is the
+      // file as it was before it, and must not end that delete.
+      const issuedAt = Date.now();
       readFile(workspaceId, keyFile)
         .then(
           () => {
             if (cancelled) return;
-            forgetOwnDeleteRef.current?.(keyFile);
+            forgetOwnDeleteRef.current?.(keyFile, issuedAt);
             setDeleted((prev) => (prev?.key === key ? null : prev));
           },
           (err) => {
@@ -117,9 +120,10 @@ export function useItemDeletedElsewhere({
     // found the item, so it came back. Confirm with one read and forget the
     // marker — otherwise the next delete, by someone else, is skipped.
     if (isOwnDeleteRef.current?.(keyFile)) {
+      const issuedAt = Date.now();
       readFile(workspaceId, keyFile).then(
         () => {
-          if (!cancelled) forgetOwnDeleteRef.current?.(keyFile);
+          if (!cancelled) forgetOwnDeleteRef.current?.(keyFile, issuedAt);
         },
         () => {},
       );

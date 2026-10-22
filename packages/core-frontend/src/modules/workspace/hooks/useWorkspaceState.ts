@@ -783,6 +783,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Numbered like a refresh read: once its bytes open the tab, a refresh
     // read issued before it (for a tab since closed) lands on nothing.
     const seq = ++existenceReadSeqRef.current;
+    const issuedAt = Date.now();
     try {
       const content = await readFile(workspaceId, relativePath);
       // A read that outlived its workspace belongs to another branch's tab
@@ -791,6 +792,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         traceFiles('add-tab:stale-workspace', { path: relativePath, readFrom: workspaceId, now: workspaceIdRef.current });
         return false;
       }
+      // The file is there (restored since our delete): saving it is not
+      // re-creating it. A read sent before the delete answered keeps it.
+      forgetOwnDelete(relativePath, issuedAt);
       const isLatest = requestId === addRequestIdRef.current;
       // Re-check dedup in case of races during the await.
       const stillExisting = openTabsRef.current.find((t) => t.path === relativePath);
@@ -829,7 +833,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       console.error('Failed to read file:', err);
       throw err;
     }
-  }, [workspaceId, activateTab, markLanded]);
+  }, [workspaceId, activateTab, markLanded, forgetOwnDelete]);
 
   const closeTab = useCallback(async (
     tab: OpenTab,
@@ -935,6 +939,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Numbered like refresh reads, so one issued before them lands on nothing
     // once these bytes open the tabs.
     const seqs = uniqPaths.map(() => ++existenceReadSeqRef.current);
+    const issuedAt = Date.now();
     const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
     // The strip is no longer this hydration's to write: the workspace moved to
     // another branch, or a newer restore started while these reads were in
@@ -964,6 +969,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         });
         surviving.push(path);
         survivingSeqs.push(seqs[i]);
+        // Found on this branch: an own delete it outlived is over, as in addTab.
+        if (workspaceIdRef.current === workspaceId) forgetOwnDelete(path, issuedAt);
       } else {
         const err = res.reason;
         if (err instanceof WorkspaceApiError && err.status === 404) {
@@ -1009,7 +1016,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setActiveTabPath(requested);
     hydratedKeyRef.current = hydratedKey;
     return { surviving, dropped, denied, superseded: false };
-  }, [workspaceId, workspaceBranch, markLanded]);
+  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 

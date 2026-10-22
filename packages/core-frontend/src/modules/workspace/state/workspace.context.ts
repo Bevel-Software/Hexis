@@ -386,10 +386,12 @@ export interface WorkspaceContextValue {
   isOwnDelete?: (relativePath: string) => boolean;
   /**
    * `relativePath` was read back, so it exists again: `isOwnDelete` stops
-   * covering it, and a later delete of it is someone else's. Optional, as
+   * covering it, and a later delete of it is someone else's. `readIssuedAt`:
+   * when the read that found it was sent — a delete that answered after that
+   * stays, since the read saw the file as it was before it. Optional, as
    * `isOwnDelete` is.
    */
-  forgetOwnDelete?: (relativePath: string) => void;
+  forgetOwnDelete?: (relativePath: string, readIssuedAt?: number) => void;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
   saveFile: (relativePath: string, content: string) => Promise<void>;
   /**

@@ -369,7 +369,6 @@ describe('the editor writing back as its tab closes', () => {
     expect(apiMocks.writeFile).not.toHaveBeenCalled();
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
-
   it('a read that finds the file lets the waiting save through', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
@@ -661,7 +660,6 @@ describe('a file deleted by someone else', () => {
     expect(result.current.hasUnsavedFileChanges).toBe(true);
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
-
   it('clears the dirty flag as before on a tab nobody deleted', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
@@ -941,7 +939,6 @@ describe('a file deleted by someone else', () => {
     expect(apiMocks.writeFile).not.toHaveBeenCalled();
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
-
   it('a read issued after the 404 that finds the file again ends the delete, as a restore does', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
@@ -1033,7 +1030,6 @@ describe('a file deleted by someone else', () => {
     await expect(result.current.saveFile('KB/Draft.md', 'written back')).rejects.toThrow('Draft.md was deleted from this branch');
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
-
   it('a lock released by a delete shows the notice over unsaved edits too, keeping them', async () => {
     const result = await mountReady();
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
@@ -1051,7 +1047,6 @@ describe('a file deleted by someone else', () => {
     expect(apiMocks.writeFile).not.toHaveBeenCalled();
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
-
   it("a lock released on a file that is still there leaves a dirty tab's edits alone", async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
@@ -1638,6 +1633,51 @@ describe('the editor writing back after our own delete', () => {
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
+  it('a file restored on the branch and opened again saves at once', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    // Someone restores it on the branch a moment later (a read sent in the
+    // delete's own millisecond counts as sent before it); nothing in this
+    // session re-created it.
+    await new Promise((r) => setTimeout(r, 2));
+    disk.set('KB/Draft.md', 'restored');
+    await open(result, 'KB/Draft.md');
+
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'restored, edited'); });
+    expect(disk.get('KB/Draft.md')).toBe('restored, edited');
+  });
+
+  it('a file restored on the branch and brought back by a tab restore saves at once', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    await new Promise((r) => setTimeout(r, 2));
+    disk.set('KB/Draft.md', 'restored');
+    await act(async () => { await result.current.hydrateTabs(['KB/Draft.md'], 'KB/Draft.md'); });
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBe('restored');
+
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'restored, edited'); });
+    expect(disk.get('KB/Draft.md')).toBe('restored, edited');
+  });
+
+  it('an opening read sent before our delete answered keeps the delete', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    // A tab restore reads the file, then our delete answers before that read does.
+    let hydrating!: Promise<unknown>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    await act(async () => { answer(); await hydrating; });
+
+    expect(result.current.isOwnDelete?.('KB/Draft.md')).toBe(true);
+  });
   it('a file created where our own delete was saves as any other', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
