@@ -7,7 +7,6 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import type {
   AuthUser,
   ChangeInput,
-  PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -239,10 +238,6 @@ function makePrs(): PullRequestService {
 
 function makeReviewWorkflow(): IReviewWorkflowService {
   return {
-    listComments: vi.fn(),
-    postComment: vi.fn(),
-    editComment: vi.fn(),
-    deleteComment: vi.fn(),
     getApprovalStates: vi.fn(),
     approveFile: vi.fn(),
     unapproveFile: vi.fn(),
@@ -572,21 +567,6 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     expect(prs.listOpenPrs).toHaveBeenCalledWith({ fresh: true });
   });
 
-  it('postComment delegates AND invalidates the PR detail cache', async () => {
-    const prs = makePrs();
-    const reviewWorkflow = makeReviewWorkflow();
-    const comment = { id: 'c1' };
-    const input: PostChangeRequestCommentInput = { body: 'hi' };
-    (reviewWorkflow.postComment as ReturnType<typeof vi.fn>).mockResolvedValue(comment);
-
-    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
-    const user = makeUser();
-    await expect(svc.postComment(42, user, input, 'sha1')).resolves.toBe(comment);
-    expect(reviewWorkflow.postComment).toHaveBeenCalledWith(42, user, input, 'sha1');
-    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(42);
-    expect(prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
-  });
-
   it('approveFile invalidates the PR detail cache exactly once', async () => {
     const prs = makePrs();
     const reviewWorkflow = makeReviewWorkflow();
@@ -602,12 +582,63 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     const prs = makePrs();
     const reviewWorkflow = makeReviewWorkflow();
     (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockResolvedValue({ prNumber: 9, cancelledAt: 't' });
+    // A caller holding no grant: not the author, not an admin, no files to own.
+    const access = makeAccessControl();
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
-    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
     const user = makeUser();
     await svc.rejectChangeRequest(9, user, 'open', null, 'main', 'w1');
+    // Passed through unchanged: `cancelPr` is the one that refuses it.
     expect(reviewWorkflow.cancelPr).toHaveBeenCalledWith(9, user, 'open', null, 'main', 'w1');
     expect(prs.invalidateDetailCache).toHaveBeenCalledWith(9);
+  });
+
+  // Reject and the title/description edit share ONE rule for who may decide a
+  // request (`changeRequestDecisionGrant`); these pin reject's side of it.
+  it('rejectChangeRequest lets the holder of write on every changed file close it as the author would', async () => {
+    const prs = makePrs();
+    (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ files: [{ path: 'a.md' }, { path: 'b.md' }] });
+    const reviewWorkflow = makeReviewWorkflow();
+    (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockResolvedValue({ prNumber: 9, cancelledAt: 't' });
+    const access = makeAccessControl();
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    (access.canWriteBatchAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([['a.md', true], ['b.md', true]]),
+    );
+    const workspaceService = makeWorkspaceService();
+
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, workspaceService, access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    const user = makeUser();
+    await svc.rejectChangeRequest(9, user, 'open', 'someone-else', 'main', 'w1');
+    expect(workspaceService.ensureRemotesFetched).toHaveBeenCalledWith('w1', { strict: true, force: true });
+    expect(access.canWriteBatchAtRef).toHaveBeenCalledWith('w1', 'origin/main', user.email, ['a.md', 'b.md']);
+    expect(reviewWorkflow.cancelPr).toHaveBeenCalledWith(9, user, 'open', hashEmail(user.email), 'main', 'w1');
+  });
+
+  it('rejectChangeRequest refuses with a worded 409 when origin cannot be fetched, never against a stale tree', async () => {
+    const reviewWorkflow = makeReviewWorkflow();
+    const workspaceService = makeWorkspaceService();
+    (workspaceService.ensureRemotesFetched as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'));
+    const access = makeAccessControl();
+
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), reviewWorkflow, workspaceService, access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    await expect(svc.rejectChangeRequest(9, makeUser(), 'open', 'someone-else', 'main', 'w1')).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('origin was unreachable'),
+    });
+    expect(access.canWriteAtRef).not.toHaveBeenCalled();
+    expect(reviewWorkflow.cancelPr).not.toHaveBeenCalled();
+  });
+
+  it("rejectChangeRequest reads no grant for a request that is no longer open — cancelPr answers it", async () => {
+    const reviewWorkflow = makeReviewWorkflow();
+    (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('already-applied'));
+    const workspaceService = makeWorkspaceService();
+
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), reviewWorkflow, workspaceService, makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
+    await expect(svc.rejectChangeRequest(9, makeUser(), 'merged', null, 'main', 'w1')).rejects.toThrow('already-applied');
+    expect(workspaceService.ensureRemotesFetched).not.toHaveBeenCalled();
   });
 
   it('mergeChangeRequest wraps the underlying merge result in a "merged" outcome', async () => {
@@ -1606,6 +1637,35 @@ describe('WorkflowService.openChangeRequest — when the repository host refuses
     return { svc, git, prs, values, emit };
   }
 
+  it('stores the description as the whole body, and an access request\'s level and note on their own columns', async () => {
+    const h = makeOpenHarness(vi.fn().mockResolvedValue(undefined));
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), { ...INPUT, description: '  Why this.  ' });
+    expect(h.values).toHaveBeenLastCalledWith(
+      expect.objectContaining({ body: 'Why this.', accessRequestLevel: null, accessRequestNote: null }),
+    );
+    // Nothing of Hexis's own is appended: the stored body is exactly the description.
+    expect((h.values.mock.calls[0] as [Record<string, unknown>])[0].body).not.toContain('Affected owners');
+
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), {
+      ...INPUT,
+      description: 'Rita asked for **Owner** on Research.',
+      accessRequest: { level: 'owner', note: '  I maintain these pages now  ' },
+    });
+    expect(h.values).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        body: 'Rita asked for **Owner** on Research.',
+        accessRequestLevel: 'owner',
+        accessRequestNote: 'I maintain these pages now',
+      }),
+    );
+
+    // A level with a blank note stores no note.
+    await h.svc.openChangeRequest('ali%2Fx', makeUser(), { ...INPUT, accessRequest: { level: 'write', note: '   ' } });
+    expect(h.values).toHaveBeenLastCalledWith(
+      expect.objectContaining({ body: '', accessRequestLevel: 'write', accessRequestNote: null }),
+    );
+  });
+
   it('creates the request, then answers 409 with the saved-locally sentence and raises the banner', async () => {
     const refused = new Error(
       'git push failed: remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)',
@@ -1787,6 +1847,9 @@ describe('WorkflowService.openChangeRequest — tells the change-request listene
     // The row landed before anyone was told, and the answer says who was.
     expect(h.values).toHaveBeenCalledTimes(1);
     expect(h.values.mock.invocationCallOrder[0]).toBeLessThan(h.run.mock.invocationCallOrder[0]!);
+    // The approvers the listeners hear of are never written into the request:
+    // with no description, the stored body is empty.
+    expect((h.values.mock.calls[0] as unknown as [Record<string, unknown>])[0].body).toBe('');
     expect(answer).toMatchObject({ number: 12, notified: ['email'] });
   });
 

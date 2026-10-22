@@ -20,6 +20,10 @@ import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
+import {
+  createToolHintsAgentRoutes,
+  createToolHintsRoutes,
+} from '../modules/tool-registry/read-only-hints.js';
 import { createCatalogRevisionRoutes } from './catalog-revision.js';
 import {
   createToolManualsAgentRoutes,
@@ -539,11 +543,16 @@ export async function createCoreServer(
     agentAccessGate,
     core,
   });
+  // What MCP clients are told about each platform tool's effect: read by the
+  // agent manual (the hosted endpoint) and by `/agent/tool-hints` (hexis-mcp).
+  const { readOnlyHints } = core;
   toolsRouter.use(createManualRoutes(
     core.toolRegistry,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    readOnlyHints,
   ));
+  toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
   // `.tool` sub-manuals. Mounted on the tools router so they share `manualAuth`
   // and sit before the JWT `/api` mounts.
@@ -672,6 +681,7 @@ export async function createCoreServer(
   const eventDelivery = new EventDelivery(createEventAccess({
     accessControl: core.accessControl,
     kbDirName: core.kbDirName,
+    getChangeRequest: (number) => core.workflowService.getChangeRequest(number),
     workspaces: {
       hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
       anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
@@ -758,6 +768,8 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // The Tools page's read-only toggles: anyone signed in reads, admins write.
+  app.use('/api', core.authMiddleware, createToolHintsRoutes(readOnlyHints, core.adminAccess));
   // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —
   // admin-gated inside.
   app.use('/api', core.authMiddleware, createGroupsAdminRoutes({

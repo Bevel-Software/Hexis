@@ -22,6 +22,40 @@ export interface ProxiedTool {
    * ignores the field, so carrying it costs nothing.
    */
   ui?: McpAppToolUi;
+  /**
+   * Whether MCP clients are told this tool only reads (`annotations.readOnlyHint`).
+   *
+   * Set for the platform's own tools only, from the {@link READ_ONLY_TAG} the
+   * deployment's manual carries on each one whose write declaration makes it
+   * read-only; an admin's override is joined on per listing
+   * ({@link withReadOnlyOverride}). Left unset for a tool from
+   * anywhere else (a `.tool` manual, a plugin's MCP server): such a tool is
+   * listed with no annotation at all, exactly as before.
+   */
+  readOnly?: boolean;
+}
+
+/**
+ * The UTCP tag the deployment's manual puts on a platform tool whose
+ * effective read-only hint is true. A tag rather than a field because tags are
+ * already part of the UTCP tool shape and survive the manual serializer.
+ */
+export const READ_ONLY_TAG = 'read-only';
+
+/**
+ * A tool with the deployment's override of its read-only hint, where it has
+ * one, joined on at LISTING time: the manual's tag carries the built-in value,
+ * in a surface that may be cached across listings, and an override baked into
+ * that would outlive the toggle that set it. Only a tool that carries a hint
+ * at all (the platform's own); any other stays unannotated whatever its name.
+ */
+export function withReadOnlyOverride(
+  tool: ProxiedTool,
+  overrides: Readonly<Record<string, boolean>> | undefined,
+): ProxiedTool {
+  if (tool.readOnly === undefined || !overrides || !Object.hasOwn(overrides, tool.mcpName)) return tool;
+  const override = overrides[tool.mcpName];
+  return typeof override === 'boolean' ? { ...tool, readOnly: override } : tool;
 }
 
 /**
@@ -96,6 +130,9 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
     // every client is required to tolerate, so a client without the
     // extension reads the tool exactly as it did before.
     ...(tool.ui ? { _meta: toolUiMeta(tool.ui) } : {}),
+    // The read-only hint, and no other annotation: only for a tool whose
+    // effect the platform knows (see `ProxiedTool.readOnly`).
+    ...(tool.readOnly !== undefined ? { annotations: { readOnlyHint: tool.readOnly } } : {}),
   };
 }
 
@@ -407,6 +444,9 @@ export function flattenManualTool(tool: UtcpTool, kbManualName: string): Proxied
     description: tool.description,
     inputSchema: tool.inputs,
     manualName: manual,
+    // Only the platform's own manual speaks for its tools' effect; every other
+    // manual's tags are its author's, and its tools stay unannotated.
+    ...(manual === kbManualName ? { readOnly: (tool.tags ?? []).includes(READ_ONLY_TAG) } : {}),
   };
 }
 
