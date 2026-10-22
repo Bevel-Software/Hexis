@@ -83,15 +83,15 @@ export class WorkerDocumentExtractor implements IDocumentExtractor {
   }
 
   async extract(extension: string, bytes: Buffer): Promise<IsolatedExtraction> {
-    const started = Date.now();
     const first = await this.attempt(extension, bytes, this.budgetMs, false);
     if (!('unattributed' in first)) return first;
     // A rejection came while a worker that had served another job ran this one,
     // and may be that job's: run it again where it is the first job, so what
-    // the file is answered (and remembered) as is its own. Within the budget.
-    const left = this.budgetMs - (Date.now() - started);
-    if (left <= 0) return { ok: false, failure: 'timeout', message: extractionTimeoutNotice(this.budgetMs) };
-    const again = await this.attempt(extension, bytes, left, true);
+    // the file is answered (and remembered) as is its own. With the WHOLE
+    // budget again: the first run was cut short by another file's leftover,
+    // not by this file, and a run given only what was left would time out a
+    // sound document — and remember that timeout for an hour.
+    const again = await this.attempt(extension, bytes, this.budgetMs, true);
     // In a fresh worker the worker never answers `unattributed`; a crash of the moment if it ever did —
     // and never with that rejection's words, which may be another file's.
     return 'unattributed' in again ? { ok: false, failure: 'crashed', message: EXTRACTION_WORKER_FAILED } : again;
