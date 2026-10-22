@@ -28,7 +28,8 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { WorkerPatternMatcher } from '../bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../ripgrep-search.js';
+import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
@@ -72,7 +73,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let workspaces: WorkspaceService | null = null;
   let spillRoot = '';
   let docCacheDir = '';
-  let patternMatcher: WorkerPatternMatcher | undefined;
+  let patternMatcher: RipgrepPatternMatcher | undefined;
 
   afterEach(async () => {
     if (httpServer) {
@@ -208,7 +209,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
       undefined,
       undefined,
       undefined,
-      (patternMatcher = new WorkerPatternMatcher()),
+      (patternMatcher = new RipgrepPatternMatcher()),
     );
     app.use('/api', router);
     internalTools = (await registry.listInternal()) as unknown as { name: string; inputs: unknown }[];
@@ -495,12 +496,15 @@ describe('workspace tools — a branch that cannot be opened', () => {
   /**
    * Not about branches, but this file holds the real chain harness: a grep
    * called from inside `call_tool_chain` reaches the same route, so the same
-   * bound stops a catastrophic pattern there — the chain answers the worded
-   * 400 rather than waiting out its own timeout on a held event loop.
+   * bound stops a search there that would not finish — the chain answers the
+   * worded 400 rather than waiting out its own timeout. The walk that never
+   * finishes is a ripgrep that sleeps (`slowRipgrep`); a single file's text
+   * still goes to the real one.
    */
-  it('stops a too-expensive grep pattern from inside call_tool_chain, and a control pattern still matches', async () => {
+  it('stops a too-expensive grep from inside call_tool_chain, and a control search still matches', async () => {
     const line = `${'a'.repeat(39)}!`;
     const base = await start({ files: { 'redos.md': `${line}\n` } });
+    const slow = await slowRipgrep();
     const client = await CodeModeUtcpClient.create(process.cwd(), {
       variables: { bevel_API_URL: base, bevel_CONNECTION_KEY: 'internal-token' },
     } as never);
@@ -516,12 +520,12 @@ describe('workspace tools — a branch that cannot be opened', () => {
         }),
       );
       const { result } = await client.callToolChain(
-        `const grep = (pattern) => bevel.grep({ body: { branch: 'alice/draft', pattern, path: 'knowledge-base/redos.md' } });
+        `const grep = (pattern, path) => bevel.grep({ body: { branch: 'alice/draft', pattern, path } });
          let expensive;
          const started = Date.now();
-         try { expensive = { ok: grep('^(a+)+$') }; } catch (err) { expensive = { failed: err.message }; }
+         try { expensive = { ok: grep('^a+!$', 'knowledge-base') }; } catch (err) { expensive = { failed: err.message }; }
          const took = Date.now() - started;
-         return { expensive, took, control: grep('^a+!$') };`,
+         return { expensive, took, control: grep('^a+!$', 'knowledge-base/redos.md') };`,
         30_000,
       );
       // The search is stopped at the ticket's 5 s budget: timed around the call
@@ -532,8 +536,10 @@ describe('workspace tools — a branch that cannot be opened', () => {
       expect(result.expensive.failed).toContain('HTTP 400');
       expect(result.expensive.failed).toContain('Pattern too expensive');
       expect(result.control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
+      expect(await slow.alive()).toEqual([]);
     } finally {
       await client.close();
+      await slow.remove();
     }
   });
 

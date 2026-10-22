@@ -66,7 +66,8 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
-import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../modules/workspace/ripgrep-search.js';
+import { assertRipgrep } from '../modules/workspace/ripgrep-version.js';
 import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
 import {
@@ -255,7 +256,7 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
-  /** Runs a caller's `grep` pattern off the request thread under a budget; its workers end when the graph stops. */
+  /** Runs a caller's `grep` pattern in ripgrep under a budget; its running searches end when the graph stops. */
   patternMatcher: IPatternMatcher;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
@@ -432,6 +433,9 @@ export async function createCoreServices(
   // (see `git-version.ts`): every clone, fetch and refresh below depends on it,
   // so an unsupported binary is better surfaced here than at the first merge.
   await assertGitVersion();
+  // The same for ripgrep, which the grep tool searches with and has no
+  // fallback for (see `ripgrep-version.ts`).
+  await assertRipgrep();
   // What tells this knowledge base's locks, migration ledger and secrets
   // loader apart from another's in the same process and database. Empty for
   // the default schema, so a single-tenant deployment keeps the lock ids and
@@ -795,7 +799,7 @@ export async function createCoreServices(
       'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
       'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
   });
-  const patternMatcher = new WorkerPatternMatcher();
+  const patternMatcher = new RipgrepPatternMatcher();
   const agentDownloadStore = new AgentDownloadStore({
     root: agentDownloadsRoot,
     publicBaseUrl: config.publicBackendUrl,

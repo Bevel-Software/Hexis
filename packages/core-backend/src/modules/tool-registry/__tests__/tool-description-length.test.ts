@@ -15,7 +15,7 @@ import type { UtcpTool } from '../tool.contract.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { WorkerPatternMatcher } from '../../workspace/bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../../workspace/ripgrep-search.js';
 import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
@@ -115,7 +115,7 @@ async function hexisTools(skills: Parameters<typeof registerSkillsTools>[4] = em
     // mounted on the same terms (it spawns no worker until a search runs).
     undefined,
     undefined,
-    new WorkerPatternMatcher(),
+    new RipgrepPatternMatcher(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
   registerPluginsTools(registry, kb);

@@ -5,7 +5,9 @@ import { createShutdown, stopCore, withStartupTask, type LeasedWorker } from '..
 import { holdCommitWorkerLease, holdable } from '../lifecycle.js';
 import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
-import { WorkerPatternMatcher } from '../../modules/workspace/bounded-matcher.js';
+import { tmpdir } from 'node:os';
+import { RipgrepPatternMatcher } from '../../modules/workspace/ripgrep-search.js';
+import { slowRipgrep } from '../../__tests__/slow-ripgrep.js';
 
 /** A lease the suite scripts: what each `tryAcquire` answers, and a way to lose it. */
 function fakeLease(answers: boolean[]) {
@@ -538,19 +540,28 @@ describe('stopCore', () => {
     ]);
   });
 
-  it('ends the grep matcher\'s workers, so an evicted graph leaves no search running behind it', async () => {
+  it('ends the grep matcher\'s running searches, so an evicted graph leaves no ripgrep running behind it', async () => {
     const g = graph();
-    const patternMatcher = new WorkerPatternMatcher();
-    // A search holding a worker for its whole 5 s budget when the graph is stopped.
-    const running = patternMatcher.search('^(a+)+$', '').matchingLines([`${'a'.repeat(39)}!`], 1);
-    await new Promise((r) => setTimeout(r, 100));
-    const started = Date.now();
-    await stopCore({ ...g.core, patternMatcher } as never);
-    await expect(running).rejects.toMatchObject({ status: 503, details: { code: 'search_busy' } });
-    expect(Date.now() - started).toBeLessThan(1_000);
-    // Closed for good: nothing after the stop starts a worker.
-    await expect(patternMatcher.search('b', '').matchingLines(['b'], 1)).rejects.toMatchObject({ status: 503 });
-    expect(g.order.at(-1)).toBe('db.end');
+    const slow = await slowRipgrep();
+    const patternMatcher = new RipgrepPatternMatcher();
+    try {
+      // A tree search that would hold its ripgrep for the whole 5 s budget when the graph is stopped.
+      const search = await patternMatcher.search('needle', { ignoreCase: false });
+      const running = (async () => {
+        for await (const file of search.files({ cwd: tmpdir(), root: '.' }, [])) void file;
+      })();
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const started = Date.now();
+      await stopCore({ ...g.core, patternMatcher } as never);
+      await expect(running).rejects.toMatchObject({ status: 503, details: { code: 'search_busy' } });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(await slow.alive()).toEqual([]);
+      // Closed for good: nothing after the stop starts a search.
+      await expect(patternMatcher.search('b', { ignoreCase: false })).rejects.toMatchObject({ status: 503 });
+      expect(g.order.at(-1)).toBe('db.end');
+    } finally {
+      await slow.remove();
+    }
   });
 
   it('does not wait past the budget for a worker that never stops, and still ends the pool', async () => {

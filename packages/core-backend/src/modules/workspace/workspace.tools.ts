@@ -1,5 +1,5 @@
 import nodeFs from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
@@ -35,10 +35,11 @@ import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../
 import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
+import { TextReader } from './file-readers/text-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
   folderPlaceholderPath,
@@ -63,7 +64,14 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/index.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import { endsTheSearch, type IPatternMatcher, type IPatternSearch } from './pattern-matcher.contract.js';
+import {
+  compareSearchPaths,
+  PATTERN_DIALECT,
+  type FileMatches,
+  type IPatternMatcher,
+  type IPatternSearch,
+  type TreeScope,
+} from './pattern-matcher.contract.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
@@ -154,18 +162,25 @@ async function filterReadableEntries(
     fileWsPaths.push(dir ? `${dir}/${e.name}` : e.name);
   }
   if (fileWsPaths.length === 0) return entries;
+  const readable = await readableFiles(gate, fileWsPaths);
+  return entries.filter((e) => e.type === 'directory' || readable.has(dir ? `${dir}/${e.name}` : e.name));
+}
+
+/**
+ * The FILES among `wsPaths` the caller may read, judged in one batched ACL
+ * load by the FULL `canReadBatch` (per-node frontmatter honoured), via the
+ * shared `resolveReadableMap`. A path the verdict does not name is unreadable.
+ */
+async function readableFiles(gate: ReadGate, wsPaths: string[]): Promise<Set<string>> {
+  if (wsPaths.length === 0) return new Set();
   const verdict = await resolveReadableMap(
     (wid, email, rels) => gate.accessControl.canReadBatch(wid, email, rels),
     gate.workspaceId,
     gate.userEmail,
     gate.kbDirName,
-    fileWsPaths,
+    wsPaths,
   );
-  return entries.filter((e) => {
-    if (e.type === 'directory') return true;
-    const wsPath = dir ? `${dir}/${e.name}` : e.name;
-    return verdict.get(wsPath) === true;
-  });
+  return new Set(wsPaths.filter((p) => verdict.get(p) === true));
 }
 
 /**
@@ -639,42 +654,45 @@ function modeOf(a: Record<string, unknown>): WriteMode {
 }
 
 /**
- * What searching ONE file amounted to. The walk ignores this (a file with
- * nothing searchable is just a file with no matches), but a grep whose path
- * NAMES that one file has nothing else to report: without this it could only
- * answer an empty match list, which reads as "your pattern is not in there"
- * when the truth is "there was never any text to look at".
+ * What a file holds for `grep` to search. The walk ignores the difference
+ * between the last two (a file with nothing searchable is just a file with no
+ * matches), but a grep whose path NAMES that one file has nothing else to
+ * report: without it, it could only answer an empty match list, which reads as
+ * "your pattern is not in there" when the truth is "there was never any text
+ * to look at".
  */
-type FileGrepOutcome =
-  /** Its text was searched; any matches are in `out`. */
-  | 'searched'
+type SearchableText =
+  /** Text to search. */
+  | { kind: 'text'; text: string }
   /** No searchable text at all: an image, binary content, a corrupt document (remembered or fresh). */
-  | 'no-text'
+  | { kind: 'no-text' }
   /** A cold document the per-call extraction budget could not afford (counted in `docs`). */
-  | 'budget-skipped';
+  | { kind: 'budget-skipped' };
+
+/** One line of a grep answer: that path, the 1-based line number, the line cut to {@link GREP_LINE_CHARS}. */
+interface GrepMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/** The longest stretch of a matching line a grep answer carries. */
+const GREP_LINE_CHARS = 300;
+
+/** Files a tree search judges readable at once: one batched access check each. */
+const GREP_VERDICT_BATCH = 64;
 
 /**
- * Search ONE file and append its matches to `out`. Shared by the directory
- * walk and by a grep whose `path` names a file, so both produce the same match
- * shape (that path, 1-based line numbers, 300-char text) under the same cap.
- *
- * What is searched is the file's reader's business: text content for the text
- * reader (null on NUL bytes / invalid UTF-8 — binary is not searchable), the
- * EXTRACTION for a document reader (marker line included, so the
- * `[slide N]`/`[sheet: …]`/`[page N]` lines are themselves searchable and line
- * numbers match what read_file returns), nothing for images.
+ * The text ONE file holds for `grep`, read through its reader: the text
+ * content for a text reader (none on NUL bytes / invalid UTF-8 — binary is not
+ * searchable), the EXTRACTION for a document reader (marker line included, so
+ * the `[slide N]`/`[sheet: …]`/`[page N]` lines are themselves searchable and
+ * line numbers match what read_file returns), nothing for images.
  *
  * Throws whatever reading the file throws — the caller decides whether that is
- * a file to skip (the walk) or an error to surface (a single-file grep).
+ * a file to skip (a tree search) or an error to surface (a single-file grep).
  */
-async function grepOneFile(
-  fs: LocalFilesystem,
-  path: string,
-  matcher: IPatternSearch,
-  out: { path: string; line: number; text: string }[],
-  max: number,
-  docs: DocGrepState,
-): Promise<FileGrepOutcome> {
+async function searchableText(fs: LocalFilesystem, path: string, docs: DocGrepState): Promise<SearchableText> {
   const reader = docs.readers.readerFor(path);
   const bytes = asBytes(await fs.readFile(path));
   let content: string | null;
@@ -682,13 +700,13 @@ async function grepOneFile(
     // What the cache remembers is free — an extraction is searched, a failure
     // (a damaged file, or one that overran its budget within the hour) is
     // skipped without extracting it again. A cold document draws on the
-    // per-walk budget (see UNCACHED_DOCS_PER_GREP) — beyond it the search
+    // per-call budget (see UNCACHED_DOCS_PER_GREP) — beyond it the search
     // skips the document and counts it.
     let res = await reader.cachedRead(bytes, path);
     if (res === undefined) {
       if (docs.uncachedBudget <= 0) {
         docs.skippedUncached++;
-        return 'budget-skipped';
+        return { kind: 'budget-skipped' };
       }
       docs.uncachedBudget--;
       res = await reader.read(bytes, path, docs.origin);
@@ -698,14 +716,14 @@ async function grepOneFile(
   } else {
     content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
   }
-  if (content === null) return 'no-text';
-  const lines = content.split('\n');
-  // matchingLines posts these to the worker in bounded batches, so no one
-  // copy of a large file runs on the request thread.
-  for (const i of await matcher.matchingLines(lines, max - out.length)) {
-    out.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
-  }
-  return 'searched';
+  return content === null ? { kind: 'no-text' } : { kind: 'text', text: content };
+}
+
+/** Append the lines `hits` names (0-based indices into `text`'s lines) to `out`, as matches in `path`. */
+function pushMatches(out: GrepMatch[], path: string, text: string, hits: readonly number[]): void {
+  if (hits.length === 0) return;
+  const lines = text.split('\n');
+  for (const i of hits) out.push({ path, line: i + 1, text: lines[i]!.slice(0, GREP_LINE_CHARS) });
 }
 
 /**
@@ -742,56 +760,111 @@ async function searchRootKind(
   }
 }
 
-/** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */
-async function grepWalk(
+/**
+ * Where ripgrep searches the directory `root`: from the workspace's canonical
+ * directory, with the root's canonical path relative to it. The stat that
+ * called `root` a directory already refused one outside the workspace; this
+ * refuses it again where the search is started, so ripgrep, which follows the
+ * root it is given, is never started on anything outside.
+ */
+async function treeScope(fs: LocalFilesystem, root: string): Promise<TreeScope> {
+  const cwd = await nodeFs.realpath(fs.basePath);
+  const absolute = fs.resolveAbsolutePath(root);
+  const rel = absolute === undefined ? '..' : relative(cwd, await nodeFs.realpath(absolute));
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new ToolError(`"${displayPath(root)}" is outside the workspace.`, 403);
+  }
+  return { cwd, root: rel === '' ? '.' : rel.split(sep).join('/') };
+}
+
+/**
+ * grep over the directory `root`, in two passes over one ripgrep walk.
+ *
+ * The text pass is ripgrep's own: every file whose reader greps its bytes as
+ * text (a TextReader) is searched by it, in path order, and read nowhere else.
+ * Its files are judged readable in batches BEFORE any of their lines is
+ * counted, and the pass stops at the `max`-th readable line.
+ *
+ * The document pass reads the files every other reader owns through that
+ * reader, as `read_file` does — extractions under the per-call budget — and
+ * has their text matched by the same engine. A document that sorts after the
+ * text pass's last line cannot be among the first `max`, so it is not read.
+ *
+ * Answers what both found, unsorted: the caller merges, sorts and caps. Every
+ * file that contributes a line, and every document opened, reaches
+ * `notifyRead` first.
+ */
+async function grepTree(
   fs: LocalFilesystem,
-  dir: string,
-  matcher: IPatternSearch,
-  out: { path: string; line: number; text: string }[],
+  root: string,
+  search: IPatternSearch,
   max: number,
-  depth: number,
   gate: ReadGate,
   notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
-  /** A file the walk leaves to its caller: never opened, never counted against `max`. */
+  /** A file the search leaves to its caller: never answered, never counted against `max`. */
   skip: (path: string) => boolean = () => false,
-): Promise<void> {
-  if (out.length >= max || depth > 12) return;
-  let entries;
-  try {
-    entries = (await fs.readdir(dir || '.')) as DirEntry[];
-  } catch {
-    return;
-  }
-  // Filter unreadable KB nodes out of the walk so grep never opens — or leaks
-  // a line from — a file the caller may not read.
-  entries = await filterReadableEntries(gate, dir, entries);
-  for (const e of entries) {
-    if (out.length >= max) return;
-    if (hasGitInternalsSegment(e.name) || e.name === 'node_modules') continue;
-    if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
-    const p = dir ? `${dir}/${e.name}` : e.name;
-    if (e.type === 'directory') {
-      await grepWalk(fs, p, matcher, out, max, depth + 1, gate, notifyRead, docs, skip);
-    } else if (skip(p)) {
-      continue;
-    } else {
-      // Opening a file is a read of it, even when the walk started at a root
-      // the read hook was already told about — so every file the walk opens
-      // reaches the hook by name (closes the read-leak).
-      await notifyRead(p);
-      // A file the walk cannot read is silently skipped: one unreadable entry
-      // must not fail a search over the whole tree.
-      // A pattern too expensive to finish, or no worker free to run it, is not
-      // an unreadable file: either ends the whole search.
-      try {
-        await grepOneFile(fs, p, matcher, out, max, docs);
-      } catch (err) {
-        if (endsTheSearch(err)) throw err;
-        continue;
+): Promise<GrepMatch[]> {
+  const scope = await treeScope(fs, root);
+  const at = (p: string): string => (root === '' ? p : `${root}/${p}`);
+  // ripgrep already stays out of `.git`; the folder's every other spelling,
+  // and the folder placeholder, are left out as everywhere else.
+  const shown = (p: string): boolean => !hasGitInternalsSegment(p) && !isFolderPlaceholder(p) && !skip(p);
+  // Which reader owns an extension is the registry's answer, asked of a name
+  // carrying it; a TextReader greps the bytes themselves, which is ripgrep's
+  // pass. Extensions any other reader owns are left out of it.
+  const readerOf = (ext: string): FileReader => docs.readers.readerFor(`file${ext}`);
+  const notRaw = docs.readers.ownedExtensions().filter((ext) => !(readerOf(ext) instanceof TextReader));
+  const out: GrepMatch[] = [];
+
+  let batch: FileMatches[] = [];
+  const answer = async (): Promise<void> => {
+    const files = batch.filter((f) => shown(f.path));
+    batch = [];
+    const readable = await readableFiles(gate, files.map((f) => f.path));
+    for (const f of files) {
+      if (out.length >= max) return;
+      if (!readable.has(f.path)) continue;
+      await notifyRead(f.path);
+      for (const l of f.lines.slice(0, max - out.length)) {
+        out.push({ path: f.path, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
       }
     }
+  };
+  for await (const file of search.files(scope, notRaw)) {
+    batch.push({ path: at(file.path), lines: file.lines });
+    if (batch.length >= GREP_VERDICT_BATCH) {
+      await answer();
+      if (out.length >= max) break;
+    }
   }
+  if (out.length < max) await answer();
+
+  const last = out.length >= max ? out[out.length - 1]!.path : undefined;
+  const readerOwned = notRaw.filter((ext) => {
+    const reader = readerOf(ext);
+    return reader instanceof DocumentReader || reader.greppableText !== undefined;
+  });
+  const listed = (await search.list(scope, readerOwned))
+    .map(at)
+    .filter((p) => shown(p) && (last === undefined || compareSearchPaths(p, last) <= 0));
+  const readable = await readableFiles(gate, listed);
+  const texts: { path: string; text: string }[] = [];
+  for (const p of listed) {
+    if (!readable.has(p)) continue;
+    await notifyRead(p);
+    let found: SearchableText;
+    try {
+      found = await searchableText(fs, p, docs);
+    } catch {
+      // One document that cannot be read must not fail a search over the tree.
+      continue;
+    }
+    if (found.kind === 'text') texts.push({ path: p, text: found.text });
+  }
+  const hits = await search.matchingLines(texts.map((t) => t.text));
+  texts.forEach((t, i) => pushMatches(out, t.path, t.text, hits[i]!));
+  return out;
 }
 
 /** One `allowed-tools` entry a saved SKILL.md names that no visible tool matches. */
@@ -2408,12 +2481,13 @@ export function registerWorkspaceTools(
       name: 'grep',
       gated: true,
       description:
-        'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
+        `Regex search across the workspace. ${PATTERN_DIALECT} Covers hidden and git-ignored files. ` +
+        'Returns `{ matches: [{ path, line, text }] }`, capped, in path then line order. `path` may name a DIRECTORY (its subtree) or a single FILE; a path with nothing at it is an error. Searches INSIDE Office/OpenDocument, PDF and email files (.eml/.msg) via their extracted text — matches carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call; the result notes the rest (re-run to cover them).',
       inputs: {
         type: 'object',
         properties: {
           branch: BRANCH_INPUT,
-          pattern: str('JavaScript regular expression.'),
+          pattern: str('Regular expression, RE2-style (ripgrep): no look-around, no backreferences.'),
           path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
           ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
           max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
@@ -2441,9 +2515,10 @@ export function registerWorkspaceTools(
       },
       write: false,
       handler: async (a, ctx: ToolContext) => {
-        // The caller's pattern never runs on the request thread: a backtracking
-        // one would hold the event loop for everyone (see IPatternMatcher).
-        const matcher = patterns.search(a.pattern as string, a.ignore_case ? 'i' : '');
+        // The caller's pattern runs in ripgrep, never on the request thread
+        // (see IPatternMatcher); one the engine refuses is answered here,
+        // before anything is searched.
+        const search = await patterns.search(a.pattern as string, { ignoreCase: Boolean(a.ignore_case) });
         // No path means the whole REPOSITORY, not the workspace directory above
         // it. The workspace root also holds whatever an older build left beside
         // the checkout, and the read gate has no rules for a path outside the
@@ -2457,7 +2532,7 @@ export function registerWorkspaceTools(
         const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
         const fs = await ctx.getFilesystem(a.branch as string);
         const gate = readGateFor(a.branch as string, ctx);
-        const out: { path: string; line: number; text: string }[] = [];
+        const out: GrepMatch[] = [];
         const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
         const docs: DocGrepState = {
           readers,
@@ -2496,42 +2571,22 @@ export function registerWorkspaceTools(
         // The guide's own path is not told here, because `guideAt` tells the
         // hook of the organisation's file there exactly as `read_file` does
         // (after the gate), and the platform's guide alone is nobody's file to
-        // note. Each file the walk opens goes to the hook per file below, so a
-        // hook sees every path a grep reached rather than only its root.
+        // note. Each file that contributes a line, and each document opened,
+        // goes to the hook per file below, so a hook sees every file a grep
+        // answers from rather than only its root.
         if (!(coversGuide && kind !== 'directory')) {
           await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
         }
+        const notifyRead = (p: string): Promise<void> => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
         if (coversGuide) {
           if (kind === 'directory') {
-            await grepWalk(
-              fs,
-              searchRoot,
-              matcher,
-              out,
-              max,
-              0,
-              gate,
-              (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
-              docs,
-              (p) => p === guidePath,
-            );
+            out.push(...(await grepTree(fs, searchRoot, search, max, gate, notifyRead, docs, (p) => p === guidePath)));
           }
-          const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
-          for (const i of await matcher.matchingLines(lines, max - out.length)) {
-            out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
-          }
+          const guide = await guideAt(a.branch as string, ctx, guidePath);
+          const [hits] = await search.matchingLines([guide]);
+          pushMatches(out, guidePath, guide, hits!);
         } else if (kind === 'directory') {
-          await grepWalk(
-            fs,
-            searchRoot,
-            matcher,
-            out,
-            max,
-            0,
-            gate,
-            (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
-            docs,
-          );
+          out.push(...(await grepTree(fs, searchRoot, search, max, gate, notifyRead, docs)));
         } else {
           // Not a directory: the permission verdict comes BEFORE every other
           // one, and it is `read_file`'s own gate on the same path — so grep
@@ -2541,15 +2596,15 @@ export function registerWorkspaceTools(
           // gets the 403, never the filesystem's complaint about it.
           await assertCanRead(gate, searchRoot);
           if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
-          // A named FILE is searched directly: routing it through the walk would
-          // fail its readdir and answer an empty match list, which the caller
-          // cannot tell from "the pattern is not in this file".
-          const outcome = await orNotFound(
-            searchRoot,
-            () => grepOneFile(fs, searchRoot, matcher, out, max, docs),
-            'Nothing to search',
-          );
-          if (outcome === 'no-text') {
+          // A named FILE is read through its reader, exactly as read_file
+          // reads it, and its text is searched by the same engine: a tree
+          // search would find nothing to walk and answer an empty match list,
+          // which the caller cannot tell from "the pattern is not in this file".
+          const found = await orNotFound(searchRoot, () => searchableText(fs, searchRoot, docs), 'Nothing to search');
+          if (found.kind === 'text') {
+            const [hits] = await search.matchingLines([found.text]);
+            pushMatches(out, searchRoot, found.text, hits!);
+          } else if (found.kind === 'no-text') {
             fileNote =
               `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
               'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
@@ -2563,8 +2618,11 @@ export function registerWorkspaceTools(
               `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
               'same grep to extract and search the next batch.'
             : undefined);
+        // One order whatever found the lines, then the cap: the first
+        // `max_results` by path, then line.
+        out.sort((x, y) => compareSearchPaths(x.path, y.path) || x.line - y.line);
         return {
-          matches: out,
+          matches: out.slice(0, max),
           truncated: out.length >= max,
           ...(note !== undefined ? { note } : {}),
         };
