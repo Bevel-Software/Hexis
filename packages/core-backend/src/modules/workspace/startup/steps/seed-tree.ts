@@ -7,7 +7,7 @@ import { reservedRootDirs } from './template-files.step.js';
 import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from './template-source.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 import { GitInternalsError } from '../../../../shared/domain-errors.js';
-import { isManagedGuide } from '../../../agent-guide/agent-guide.js';
+import { isManagedGuide } from '../../../agent-guide/index.js';
 import { utf8Text } from '../../../../shared/utf8-text.js';
 
 /**

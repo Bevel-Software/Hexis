@@ -24,7 +24,7 @@ import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 import { WorkspaceIdMutex, type WorkspaceMutex } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';

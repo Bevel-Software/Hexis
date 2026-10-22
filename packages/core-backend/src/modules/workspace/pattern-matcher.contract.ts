@@ -1,4 +1,4 @@
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 
 /**
  * The contract for running a CALLER'S regular expression: what `grep` (REST,

@@ -39,7 +39,7 @@ import {
   canonicalEmail,
   EMAIL_REGEX,
   GROUP_REF_PREFIX,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 
 /** Bad-input failure when editing roles.yaml (invalid name/email, unknown role). */
 export class RolesEditError extends Error {

@@ -3,8 +3,8 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('declared-variables');
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
-import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
+import type { ISecretsVaultService } from '../secrets-vault/index.js';
 
 type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
 

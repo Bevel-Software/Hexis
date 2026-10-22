@@ -1,7 +1,7 @@
 import express from 'express';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import type { UpdateCheckService } from './update-check.service.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * `GET /api/update-check` — ADMIN-ONLY (same `requireAdmin` shape as the setup

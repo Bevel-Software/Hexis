@@ -4,7 +4,7 @@ import {
   canonicalEmail,
   canonicalRoleName,
   RESERVED_ROLE_NAMES,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import { unsafeNameReason } from '../access-model/group-files.js';
 import { printable } from '../../shared/printable.js';
 

@@ -3,7 +3,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { announceToolCredentialsChanged } from '../../../../core/events';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { kbFileUrl } from '../../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../../workspace';
 import { useSavedKeyProbe } from '../../../secrets-vault/probe/useSavedKeyProbe';
 import { type ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
 import { pathForTool } from '../../routes/library-paths';

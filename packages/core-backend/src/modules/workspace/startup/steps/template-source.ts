@@ -3,8 +3,8 @@ import { gitignoreLiteral, renderKbLayoutPlaceholders, type KbLayout } from '@be
 import { IGNORE_FILENAME, isAbsence, type EntryStat, type IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
 
-import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
-import { sharedFileRulesSection } from '../../../agent-instructions/shared-file-rules.js';
+import { PREAMBLE_FILE } from '../../../agent-instructions/index.js';
+import { sharedFileRulesSection } from '../../../agent-instructions/index.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import { logger } from '../../../../shared/logging.js';
 

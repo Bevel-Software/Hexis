@@ -47,7 +47,7 @@ import express from 'express';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
 import type { IEventDelivery } from './events-delivery.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /** Interval between SSE keep-alive comments (ms). 25 s sits comfortably under
  * the typical 30–100 s proxy idle timeout. */
