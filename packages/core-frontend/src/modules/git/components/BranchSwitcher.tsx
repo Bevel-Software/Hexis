@@ -15,7 +15,8 @@ import { useConfirm } from '../../../shared/components';
 import { parseGitError, type GitErrorInfo } from '../services/error-messages';
 import { useAuth } from '../../auth/state/auth.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { kbFileUrl, KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace';
+import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
 import { useCrCreationPort } from '../../../core/registry';
 import { fetchFileAccess } from '../../access/api';
 

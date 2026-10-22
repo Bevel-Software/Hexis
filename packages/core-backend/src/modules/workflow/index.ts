@@ -10,4 +10,4 @@ export { CHANGE_REQUEST_URL_NOTE, changeRequestLink, changeRequestLinkBase } fro
 export { WorkflowEventBus } from './event-bus.js';
 export { createEventsRoutes } from './events.routes.js';
 export { EventDelivery, createEventAccess } from './events-delivery.js';
-export type { EventAccess, EventViewer, IEventDelivery } from './events-delivery.js';
+export type { ChangeRequestFacts, EventAccess, EventViewer, IEventDelivery } from './events-delivery.js';

@@ -7,7 +7,7 @@ import { Button } from '../../../shared/components';
 import { listFiles, readFile } from '../../workspace/services/workspace.api';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { checkoutRoot } from '../../workspace/utils/fileTree';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace';
 
 /**
  * The plugin page's two smallest sections, both pure REUSE of the Knowledge

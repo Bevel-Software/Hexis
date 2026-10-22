@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { ReviewContext } from './review.context';
 import { useReviewState } from '../hooks/useReviewState';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 
 /**
  * Wires the agent-review session state into the tree. Registered by the

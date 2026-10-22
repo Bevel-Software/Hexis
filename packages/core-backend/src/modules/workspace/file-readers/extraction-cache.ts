@@ -15,6 +15,15 @@ export function gitBlobSha(bytes: Buffer): string {
   return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
 }
 
+/**
+ * What the cache holds for a key: the extraction, or the notice a failed one
+ * answered with. A failure with `until` (epoch ms) is remembered only until
+ * then — a lookup past it is a miss; one without is remembered like a success.
+ */
+export type CachedExtraction =
+  | ({ failed?: undefined } & ExtractedDoc)
+  | { failed: true; message: string; until?: number };
+
 /** Default size bound for the on-disk extraction cache. */
 const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024; // 512MB
 
@@ -24,7 +33,8 @@ const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024; // 512MB
  * re-upload of identical bytes, or the same document on another branch or
  * path, hits the same entry; extension, so identical bytes under another
  * FORMAT never return the wrong extractor's output). One JSON file per entry
- * (`<key>.json` holding the `{ summary, text }`), under a dedicated root
+ * (`<key>.json` holding the `{ summary, text }`, or a failure's
+ * `{ failed, message, until? }`), under a dedicated root
  * that — like the spill
  * store's — sits BESIDE the workspaces root, never inside a workspace and
  * never committed.
@@ -43,16 +53,23 @@ export class DocExtractionCache {
     private readonly maxTotalBytes: number = DEFAULT_MAX_TOTAL_BYTES,
   ) {}
 
-  /** The cached extraction for `sha`, or undefined on miss/corrupt entry. */
-  async get(sha: string): Promise<ExtractedDoc | undefined> {
+  /**
+   * The cached entry for `sha`, or undefined on miss/corrupt entry — and for a
+   * failure remembered only until a moment `now` (epoch ms) has passed.
+   */
+  async get(sha: string, now: number): Promise<CachedExtraction | undefined> {
     try {
       const parsed: unknown = JSON.parse(await fs.readFile(this.entryPath(sha), 'utf8'));
-      if (
-        typeof parsed === 'object' && parsed !== null &&
-        typeof (parsed as ExtractedDoc).summary === 'string' &&
-        typeof (parsed as ExtractedDoc).text === 'string'
-      ) {
-        return { summary: (parsed as ExtractedDoc).summary, text: (parsed as ExtractedDoc).text };
+      if (typeof parsed !== 'object' || parsed === null) return undefined;
+      const entry = parsed as Record<string, unknown>;
+      if (entry.failed === true && typeof entry.message === 'string') {
+        if (entry.until === undefined) return { failed: true, message: entry.message };
+        return typeof entry.until === 'number' && now < entry.until
+          ? { failed: true, message: entry.message, until: entry.until }
+          : undefined;
+      }
+      if (typeof entry.summary === 'string' && typeof entry.text === 'string') {
+        return { summary: entry.summary, text: entry.text };
       }
       return undefined;
     } catch {
@@ -74,11 +91,15 @@ export class DocExtractionCache {
   /** The prune in flight, so concurrent puts share ONE scan instead of racing their own. */
   private pruning: Promise<void> | undefined;
 
-  /** Store an extraction under `sha`; prunes towards the size bound. Never throws. */
-  async put(sha: string, doc: ExtractedDoc): Promise<void> {
+  /** Store an extraction (or a failure) under `sha`; prunes towards the size bound. Never throws. */
+  async put(sha: string, entry: CachedExtraction): Promise<void> {
     try {
       await fs.mkdir(this.root, { recursive: true });
-      const payload = JSON.stringify({ summary: doc.summary, text: doc.text });
+      const payload = JSON.stringify(
+        entry.failed
+          ? { failed: true, message: entry.message, ...(entry.until === undefined ? {} : { until: entry.until }) }
+          : { summary: entry.summary, text: entry.text },
+      );
       await fs.writeFile(this.entryPath(sha), payload, 'utf8');
       this.writtenSinceScan += Buffer.byteLength(payload);
       if (

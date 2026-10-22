@@ -20,7 +20,7 @@
  */
 
 import type { JsonSchema } from '../tool-registry/tool.contract.js';
-import type { ToolContext } from '../tool-helpers/tool.contract.js';
+import type { ToolContext } from '../tool-helpers/index.js';
 import type { WorkflowHooks } from '../workflow/workflow-hooks.js';
 
 /**

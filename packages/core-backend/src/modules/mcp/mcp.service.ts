@@ -51,14 +51,11 @@ import {
 } from '@bevel-software/platform-mcp-core';
 import type { KbLayout } from '@bevel-software/platform-shared';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
-import {
-  scopesCovered,
-  type ForcedRefreshOutcome,
-  type ISecretsVaultService,
-} from '../secrets-vault/secrets-vault.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
-import type { SpillStore } from '../workspace/spill-store.js';
+import { type ForcedRefreshOutcome, type ISecretsVaultService } from '../secrets-vault/index.js';
+import { scopesCovered } from '../secrets-vault/secrets-vault.contract.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
+import type { SpillStore } from '../workspace/index.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';

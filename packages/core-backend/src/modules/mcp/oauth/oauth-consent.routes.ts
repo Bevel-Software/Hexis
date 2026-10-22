@@ -5,7 +5,7 @@ const log = logger('mcp-oauth');
 import type { BevelOAuthProvider } from './bevel-oauth-provider.js';
 import { verifyAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 import type { IAgentScopeResolver } from '../../agent-scope/index.js';
-import '../../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface OAuthConsentRoutesDeps {
   provider: BevelOAuthProvider;

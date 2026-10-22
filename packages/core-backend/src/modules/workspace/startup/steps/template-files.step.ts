@@ -7,8 +7,8 @@ import {
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
-import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
-import { isManagedGuide } from '../../../agent-guide/agent-guide.js';
+import { PREAMBLE_FILE } from '../../../agent-instructions/index.js';
+import { isManagedGuide } from '../../../agent-guide/index.js';
 import { TemplateSource } from './template-source.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { hasGitInternalsSegment } from '../../../../shared/git-internals.js';

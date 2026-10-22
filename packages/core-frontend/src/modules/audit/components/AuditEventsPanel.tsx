@@ -2,7 +2,8 @@ import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } fr
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { pathForSkill, pathForTool } from '../../library/routes/library-paths';
+import { pathForTool } from '../../library';
+import { pathForSkill } from '../../library/routes/library-paths';
 import {
   listEvents,
   type AgentEvent,

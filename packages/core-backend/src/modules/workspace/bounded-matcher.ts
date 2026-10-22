@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads';
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { exchange, MAX_TIMER_MS, sizingOption, WorkerPool } from './worker-pool.js';
+import { ToolError } from '../tool-helpers/index.js';
 import {
   type IPatternMatcher,
   type IPatternSearch,
@@ -22,8 +23,10 @@ import {
  * the same flags and calls `test` on each line — so a pattern within budget
  * matches exactly the lines it always did.
  *
- * The pool is this instance's own: the composition root builds one per graph
- * and closes it when the graph stops, so no worker outlives what it served.
+ * The pool is this instance's own (its mechanics are the shared
+ * {@link WorkerPool}; the regex worker below is this kind's): the composition
+ * root builds one per graph and closes it when the graph stops, so no worker
+ * outlives what it served.
  */
 export interface WorkerPatternMatcherOptions {
   /** Matching time one search may spend, summed over every file it searches. Default 5 s. */
@@ -96,36 +99,38 @@ type Reply = { hits: number[]; elapsed: number } | { error: string };
 type Lease = {
   acquire(): Promise<Worker>;
   release(w: Worker): void;
+  discard(w: Worker): void;
   batchEnd(lines: string[], from: number): number;
   readonly batchChars: number;
 };
-type Waiter = { resolve: (w: Worker) => void; reject: (err: Error) => void };
 
 export class WorkerPatternMatcher implements IPatternMatcher {
   private readonly budgetMs: number;
-  private readonly poolMax: number;
-  private readonly maxWaiting: number;
   private readonly maxPatternLength: number;
   private readonly batchChars: number;
   private readonly batchLines: number;
-  private readonly idle: Worker[] = [];
-  private readonly all = new Set<Worker>();
-  private readonly waiting: Waiter[] = [];
-  private closed = false;
+  private readonly pool: WorkerPool;
   private readonly lease: Lease;
 
   constructor(opts: WorkerPatternMatcherOptions = {}) {
     this.budgetMs = option('budgetMs', opts.budgetMs ?? 5_000, 1, MAX_TIMER_MS - TRANSFER_GRACE_MS);
-    // A pool of none would leave every search waiting for a worker that never comes.
-    this.poolMax = option('poolMax', opts.poolMax ?? 4, 1);
-    // No queue at all is allowed: every search past the pool is refused busy.
-    this.maxWaiting = option('maxWaiting', opts.maxWaiting ?? 16, 0);
+    this.pool = new WorkerPool(
+      () => new Worker(WORKER_SOURCE, { eval: true }),
+      {
+        // A pool of none would leave every search waiting for a worker that never comes.
+        poolMax: option('poolMax', opts.poolMax ?? 4, 1),
+        // No queue at all is allowed: every search past the pool is refused busy.
+        maxWaiting: option('maxWaiting', opts.maxWaiting ?? 16, 0),
+      },
+      () => new SearchBusyError(),
+    );
     this.maxPatternLength = option('maxPatternLength', opts.maxPatternLength ?? 1_000, 1);
     this.batchChars = option('batchChars', opts.batchChars ?? 1_000_000, 1);
     this.batchLines = option('batchLines', opts.batchLines ?? 10_000, 1);
     this.lease = {
-      acquire: () => this.acquire(),
-      release: (w) => this.release(w),
+      acquire: () => this.pool.acquire(),
+      release: (w) => this.pool.release(w),
+      discard: (w) => this.pool.discard(w),
       batchEnd: (lines, from) => this.batchEnd(lines, from),
       batchChars: this.batchChars,
     };
@@ -147,12 +152,8 @@ export class WorkerPatternMatcher implements IPatternMatcher {
     return new BoundedSearch(this.lease, source, flags, this.budgetMs);
   }
 
-  async close(): Promise<void> {
-    this.closed = true;
-    for (const waiter of this.waiting.splice(0)) waiter.reject(new SearchBusyError());
-    const workers = [...this.all];
-    this.idle.length = 0;
-    await Promise.all(workers.map((w) => w.terminate()));
+  close(): Promise<void> {
+    return this.pool.close();
   }
 
   /**
@@ -167,43 +168,6 @@ export class WorkerPatternMatcher implements IPatternMatcher {
     const last = Math.min(lines.length, from + this.batchLines);
     while (to < last && (to === from || chars + lines[to]!.length <= this.batchChars)) chars += lines[to++]!.length;
     return to;
-  }
-
-  private async acquire(): Promise<Worker> {
-    if (this.closed) throw new SearchBusyError();
-    if (this.idle.length === 0 && this.all.size >= this.poolMax && this.waiting.length >= this.maxWaiting) {
-      throw new SearchBusyError();
-    }
-    const w =
-      this.idle.pop() ??
-      (this.all.size < this.poolMax
-        ? this.spawn()
-        : await new Promise<Worker>((resolve, reject) => this.waiting.push({ resolve, reject })));
-    w.ref();
-    return w;
-  }
-
-  private release(w: Worker): void {
-    const next = this.waiting.shift();
-    if (next) return next.resolve(w);
-    // An idle worker must not hold a process's exit open.
-    w.unref();
-    this.idle.push(w);
-  }
-
-  private spawn(): Worker {
-    const w = new Worker(WORKER_SOURCE, { eval: true });
-    this.all.add(w);
-    // A worker that dies — terminated over budget, or out of memory — leaves the pool.
-    w.once('exit', () => {
-      this.all.delete(w);
-      const at = this.idle.indexOf(w);
-      if (at >= 0) this.idle.splice(at, 1);
-      if (this.closed) return;
-      const next = this.waiting.shift();
-      if (next) next.resolve(this.spawn());
-    });
-    return w;
   }
 }
 
@@ -231,7 +195,7 @@ class BoundedSearch implements IPatternSearch {
       }
     } catch (err) {
       // Terminating is what stops a regex mid-backtrack; the pool replaces it.
-      void w.terminate();
+      this.pool.discard(w);
       throw err;
     }
     this.pool.release(w);
@@ -292,37 +256,16 @@ async function shareLine(w: Worker, line: string, chunkChars: number): Promise<S
   }
 }
 
-function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'timeout'> {
-  return new Promise((resolve, reject) => {
-    const settle = (fn: () => void) => {
-      clearTimeout(timer);
-      w.off('message', onMessage);
-      w.off('error', onError);
-      w.off('exit', onExit);
-      fn();
-    };
-    const onMessage = (reply: Reply) => settle(() => resolve(reply));
-    const onError = (err: Error) => settle(() => reject(err));
-    // Terminated under the search by `close()`: answered as busy, not left hanging until the timer.
-    const onExit = () => settle(() => reject(new SearchBusyError()));
-    const timer = setTimeout(() => settle(() => resolve('timeout')), timeoutMs);
-    w.on('message', onMessage);
-    w.on('error', onError);
-    w.on('exit', onExit);
-    w.postMessage(message);
-  });
+async function run(w: Worker, message: object, timeoutMs: number): Promise<Reply | 'timeout'> {
+  const outcome = await exchange<Reply>(w, message, timeoutMs);
+  if ('reply' in outcome) return outcome.reply;
+  if ('timeout' in outcome) return 'timeout';
+  if ('error' in outcome) throw outcome.error;
+  // Terminated under the search by `close()`: answered as busy, not left hanging until the timer.
+  throw new SearchBusyError();
 }
-
-/**
- * The longest delay `setTimeout` honours. A longer one fires after 1 ms, so a
- * budget past this (less the grace added to it) would stop every search at once.
- */
-const MAX_TIMER_MS = 2_147_483_647;
 
 /** A sizing option as given, refused at construction unless it is an integer from `min` to `max`. */
 function option(name: string, value: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
-  if (!Number.isInteger(value) || value < min || value > max) {
-    throw new RangeError(`WorkerPatternMatcher: ${name} must be an integer from ${min} to ${max}, got ${value}.`);
-  }
-  return value;
+  return sizingOption('WorkerPatternMatcher', name, value, min, max);
 }

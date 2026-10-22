@@ -95,7 +95,7 @@ import {
   type ChangeRequestPerson,
   type IChangeRequestHooks,
 } from './change-request-hooks.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import { WorkspaceMutex } from '../kb-fs/index.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {

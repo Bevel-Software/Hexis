@@ -1,8 +1,8 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
-import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
+import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/index.js';
 import { isCommitSha } from '../../../shared/git.contract.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -75,7 +75,7 @@ const changeRequestApproversSchema: JsonSchema = {
   properties: {
     path: { type: 'string' },
     roles: { type: 'array', items: { type: 'string' }, description: 'Roles that confer approval here; `everyone` means any signed-in approver.' },
-    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly, by display name.' },
+    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly: each by display name, or by email when the access tree resolved no name. Never a blank string.' },
     approved: { type: 'boolean', description: 'True once an eligible approver has approved at the current head.' },
     inMergeGate: { type: 'boolean', description: 'False when the merge gate does not bind this path — then nobody has to approve it.' },
     approversUnknown: { type: 'boolean', description: 'Present when the access tree could not be resolved: empty `roles`/`users` means unknown, not nobody.' },

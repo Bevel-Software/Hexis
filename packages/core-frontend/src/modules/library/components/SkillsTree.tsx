@@ -3,7 +3,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { libraryUploadTarget, useWorkspace } from '../../workspace/state/workspace.context';
 import { checkoutRoot } from '../../workspace/utils/fileTree';
-import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
+import { kbFileUrl } from '../../workspace';
+import { KB_ROUTE_PREFIX, safeDecode } from '../../workspace/routing/kb-routes';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { Puzzle } from 'lucide-react';
 import {

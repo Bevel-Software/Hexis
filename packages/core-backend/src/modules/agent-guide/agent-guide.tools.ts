@@ -2,8 +2,8 @@ import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
 import { GET_AGENT_GUIDE_TOOL } from '../tool-registry/guide-first.js';
 import { TOOL_DESCRIPTION_CAP } from '../tool-registry/description-length.js';
-import { ToolError } from '../tool-helpers/tool.contract.js';
-import { toolDef } from '../tool-helpers/tool-def.js';
+import { ToolError } from '../tool-helpers/index.js';
+import { toolDef } from '../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { AGENT_GUIDE_FILE, joinGuideSections, type AgentGuideSectionsReader } from './agent-guide.js';
 

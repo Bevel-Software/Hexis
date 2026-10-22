@@ -3,8 +3,8 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('declared-variables');
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
-import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
+import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 

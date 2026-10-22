@@ -20,7 +20,7 @@ import {
 // auth type, so a `.tool` naming it validates here.
 import { findUnservedGoogleServiceAccountAuth, holdsLiteralGoogleServiceAccountKey } from '@bevel-software/platform-mcp-core';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
-import type { PluginSource } from '../plugins/discovery/plugin-source.js';
+import type { PluginSource } from '../plugins/index.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';

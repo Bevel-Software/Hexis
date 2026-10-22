@@ -7,8 +7,8 @@ import {
   EmbedTokenError,
 } from './embed.errors.js';
 import { EmbedRefParseError } from './embed-link.js';
-import { rawExtensionOf, rawMimeFor } from '../workspace/file-readers/raw-mime.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import { rawExtensionOf, rawMimeFor } from '../workspace/index.js';
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * What `/api/embed/raw` answers as `Content-Type`, by extension — the types a
