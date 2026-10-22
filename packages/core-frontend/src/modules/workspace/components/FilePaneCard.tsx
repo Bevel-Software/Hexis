@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import { Surface } from '../../../shared/components';
 
@@ -37,6 +37,8 @@ export interface FilePaneCardProps {
    */
   chromeless?: boolean;
   className?: string;
+  /** Inline geometry the caller measured, e.g. a width to hold across a layout switch. */
+  style?: CSSProperties;
   children: ReactNode;
 }
 
@@ -47,6 +49,7 @@ export function FilePaneCard({
   notice,
   chromeless = false,
   className,
+  style,
   children,
 }: FilePaneCardProps) {
   return (
@@ -55,7 +58,10 @@ export function FilePaneCard({
       radius="lg"
       elevation={chromeless ? 'none' : 'card'}
       data-testid="file-pane-card"
-      className={cn('overflow-hidden', chromeless && 'border-0 bg-transparent', className)}
+      // The border goes TRANSPARENT, not away: the box keeps its width to the
+      // pixel, so the text inside wraps exactly as it did with the edges drawn.
+      className={cn('overflow-hidden', chromeless && 'border-transparent bg-transparent', className)}
+      style={style}
     >
       {!chromeless && (
         <div className="flex min-h-11 items-center gap-3 border-b border-line px-3.5 py-2">
@@ -68,7 +74,9 @@ export function FilePaneCard({
 
       {!chromeless && notice}
 
-      <div className="px-6 py-4">{children}</div>
+      <div data-file-pane-body="" className="px-6 py-4">
+        {children}
+      </div>
     </Surface>
   );
 }
