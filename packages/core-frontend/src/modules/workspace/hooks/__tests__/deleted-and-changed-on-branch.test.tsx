@@ -1944,6 +1944,73 @@ describe('the Knowledge page mounted again while a deleted tab is open', () => {
     expect(tabAt(result, 'KB/Draft.md')?.savedContent).toBe('# Draft\n\nChanged on the branch.');
   });
 
+  /**
+   * A remount whose read of KB/Keep.md is held while its read of KB/Draft.md,
+   * deleted while the route was away, answers 404 at once. Resolves the held
+   * read; the hydration's promise is returned with it.
+   */
+  async function remountWithKeepHeld(result: Hook) {
+    const read = apiMocks.readFile.getMockImplementation()!;
+    let releaseKeep!: () => void;
+    let taken = false;
+    apiMocks.readFile.mockImplementation((ws: string, p: string) => {
+      if (p !== 'KB/Keep.md' || taken) return read(ws, p);
+      taken = true;
+      return new Promise<string>((resolve) => { releaseKeep = () => resolve(disk.get('KB/Keep.md')!); });
+    });
+    disk.delete('KB/Draft.md');
+    let hydrating!: Promise<unknown>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(taken).toBe(true));
+    // KB/Draft.md's 404 has answered; the hydration still waits on KB/Keep.md.
+    await settle();
+    apiMocks.writeFile.mockClear();
+    return { releaseKeep, hydrating };
+  }
+
+  it('a save while another remount read is still out writes nothing back to a file its read found gone', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nA paragraph I added.');
+    const { releaseKeep, hydrating } = await remountWithKeepHeld(result);
+
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', '# Draft\n\nA paragraph I added.'); });
+    await act(async () => {
+      releaseKeep();
+      await hydrating;
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    const tab = tabAt(result, 'KB/Draft.md');
+    expect(tab?.deletedBy).toMatchObject({ name: null });
+    expect(tab?.isDirty).toBe(true);
+    expect(tab?.content).toBe('# Draft\n\nA paragraph I added.');
+  });
+
+  it("rejecting an agent's change while another remount read is still out writes nothing back to a file its read found gone", async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+    const { releaseKeep, hydrating } = await remountWithKeepHeld(result);
+
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await act(async () => {
+      releaseKeep();
+      await hydrating;
+      await expect(rejecting).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    const tab = tabAt(result, 'KB/Draft.md');
+    expect(tab?.deletedBy).toMatchObject({ name: null });
+    expect(tab?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
+  });
+
   it('still drops a persisted tab whose file is gone when the branch is first opened', async () => {
     const result = await mountReady();
     disk.delete('KB/Draft.md');

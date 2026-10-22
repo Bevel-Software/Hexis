@@ -959,134 +959,143 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // once these bytes open the tabs. A read of a tab already open is an
     // existence check like any other (`trackExistenceCheck`): a save or a
     // Reject waits on it, so it cannot re-create a file its 404 is about to
-    // report gone.
+    // report gone. Each check answers only once this hydration has applied
+    // every read, not when its own read settles: the tabs are marked deleted
+    // after the slowest read, and a save starting in between would find no
+    // check to wait on and nothing marked yet.
     const issuedAt = Date.now();
     const openAtStart = new Set(openTabsRef.current.map((t) => t.path));
     const reads = readPaths.map((p) => readFile(workspaceId, p));
+    let releaseChecks!: () => void;
+    const applied = new Promise<void>((resolve) => { releaseChecks = resolve; });
     const seqs = readPaths.map((p, i) => (openAtStart.has(p)
-      ? trackExistenceCheck(workspaceId, p, reads[i])
+      ? trackExistenceCheck(workspaceId, p, applied.then(() => reads[i]))
       : ++existenceReadSeqRef.current));
-    const results = await Promise.allSettled(reads);
-    // The strip is no longer this hydration's to write: the workspace moved to
-    // another branch, or a newer restore started while these reads were in
-    // flight. Report what we read so the caller can still classify its
-    // deeplink, but touch nothing — and tell the caller, so it doesn't record
-    // a hydration that never landed.
-    const superseded =
-      workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
-    // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
-    // strip: its file still has to sit alongside the restored ones.
-    const outranked = requestId !== addRequestIdRef.current;
-    // As they are now: a tab may have been edited or marked while reads ran.
-    const liveTabs = liveTabsNow();
-    // On a remount, the other tabs still open: clean ones. Their reads land
-    // under the same order every refresh read obeys (`applyReadBytes`): bytes
-    // or a write that landed after this read was issued are newer than its
-    // answer, and a read issued after it that found the file gone outranks
-    // its find. Such a tab is kept as it is now.
-    const openNow = openTabsNow();
-    const survivors: OpenTab[] = [];
-    const surviving: string[] = [];
-    const landed: { path: string; seq: number }[] = [];
-    const dropped: string[] = [];
-    const denied: string[] = [];
-    // Open tabs kept whose read found the file gone: marked deleted below.
-    const goneLive: { path: string; seq: number }[] = [];
-    for (let i = 0; i < readPaths.length; i++) {
-      const path = readPaths[i];
-      const res = results[i];
-      const live = liveTabs.get(path);
-      if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 403) {
-        // Denied first: no longer readable, so nothing of it is kept.
-        liveTabs.delete(path);
-        denied.push(path);
-      } else if (live) {
-        liveTabs.delete(path);
-        survivors.push(live);
-        surviving.push(path);
-        if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 404) {
-          goneLive.push({ path, seq: seqs[i] });
-        }
-      } else if (res.status === 'fulfilled' && openNow.has(path)
-        && (isStaleLanding(workspaceId, path, seqs[i]) || isStaleFind(workspaceId, path, seqs[i]))) {
-        survivors.push(openNow.get(path)!);
-        surviving.push(path);
-      } else if (res.status === 'fulfilled') {
-        survivors.push({
-          path,
-          content: res.value,
-          savedContent: res.value,
-          isDirty: false,
-          pendingFileContent: null,
-        });
-        surviving.push(path);
-        landed.push({ path, seq: seqs[i] });
-        // Found on this branch: an own delete it outlived is over, as in addTab.
-        if (workspaceIdRef.current === workspaceId) forgetOwnDelete(path, issuedAt);
-      } else {
-        const err = res.reason;
-        if (err instanceof WorkspaceApiError && err.status === 404 && openNow.has(path)) {
-          // Open and clean: deleted while the route was away. The notice says
-          // so; dropping the tab would show "File not found" instead.
+    try {
+      const results = await Promise.allSettled(reads);
+      // The strip is no longer this hydration's to write: the workspace moved to
+      // another branch, or a newer restore started while these reads were in
+      // flight. Report what we read so the caller can still classify its
+      // deeplink, but touch nothing — and tell the caller, so it doesn't record
+      // a hydration that never landed.
+      const superseded =
+        workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
+      // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
+      // strip: its file still has to sit alongside the restored ones.
+      const outranked = requestId !== addRequestIdRef.current;
+      // As they are now: a tab may have been edited or marked while reads ran.
+      const liveTabs = liveTabsNow();
+      // On a remount, the other tabs still open: clean ones. Their reads land
+      // under the same order every refresh read obeys (`applyReadBytes`): bytes
+      // or a write that landed after this read was issued are newer than its
+      // answer, and a read issued after it that found the file gone outranks
+      // its find. Such a tab is kept as it is now.
+      const openNow = openTabsNow();
+      const survivors: OpenTab[] = [];
+      const surviving: string[] = [];
+      const landed: { path: string; seq: number }[] = [];
+      const dropped: string[] = [];
+      const denied: string[] = [];
+      // Open tabs kept whose read found the file gone: marked deleted below.
+      const goneLive: { path: string; seq: number }[] = [];
+      for (let i = 0; i < readPaths.length; i++) {
+        const path = readPaths[i];
+        const res = results[i];
+        const live = liveTabs.get(path);
+        if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 403) {
+          // Denied first: no longer readable, so nothing of it is kept.
+          liveTabs.delete(path);
+          denied.push(path);
+        } else if (live) {
+          liveTabs.delete(path);
+          survivors.push(live);
+          surviving.push(path);
+          if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 404) {
+            goneLive.push({ path, seq: seqs[i] });
+          }
+        } else if (res.status === 'fulfilled' && openNow.has(path)
+          && (isStaleLanding(workspaceId, path, seqs[i]) || isStaleFind(workspaceId, path, seqs[i]))) {
           survivors.push(openNow.get(path)!);
           surviving.push(path);
-          goneLive.push({ path, seq: seqs[i] });
-        } else if (err instanceof WorkspaceApiError && err.status === 404) {
-          dropped.push(path);
-        } else if (err instanceof WorkspaceApiError && err.status === 403) {
-          denied.push(path);
+        } else if (res.status === 'fulfilled') {
+          survivors.push({
+            path,
+            content: res.value,
+            savedContent: res.value,
+            isDirty: false,
+            pendingFileContent: null,
+          });
+          surviving.push(path);
+          landed.push({ path, seq: seqs[i] });
+          // Found on this branch: an own delete it outlived is over, as in addTab.
+          if (workspaceIdRef.current === workspaceId) forgetOwnDelete(path, issuedAt);
         } else {
-          // Surface the first unexpected failure so the route can show
-          // "file-load-failed" rather than misleading "file-missing".
-          throw err;
+          const err = res.reason;
+          if (err instanceof WorkspaceApiError && err.status === 404 && openNow.has(path)) {
+            // Open and clean: deleted while the route was away. The notice says
+            // so; dropping the tab would show "File not found" instead.
+            survivors.push(openNow.get(path)!);
+            surviving.push(path);
+            goneLive.push({ path, seq: seqs[i] });
+          } else if (err instanceof WorkspaceApiError && err.status === 404) {
+            dropped.push(path);
+          } else if (err instanceof WorkspaceApiError && err.status === 403) {
+            denied.push(path);
+          } else {
+            // Surface the first unexpected failure so the route can show
+            // "file-load-failed" rather than misleading "file-missing".
+            throw err;
+          }
         }
       }
-    }
 
-    if (superseded) {
-      traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
-      return { surviving, dropped, denied, superseded: true };
-    }
-
-    // Live tabs that became so while the reads ran stay too.
-    for (const [path, live] of liveTabs) {
-      survivors.push(live);
-      surviving.push(path);
-    }
-    landed.forEach(({ path, seq }) => markLanded(workspaceId, path, seq));
-
-    if (outranked) {
-      // Merge instead of replace: the newer open's tab stays (it may not even
-      // be in `prev` yet — `addTab` appends with its own race-safe setter, so
-      // it lands on top of this list), and the restored tabs join it in their
-      // persisted order. Activation is left alone; the newer open is the
-      // user's latest intent and has already claimed it.
-      traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
-      const restored = new Set(surviving);
-      // A denied tab leaves `prev` too: the open that outranked this restore
-      // only activated it, and its content may no longer be shown.
-      const gone = new Set(denied);
-      setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path) && !gone.has(t.path))]);
-      if (activeTabPathRef.current !== null && gone.has(activeTabPathRef.current)) {
-        setActiveTabPath(survivors[survivors.length - 1]?.path ?? null);
+      if (superseded) {
+        traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
+        return { surviving, dropped, denied, superseded: true };
       }
+
+      // Live tabs that became so while the reads ran stay too.
+      for (const [path, live] of liveTabs) {
+        survivors.push(live);
+        surviving.push(path);
+      }
+      landed.forEach(({ path, seq }) => markLanded(workspaceId, path, seq));
+
+      if (outranked) {
+        // Merge instead of replace: the newer open's tab stays (it may not even
+        // be in `prev` yet — `addTab` appends with its own race-safe setter, so
+        // it lands on top of this list), and the restored tabs join it in their
+        // persisted order. Activation is left alone; the newer open is the
+        // user's latest intent and has already claimed it.
+        traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
+        const restored = new Set(surviving);
+        // A denied tab leaves `prev` too: the open that outranked this restore
+        // only activated it, and its content may no longer be shown.
+        const gone = new Set(denied);
+        setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path) && !gone.has(t.path))]);
+        if (activeTabPathRef.current !== null && gone.has(activeTabPathRef.current)) {
+          setActiveTabPath(survivors[survivors.length - 1]?.path ?? null);
+        }
+        goneLive.forEach(({ path, seq }) => applyReadGone(workspaceId, path, seq, null));
+        // Still a completed restore for this key: the strip now holds this
+        // branch's tabs, so persistence may resume. Leaving the marker unset was
+        // what stopped this branch's tabs from ever being written again.
+        hydratedKeyRef.current = hydratedKey;
+        return { surviving, dropped, denied, superseded: false };
+      }
+
+      setOpenTabs(survivors);
       goneLive.forEach(({ path, seq }) => applyReadGone(workspaceId, path, seq, null));
-      // Still a completed restore for this key: the strip now holds this
-      // branch's tabs, so persistence may resume. Leaving the marker unset was
-      // what stopped this branch's tabs from ever being written again.
+      // Activate `activePath` if it survived; else last surviving path; else null.
+      const requested = activePath && survivors.some((t) => t.path === activePath)
+        ? activePath
+        : (survivors[survivors.length - 1]?.path ?? null);
+      setActiveTabPath(requested);
       hydratedKeyRef.current = hydratedKey;
       return { surviving, dropped, denied, superseded: false };
+    } finally {
+      releaseChecks();
     }
-
-    setOpenTabs(survivors);
-    goneLive.forEach(({ path, seq }) => applyReadGone(workspaceId, path, seq, null));
-    // Activate `activePath` if it survived; else last surviving path; else null.
-    const requested = activePath && survivors.some((t) => t.path === activePath)
-      ? activePath
-      : (survivors[survivors.length - 1]?.path ?? null);
-    setActiveTabPath(requested);
-    hydratedKeyRef.current = hydratedKey;
-    return { surviving, dropped, denied, superseded: false };
   }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
