@@ -14,6 +14,7 @@ import { extractOdt } from '../extract-odt.js';
 import { extractOdp } from '../extract-odp.js';
 import { extractOds } from '../extract-ods.js';
 import { DocExtractService, EXTRACTION_SCHEMA } from '../doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../extract-in-worker.js';
 import { DocExtractionCache, gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
 import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
@@ -611,7 +612,7 @@ describe('DocExtractService cache', () => {
 
   beforeEach(async () => {
     cacheRoot = await mkdtemp(join(tmpdir(), 'doc-extract-cache-'));
-    service = new DocExtractService(cacheRoot);
+    service = new DocExtractService(cacheRoot, new WorkerDocumentExtractor());
   });
   afterEach(async () => {
     await rm(cacheRoot, { recursive: true, force: true });
@@ -619,7 +620,7 @@ describe('DocExtractService cache', () => {
 
   it('extracts ONCE per content: the second read is served from the cache file', async () => {
     const bytes = docxBytes(para('Cache me once'));
-    const first = await service.extract('a.docx', bytes, extractDocx);
+    const first = await service.extract('a.docx', bytes);
     expect(first.ok).toBe(true);
     const entries = await readdir(cacheRoot);
     expect(entries).toEqual([`${gitBlobSha(bytes)}.docx.${EXTRACTION_SCHEMA}.json`]);
@@ -628,7 +629,7 @@ describe('DocExtractService cache', () => {
     // text, it came from the cache — the parser did NOT run again. (Real-files
     // proof without spying on module internals.)
     await writeFile(join(cacheRoot, entries[0]), JSON.stringify({ summary: 'tampered summary', text: 'FROM CACHE' }), 'utf8');
-    const second = await service.extract('a.docx', bytes, extractDocx);
+    const second = await service.extract('a.docx', bytes);
     if (!second.ok) throw new Error(second.message);
     expect(second.text).toBe('FROM CACHE');
     expect(second.marker).toBe('[extracted text of a.docx — tampered summary]');
@@ -637,9 +638,9 @@ describe('DocExtractService cache', () => {
   it('is invalidated by CONTENT change (new blob sha → fresh extraction, new entry)', async () => {
     const v1 = docxBytes(para('version one'));
     const v2 = docxBytes(para('version two'));
-    await service.extract('a.docx', v1, extractDocx);
+    await service.extract('a.docx', v1);
     const after1 = await readdir(cacheRoot);
-    const res = await service.extract('a.docx', v2, extractDocx);
+    const res = await service.extract('a.docx', v2);
     if (!res.ok) throw new Error(res.message);
     expect(res.text).toBe('version two');
     const after2 = await readdir(cacheRoot);
@@ -649,9 +650,9 @@ describe('DocExtractService cache', () => {
 
   it('keys by content, not path: the same bytes under another path reuse the entry, marker names the read path', async () => {
     const bytes = docxBytes(para('Shared content'));
-    await service.extract('one.docx', bytes, extractDocx);
+    await service.extract('one.docx', bytes);
     expect(await readdir(cacheRoot)).toHaveLength(1);
-    const other = await service.extract('two/other.docx', bytes, extractDocx);
+    const other = await service.extract('two/other.docx', bytes);
     if (!other.ok) throw new Error(other.message);
     expect(other.marker).toMatch(/^\[extracted text of two\/other\.docx — /);
     expect(await readdir(cacheRoot)).toHaveLength(1);
@@ -660,15 +661,20 @@ describe('DocExtractService cache', () => {
   it('getCached misses before extraction and hits after — the grep budget contract', async () => {
     const bytes = docxBytes(para('Budget line'));
     expect(await service.getCached('a.docx', bytes)).toBeUndefined();
-    await service.extract('a.docx', bytes, extractDocx);
+    await service.extract('a.docx', bytes);
     const hit = await service.getCached('a.docx', bytes);
     expect(hit?.text).toBe('Budget line');
   });
 
-  it('does NOT cache failures — a corrupt file is re-tried on the next read', async () => {
-    const res = await service.extract('bad.docx', Buffer.from('junk'), extractDocx);
+  it('remembers a parser failure under the content key — a corrupt file is answered from the cache', async () => {
+    // Reversed on purpose (Damaged-Document-Never-Hangs): a damaged file was
+    // extracted again on every read and every grep; now its failure is kept
+    // like a success, and the cheap lookup answers it too.
+    const junk = Buffer.from('junk');
+    const res = await service.extract('bad.docx', junk);
     expect(res.ok).toBe(false);
-    expect(await readdir(cacheRoot)).toHaveLength(0);
+    expect(await readdir(cacheRoot)).toEqual([`${gitBlobSha(junk)}.docx.${EXTRACTION_SCHEMA}.json`]);
+    expect(await service.getCached('bad.docx', junk)).toEqual(res);
   });
 
   it('computes the git blob sha (matches `git hash-object`)', async () => {
@@ -678,7 +684,7 @@ describe('DocExtractService cache', () => {
 
   it('the cached entry on disk is the {summary, text} JSON', async () => {
     const bytes = docxBytes(para('On disk'));
-    await service.extract('a.docx', bytes, extractDocx);
+    await service.extract('a.docx', bytes);
     const raw = JSON.parse(await readFile(join(cacheRoot, `${gitBlobSha(bytes)}.docx.${EXTRACTION_SCHEMA}.json`), 'utf8')) as { summary: string; text: string };
     expect(raw.text).toBe('On disk');
     expect(typeof raw.summary).toBe('string');
@@ -693,12 +699,12 @@ describe('DocExtractService cache', () => {
         `${odsCell('cell')}` +
         '</table:table-row></table:table></office:text>',
     );
-    const asOdt = await service.extract('doc.odt', bytes, extractOdt);
+    const asOdt = await service.extract('doc.odt', bytes);
     if (!asOdt.ok) throw new Error(asOdt.message);
     expect(asOdt.text).toContain('Prose line');
 
     // Same bytes, renamed .ods: the odt extraction must NOT come back.
-    const asOds = await service.extract('doc.ods', bytes, extractOds);
+    const asOds = await service.extract('doc.ods', bytes);
     if (!asOds.ok) throw new Error(asOds.message);
     expect(asOds.text.split('\n')[0]).toBe('[sheet: Grid]');
     expect(asOds.marker).toContain('sheet');

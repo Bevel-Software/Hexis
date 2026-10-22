@@ -17,6 +17,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
@@ -91,7 +92,7 @@ beforeAll(async () => {
     },
     createToolHandlerFactory(resolve),
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-    new DocExtractService(docCache),
+    new DocExtractService(docCache, new WorkerDocumentExtractor()),
     access,
     testKbContext({ kbDirName: KB }),
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
