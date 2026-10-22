@@ -9,7 +9,7 @@ import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { PageToolsContext, getFileRenderer } from '../../src/modules/workspace/components/renderers';
 import { GitContext, type GitContextValue } from '../../src/modules/git';
-import { WorkspaceContext, type WorkspaceContextValue } from '../../src/modules/workspace/state/workspace.context';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../src/modules/workspace';
 
 declare global {
   interface Window {
