@@ -951,15 +951,28 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
     // strip: its file still has to sit alongside the restored ones.
     const outranked = requestId !== addRequestIdRef.current;
+    // The strip already holds this key's tabs: the route remounted (Knowledge
+    // left for another page and back), it did not open the branch. A tab whose
+    // file someone else deleted, or with unsaved edits, is the only copy of
+    // what it holds — the deleted notice and Copy edits read it until Close —
+    // so it stays as it is, whatever its read answered.
+    const liveTabs = hydratedKey !== null && hydratedKeyRef.current === hydratedKey
+      ? new Map(openTabsRef.current.filter((t) => t.deletedBy || t.isDirty).map((t) => [t.path, t]))
+      : new Map<string, OpenTab>();
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
-    const survivingSeqs: number[] = [];
+    const landed: { path: string; seq: number }[] = [];
     const dropped: string[] = [];
     const denied: string[] = [];
     for (let i = 0; i < uniqPaths.length; i++) {
       const path = uniqPaths[i];
       const res = results[i];
-      if (res.status === 'fulfilled') {
+      const live = liveTabs.get(path);
+      if (live) {
+        liveTabs.delete(path);
+        survivors.push(live);
+        surviving.push(path);
+      } else if (res.status === 'fulfilled') {
         survivors.push({
           path,
           content: res.value,
@@ -968,7 +981,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           pendingFileContent: null,
         });
         surviving.push(path);
-        survivingSeqs.push(seqs[i]);
+        landed.push({ path, seq: seqs[i] });
         // Found on this branch: an own delete it outlived is over, as in addTab.
         if (workspaceIdRef.current === workspaceId) forgetOwnDelete(path, issuedAt);
       } else {
@@ -990,7 +1003,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return { surviving, dropped, denied, superseded: true };
     }
 
-    surviving.forEach((path, i) => markLanded(workspaceId, path, survivingSeqs[i]));
+    // Live tabs the persisted list had not caught up with yet stay too.
+    for (const [path, live] of liveTabs) {
+      survivors.push(live);
+      surviving.push(path);
+    }
+    landed.forEach(({ path, seq }) => markLanded(workspaceId, path, seq));
 
     if (outranked) {
       // Merge instead of replace: the newer open's tab stays (it may not even

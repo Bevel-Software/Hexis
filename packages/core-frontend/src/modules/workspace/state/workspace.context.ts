@@ -317,6 +317,11 @@ export interface WorkspaceContextValue {
    * which paths survived, which were dropped, and which were denied — callers
    * surface "file not found" / "no access" for a deeplinked path that didn't
    * make it.
+   *
+   * Called again for the key the strip already holds (the file route mounted
+   * again), a tab marked deleted (`deletedBy`) or with unsaved edits stays as
+   * it is, whatever its read answered: it is the only copy of what it holds
+   * until Close.
    */
   hydrateTabs: (
     paths: string[],

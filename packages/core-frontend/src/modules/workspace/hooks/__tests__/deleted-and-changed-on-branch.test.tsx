@@ -1690,6 +1690,69 @@ describe('the editor writing back after our own delete', () => {
   });
 });
 
+describe('the Knowledge page mounted again while a deleted tab is open', () => {
+  // The workspace state lives in the app shell; the file route does not. Going
+  // to Settings or Skills & Tools and back mounts the route again, and it
+  // restores the strip with the same call it opens the branch with.
+  const remount = (result: Hook, paths: string[], active: string) =>
+    act(async () => { await result.current.hydrateTabs(paths, active); });
+
+  it('keeps the deleted tab, its notice and its unsaved edits until Close', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nA page to delete.\n\nA paragraph I added.');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+
+    const tab = tabAt(result, 'KB/Draft.md');
+    expect(tab?.deletedBy).toMatchObject({ name: 'Sam Rivera' });
+    expect(tab?.isDirty).toBe(true);
+    expect(tab?.content).toBe('# Draft\n\nA page to delete.\n\nA paragraph I added.');
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Keep.md', 'KB/Draft.md']);
+
+    await act(async () => { await result.current.closeTab(tab!, { skipConfirm: true }); });
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+  });
+
+  it('keeps a deleted tab the saved tab list has not caught up with', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+    await open(result, 'KB/Draft.md');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
+
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+  });
+
+  it('keeps unsaved edits on a tab whose file is still there', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+    await typeInto(result, 'keep, edited');
+
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+
+    expect(tabAt(result, 'KB/Keep.md')?.content).toBe('keep, edited');
+    expect(tabAt(result, 'KB/Keep.md')?.isDirty).toBe(true);
+  });
+
+  it('still drops a persisted tab whose file is gone when the branch is first opened', async () => {
+    const result = await mountReady();
+    disk.delete('KB/Draft.md');
+    let outcome!: { dropped: string[] };
+    await act(async () => { outcome = await result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+
+    expect(outcome.dropped).toEqual(['KB/Draft.md']);
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+  });
+});
+
 describe('a late 404 about a file that came back since', () => {
   const RESTORED = '# Draft\n\nRestored since.';
 
