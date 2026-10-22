@@ -108,9 +108,9 @@ export interface FsTreeChangedEvent {
  * in the explorer is told in place, and nothing is kept for later.
  *
  * `reason` follows "Could not be read:" in the explorer's notice. It names the
- * file and quotes the parser, so unlike the other workspace-scoped kinds it is
- * delivered only to sessions whose person may read `path` (see
- * `readGatedPath`).
+ * file and quotes the parser; like every kind that names a path on a
+ * workspace, it is delivered only to sessions whose person may read `path`
+ * (the events route's delivery rule, judged by the access rules).
  */
 export interface DocumentUnreadableEvent {
   kind: 'document-unreadable';
@@ -387,16 +387,6 @@ export type WorkflowEventPayload =
   | ResyncEvent;
 
 export type WorkflowEvent = WorkflowEventEnvelope & WorkflowEventPayload;
-
-/**
- * The file a session's person must be allowed to READ before `e` is
- * delivered to it, or undefined when the kind carries nothing that rule
- * protects. The delivery rule is per kind: a kind is added here when what it
- * says about a file may only reach someone who may read that file.
- */
-export function readGatedPath(e: WorkflowEventPayload): { workspaceId: string; path: string } | undefined {
-  return e.kind === 'document-unreadable' ? { workspaceId: e.workspaceId, path: e.path } : undefined;
-}
 
 /** True for events scoped to a workspace — the focus filter applies. */
 export function isWorkspaceScoped(

@@ -103,13 +103,6 @@ interface ActiveSession {
   cleanup: () => void;
 }
 
-/**
- * May `userId` read `path` in `workspaceId`? The access rules' own answer,
- * supplied by the composition root. A route given none delivers no read-gated
- * event at all: the rule fails closed.
- */
-export type EventReadGate = (userId: string, workspaceId: string, path: string) => Promise<boolean>;
-
 export function createEventsRoutes(
   bus: WorkflowEventBus,
   authMiddleware: express.RequestHandler,
