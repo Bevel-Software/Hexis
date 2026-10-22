@@ -10,12 +10,12 @@ import {
   withLinkedSkillRoots,
   type AuthUser,
 } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { AccessMutationService, accessMdPathForFolder } from '../access/access-mutation.service.js';
+import type { IAccessControl, IAccessMutation } from '../access/index.js';
+import { accessMdPathForFolder } from '../access/index.js';
 import { pluginPrincipalKey } from '../access-model/index.js';
-import type { Principal } from '../access-model/access-splice.js';
+import type { Principal } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
 import type { ISkillService } from '../skills/index.js';
 import { logger } from '../../shared/logging.js';
@@ -119,12 +119,13 @@ export class PluginLinkError extends Error {
  */
 export class PluginLinksService {
   private readonly locks = new WorkspaceMutex();
-  private readonly mutation: AccessMutationService;
 
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly commits: ProvisionCommitDriver,
     private readonly accessControl: IAccessControl,
+    /** Grants and revokes the links' tokens; the composition root owns the implementation. */
+    private readonly mutation: IAccessMutation,
     private readonly skillService: ISkillService,
     private readonly links: PluginLinkIndex,
     private readonly kb: KbContext,
@@ -132,9 +133,7 @@ export class PluginLinksService {
       emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void;
     },
     private readonly onChanged?: () => void,
-  ) {
-    this.mutation = new AccessMutationService(workspaceService, accessControl, kb.kbDirName);
-  }
+  ) {}
 
   private get kbDirName(): string {
     return this.kb.kbDirName;

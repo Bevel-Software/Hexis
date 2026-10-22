@@ -5,12 +5,12 @@ import {
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
 import { DrizzleQueryError } from 'drizzle-orm';
-import { spliceGrant } from '../access-model/access-splice.js';
-import { sanitizeError } from '../workflow/sanitize-error.js';
+import { spliceGrant } from '../access-model/index.js';
+import { sanitizeError } from '../workflow/index.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type {
   ClaimedJoinRequest,
   JoinRequestRecord,

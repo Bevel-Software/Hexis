@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
+import { useEventBus, canonicalizeWorkspaceId } from '../../workflow';
 
 /**
  * The extensions the raw file route serves as pictures, which is what a

@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
-import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
+import type { GitRunError} from '../../shared/git.contract.js';
+import { type IGitRunner } from '../../shared/git.contract.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import type { AddWorktreeOptions, FetchOptions, IKbRepository } from './kb-repository.contract.js';
@@ -12,7 +13,7 @@ import {
   cloneTrackingConfigArgs,
   ORIGIN_FETCH_REFSPEC,
   SAFE_IMPLICIT_FETCH_ARGS,
-} from '../kb-fs/clone-config.js';
+} from '../kb-fs/index.js';
 
 const log = logger('kb-repository');
 

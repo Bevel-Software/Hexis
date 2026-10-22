@@ -1,15 +1,12 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry } from '../tool-registry/tool.contract.js';
-import { ToolError } from '../tool-helpers/index.js';
-import { toolDef } from '../tool-helpers/index.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../tool-helpers/index.js';
+import type { IToolRegistry } from '../tool-registry/index.js';
+import { ToolError, toolDef } from '../tool-helpers/index.js';
+import type { ToolHandlerFactory, ToolContext } from '../tool-helpers/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ReadForTool } from '../workspace/workspace.tools.js';
+import type { ReadForTool } from '../workspace/index.js';
 import type { IEmbedService } from './embed.interface.js';
-import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
-import { SESSION_ID_INPUT, type ToolDescriptionNotes } from '../workspace/index.js';
-import { sessionIdInputOf } from '../workspace/workspace.tools.js';
+import { requireExternalSource } from '../tool-auth/index.js';
+import { SESSION_ID_INPUT, type ToolDescriptionNotes, sessionIdInputOf } from '../workspace/index.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
 export const OPEN_PAGE_TOOL = 'open_page';

@@ -50,3 +50,20 @@ export {
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
 export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
+// Reached by other modules; exported here so they stop importing the files.
+export { useCreatePage } from './hooks/useCreatePage';
+export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
+export { useOpenChangeRequests } from './hooks/useOpenChangeRequests';
+export { useWorkspaceImageResolver } from './hooks/useWorkspaceImageResolver';
+export { KB_ROUTE_PREFIX, openExternalHref, safeDecode, stripJunkBeforeKbDir, useFileNav, useNodeIdNav } from './routing/kb-routes';
+export { WorkspaceApiError, deleteFile, getOrCreateWorkspace, listFiles, readFile, writeFile } from './services/workspace.api';
+export type { SkillToolWarning } from './services/workspace.api';
+export { useEditablePage } from './state/editable-page';
+export { WorkspaceContext, libraryUploadTarget, useWorkspace } from './state/workspace.context';
+export type { WorkspaceContextValue } from './state/workspace.context';
+export { computeDiff } from './utils/diff';
+export type { DiffLine } from './utils/diff';
+export { displayFileName, fileNameTooltip } from './utils/display-file-name';
+export { checkoutRoot, findEntryByPath, knowledgeFiles, pathExistsInTree } from './utils/fileTree';
+export { labelFor, parseFrontmatter } from './utils/frontmatter';
+export type { FrontmatterData } from './utils/frontmatter';

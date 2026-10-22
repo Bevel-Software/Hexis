@@ -58,8 +58,8 @@
  */
 
 import { and, eq, gt, inArray, lte } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { fileLocks } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { fileLocks } from '../database/index.js';
 import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/platform-shared';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';

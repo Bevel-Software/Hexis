@@ -19,4 +19,4 @@ export {
   type RenderedGuideSection,
 } from './agent-guide.js';
 export { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from './agent-guide.tools.js';
-export { GUIDE_FIRST_SENTENCE, withGuideFirst } from '../tool-registry/guide-first.js';
+export { GUIDE_FIRST_SENTENCE, withGuideFirst } from '../tool-registry/index.js';

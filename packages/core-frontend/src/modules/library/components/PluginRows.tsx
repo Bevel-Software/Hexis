@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ExternalLink, UserPlus, Users } from 'lucide-react';
 import { Badge, Banner } from '../../../shared/components';
-import { useAdmin } from '../../admin/state/admin.context';
+import { useAdmin } from '../../admin';
 import { useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
 import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';

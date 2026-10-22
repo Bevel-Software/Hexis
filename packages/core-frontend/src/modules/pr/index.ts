@@ -9,3 +9,6 @@ export { updateChangeRequest } from './services/pr-edit.api';
 export { approvePrFile, revertPrFile, unapprovePrFile } from './services/pr-approvals.api';
 export { deleteChangeRequest } from './services/pr-cancel.api';
 export { refreshChangeRequestFromTarget } from './services/pr-merge.api';
+// Reached by other modules; exported here so they stop importing the files.
+export { cancelPullRequest } from './services/pr-cancel.api';
+export { mergePullRequest } from './services/pr-merge.api';

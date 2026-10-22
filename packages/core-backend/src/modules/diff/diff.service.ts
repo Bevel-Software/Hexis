@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '@bevel-software/platform-shared';
 import type { IDiffService } from './diff.interface.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { WorkspaceMutex } from '../kb-fs/index.js';
 import { gitDirOf } from '../kb-fs/index.js';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
