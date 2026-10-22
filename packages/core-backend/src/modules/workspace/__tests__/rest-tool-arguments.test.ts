@@ -22,7 +22,7 @@ import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
 import { callLine, compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
-import { RipgrepPatternMatcher } from '../ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
 const patternMatcher = new RipgrepPatternMatcher();

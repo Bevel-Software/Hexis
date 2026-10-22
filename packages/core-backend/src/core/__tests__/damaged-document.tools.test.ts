@@ -16,7 +16,7 @@ import { RoutineWritePolicyService } from '../../modules/workspace/routine-write
 import { WorkflowHooks } from '../../modules/workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../modules/workspace/agent-access.gate.js';
 import { SpillStore } from '../../modules/workspace/spill-store.js';
-import { RipgrepPatternMatcher } from '../../modules/workspace/ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../../modules/workspace/index.js';
 import { DocExtractService, type UnreadableDocument } from '../../modules/workspace/file-readers/doc-extract.service.js';
 import type { IDocumentExtractor } from '../../modules/workspace/file-readers/document-extractor.contract.js';
 import { WorkerDocumentExtractor, type WorkerDocumentExtractorOptions } from '../../modules/workspace/file-readers/extract-in-worker.js';

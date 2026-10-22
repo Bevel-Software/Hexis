@@ -1,16 +1,22 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../ripgrep-search.js';
-import { compareSearchPaths, type FileMatches, type IPatternSearch } from '../pattern-matcher.contract.js';
+import {
+  compareSearchPaths,
+  RipgrepPatternMatcher,
+  type FileMatches,
+  type IPatternSearch,
+  type RipgrepPatternMatcherOptions,
+  type TreeSearchOptions,
+} from '../index.js';
 import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 
 /**
  * The ripgrep runner through its contract, against the real `rg` on PATH:
  * what a walk covers and in which order, how its JSON is read, how a pattern
  * the engine refuses is answered, and that every run ends — at the budget, on
- * an early stop, or on `close()`.
+ * an early stop, when the caller goes away, or on `close()`.
  */
 let dir = '';
 let matchers: RipgrepPatternMatcher[] = [];
@@ -24,9 +30,17 @@ function matcher(opts?: RipgrepPatternMatcherOptions): RipgrepPatternMatcher {
 const search = (pattern: string, opts?: RipgrepPatternMatcherOptions, ignoreCase = false): Promise<IPatternSearch> =>
   matcher(opts).search(pattern, { ignoreCase });
 
-async function all(s: IPatternSearch, exclude: string[] = []): Promise<FileMatches[]> {
+async function all(
+  s: IPatternSearch,
+  exclude: string[] = [],
+  opts: Partial<TreeSearchOptions> & { root?: string } = {},
+): Promise<FileMatches[]> {
   const out: FileMatches[] = [];
-  for await (const f of s.files({ cwd: dir, root: 'kb' }, exclude)) out.push(f);
+  const { root = 'kb', ...rest } = opts;
+  const cwd = root === '.' ? join(dir, 'kb') : dir;
+  for await (const f of s.files({ cwd, root }, { excludeExtensions: exclude, excludePaths: [], maxLinesPerFile: 1_000, ...rest })) {
+    out.push(f);
+  }
   return out;
 }
 
@@ -85,15 +99,36 @@ describe('RipgrepPatternMatcher', () => {
     expect(files[0]!.lines[1]).toEqual({ line: 2, text: 'needle short' });
   });
 
-  it('lists the files of the given extensions by the same walk, case-insensitively and outside .git', async () => {
+  it('lists every file by the same walk, in the same order, outside .git and never through a link', async () => {
     await put('kb/b.pdf', 'x');
     await put('kb/a/One.PDF', 'x');
     await put('kb/c.md', 'x');
     await put('kb/.git/d.pdf', 'x');
     await put('kb/.hidden/e.eml', 'x');
+    await symlink(join(dir, 'kb/c.md'), join(dir, 'kb/link.md'));
     const s = await search('x');
-    expect(await s.list({ cwd: dir, root: 'kb' }, ['.pdf', '.eml'])).toEqual(['.hidden/e.eml', 'a/One.PDF', 'b.pdf']);
-    expect(await s.list({ cwd: dir, root: 'kb' }, [])).toEqual([]);
+    expect(await s.list({ cwd: dir, root: 'kb' })).toEqual(['.hidden/e.eml', 'a/One.PDF', 'b.pdf', 'c.md']);
+  });
+
+  it('never answers an excluded file, whatever its name, from any root, and still answers its siblings', async () => {
+    const names = ['secret.md', 'we ird[1]/#c*.md', '!d.md', 'e.md ', '{f,g}.md', 'back\\slash.md', 'q?.md'];
+    for (const n of names) await put(`kb/${n}`, 'needle\n');
+    await put('kb/open.md', 'needle\n');
+    await put('kb/qx.md', 'needle\n');
+    for (const root of ['kb', '.']) {
+      const files = await all(await search('needle'), [], { root, excludePaths: names });
+      expect(files.map((f) => f.path), root).toEqual(['open.md', 'qx.md']);
+    }
+  });
+
+  it('keeps at most maxLinesPerFile lines of a file and still answers the next file', async () => {
+    await put('kb/a.md', 'needle\n'.repeat(10));
+    await put('kb/b.md', 'x\nneedle b\n');
+    const files = await all(await search('needle'), [], { maxLinesPerFile: 3 });
+    expect(files).toEqual([
+      { path: 'a.md', lines: [1, 2, 3].map((line) => ({ line, text: 'needle' })) },
+      { path: 'b.md', lines: [{ line: 2, text: 'needle b' }] },
+    ]);
   });
 
   it('places each matching line in the text it came from', async () => {
@@ -158,12 +193,49 @@ describe('RipgrepPatternMatcher', () => {
     for (let i = 0; i < 50; i++) await put(`kb/f${String(i).padStart(2, '0')}.md`, 'needle\n');
     const m = matcher({ maxRunning: 1, maxWaiting: 0 });
     const s = await m.search('needle', { ignoreCase: false });
-    for await (const f of s.files({ cwd: dir, root: 'kb' }, [])) {
+    for await (const f of s.files({ cwd: dir, root: 'kb' }, { excludeExtensions: [], excludePaths: [], maxLinesPerFile: 1 })) {
       expect(f.path).toBe('f00.md');
       break;
     }
     // With one slot and no queue, a run still holding it would make this a 503.
     expect(await (await m.search('needle', { ignoreCase: false })).matchingLines(['needle'])).toEqual([[0]]);
+  });
+
+  it('spends one budget across every run of a search, so runs that each finish can still exhaust it', async () => {
+    // Each walk takes 400 ms and finishes; the third has 200 ms of a 1 s budget left.
+    const slow = await slowRipgrep({ walkMs: 400 });
+    try {
+      const s = await search('needle', { budgetMs: 1_000 });
+      expect(await all(s)).toEqual([]);
+      expect(await s.list({ cwd: dir, root: 'kb' })).toEqual([]);
+      const started = Date.now();
+      await expect(all(s)).rejects.toMatchObject({ status: 400, details: { code: 'pattern_too_expensive' } });
+      expect(Date.now() - started).toBeLessThan(400);
+      expect(await slow.alive()).toEqual([]);
+    } finally {
+      await slow.remove();
+    }
+  });
+
+  it('kills every run when the caller goes away, answers it abandoned, and gives the slot back', async () => {
+    const slow = await slowRipgrep();
+    try {
+      const m = matcher({ maxRunning: 1, maxWaiting: 0 });
+      const gone = new AbortController();
+      const s = await m.search('needle', { ignoreCase: false, signal: gone.signal });
+      const running = all(s);
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const started = Date.now();
+      gone.abort();
+      await expect(running).rejects.toMatchObject({ status: 499, details: { code: 'search_abandoned' } });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(await slow.alive()).toEqual([]);
+      // A later run of the abandoned search is refused before it starts.
+      await expect(s.matchingLines(['needle'])).rejects.toMatchObject({ details: { code: 'search_abandoned' } });
+      expect(await (await m.search('needle', { ignoreCase: false })).matchingLines(['needle'])).toEqual([[0]]);
+    } finally {
+      await slow.remove();
+    }
   });
 
   it('refuses a run past the queue with a 503 and ends every run on close', async () => {

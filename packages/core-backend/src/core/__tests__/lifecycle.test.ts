@@ -6,7 +6,7 @@ import { holdCommitWorkerLease, holdable } from '../lifecycle.js';
 import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
 import { tmpdir } from 'node:os';
-import { RipgrepPatternMatcher } from '../../modules/workspace/ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../../modules/workspace/index.js';
 import { slowRipgrep } from '../../__tests__/slow-ripgrep.js';
 
 /** A lease the suite scripts: what each `tryAcquire` answers, and a way to lose it. */
@@ -548,7 +548,7 @@ describe('stopCore', () => {
       // A tree search that would hold its ripgrep for the whole 5 s budget when the graph is stopped.
       const search = await patternMatcher.search('needle', { ignoreCase: false });
       const running = (async () => {
-        for await (const file of search.files({ cwd: tmpdir(), root: '.' }, [])) void file;
+        for await (const file of search.files({ cwd: tmpdir(), root: '.' }, { excludeExtensions: [], excludePaths: [], maxLinesPerFile: 1 })) void file;
       })();
       while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
       const started = Date.now();

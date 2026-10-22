@@ -67,7 +67,6 @@ import { removeEmptyDirs } from './empty-dirs.js';
 import {
   compareSearchPaths,
   PATTERN_DIALECT,
-  type FileMatches,
   type IPatternMatcher,
   type IPatternSearch,
   type TreeScope,
@@ -679,9 +678,6 @@ interface GrepMatch {
 /** The longest stretch of a matching line a grep answer carries. */
 const GREP_LINE_CHARS = 300;
 
-/** Files a tree search judges readable at once: one batched access check each. */
-const GREP_VERDICT_BATCH = 64;
-
 /**
  * The text ONE file holds for `grep`, read through its reader: the text
  * content for a text reader (none on NUL bytes / invalid UTF-8 — binary is not
@@ -778,12 +774,19 @@ async function treeScope(fs: LocalFilesystem, root: string): Promise<TreeScope> 
 }
 
 /**
- * grep over the directory `root`, in two passes over one ripgrep walk.
+ * grep over the directory `root`: the tree is listed and judged first, then
+ * searched in two passes.
+ *
+ * The listing opens no file, and every file in it is judged readable or not
+ * BEFORE anything is searched: a file the caller may not read is never opened
+ * by either pass, so what it holds can change neither the answer nor how
+ * long the search takes, and so not whether it ends within its budget.
  *
  * The text pass is ripgrep's own: every file whose reader greps its bytes as
  * text (a TextReader) is searched by it, in path order, and read nowhere else.
- * Its files are judged readable in batches BEFORE any of their lines is
- * counted, and the pass stops at the `max`-th readable line.
+ * Each file is answered as ripgrep finishes it, and the pass stops at the
+ * `max`-th line. A file that was not in the listing (it appeared since) was
+ * never judged, so it never answers.
  *
  * The document pass reads the files every other reader owns through that
  * reader, as `read_file` does — extractions under the per-call budget — and
@@ -815,43 +818,40 @@ async function grepTree(
   // pass. Extensions any other reader owns are left out of it.
   const readerOf = (ext: string): FileReader => docs.readers.readerFor(`file${ext}`);
   const notRaw = docs.readers.ownedExtensions().filter((ext) => !(readerOf(ext) instanceof TextReader));
+  const ownedBy = (p: string, exts: readonly string[]): boolean => {
+    const lower = p.toLowerCase();
+    return exts.some((ext) => lower.endsWith(ext));
+  };
   const out: GrepMatch[] = [];
 
-  let batch: FileMatches[] = [];
-  const answer = async (): Promise<void> => {
-    const files = batch.filter((f) => shown(f.path));
-    batch = [];
-    const readable = await readableFiles(gate, files.map((f) => f.path));
-    for (const f of files) {
-      if (out.length >= max) return;
-      if (!readable.has(f.path)) continue;
-      await notifyRead(f.path);
-      for (const l of f.lines.slice(0, max - out.length)) {
-        out.push({ path: f.path, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
-      }
+  // Every file the walk covers, judged in one batched access check before a
+  // byte of any is searched. Only what is shown is judged, so the readable
+  // set is also what the caller may be answered from.
+  const all = await search.list(scope);
+  const readable = await readableFiles(gate, all.map(at).filter(shown));
+  const excludePaths = all.filter((p) => !readable.has(at(p)) && !ownedBy(p, notRaw));
+  for await (const file of search.files(scope, { excludeExtensions: notRaw, excludePaths, maxLinesPerFile: max })) {
+    const p = at(file.path);
+    if (!readable.has(p)) continue;
+    await notifyRead(p);
+    for (const l of file.lines.slice(0, max - out.length)) {
+      out.push({ path: p, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
     }
-  };
-  for await (const file of search.files(scope, notRaw)) {
-    batch.push({ path: at(file.path), lines: file.lines });
-    if (batch.length >= GREP_VERDICT_BATCH) {
-      await answer();
-      if (out.length >= max) break;
-    }
+    // Enough: leaving the loop kills ripgrep at the file that filled the cap.
+    if (out.length >= max) break;
   }
-  if (out.length < max) await answer();
 
   const last = out.length >= max ? out[out.length - 1]!.path : undefined;
   const readerOwned = notRaw.filter((ext) => {
     const reader = readerOf(ext);
     return reader instanceof DocumentReader || reader.greppableText !== undefined;
   });
-  const listed = (await search.list(scope, readerOwned))
+  const listed = all
+    .filter((p) => ownedBy(p, readerOwned))
     .map(at)
-    .filter((p) => shown(p) && (last === undefined || compareSearchPaths(p, last) <= 0));
-  const readable = await readableFiles(gate, listed);
+    .filter((p) => readable.has(p) && (last === undefined || compareSearchPaths(p, last) <= 0));
   const texts: { path: string; text: string }[] = [];
   for (const p of listed) {
-    if (!readable.has(p)) continue;
     await notifyRead(p);
     let found: SearchableText;
     try {
@@ -2517,8 +2517,12 @@ export function registerWorkspaceTools(
       handler: async (a, ctx: ToolContext) => {
         // The caller's pattern runs in ripgrep, never on the request thread
         // (see IPatternMatcher); one the engine refuses is answered here,
-        // before anything is searched.
-        const search = await patterns.search(a.pattern as string, { ignoreCase: Boolean(a.ignore_case) });
+        // before anything is searched. A caller that goes away takes the
+        // search's runs with it.
+        const search = await patterns.search(a.pattern as string, {
+          ignoreCase: Boolean(a.ignore_case),
+          signal: ctx.abortSignal,
+        });
         // No path means the whole REPOSITORY, not the workspace directory above
         // it. The workspace root also holds whatever an older build left beside
         // the checkout, and the read gate has no rules for a path outside the

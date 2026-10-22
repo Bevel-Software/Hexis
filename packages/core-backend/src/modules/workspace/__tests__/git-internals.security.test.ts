@@ -36,7 +36,7 @@ import { createDiffRoutes } from '../../diff/diff.routes.js';
 import { DiffService } from '../../diff/diff.service.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { WorkspaceService } from '../workspace.service.js';
-import { RipgrepPatternMatcher } from '../ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../index.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */

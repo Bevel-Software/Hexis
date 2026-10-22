@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MAX_TIMER_MS, sizingOption } from './worker-pool.js';
 import { ToolError } from '../tool-helpers/index.js';
 import { logger } from '../../shared/logging.js';
@@ -7,8 +10,10 @@ import {
   type IPatternMatcher,
   type IPatternSearch,
   type TreeScope,
+  type TreeSearchOptions,
   PatternRefusedError,
   PatternTooExpensiveError,
+  SearchAbandonedError,
   SearchBusyError,
 } from './pattern-matcher.contract.js';
 
@@ -25,8 +30,9 @@ const log = logger('grep');
  * caller that has enough stops the walk.
  *
  * Each run is owned by the call that started it, which kills it on every way
- * out: the walk finished, the caller stopped reading, the budget ran out, or
- * an error. `close()` kills whatever is still running.
+ * out: the walk finished, the caller stopped reading, the budget ran out, the
+ * search's caller went away (its abort signal), or an error. `close()` kills
+ * whatever is still running.
  */
 export interface RipgrepPatternMatcherOptions {
   /** Wall time one search's runs may spend, summed over every run it makes. Default 5 s. */
@@ -51,6 +57,9 @@ const WALK_ARGS = ['--hidden', '--no-ignore', '--no-follow', '--no-messages', '-
 
 /** Last among a walk's globs, so no extension a caller lets through can bring a `.git` folder back. */
 const NO_GIT = ['--iglob', '!.git'];
+
+/** How every `--json` match record begins: ripgrep writes `type` first. */
+const MATCH_RECORD = '{"type":"match"';
 
 /** How much of a refused run's stderr is kept. */
 const STDERR_CAP = 4_096;
@@ -89,7 +98,7 @@ export class RipgrepPatternMatcher implements IPatternMatcher {
     };
   }
 
-  async search(pattern: string, opts: { ignoreCase: boolean }): Promise<IPatternSearch> {
+  async search(pattern: string, opts: { ignoreCase: boolean; signal?: AbortSignal }): Promise<IPatternSearch> {
     if (pattern.length > this.maxPatternLength) {
       throw new ToolError(
         `Pattern too long: ${pattern.length} characters, and a search pattern may have at most ${this.maxPatternLength}.`,
@@ -99,7 +108,7 @@ export class RipgrepPatternMatcher implements IPatternMatcher {
     }
     // A process argument cannot carry a NUL; the escape `\x00` can.
     if (pattern.includes('\0')) throw new PatternRefusedError('a pattern cannot contain a NUL character; write it as \\x00.');
-    const search = new RipgrepSearch(this.runner, pattern, opts.ignoreCase ? ['-i'] : [], this.budgetMs);
+    const search = new RipgrepSearch(this.runner, pattern, opts.ignoreCase ? ['-i'] : [], this.budgetMs, opts.signal);
     // The engine judges the pattern before anything is searched, so a refused
     // one is answered as such whatever the search would have found.
     await search.matchingLines(['']);
@@ -160,54 +169,69 @@ class RipgrepSearch implements IPatternSearch {
     private readonly pattern: string,
     private readonly flags: string[],
     private readonly budgetMs: number,
+    private readonly signal: AbortSignal | undefined,
   ) {}
 
-  async *files(scope: TreeScope, excludeExtensions: readonly string[]): AsyncIterable<FileMatches> {
-    const args = [
-      ...BASE_ARGS,
-      '--json',
-      ...WALK_ARGS,
-      ...excludeExtensions.flatMap((ext) => ['--iglob', `!*${ext}`]),
-      ...NO_GIT,
-      ...this.flags,
-      '-e',
-      this.pattern,
-      '--',
-      scope.root,
-    ];
-    let current: FileMatches | null = null;
-    for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
-      const event = parseEvent(record);
-      if (event === null) continue;
-      if (event.type === 'begin') {
-        const path = underRoot(scope.root, pathOf(event.data?.path));
-        current = path === null ? null : { path, lines: [] };
-      } else if (event.type === 'match' && current !== null) {
-        const text = textOf(event.data?.lines);
-        const line = event.data?.line_number;
-        if (text !== null && typeof line === 'number') current.lines.push({ line, text: withoutNewline(text) });
-      } else if (event.type === 'end' && current !== null) {
-        // A file ripgrep found binary part-way through is not text: whatever
-        // it matched before the NUL is dropped with the rest.
-        const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
-        if (!binary && current.lines.length > 0) yield current;
-        current = null;
+  async *files(scope: TreeScope, opts: TreeSearchOptions): AsyncIterable<FileMatches> {
+    // The excluded files go to ripgrep as an ignore file of their own, so it
+    // never opens them, however many there are: a command line has a length
+    // limit and an ignore file has none. Its rules are anchored at `cwd`,
+    // where ripgrep runs.
+    let ignoreDir: string | undefined;
+    try {
+      const ignore: string[] = [];
+      if (opts.excludePaths.length > 0) {
+        ignoreDir = await mkdtemp(join(tmpdir(), 'hx-grep-'));
+        const file = join(ignoreDir, 'excluded');
+        const under = scope.root === '.' ? '' : `${scope.root}/`;
+        await writeFile(file, opts.excludePaths.map((p) => ignoreRule(`${under}${p}`)).join('\n') + '\n');
+        ignore.push('--ignore-file', file);
       }
+      const args = [
+        ...BASE_ARGS,
+        '--json',
+        ...WALK_ARGS,
+        ...ignore,
+        ...opts.excludeExtensions.flatMap((ext) => ['--iglob', `!*${ext}`]),
+        ...NO_GIT,
+        ...this.flags,
+        '-e',
+        this.pattern,
+        '--',
+        scope.root,
+      ];
+      let current: FileMatches | null = null;
+      for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
+        // A file that has given all the lines it may answer: the rest of its
+        // matches are only waited through, never parsed, until its `end`.
+        if (current !== null && current.lines.length >= opts.maxLinesPerFile && record.startsWith(MATCH_RECORD)) continue;
+        const event = parseEvent(record);
+        if (event === null) continue;
+        if (event.type === 'begin') {
+          const path = underRoot(scope.root, pathOf(event.data?.path));
+          current = path === null ? null : { path, lines: [] };
+        } else if (event.type === 'match' && current !== null) {
+          const text = textOf(event.data?.lines);
+          const line = event.data?.line_number;
+          if (text !== null && typeof line === 'number' && current.lines.length < opts.maxLinesPerFile) {
+            current.lines.push({ line, text: withoutNewline(text) });
+          }
+        } else if (event.type === 'end' && current !== null) {
+          // A file ripgrep found binary part-way through is not text: whatever
+          // it matched before the NUL is dropped with the rest. That is known
+          // only here, so a file is answered at its end and not before.
+          const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
+          if (!binary && current.lines.length > 0) yield current;
+          current = null;
+        }
+      }
+    } finally {
+      if (ignoreDir !== undefined) await rm(ignoreDir, { recursive: true, force: true });
     }
   }
 
-  async list(scope: TreeScope, extensions: readonly string[]): Promise<string[]> {
-    if (extensions.length === 0) return [];
-    const args = [
-      ...BASE_ARGS,
-      '--files',
-      '--null',
-      ...WALK_ARGS,
-      ...extensions.flatMap((ext) => ['--iglob', `*${ext}`]),
-      ...NO_GIT,
-      '--',
-      scope.root,
-    ];
+  async list(scope: TreeScope): Promise<string[]> {
+    const args = [...BASE_ARGS, '--files', '--null', ...WALK_ARGS, ...NO_GIT, '--', scope.root];
     const out: string[] = [];
     for await (const record of this.run(args, scope.cwd, undefined, '\0')) {
       const path = underRoot(scope.root, record);
@@ -245,18 +269,28 @@ class RipgrepSearch implements IPatternSearch {
    * Run ripgrep and yield its stdout split on `separator`. The run is this
    * generator's: it is killed when the caller stops reading, when the
    * search's budget runs out (answered with {@link PatternTooExpensiveError}),
-   * and on any error, and its slot is given back on every one of those.
+   * when the search's caller goes away (answered with
+   * {@link SearchAbandonedError}), and on any error, and its slot is given
+   * back on every one of those.
    */
   private async *run(args: string[], cwd: string | undefined, input: string | undefined, separator: string): AsyncGenerator<string> {
     const release = await this.runner.slot();
     let child: ChildProcess | undefined;
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
+    let abandoned = false;
+    const onAbort = (): void => {
+      abandoned = true;
+      child?.kill('SIGKILL');
+    };
     const started = Date.now();
     try {
+      // A caller gone while this run waited for its slot gets no run at all.
+      if (this.signal?.aborted) throw new SearchAbandonedError();
       const remaining = this.budgetMs - this.spentMs;
       if (remaining <= 0) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
       child = this.runner.start(args, cwd, input !== undefined);
+      this.signal?.addEventListener('abort', onAbort, { once: true });
       // Listening for a failed spawn first, so its error wins over the exit it also causes.
       const failed = new Promise<never>((_, reject) => child!.once('error', reject));
       failed.catch(() => undefined);
@@ -293,8 +327,9 @@ class RipgrepSearch implements IPatternSearch {
         if (from < chunk.length) parts.push(from === 0 ? chunk : chunk.slice(from));
       }
       const rest = parts.join('');
-      if (rest.length > 0 && !timedOut) yield rest;
+      if (rest.length > 0 && !timedOut && !abandoned) yield rest;
       const { code } = await Promise.race([exit, failed]);
+      if (abandoned) throw new SearchAbandonedError();
       if (timedOut) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
       if (code === null && this.runner.isClosed()) throw new SearchBusyError();
       // 0: matches, 1: none. 2 with nothing on stderr is a file ripgrep could
@@ -303,9 +338,11 @@ class RipgrepSearch implements IPatternSearch {
       if (code === 2 && stderr.trim().length > 0) throw refusal(stderr);
       if (code !== 0 && code !== 1 && code !== 2) throw new Error(`ripgrep ended with exit code ${String(code)}`);
     } catch (err) {
+      if (abandoned) throw new SearchAbandonedError();
       if (timedOut) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
       throw err;
     } finally {
+      this.signal?.removeEventListener('abort', onAbort);
       if (timer) clearTimeout(timer);
       if (child && child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
         const exit = exited(child);
@@ -388,6 +425,17 @@ function underRoot(root: string, path: string | null): string | null {
   if (path === null) return null;
   const prefix = `${root}/`;
   return path.startsWith(prefix) && path.length > prefix.length ? path.slice(prefix.length) : null;
+}
+
+/**
+ * The ignore-file rule that names exactly `path` (relative to where ripgrep
+ * runs): anchored with `/`, every character a gitignore glob or line reads
+ * specially escaped. A line break cannot be written in a rule, so it is
+ * matched by `?`, which may also leave out a sibling differing only there:
+ * a file too many is left out, never one too few.
+ */
+function ignoreRule(path: string): string {
+  return `/${path.replace(/[\\*?[\]{}!# ]/g, (c) => `\\${c}`).replace(/[\r\n]/g, '?')}`;
 }
 
 function countLines(text: string): number {

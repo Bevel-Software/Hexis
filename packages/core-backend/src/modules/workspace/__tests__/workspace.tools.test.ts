@@ -15,7 +15,7 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../ripgrep-search.js';
+import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../index.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
 import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
@@ -1438,6 +1438,73 @@ describe('grep runs ripgrep', () => {
     const res = await grep(base, { pattern: 'needle', max_results: 1 });
     expect(res.body.matches).toEqual([{ path: `${KB_DIR}/open.md`, line: 1, text: 'needle open' }]);
     expect(res.body.truncated).toBe(true);
+  });
+
+  // Four million matching lines: a file ripgrep searched would spend far more
+  // than the 1.5 s budget answering them.
+  const huge = 'needle\n'.repeat(4_000_000);
+
+  it('never searches a file the caller may not read, so what it holds cannot turn the answer into a 400', async () => {
+    matcherOptions = { budgetMs: 1_500 };
+    const base = await start('read', denyReads(new Set(['Locked/huge.md'])));
+    await fs.writeFile(`${KB_DIR}/Locked/huge.md`, huge);
+    await fs.writeFile(`${KB_DIR}/open.md`, 'needle open\n');
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(200);
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/open.md`, line: 1, text: 'needle open' }]);
+  }, 20_000);
+
+  it('stops the search at the file that fills max_results, so what comes after it costs nothing', async () => {
+    matcherOptions = { budgetMs: 1_500 };
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.md`, 'needle first\n');
+    await fs.writeFile(`${KB_DIR}/z/huge.md`, huge);
+    const res = await grep(base, { pattern: 'needle', max_results: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/a.md`, line: 1, text: 'needle first' }]);
+    expect(res.body.truncated).toBe(true);
+  }, 20_000);
+
+  it('stops the search when its caller goes away, leaving no ripgrep running', async () => {
+    const slow = await slowRipgrep();
+    try {
+      matcherOptions = {};
+      const base = await start();
+      const gone = new AbortController();
+      const call = fetch(`${base}/api/agent/tools/grep`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer x' },
+        body: JSON.stringify({ branch: 'main', pattern: 'needle' }),
+        signal: gone.signal,
+      }).catch(() => undefined);
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const left = Date.now();
+      gone.abort();
+      await call;
+      // Well inside the 5 s budget the search would otherwise have run to.
+      while ((await slow.alive()).length > 0 && Date.now() - left < 4_000) await new Promise((r) => setTimeout(r, 20));
+      expect(await slow.alive()).toEqual([]);
+      expect(Date.now() - left).toBeLessThan(1_000);
+    } finally {
+      await slow.remove();
+    }
+  }, 15_000);
+
+  it('searches node_modules and folders of any depth, and a link inside the workspace only where it points', async () => {
+    const base = await start();
+    const deep = Array.from({ length: 15 }, (_, i) => `d${i}`).join('/');
+    await fs.writeFile(`${KB_DIR}/node_modules/pkg/readme.md`, 'needle in node_modules\n');
+    await fs.writeFile(`${KB_DIR}/${deep}/deep.md`, 'needle fifteen levels down\n');
+    await fs.writeFile(`${KB_DIR}/real/target.md`, 'needle at the target\n');
+    await symlink(join(tempDir, KB_DIR, 'real', 'target.md'), join(tempDir, KB_DIR, 'file-link.md'));
+    await symlink(join(tempDir, KB_DIR, 'real'), join(tempDir, KB_DIR, 'folder-link'));
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(200);
+    expect(res.body.matches.map((m) => m.path)).toEqual([
+      `${KB_DIR}/${deep}/deep.md`,
+      `${KB_DIR}/node_modules/pkg/readme.md`,
+      `${KB_DIR}/real/target.md`,
+    ]);
   });
 
   it('answers the first max_results by path then line, whatever reads them, and marks the answer truncated', async () => {

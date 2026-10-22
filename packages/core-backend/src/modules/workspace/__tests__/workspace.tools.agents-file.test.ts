@@ -17,7 +17,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { RipgrepPatternMatcher } from '../ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
 const patternMatcher = new RipgrepPatternMatcher();

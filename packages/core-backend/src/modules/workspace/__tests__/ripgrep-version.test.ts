@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assertRipgrep } from '../ripgrep-version.js';
+import { assertRipgrep } from '../index.js';
 
 /** The boot check, against the real PATH and against one where `rg` is nowhere. */
 describe('assertRipgrep', () => {

@@ -28,7 +28,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { RipgrepPatternMatcher } from '../ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../index.js';
 import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';

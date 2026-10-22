@@ -10,7 +10,8 @@ import { promisify } from 'node:util';
  * where the server finds its ripgrep. A run reading stdin (the pattern check,
  * a document's text) is handed to the real `rg`, so a pattern is judged as it
  * always is; a walk records its process id and sleeps for a minute, which no
- * budget waits out.
+ * budget waits out — or, given `walkMs`, sleeps that long and then finishes
+ * having found nothing, which is how a suite spends a budget in parts.
  *
  * `alive()` answers which of the walks it started are still running, so a
  * suite can assert that a stopped search left no process behind. `remove()`
@@ -21,7 +22,8 @@ export interface SlowRipgrep {
   remove(): Promise<void>;
 }
 
-export async function slowRipgrep(): Promise<SlowRipgrep> {
+export async function slowRipgrep(opts: { walkMs?: number } = {}): Promise<SlowRipgrep> {
+  const seconds = opts.walkMs === undefined ? '60' : (opts.walkMs / 1000).toFixed(3);
   const real = (await promisify(execFile)('sh', ['-c', 'command -v rg'])).stdout.trim();
   const dir = await mkdtemp(join(tmpdir(), 'slow-rg-'));
   const pids = join(dir, 'pids');
@@ -33,7 +35,7 @@ export async function slowRipgrep(): Promise<SlowRipgrep> {
       'for a in "$@"; do last="$a"; done',
       `if [ "$last" = "-" ]; then exec '${real}' "$@"; fi`,
       `echo $$ >> '${pids}'`,
-      'exec sleep 60',
+      `exec sleep ${seconds}`,
       '',
     ].join('\n'),
   );

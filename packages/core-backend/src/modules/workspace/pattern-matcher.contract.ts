@@ -20,9 +20,11 @@ export interface IPatternMatcher {
    * One search's matcher for `pattern`: its budget is spent across every call
    * it makes. Rejects with the 400 {@link PatternRefusedError} when the engine
    * refuses the pattern, or the 400 `pattern_too_long` an over-long pattern
-   * earns, before any file is searched.
+   * earns, before any file is searched. When `signal` aborts (the caller went
+   * away), every run the search has going is killed, and the call it was
+   * serving rejects with {@link SearchAbandonedError}.
    */
-  search(pattern: string, opts: { ignoreCase: boolean }): Promise<IPatternSearch>;
+  search(pattern: string, opts: { ignoreCase: boolean; signal?: AbortSignal }): Promise<IPatternSearch>;
   /** Ends every running search; a search after this is refused. */
   close(): Promise<void>;
 }
@@ -33,6 +35,19 @@ export interface TreeScope {
   cwd: string;
   /** The directory searched, relative to `cwd` (`.` for `cwd` itself). */
   root: string;
+}
+
+/** What a tree search leaves out, and how much of each file it keeps. */
+export interface TreeSearchOptions {
+  /** Files whose extension (lowercase, with the dot) is one of these are not searched. */
+  excludeExtensions: readonly string[];
+  /**
+   * Files, relative to the scope's `root` as {@link IPatternSearch.list}
+   * answers them, that are never opened: not one byte of them is searched.
+   */
+  excludePaths: readonly string[];
+  /** The most lines one file answers; the lines past it are neither kept nor parsed. */
+  maxLinesPerFile: number;
 }
 
 /** One file's matching lines, as a tree search finds them. */
@@ -57,16 +72,17 @@ export interface IPatternSearch {
    * The lines the pattern matches in every text file under the scope, one
    * file at a time in {@link compareSearchPaths} order. A file whose content is
    * binary contributes nothing, and neither does a line that is not UTF-8.
-   * Files whose extension (lowercase, with the dot) is in `excludeExtensions`
-   * are not searched. Stopping the iteration early stops the search.
+   * Each file is answered as soon as ripgrep has finished it (whether a file
+   * is binary is known only then), so stopping the iteration stops the search
+   * at the file the caller had enough with.
    */
-  files(scope: TreeScope, excludeExtensions: readonly string[]): AsyncIterable<FileMatches>;
+  files(scope: TreeScope, opts: TreeSearchOptions): AsyncIterable<FileMatches>;
   /**
-   * The files under the scope whose extension is in `extensions`, relative to
-   * the root, in {@link compareSearchPaths} order: what {@link files} leaves to
-   * the caller to read, found by the same walk.
+   * Every file under the scope, relative to the root, in
+   * {@link compareSearchPaths} order: the walk {@link files} makes, without
+   * opening a file — what a caller judges before anything is searched.
    */
-  list(scope: TreeScope, extensions: readonly string[]): Promise<string[]>;
+  list(scope: TreeScope): Promise<string[]>;
   /**
    * For each of `texts`, the 0-based indices of its lines (split on `\n`) that
    * the pattern matches, in order.
@@ -120,6 +136,14 @@ export class SearchBusyError extends ToolError {
   constructor() {
     super('Too many searches are running at once; try again in a few seconds.', 503, { code: 'search_busy' });
     this.name = 'SearchBusyError';
+  }
+}
+
+/** A search whose caller went away: its runs were killed, and nobody is waiting for the answer. */
+export class SearchAbandonedError extends ToolError {
+  constructor() {
+    super('The search was stopped because its caller went away.', 499, { code: 'search_abandoned' });
+    this.name = 'SearchAbandonedError';
   }
 }
 

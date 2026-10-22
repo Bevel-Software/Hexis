@@ -66,14 +66,14 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
-import { RipgrepPatternMatcher } from '../modules/workspace/ripgrep-search.js';
-import { assertRipgrep } from '../modules/workspace/ripgrep-version.js';
-import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
 import {
+  assertRipgrep,
   DocExtractService,
+  RipgrepPatternMatcher,
   WorkerDocumentExtractor,
   type IDocumentExtractor,
+  type IPatternMatcher,
 } from '../modules/workspace/index.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';

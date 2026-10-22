@@ -15,7 +15,7 @@ import type { UtcpTool } from '../tool.contract.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { RipgrepPatternMatcher } from '../../workspace/ripgrep-search.js';
+import { RipgrepPatternMatcher } from '../../workspace/index.js';
 import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
