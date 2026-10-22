@@ -44,7 +44,8 @@ name.
 
 ### Calling tools: `window.bevel.tools`
 
-On the app's file page, a page calls the tools of the person viewing it —
+On the app's file page, and on a skill's page in the Library (Skills & Tools →
+the skill → its file), a page calls the tools of the person viewing it —
 exactly the tools that person's own agent gets from the hosted MCP server,
 with the same names, answers and refusals — through five functions, each
 returning a promise:
@@ -71,9 +72,10 @@ namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`, `notion.search`);
 fails as an unknown tool — convert it, or call it from `callToolChain`.
 
 `window.bevel.tools` is `null` wherever tools are not available: on the
-embed, on a skill page and in any preview that is not the app's file page.
-Check it before every use, and render the page without tools when it is
-`null` — never assume it is there:
+embed (a page shown on another site, or in a chat's MCP App pane), and in a
+change request's or a file history's preview of a page. Check it before
+every use, and render the page without tools when it is `null` — never
+assume it is there:
 
 ```js
 const tools = window.bevel?.tools;
@@ -131,11 +133,12 @@ input.addEventListener('change', async () => {
 ```
 
 **A page that needs tools asks for them.** `window.bevel.requireTools()`
-resolves `true` at once, with nothing shown, on the app's file page. Anywhere
-else the app shows a card, "<page name> uses tools that are only available in
-the platform", with Continue without tools and Open in the platform; Open in
-the platform opens the page on the app's file page (in a new tab when the page
-is shown on another site). Either way the call resolves `false`, and the page
+resolves `true` at once, with nothing shown, on the app's file page and on a
+skill's page. Anywhere else the app shows a card,
+"<page name> uses tools that are only available in the platform", with
+Continue without tools and Open in the platform; Open in the platform opens
+the page on the app's file page (in a new tab when the page is shown on
+another site). Either way the call resolves `false`, and the page
 goes on rendering without tools:
 
 ```js

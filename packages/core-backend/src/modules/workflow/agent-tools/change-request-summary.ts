@@ -65,7 +65,11 @@ export interface ChangeRequestApprovers {
   path: string;
   /** Roles that confer approval here. `everyone` means any signed-in approver. */
   roles: string[];
-  /** Approvers named directly, by display name. */
+  /**
+   * Approvers named directly: each by display name, or by email when the
+   * access tree resolved no name (an owner listed only by email has none).
+   * Never a blank string — an approver with neither is left out.
+   */
   users: string[];
   /** True once an eligible approver has approved at the request's current head. */
   approved: boolean;
@@ -129,12 +133,22 @@ export function changeKindOf(status: PrFileStatus | undefined): ChangeKind {
   }
 }
 
+/**
+ * How the answer names one approver: the display name when there is one, the
+ * email otherwise. The resolver hands back an empty name for an owner that
+ * `roles.yaml` lists by email, so the name alone left the agent `[""]` while
+ * `mergeBlockedReasons` named the same owner by email.
+ */
+function approverName(user: { name?: string; email?: string }): string {
+  return user.name?.trim() || user.email?.trim() || '';
+}
+
 function approversOf(approval: FileApproval): ChangeRequestApprovers {
   const eligible = approval.eligibleApprovers ?? { roles: [], users: [] };
   return {
     path: approval.path,
     roles: eligible.roles ?? [],
-    users: (eligible.users ?? []).map((u) => u.name),
+    users: (eligible.users ?? []).map(approverName).filter((n) => n !== ''),
     approved: approval.isApproved,
     inMergeGate: approval.inMergeGate,
     // Anything but an explicit `true` is unresolved — a detail built before

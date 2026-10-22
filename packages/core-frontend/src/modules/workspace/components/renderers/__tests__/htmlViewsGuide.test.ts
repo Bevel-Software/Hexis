@@ -170,7 +170,10 @@ describe('the html-views guide section agrees with the renderer', () => {
 
     // Null everywhere else, and the guide tells a page to check before every use.
     expect(runBridge().bevel.tools).toBeNull();
-    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed, on a skill page and in any preview that is not the app\'s file page.');
+    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed (a page shown on another site, or in a chat\'s MCP App pane), and in a change request\'s or a file history\'s preview of a page.');
+    // Where it is answered: the hosts htmlToolBridge.ts lists, the skill page beside the file page.
+    expect(flat).toContain('On the app\'s file page, and on a skill\'s page in the Library');
+    expect(flat).toContain('resolves `true` at once, with nothing shown, on the app\'s file page and on a skill\'s page.');
     expect(flat).toContain('Check it before every use, and render the page without tools when it is `null`');
 
     // The consent rule and the two cards, in the app's words.

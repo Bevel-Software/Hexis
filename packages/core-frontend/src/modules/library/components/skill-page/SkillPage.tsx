@@ -888,8 +888,14 @@ export function SkillPage({
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
-          // A page of the skill opens on the Knowledge file page, where its
-          // tools are — in a new tab, as the page asked from inside itself
+          // The page's tools are answered here, as on its file page, under
+          // the path the file page uses for it (repo-relative, kbDirName
+          // stripped): one identity per page in the Audit log and the
+          // consent card, never the skill-relative tab name.
+          pagePath={fileWorkspacePath ? fileRepoPath : undefined}
+          // The renderer's own target for Open in the platform, which it
+          // offers only to a page mounted without tools: the Knowledge file
+          // page, in a new tab, as the page asked from inside itself
           // (`openFilePage`, the Knowledge view's own). The plain URL would
           // route straight back here (every file under a skill's folder IS
           // the skill page); the file-page URL asks for the file route.

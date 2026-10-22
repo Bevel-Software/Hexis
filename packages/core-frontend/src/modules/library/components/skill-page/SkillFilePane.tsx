@@ -7,6 +7,7 @@ import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRender
 import {
   OpenPageInPlatformContext,
   PageLinkHomeContext,
+  PageToolsContext,
   scrollToHeading,
   type KbLinkTarget,
 } from '../../../workspace';
@@ -58,9 +59,17 @@ interface SkillFilePaneProps {
   /** Image source resolver, same contract as `KbMarkdownView`; absent ⇒ plain `<img>` tags. */
   resolveImage?: KbImageResolver;
   /**
+   * The file's knowledge-base path (`Skills/review/view.html`) — the path the
+   * file page gives the page-tool bridge for the same file. Present, an HTML
+   * page here gets the viewer's tools, recorded under this path; absent (the
+   * skill's path has not resolved yet), it gets none.
+   */
+  pagePath?: string;
+  /**
    * Open this file on the app's file page — what an HTML page's "Open in the
    * platform" does here, since `file` is relative to the skill, not a
-   * workspace path.
+   * workspace path. The renderer offers it only to a page without tools,
+   * i.e. while `pagePath` is absent.
    */
   onOpenInPlatform?(): void;
   /**
@@ -94,6 +103,7 @@ export function SkillFilePane({
   headingLink,
   sectionHash,
   resolveImage,
+  pagePath,
   onOpenInPlatform,
   linkHome,
 }: SkillFilePaneProps) {
@@ -134,13 +144,16 @@ export function SkillFilePane({
         // skill's bundled template (a deck, a report shell) is meant to be
         // SEEN; the renderer's own Code tab keeps the source one click away.
         // Sized wrapper because the renderer fills its parent, and this card
-        // has no height of its own.
+        // has no height of its own. The skill page is the platform: the
+        // page's `window.bevel.tools` is answered here as on its file page.
         <div className="h-[70vh]">
-          <OpenPageInPlatformContext.Provider value={onOpenInPlatform ?? null}>
-            <PageLinkHomeContext.Provider value={linkHome ?? null}>
-              <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
-            </PageLinkHomeContext.Provider>
-          </OpenPageInPlatformContext.Provider>
+          <PageToolsContext.Provider value={pagePath ? { pagePath } : null}>
+            <OpenPageInPlatformContext.Provider value={onOpenInPlatform ?? null}>
+              <PageLinkHomeContext.Provider value={linkHome ?? null}>
+                <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
+              </PageLinkHomeContext.Provider>
+            </OpenPageInPlatformContext.Provider>
+          </PageToolsContext.Provider>
         </div>
       ) : (
         <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">

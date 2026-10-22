@@ -75,7 +75,7 @@ const changeRequestApproversSchema: JsonSchema = {
   properties: {
     path: { type: 'string' },
     roles: { type: 'array', items: { type: 'string' }, description: 'Roles that confer approval here; `everyone` means any signed-in approver.' },
-    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly, by display name.' },
+    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly: each by display name, or by email when the access tree resolved no name. Never a blank string.' },
     approved: { type: 'boolean', description: 'True once an eligible approver has approved at the current head.' },
     inMergeGate: { type: 'boolean', description: 'False when the merge gate does not bind this path — then nobody has to approve it.' },
     approversUnknown: { type: 'boolean', description: 'Present when the access tree could not be resolved: empty `roles`/`users` means unknown, not nobody.' },

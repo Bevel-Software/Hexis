@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
+import { useContext } from 'react';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
@@ -143,6 +144,25 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
   ),
 }));
 
+// The HTML renderer's frame and cards are its own suite's business; this
+// stand-in shows what the page hands it — the page-tool bridge, and the path
+// a page's calls would be recorded under.
+// The context is read through the module's entry point at RENDER time: the
+// entry point itself imports this renderer, so importing it inside the
+// factory would wait on its own result.
+vi.mock('../../workspace/components/renderers/HtmlRenderer', () => {
+  return {
+    HtmlRenderer: ({ filePath }: { filePath: string }) => {
+      const tools = useContext(PageToolsContext);
+      return (
+        <div data-testid="html-view" data-file={filePath}>
+          {tools ? tools.pagePath : 'no tools'}
+        </div>
+      );
+    },
+  };
+});
+
 // The file bar's Edit-or-Propose decision asks the per-file access resolver.
 // Default here is the READER's answer (`canWrite: false`) so the proposing
 // suites below exercise the propose path; the Edit test flips it.
@@ -175,6 +195,7 @@ vi.mock('../state/library-data', () => ({
 }));
 
 import { SkillPage } from '../components/skill-page/SkillPage';
+import { PageToolsContext } from '../../workspace';
 import { LibraryToastProvider } from '../state/toast';
 import { expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
@@ -532,6 +553,24 @@ describe('SkillPage', () => {
     } finally {
       open.mockRestore();
     }
+  });
+
+  /**
+   * The skill page is the platform: a page of the skill gets its tools here,
+   * as on its file page, and under the path the file page would record —
+   * the knowledge-base path, never the skill-relative tab name.
+   */
+  it.each([
+    ['the Skills/ root', 'Skills/newsletter'],
+    ['a plugin', 'Plugins/Engineering/skills/newsletter'],
+  ])('answers an HTML page’s tools under its knowledge-base path, for a skill under %s', async (_, path) => {
+    apiMock.getSkill.mockResolvedValue({ ...skillDetail, path, files: [`${path}/view.html`] });
+    apiMock.getSkillFile.mockResolvedValue('<script>bevel.tools.requireTools()</script>');
+    renderPage(false);
+    fireEvent.click(await screen.findByRole('tab', { name: /view\.html/ }));
+    const page = await screen.findByTestId('html-view');
+    expect(page).toHaveAttribute('data-file', 'view.html');
+    expect(page).toHaveTextContent(new RegExp(`^${path}/view\\.html$`));
   });
 
   it('loads the skill and shows its name, needed integrations and files', async () => {
