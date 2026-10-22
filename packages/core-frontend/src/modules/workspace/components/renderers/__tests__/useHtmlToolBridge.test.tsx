@@ -36,7 +36,7 @@ function OtherHtmlRenderer({ viewKey }: { viewKey: number }) {
   const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath: PATH, viewKey });
   // The document carries the identity the controller minted for it, as the
   // real runtime does (`buildSandboxedHtml` with this `toolBridge`).
-  const srcDoc = toolBridge ? `with tools documentId="${toolBridge.documentId}"` : 'without tools';
+  const srcDoc = `${toolBridge.tools ? 'with tools' : 'without tools'} documentId="${toolBridge.documentId}"`;
   return (
     <>
       <iframe ref={iframeRef} title="page" sandbox="allow-scripts" srcDoc={srcDoc} />
@@ -123,9 +123,23 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     expect(next.documentId).toMatch(/^doc-/);
     expect(next.documentId).not.toBe(first);
     cleanup();
-    expect(mount('elsewhere').iframe.getAttribute('srcdoc')).toBe('without tools');
+    expect(mount('elsewhere').iframe.getAttribute('srcdoc')).toMatch(/^without tools documentId="doc-/);
     cleanup();
-    expect(mount('embed').iframe.getAttribute('srcdoc')).toBe('without tools');
+    expect(mount('embed').iframe.getAttribute('srcdoc')).toMatch(/^without tools documentId="doc-/);
+  });
+
+  it('on a view without tools, a requireTools from the replaced document is ignored too', async () => {
+    const { frame: old, nextView } = mount('embed');
+    const current = nextView();
+    old.post({ type: 'bevel.tools.require', requestId: 'q1' });
+    await settled();
+    expect(screen.queryByText(/only available in the platform/)).toBeNull();
+    expect(old.replies).toEqual([]);
+
+    current.post({ type: 'bevel.tools.require', requestId: 'q2' });
+    expect(await screen.findByText('Roadmap uses tools that are only available in the platform')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue without tools' }));
+    await waitFor(() => expect(current.replies.at(-1)).toEqual({ type: 'bevel.tools.require.response', requestId: 'q2', ok: true, result: false }));
   });
 
   it('ignores a message from the document a view change replaced, and answers the new document', async () => {

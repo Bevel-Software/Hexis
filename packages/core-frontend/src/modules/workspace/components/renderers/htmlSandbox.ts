@@ -465,19 +465,22 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * `htmlViewsGuide.test.ts` holds the two together.
  */
 /**
- * `toolBridge`: `false` builds the frame with `bevel.tools = null`; an object
- * builds it with the tools and stamps every message the runtime posts with
- * `documentId`, the identity the app minted for THIS document — so the app
- * can tell a message queued by a document it has since replaced (the frame's
- * window survives a rebuild in place) from one the current document posts.
- * `true` builds the tools without an identity, for a host that answers one
- * document only.
+ * `toolBridge`: what the document's runtime posts as, and whether it gets the
+ * tools. An object carries `documentId`, the identity the app minted for THIS
+ * document, which the runtime stamps on every message it posts (tool calls
+ * and `requireTools()` alike) — so the app can tell a message queued by a
+ * document it has since replaced (the frame's window survives a rebuild in
+ * place) from one the current document posts; `tools: false` gives such a
+ * document `bevel.tools = null` while it still asks as itself. `true` builds
+ * the tools without an identity, for a host that answers one document only;
+ * `false` or absent builds neither.
  */
-export type ToolBridgeOption = boolean | { documentId: string };
+export type ToolBridgeOption = boolean | { documentId: string; tools?: boolean };
 
 function toolBridgeRuntime(option: ToolBridgeOption | undefined): string {
-  const enabled = option === true || (typeof option === 'object' && option !== null);
-  const documentId = typeof option === 'object' && option !== null ? option.documentId : null;
+  const withIdentity = typeof option === 'object' && option !== null ? option : null;
+  const enabled = option === true || (withIdentity !== null && withIdentity.tools !== false);
+  const documentId = withIdentity?.documentId ?? null;
   return `
 ;(function () {
   var pending = {};

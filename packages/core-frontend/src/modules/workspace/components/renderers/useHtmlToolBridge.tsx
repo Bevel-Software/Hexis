@@ -41,13 +41,14 @@ export interface HtmlToolBridgeOptions {
 export interface HtmlToolBridgeResult {
   /**
    * What to build the frame's document with — `buildSandboxedHtml`'s
-   * `toolBridge`: `false` where the page gets no tools, else the identity
-   * minted for this view's document, which the runtime stamps on every
-   * message so the app answers only the document it built. A new identity
-   * per `viewKey`, so a renderer that builds its document from this value
-   * rebuilds it when the view changes, as it must.
+   * `toolBridge`: the identity minted for this view's document, which the
+   * runtime stamps on every message so the app answers only the document it
+   * built, and whether that document gets the tools (`tools: false` leaves
+   * it `bevel.tools = null`, still asking `requireTools()` as itself). A new
+   * identity per `viewKey`, so a renderer that builds its document from this
+   * value rebuilds it when the view changes, as it must.
    */
-  toolBridge: false | { documentId: string };
+  toolBridge: { documentId: string; tools: boolean };
   /** The two cards, for the renderer to render beside its frame. */
   cards: ReactNode;
 }
@@ -80,19 +81,21 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
   // The viewer's answer about this page's writes holds for one VIEW of it: a
   // new frame document (a reload, a saved edit, another file) asks again.
   const consentRef = useRef<PageConsent | null>(null);
-  // Which document this view's is: an identity minted per `viewKey`, built
-  // into the document, and stamped by its runtime on every message. The
-  // window is not enough — a document rebuilt in the same frame element
-  // keeps the frame's window, and a message the old document queued can be
-  // delivered after the new one is committed. A message is answered only
-  // when it carries the current identity, and its reply is posted only
-  // while that identity is still current. The ref flips in the SAME commit
-  // that puts the new document in the frame (a layout effect), so nothing
-  // decided in the gap before passive effects run finds the old one current.
+  // Which document this view's is: an identity minted per `viewKey` — for
+  // every view, tools or not, since a page without tools still asks
+  // `requireTools()` — built into the document, and stamped by its runtime
+  // on every message. The window is not enough — a document rebuilt in the
+  // same frame element keeps the frame's window, and a message the old
+  // document queued can be delivered after the new one is committed. A
+  // message is answered only when it carries the current identity, and its
+  // reply is posted only while that identity is still current. The ref flips
+  // in the SAME commit that puts the new document in the frame (a layout
+  // effect), so nothing decided in the gap before passive effects run finds
+  // the old one current.
   const documentId = useMemo(() => {
     void viewKey; // a new identity per view, whatever the key's value
-    return toolPagePath ? newDocumentId() : null;
-  }, [toolPagePath, viewKey]);
+    return newDocumentId();
+  }, [viewKey]);
   const documentIdRef = useRef(documentId);
   useLayoutEffect(() => {
     documentIdRef.current = documentId;
@@ -150,11 +153,9 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
       const data = event.data as { type?: unknown; requestId?: unknown; documentId?: unknown } | null;
       // Only from the document this view built: a message from one the view
       // has since replaced — queued before the change, delivered after it,
-      // through the same window — is nobody's to answer. Where this view
-      // gives no tools there is no identity, and a message with none is the
-      // document's (it has no tools to call; `requireTools` is answered).
+      // through the same window — is nobody's to answer.
       const asked = documentIdRef.current;
-      if (asked !== null && data?.documentId !== asked) return;
+      if (data?.documentId !== asked) return;
       const reply = (message: unknown) => {
         // Only to the document that asked: a reloaded frame is a new window,
         // and a document rebuilt in the same window carries a new identity.
@@ -247,6 +248,6 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
     </>
   );
 
-  const toolBridge = useMemo(() => (documentId === null ? (false as const) : { documentId }), [documentId]);
+  const toolBridge = useMemo(() => ({ documentId, tools: toolPagePath !== null }), [documentId, toolPagePath]);
   return { toolBridge, cards };
 }
