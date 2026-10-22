@@ -727,6 +727,34 @@ async function searchableText(fs: LocalFilesystem, path: string, docs: DocGrepSt
   return content === null ? { kind: 'no-text' } : { kind: 'text', text: content };
 }
 
+/**
+ * grep over the one text file `path`, by ripgrep from the folder holding it,
+ * its lines pushed onto `out`, when it is a regular file; `null`, with
+ * nothing searched, for anything else (a link, one that loops, a file gone
+ * since), which is read as read_file reads it instead. A file that answers no
+ * line has no text when ripgrep finds it binary: it holds a NUL.
+ */
+async function grepTextFile(
+  fs: LocalFilesystem,
+  path: string,
+  search: IPatternSearch,
+  max: number,
+  out: GrepMatch[],
+): Promise<{ kind: 'searched' } | { kind: 'no-text' } | null> {
+  const slash = path.lastIndexOf('/');
+  const scope = await treeScope(fs, slash < 0 ? '' : path.slice(0, slash));
+  const name = path.slice(slash + 1);
+  const absolute = join(scope.cwd, scope.root, name);
+  if (!(await nodeFs.lstat(absolute).then((st) => st.isFile(), () => false))) return null;
+  const from = out.length;
+  for await (const file of search.files(scope, { only: [name], maxLinesPerFile: max })) {
+    for (const l of file.lines) out.push({ path, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
+  }
+  if (out.length > from) return { kind: 'searched' };
+  const bytes = await orNotFound(path, () => nodeFs.readFile(absolute), 'Nothing to search');
+  return bytes.includes(0) ? { kind: 'no-text' } : { kind: 'searched' };
+}
+
 /** Append the lines `hits` names (0-based indices into `text`'s lines) to `out`, as matches in `path`. */
 function pushMatches(out: GrepMatch[], path: string, text: string, hits: readonly number[]): void {
   if (hits.length === 0) return;
@@ -822,7 +850,11 @@ async function grepTree(
   skip: (path: string) => boolean = () => false,
 ): Promise<GrepMatch[]> {
   const scope = await treeScope(fs, root);
-  const at = (p: string): string => (root === '' ? p : `${root}/${p}`);
+  // A folder named with a trailing slash answers the paths it is spelled
+  // with everywhere else (`a/b.md`, never `a//b.md`), so the guide's own
+  // path and every verdict meet the one spelling.
+  const base = root.replace(/\/+$/, '');
+  const at = (p: string): string => (base === '' ? p : `${base}/${p}`);
   // ripgrep already stays out of `.git`; the folder's every other spelling,
   // and the folder placeholder, are left out as everywhere else.
   const shown = (p: string): boolean => !hasGitInternalsSegment(p) && !isFolderPlaceholder(p) && !skip(p);
@@ -2632,11 +2664,19 @@ export function registerWorkspaceTools(
           // gets the 403, never the filesystem's complaint about it.
           await assertCanRead(gate, searchRoot);
           if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
-          // A named FILE is read through its reader, exactly as read_file
-          // reads it, and its text is searched by the same engine: a tree
-          // search would find nothing to walk and answer an empty match list,
-          // which the caller cannot tell from "the pattern is not in this file".
-          const found = await orNotFound(searchRoot, () => searchableText(fs, searchRoot, docs), 'Nothing to search');
+          // A named text FILE is searched as a tree search searches it: by
+          // ripgrep, from its folder, so it answers the same lines either way
+          // (the valid UTF-8 lines of a file holding some that are not, and
+          // nothing from one ripgrep finds binary). Any other file, and any
+          // path that is not a regular file, is read through its reader,
+          // exactly as read_file reads it, its text searched by the same
+          // engine: a tree search would find nothing to walk and answer an
+          // empty match list, which the caller cannot tell from "the pattern
+          // is not in this file".
+          const found =
+            (readers.readerFor(searchRoot) instanceof TextReader
+              ? await grepTextFile(fs, searchRoot, search, max, out)
+              : null) ?? (await orNotFound(searchRoot, () => searchableText(fs, searchRoot, docs), 'Nothing to search'));
           if (found.kind === 'text') {
             const [hits] = await search.matchingLines([found.text]);
             pushMatches(out, searchRoot, found.text, hits!);

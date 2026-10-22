@@ -525,7 +525,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
          const started = Date.now();
          try { expensive = { ok: grep('^a+!$', 'knowledge-base') }; } catch (err) { expensive = { failed: err.message }; }
          const took = Date.now() - started;
-         return { expensive, took, control: grep('^a+!$', 'knowledge-base/redos.md') };`,
+         return { expensive, took };`,
         30_000,
       );
       // The search is stopped at the ticket's 5 s budget: timed around the call
@@ -535,8 +535,14 @@ describe('workspace tools — a branch that cannot be opened', () => {
       expect(result.expensive.ok).toBeUndefined();
       expect(result.expensive.failed).toContain('HTTP 400');
       expect(result.expensive.failed).toContain('Pattern too expensive');
-      expect(result.control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
       expect(await slow.alive()).toEqual([]);
+      // With the real ripgrep back, the same pattern matches the line.
+      await slow.remove();
+      const { result: control } = await client.callToolChain(
+        `return bevel.grep({ body: { branch: 'alice/draft', pattern: '^a+!$', path: 'knowledge-base/redos.md' } });`,
+        30_000,
+      );
+      expect(control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
     } finally {
       await client.close();
       await slow.remove();

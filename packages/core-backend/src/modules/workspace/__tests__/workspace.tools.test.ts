@@ -1016,6 +1016,10 @@ describe("the agent guide at the guide's name", () => {
     expect((await grep(base, 'needle', 'AGENTS.md')).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
     // A search under a folder does not reach a file that is not under it.
     expect((await grep(base, 'needle', `${KB_DIR}/Handbook`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+    // A folder named with a trailing slash answers the same paths, spelled
+    // once, and the guide once.
+    expect((await grep(base, 'needle', `${KB_DIR}/Handbook/`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+    expect((await grep(base, 'needle', `${KB_DIR}/`)).matches).toEqual(fromRoot.matches);
 
     // With the knowledge base's own AGENTS.md, the search covers the composed
     // text — the own file first, then the guide — and once: the walk's own
@@ -1194,6 +1198,16 @@ describe('grep with a path that names a file', () => {
     }
   });
 
+  it('a named text file answers the lines a folder search answers from it, valid UTF-8 lines of a file holding others included', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/mixed/latin.txt`, Buffer.concat([Buffer.from('needle \xff\n', 'latin1'), Buffer.from('needle ok\n')]));
+    const named = await grep(base, { pattern: 'needle', path: `${KB_DIR}/mixed/latin.txt` });
+    const folder = await grep(base, { pattern: 'needle', path: `${KB_DIR}/mixed` });
+    expect(named.matches).toEqual([{ path: `${KB_DIR}/mixed/latin.txt`, line: 2, text: 'needle ok' }]);
+    expect(named.matches).toEqual(folder.matches);
+    expect(named.note).toBeUndefined();
+  });
+
   it('a path with nothing at it fails with an error naming the path — never an empty success', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: `${KB_DIR}/notes/ghost.md` });
@@ -1342,11 +1356,12 @@ describe('grep runs ripgrep', () => {
       expect(refused.status).toBe(503);
       expect(refused.body.code).toBe('search_busy');
       expect(await Promise.all([holding, queued])).toEqual([400, 400]);
-      // A slot is free again: a single file (searched over stdin) answers.
+      expect(await slow.alive()).toEqual([]);
+      // A slot is free again: with the real ripgrep back, a search answers.
+      await slow.remove();
       const after = await grep(base, { pattern: 'needle', path: `${KB_DIR}/hit.md` });
       expect(after.status).toBe(200);
       expect(after.body.matches).toEqual([{ path: `${KB_DIR}/hit.md`, line: 1, text: 'needle' }]);
-      expect(await slow.alive()).toEqual([]);
     } finally {
       await slow.remove();
     }
