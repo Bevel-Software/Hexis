@@ -9,8 +9,10 @@ import {
   EventDelivery,
   createEventAccess,
   type EventAccess,
+  type ChangeRequestFacts,
   type EventViewer,
 } from '../index.js';
+import { hashEmail } from '../../../shared/email-identity.js';
 
 /** What a `git-sync-failed` says in place of git's words. */
 const REDACTED_REASON = 'The last push did not land.';
@@ -27,9 +29,10 @@ const PUBLIC = 'knowledge-base/Public/Notes.md';
 /** The same two files as a request names them: KB-repo-relative. */
 const FINANCE_REPO = 'Finance/Budget.md';
 const PUBLIC_REPO = 'Public/Notes.md';
-/** Request #7 changes only `Finance/`; #8 changes `Public/`. */
+/** Request #7 changes only `Finance/`; #8 changes `Public/`; #9 is Bob's own, into `Finance/` only. */
 const FINANCE_REQUEST = 7;
 const PUBLIC_REQUEST = 8;
+const BOBS_FINANCE_REQUEST = 9;
 
 const USERS: Record<string, { email: string }> = {
   alice: { email: 'alice@example.com' },
@@ -38,6 +41,13 @@ const USERS: Record<string, { email: string }> = {
   root: { email: 'root@example.com' },
   /** Reads the root, like Alice, but not `Finance/`: a folder denied below a readable root. */
   carol: { email: 'carol@example.com' },
+};
+
+/** The requests as the request list judges them. */
+const REQUESTS: Record<number, ChangeRequestFacts> = {
+  [FINANCE_REQUEST]: { base: 'main', authorId: hashEmail('alice@example.com'), touchedNodeFiles: [{ path: FINANCE_REPO }] },
+  [PUBLIC_REQUEST]: { base: 'main', authorId: hashEmail('alice@example.com'), touchedNodeFiles: [{ path: PUBLIC_REPO }] },
+  [BOBS_FINANCE_REQUEST]: { base: 'main', authorId: hashEmail('bob@example.com'), touchedNodeFiles: [{ path: FINANCE_REPO }] },
 };
 
 /** Fake of the access service the file routes use, and of the change-request scope the tools use. */
@@ -55,7 +65,11 @@ function fakeAccess(): EventAccess & { grantBob: () => void; revokeBob: () => vo
     mayReadPath: async (_ws, email, path) => reads(email, path),
     mayReadRepoPath: async (_ws, email, repoPath) =>
       repoPath === '' ? email !== USERS.bob!.email : reads(email, `knowledge-base/${repoPath}`),
-    mayReadAtTarget: async (_target, email, repoPath) => reads(email, `knowledge-base/${repoPath}`),
+    readableAtTarget: async (_target, email, repoPaths) =>
+      new Set(repoPaths.filter((p) => reads(email, `knowledge-base/${p}`))),
+    readableAtBase: async (_base, email, repoPaths) =>
+      new Set(repoPaths.filter((p) => reads(email, `knowledge-base/${p}`))),
+    changeRequest: async (number) => REQUESTS[number] ?? null,
   };
 }
 
@@ -225,7 +239,7 @@ describe('events route — delivery rule', () => {
     expect(bob.events.filter((e) => !isSentinel(e))).toEqual(sent.map((p) => expect.objectContaining(p)));
   });
 
-  it('a new request is announced to everyone, and says nothing a person may not read: a number and branches, no title, no paths', async () => {
+  it('a request the person may not see produces no change-request-opened for them; its author always hears of it', async () => {
     const bus = new WorkflowEventBus();
     const base = listen(bus, fakeAccess());
     const alice = await open(base, 'alice', 's-alice');
@@ -233,13 +247,20 @@ describe('events route — delivery rule', () => {
     await focus(base, 'alice', 's-alice');
     await focus(base, 'bob', 's-bob');
 
-    await emitAndSettle(bus, [opened(FINANCE_REQUEST), opened(PUBLIC_REQUEST)], alice, bob);
+    await emitAndSettle(bus, [opened(FINANCE_REQUEST), opened(PUBLIC_REQUEST), opened(BOBS_FINANCE_REQUEST)], alice, bob);
 
-    expect(kinds(alice)).toEqual([`change-request-opened:${FINANCE_REQUEST}`, `change-request-opened:${PUBLIC_REQUEST}`]);
-    expect(kinds(bob)).toEqual([`change-request-opened:${FINANCE_REQUEST}`, `change-request-opened:${PUBLIC_REQUEST}`]);
-    // What Bob, who may not read `Finance/`, was handed of the request into it.
-    const announced = bob.events.find((e) => e.kind === 'change-request-opened' && e.number === FINANCE_REQUEST)!;
-    expect(Object.keys(announced).sort()).toEqual(['authorIdHash', 'id', 'kind', 'number', 'source', 'target', 'ts']);
+    // Alice reads `Finance/`: she sees all three.
+    expect(kinds(alice)).toEqual([
+      `change-request-opened:${FINANCE_REQUEST}`,
+      `change-request-opened:${PUBLIC_REQUEST}`,
+      `change-request-opened:${BOBS_FINANCE_REQUEST}`,
+    ]);
+    // Bob may not read `Finance/`: #7 is hidden from him, as the request tools
+    // hide it; his own request into it is not.
+    expect(kinds(bob)).toEqual([
+      `change-request-opened:${PUBLIC_REQUEST}`,
+      `change-request-opened:${BOBS_FINANCE_REQUEST}`,
+    ]);
   });
 
   it('replay after a reconnect obeys the same rule', async () => {
@@ -261,12 +282,8 @@ describe('events route — delivery rule', () => {
       `change-request-opened:${PUBLIC_REQUEST}`,
       `approval-changed:${PUBLIC_REPO}`,
     ]);
-    // The announcements reach Bob; the approval of a file he may not read does not.
-    expect(kinds(bob)).toEqual([
-      `change-request-opened:${FINANCE_REQUEST}`,
-      `change-request-opened:${PUBLIC_REQUEST}`,
-      `approval-changed:${PUBLIC_REPO}`,
-    ]);
+    // Neither the request Bob may not see nor its approval is replayed to him.
+    expect(kinds(bob)).toEqual([`change-request-opened:${PUBLIC_REQUEST}`, `approval-changed:${PUBLIC_REPO}`]);
   });
 
   it('the focus list still decides which workspaces a session hears about', async () => {
@@ -330,10 +347,10 @@ describe('events route — delivery rule', () => {
     // The verdict on the Finance file takes a while; every other one is immediate.
     const access: EventAccess = {
       ...base0,
-      mayReadAtTarget: (target, email, repoPath) =>
-        repoPath === FINANCE_REPO
-          ? new Promise((resolve) => setTimeout(() => resolve(base0.mayReadAtTarget(target, email, repoPath)), 40))
-          : base0.mayReadAtTarget(target, email, repoPath),
+      readableAtTarget: (target, email, repoPaths) =>
+        repoPaths.includes(FINANCE_REPO)
+          ? new Promise((resolve) => setTimeout(() => resolve(base0.readableAtTarget(target, email, repoPaths)), 40))
+          : base0.readableAtTarget(target, email, repoPaths),
     };
     const base = listen(bus, access);
     const alice = await open(base, 'alice', 's-alice');
@@ -358,16 +375,55 @@ describe('events route — delivery rule', () => {
     expect(kinds(again)).toEqual(expected);
   });
 
-  it('an approval check that fails withholds that approval, and nothing after it', async () => {
+  it('a request check that fails withholds that approval and that announcement, and nothing after them', async () => {
     const bus = new WorkflowEventBus();
-    const access: EventAccess = { ...fakeAccess(), mayReadAtTarget: () => Promise.reject(new Error('access tree unreadable')) };
+    const unreadable = () => Promise.reject(new Error('access tree unreadable'));
+    const access: EventAccess = { ...fakeAccess(), readableAtTarget: unreadable, readableAtBase: unreadable };
+    const base = listen(bus, access);
+    // Bob: not the request's author, so only the failing check could have shown it to him.
+    const bob = await open(base, 'bob', 's-bob');
+    await focus(base, 'bob', 's-bob');
+
+    await emitAndSettle(bus, [approval(PUBLIC_REQUEST, PUBLIC_REPO), fileChanged(PUBLIC), opened(PUBLIC_REQUEST)], bob);
+
+    expect(kinds(bob)).toEqual([`file-changed:${PUBLIC}`]);
+  });
+
+  it('a lock whose path lacks the knowledge-base/ prefix is judged as the repository path it names', async () => {
+    // The real access wiring over a fake access service: Bob may not read `Finance/`.
+    const bus = new WorkflowEventBus();
+    const access = createEventAccess({
+      accessControl: {
+        canRead: async (_ws, email, rel) => email !== USERS.bob!.email || !rel.startsWith('Finance/'),
+        canReadBatch: async () => new Map(),
+        canReadBatchAtRef: async () => null,
+      },
+      kbDirName: 'knowledge-base',
+      getChangeRequest: async () => null,
+      workspaces: { hasWorkspace: async () => true, anyWorkspaceId: async () => WS },
+    });
     const base = listen(bus, access);
     const alice = await open(base, 'alice', 's-alice');
+    const bob = await open(base, 'bob', 's-bob');
     await focus(base, 'alice', 's-alice');
+    await focus(base, 'bob', 's-bob');
 
-    await emitAndSettle(bus, [approval(PUBLIC_REQUEST, PUBLIC_REPO), fileChanged(PUBLIC), opened(PUBLIC_REQUEST)], alice);
+    // The lock route takes both spellings; so does a client opening a file by its KB-relative URL.
+    await emitAndSettle(
+      bus,
+      [lockAcquired(FINANCE_REPO), lockReleased(FINANCE_REPO), lockAcquired(`./${FINANCE_REPO}`), lockAcquired('../Finance/Budget.md'), lockAcquired(PUBLIC_REPO)],
+      alice,
+      bob,
+    );
 
-    expect(kinds(alice)).toEqual([`file-changed:${PUBLIC}`, `change-request-opened:${PUBLIC_REQUEST}`]);
+    expect(kinds(alice)).toEqual([
+      `lock-acquired:${FINANCE_REPO}`,
+      `lock-released:${FINANCE_REPO}`,
+      `lock-acquired:./${FINANCE_REPO}`,
+      // A climb the normaliser refuses is withheld from everyone.
+      `lock-acquired:${PUBLIC_REPO}`,
+    ]);
+    expect(kinds(bob)).toEqual([`lock-acquired:${PUBLIC_REPO}`]);
   });
 
   it("an agent's tool call reaches its own person through the route, nobody else — an admin included", async () => {
@@ -524,6 +580,30 @@ describe('EventDelivery', () => {
     expect(median).toBeLessThan(50);
   });
 
+  it('judges a 100-session fan-out of a new request in under 50 ms per event', async () => {
+    // The request read and every batch verdict cost a real async hop.
+    const base = fakeAccess();
+    const hop = <T>(v: Promise<T>) => new Promise<T>((r) => setImmediate(() => r(v)));
+    const access: EventAccess = {
+      ...base,
+      changeRequest: (n) => hop(base.changeRequest(n)),
+      readableAtBase: (b, e, ps) => hop(base.readableAtBase(b, e, ps)),
+    };
+    const delivery = new EventDelivery(access);
+    const viewers = Array.from({ length: 100 }, (_, i) => ({ userId: `u${i}`, email: i % 2 ? USERS.bob!.email : `u${i}@example.com` }));
+    const samples: number[] = [];
+    for (let id = 1; id <= 20; id++) {
+      const event = stamp(opened(id % 2 ? FINANCE_REQUEST : PUBLIC_REQUEST), id);
+      const start = performance.now();
+      const verdicts = await Promise.all(viewers.map((v) => delivery.judge(event, v)));
+      samples.push(performance.now() - start);
+      expect(verdicts.filter(Boolean)).toHaveLength(id % 2 ? 50 : 100);
+    }
+    const { median, max } = spread(samples);
+    console.log(`100-session request verdicts: median ${median.toFixed(2)} ms, max ${max.toFixed(2)} ms per event`);
+    expect(median).toBeLessThan(50);
+  });
+
   it('judges one person once per event, however many tabs they have', async () => {
     let calls = 0;
     const access: EventAccess = { ...fakeAccess(), mayReadPath: async () => (calls++, true) };
@@ -550,12 +630,18 @@ describe('EventDelivery', () => {
 
 describe('createEventAccess', () => {
   const calls: string[] = [];
+  const batches: string[] = [];
   const atRef: string[] = [];
+  const requestReads: number[] = [];
   /** The branches the server holds a checkout of: `main` yes, `release` no. */
   const checkedOut = new Set([WS]);
   const access = createEventAccess({
     accessControl: {
       canRead: async (ws, email, rel) => (calls.push(`${ws}|${email}|${rel}`), !rel.startsWith('Finance/')),
+      canReadBatch: async (ws, email, paths) => {
+        batches.push(`${ws}|${email}|${paths.join(',')}`);
+        return new Map(paths.map((p) => [p, !p.startsWith('Finance/')]));
+      },
       canReadBatchAtRef: async (ws, ref, email, paths) => {
         atRef.push(`${ws}|${ref}|${email}|${paths.join(',')}`);
         if (ref === 'origin/gone') return null;
@@ -563,40 +649,101 @@ describe('createEventAccess', () => {
       },
     },
     kbDirName: 'knowledge-base',
+    getChangeRequest: async (number) => {
+      requestReads.push(number);
+      await new Promise((r) => setImmediate(r));
+      return REQUESTS[number] ?? null;
+    },
     workspaces: {
       hasWorkspace: async (workspaceId) => checkedOut.has(workspaceId),
       anyWorkspaceId: async () => WS,
     },
   });
 
-  it('judges a path as the file routes do: repo-relative inside the KB, open outside it', async () => {
+  it('judges a path as the file routes do, after their normaliser: an unprefixed path is the repository path it names', async () => {
+    calls.length = 0;
     expect(await access.mayReadPath(WS, 'a@x', FINANCE)).toBe(false);
     expect(await access.mayReadPath(WS, 'a@x', PUBLIC)).toBe(true);
-    expect(await access.mayReadPath(WS, 'a@x', '.hexis/state.json')).toBe(true);
+    expect(await access.mayReadPath(WS, 'a@x', FINANCE_REPO)).toBe(false);
+    expect(await access.mayReadPath(WS, 'a@x', `/knowledge-base/${FINANCE_REPO}`)).toBe(false);
     expect(await access.mayReadRepoPath(WS, 'a@x', '')).toBe(true);
-    expect(await access.mayReadRepoPath(WS, 'a@x', 'Finance/Budget.md')).toBe(false);
-    expect(calls).toEqual([`${WS}|a@x|Finance/Budget.md`, `${WS}|a@x|Public/Notes.md`, `${WS}|a@x|`, `${WS}|a@x|Finance/Budget.md`]);
+    expect(calls).toEqual([
+      `${WS}|a@x|${FINANCE_REPO}`,
+      `${WS}|a@x|${PUBLIC_REPO}`,
+      `${WS}|a@x|${FINANCE_REPO}`,
+      `${WS}|a@x|${FINANCE_REPO}`,
+      `${WS}|a@x|`,
+    ]);
   });
 
-  it("judges an approved path from the target branch's own checkout when the server holds one — a disk read, no git", async () => {
-    calls.length = 0;
-    expect(await access.mayReadAtTarget('main', 'a@x', PUBLIC_REPO)).toBe(true);
-    expect(await access.mayReadAtTarget('main', 'a@x', FINANCE_REPO)).toBe(false);
-    expect(calls).toEqual([`${WS}|a@x|${PUBLIC_REPO}`, `${WS}|a@x|${FINANCE_REPO}`]);
+  it('refuses a path the normaliser refuses, rather than calling it outside the knowledge base', async () => {
+    await expect(access.mayReadPath(WS, 'a@x', '../Finance/Budget.md')).rejects.toThrow();
+    await expect(access.mayReadPath(WS, 'a@x', '/etc/passwd')).rejects.toThrow();
+  });
+
+  it("judges paths at a target from the target branch's own checkout when the server holds one — one batch, no git", async () => {
+    batches.length = 0;
+    atRef.length = 0;
+    expect(await access.readableAtTarget('main', 'a@x', [PUBLIC_REPO, FINANCE_REPO, PUBLIC_REPO])).toEqual(new Set([PUBLIC_REPO]));
+    expect(batches).toEqual([`${WS}|a@x|${PUBLIC_REPO},${FINANCE_REPO}`]);
     expect(atRef).toEqual([]);
   });
 
   it('falls back to the published ref, in any clone, for a target with no checkout — and grants nothing on a ref that does not resolve', async () => {
-    calls.length = 0;
-    expect(await access.mayReadAtTarget('release', 'a@x', PUBLIC_REPO)).toBe(true);
-    expect(await access.mayReadAtTarget('release', 'a@x', FINANCE_REPO)).toBe(false);
-    expect(await access.mayReadAtTarget('gone', 'a@x', PUBLIC_REPO)).toBe(false);
-    expect(calls).toEqual([]);
-    expect(atRef).toEqual([
-      `${WS}|origin/release|a@x|${PUBLIC_REPO}`,
-      `${WS}|origin/release|a@x|${FINANCE_REPO}`,
-      `${WS}|origin/gone|a@x|${PUBLIC_REPO}`,
-    ]);
+    batches.length = 0;
+    atRef.length = 0;
+    expect(await access.readableAtTarget('release', 'a@x', [PUBLIC_REPO, FINANCE_REPO])).toEqual(new Set([PUBLIC_REPO]));
+    expect(await access.readableAtTarget('gone', 'a@x', [PUBLIC_REPO])).toEqual(new Set());
+    expect(await access.readableAtTarget('release', 'a@x', [])).toEqual(new Set());
+    expect(batches).toEqual([]);
+    expect(atRef).toEqual([`${WS}|origin/release|a@x|${PUBLIC_REPO},${FINANCE_REPO}`, `${WS}|origin/gone|a@x|${PUBLIC_REPO}`]);
+  });
+
+  it("judges a request's files at its published base, as the request tools do — even when the server holds a checkout of it", async () => {
+    batches.length = 0;
+    atRef.length = 0;
+    expect(await access.readableAtBase('main', 'a@x', [PUBLIC_REPO, FINANCE_REPO, PUBLIC_REPO])).toEqual(new Set([PUBLIC_REPO]));
+    expect(await access.readableAtBase('gone', 'a@x', [PUBLIC_REPO])).toEqual(new Set());
+    expect(batches).toEqual([]);
+    expect(atRef).toEqual([`${WS}|origin/main|a@x|${PUBLIC_REPO},${FINANCE_REPO}`, `${WS}|origin/gone|a@x|${PUBLIC_REPO}`]);
+  });
+
+  it("reads a request once for one event's whole fan-out, and again for the next", async () => {
+    requestReads.length = 0;
+    const delivery = new EventDelivery(access);
+    const event = { id: 1, ts: '2026-10-21T00:00:00.000Z', ...opened(FINANCE_REQUEST) } as WorkflowEvent;
+    const viewers = Array.from({ length: 100 }, (_, i) => ({ userId: `u${i}`, email: `u${i}@example.com` }));
+    // Nobody here reads `Finance/` and nobody wrote #7: hidden from all of them.
+    expect((await Promise.all(viewers.map((v) => delivery.judge(event, v)))).filter(Boolean)).toHaveLength(0);
+    expect(requestReads).toEqual([FINANCE_REQUEST]);
+    // Its author sees it, and that is a fresh read: a settled one is never reused.
+    expect(await delivery.judge({ ...event, id: 2 }, { userId: 'alice', email: USERS.alice!.email })).not.toBeNull();
+    expect(requestReads).toEqual([FINANCE_REQUEST, FINANCE_REQUEST]);
+  });
+
+  it('hides a request that cannot be found, and a move whose old name is closed', async () => {
+    const moved = createEventAccess({
+      accessControl: {
+        canRead: async () => true,
+        canReadBatch: async () => new Map(),
+        canReadBatchAtRef: async (_ws, _ref, _email, paths) => new Map(paths.map((p) => [p, !p.startsWith('Finance/')])),
+      },
+      kbDirName: 'knowledge-base',
+      getChangeRequest: async (number) =>
+        number === 1
+          ? { base: 'main', authorId: hashEmail('alice@example.com'), touchedNodeFiles: [{ path: PUBLIC_REPO, previousPath: FINANCE_REPO }] }
+          : number === 3
+            ? { base: 'main', authorId: hashEmail('alice@example.com'), touchedNodeFiles: [{ path: PUBLIC_REPO }] }
+            : null,
+      workspaces: { hasWorkspace: async () => true, anyWorkspaceId: async () => WS },
+    });
+    const delivery = new EventDelivery(moved);
+    const bob = { userId: 'bob', email: USERS.bob!.email };
+    const stampOpened = (n: number) => ({ id: n, ts: '2026-10-21T00:00:00.000Z', ...opened(n) }) as WorkflowEvent;
+    expect(await delivery.judge(stampOpened(1), bob)).toBeNull();
+    expect(await delivery.judge(stampOpened(2), bob)).toBeNull();
+    // The control: the same file, not moved, is readable at the base and shows the request.
+    expect(await delivery.judge(stampOpened(3), bob)).not.toBeNull();
   });
 });
 

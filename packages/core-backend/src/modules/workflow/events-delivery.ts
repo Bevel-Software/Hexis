@@ -11,13 +11,25 @@
  *
  *   - An event that names a path on a workspace (`file-changed`, the two lock
  *     events, and any later kind that carries `workspaceId` and `path`): the
- *     person may read the path on that branch, as the file routes judge it.
+ *     person may read the path on that branch, as the file routes judge it —
+ *     after the one normaliser the file routes put every path through, so a
+ *     path a client sent without the `<kbDirName>/` prefix (the lock route
+ *     takes both spellings) is judged as the repository path it names, never
+ *     as "outside the knowledge base, readable".
  *   - `approval-changed`: the person may read the approved path on the
  *     request's target branch — judged as a file event on that branch is,
  *     from the server's checkout of it (a cached read of the access rules
  *     from disk, no git), and only for a target the server holds no checkout
  *     of from its published ref. Never by reading the request's detail, which
  *     diffs the branch pair with several git subprocesses per person per event.
+ *   - `change-request-opened`: the person may see the request, by the rule the
+ *     request tools list and 404 by (`maySeeChangeRequest`): its author, or
+ *     someone who may read one of its files — both names of a move — at its
+ *     target, read at `origin/<target>` exactly as the tools read it
+ *     (`readablePathsAt`), so the event never announces a request the tools
+ *     answer as not found. The request's file list is read ONCE per event,
+ *     however many sessions are judged; each person then costs one batch
+ *     verdict from the access tree cached by commit.
  *   - `git-sync-failed`: the event names the workspace's root and, for a sync
  *     conflict, each conflicted file (its `reason` quotes them too). The person
  *     gets the paths they may read; git's words reach only a person who may
@@ -27,22 +39,24 @@
  *     already filters it; the rule says the same, so a bus that passed it on
  *     would not widen the audience.
  *
- * Every other kind is delivered as it is. That includes the change-request
- * lifecycle kinds (`change-request-opened`, `-merged`, `-rejected`,
- * `-apply-failed`): they carry a number and branch names, no title and no
- * paths, so there is nothing in them a person may not read, and every tab
- * refetches the lists it may see. A verdict that cannot be reached (the
- * access tree fails to load) withholds, or for `git-sync-failed` redacts:
+ * Every other kind is delivered as it is. That includes the number-only
+ * change-request lifecycle kinds (`-merged`, `-rejected`, `-apply-failed`),
+ * which follow an announcement the person was either given or not. A verdict
+ * that cannot be reached (the access tree fails to load, the request cannot be
+ * read) withholds, or for `git-sync-failed` redacts:
  * failing closed costs a live refresh, failing open names a file.
  *
  * Nothing here changes what publishers emit; the rule only reads the event.
  */
 
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import type { ChangeRequest, WorkflowEvent } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
+import { normalizeWorkspacePath } from '../kb-fs/index.js';
+import { fileIsReadable, isAuthor, maySeeChangeRequest, pathsOf } from './agent-tools/change-request-read-shape.js';
+import { readablePathsAt } from './read-on-branch.js';
 
 const log = logger('events');
 
@@ -65,9 +79,20 @@ export interface EventAccess {
   mayReadPath(workspaceId: string, email: string, wsPath: string): Promise<boolean>;
   /** May `email` read the KB-repo-relative `repoPath` on `workspaceId`; `''` is the root. */
   mayReadRepoPath(workspaceId: string, email: string, repoPath: string): Promise<boolean>;
-  /** May `email` read the KB-repo-relative `repoPath` on `targetBranch` — what a request into that branch is scoped by. */
-  mayReadAtTarget(targetBranch: string, email: string, repoPath: string): Promise<boolean>;
+  /** Which of the KB-repo-relative `repoPaths` `email` may read on `targetBranch` — what a request into that branch is scoped by. */
+  readableAtTarget(targetBranch: string, email: string, repoPaths: string[]): Promise<Set<string>>;
+  /** Which of the KB-repo-relative `repoPaths` `email` may read at `origin/<base>` — the change-request tools' verdict, `readablePathsAt`. */
+  readableAtBase(base: string, email: string, repoPaths: string[]): Promise<Set<string>>;
+  /**
+   * Request `number` as the request list judges it — its target, author and
+   * changed files — or null when there is none. Read once per event: callers
+   * judging one event for many sessions share the read.
+   */
+  changeRequest(number: number): Promise<ChangeRequestFacts | null>;
 }
+
+/** What the visibility rule reads of a request. */
+export type ChangeRequestFacts = Pick<ChangeRequest, 'base' | 'authorId' | 'touchedNodeFiles'>;
 
 /**
  * What the events route asks of the rule. The route depends on this, never on
@@ -80,42 +105,64 @@ export interface IEventDelivery {
 
 /** The deployment's `EventAccess`: the access service the file routes use, read in the server's own checkouts. */
 export function createEventAccess(deps: {
-  accessControl: Pick<IAccessControl, 'canRead' | 'canReadBatchAtRef'>;
+  accessControl: Pick<IAccessControl, 'canRead' | 'canReadBatch' | 'canReadBatchAtRef'>;
   kbDirName: string;
+  /** `IWorkflowService.getChangeRequest`: the summary the request list judges, files included. */
+  getChangeRequest(number: number): Promise<ChangeRequestFacts | null>;
   workspaces: {
     /** Whether the server holds a checkout for `workspaceId` (the branch's own workspace). */
     hasWorkspace(workspaceId: string): Promise<boolean>;
     /**
-     * A workspace to read a published ref in, for a target the server holds
-     * no checkout of. Every verdict at `origin/<branch>` is the same from any
-     * clone of the repository, so any existing one serves.
+     * A workspace to read a published ref in: always for a request's base,
+     * and for an approval's target the server holds no checkout of. Every
+     * verdict at `origin/<branch>` is the same from any clone of the
+     * repository, so any existing one serves.
      */
     anyWorkspaceId(): Promise<string>;
   };
 }): EventAccess {
+  /** A request's read, shared while it is in flight: one per event's fan-out, never a stale one after. */
+  const requestsInFlight = new Map<number, Promise<ChangeRequestFacts | null>>();
   return {
-    mayReadPath: (workspaceId, email, wsPath) =>
+    // Normalised first, by the file routes' own normaliser: a path it refuses
+    // throws, and the rule withholds the event.
+    mayReadPath: async (workspaceId, email, wsPath) =>
       canReadWorkspacePath(
         (w, e, p) => deps.accessControl.canRead(w, e, p),
         workspaceId,
         email,
         deps.kbDirName,
-        wsPath,
+        normalizeWorkspacePath(wsPath, deps.kbDirName),
       ),
     mayReadRepoPath: (workspaceId, email, repoPath) => deps.accessControl.canRead(workspaceId, email, repoPath),
-    mayReadAtTarget: async (targetBranch, email, repoPath) => {
+    readableAtTarget: async (targetBranch, email, repoPaths) => {
+      if (repoPaths.length === 0) return new Set();
+      const unique = [...new Set(repoPaths)];
       // The branch's own checkout, when the server has one (the default
       // branch always): the same disk read a file event on that branch gets.
       const own = workspaceIdForBranch(targetBranch);
-      if (await deps.workspaces.hasWorkspace(own)) return deps.accessControl.canRead(own, email, repoPath);
-      const verdicts = await deps.accessControl.canReadBatchAtRef(
-        await deps.workspaces.anyWorkspaceId(),
-        `origin/${targetBranch}`,
-        email,
-        [repoPath],
-      );
+      const verdicts = (await deps.workspaces.hasWorkspace(own))
+        ? await deps.accessControl.canReadBatch(own, email, unique)
+        : await deps.accessControl.canReadBatchAtRef(
+            await deps.workspaces.anyWorkspaceId(),
+            `origin/${targetBranch}`,
+            email,
+            unique,
+          );
       // A ref that cannot be resolved answers null: nothing is granted on it.
-      return verdicts?.get(repoPath) === true;
+      return new Set(unique.filter((p) => verdicts?.get(p) === true));
+    },
+    // The request tools' own rule and reading, never the target's checkout: a
+    // grant there that is not yet published must not announce a request
+    // `get_change_request` answers as not found.
+    readableAtBase: async (base, email, repoPaths) =>
+      readablePathsAt(deps.accessControl, await deps.workspaces.anyWorkspaceId(), email, base, repoPaths),
+    changeRequest: (number) => {
+      const pending = requestsInFlight.get(number);
+      if (pending) return pending;
+      const read = deps.getChangeRequest(number).finally(() => requestsInFlight.delete(number));
+      requestsInFlight.set(number, read);
+      return read;
     },
   };
 }
@@ -133,7 +180,11 @@ async function deliveryFor(
   try {
     switch (event.kind) {
       case 'approval-changed':
-        return email && (await access.mayReadAtTarget(event.targetBranch, email, event.path)) ? event : null;
+        return email && (await access.readableAtTarget(event.targetBranch, email, [event.path])).has(event.path)
+          ? event
+          : null;
+      case 'change-request-opened':
+        return email && (await maySeeRequest(event.number, email, access)) ? event : null;
       case 'git-sync-failed':
         return email ? await gitSyncFailedFor(event, email, access) : redactGitSyncFailed(event, []);
       case 'agent-tool-call':
@@ -148,6 +199,22 @@ async function deliveryFor(
     log.warn(`delivery verdict failed for event id=${event.id} kind=${event.kind} user=${viewer.userId}; withheld`, { err });
     return event.kind === 'git-sync-failed' ? redactGitSyncFailed(event, []) : null;
   }
+}
+
+/**
+ * The request tools' visibility rule, over the request the list judges: its
+ * author sees it; anyone else sees it when one of its files is readable at
+ * the target, a move only when both its names are. No request, no file list
+ * (a diff that could not be computed): author only, as the tools answer it.
+ */
+async function maySeeRequest(number: number, email: string, access: EventAccess): Promise<boolean> {
+  const request = await access.changeRequest(number);
+  if (!request) return false;
+  if (isAuthor(request, email)) return true;
+  const files = request.touchedNodeFiles ?? [];
+  const readable = await access.readableAtBase(request.base, email, files.flatMap(pathsOf));
+  const readableFiles = files.filter((f) => fileIsReadable(f, (p) => readable.has(p))).length;
+  return maySeeChangeRequest({ readableFiles, isAuthor: false });
 }
 
 type GitSyncFailed = Extract<WorkflowEvent, { kind: 'git-sync-failed' }>;
