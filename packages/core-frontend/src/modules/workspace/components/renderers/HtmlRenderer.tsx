@@ -70,8 +70,9 @@ export function HtmlRenderer({
   // Whether the surface's host grows with the page (an issue panel) rather
   // than giving it a pane to scroll in (the app, the MCP App's pane).
   const sizesToContent = surface?.sizesToContent === true;
-  // The viewer's tools, for a page on the app's file page — the one place
-  // that provides them. Everywhere else the page gets `bevel.tools = null`.
+  // The viewer's tools, for a page on a host that provides them (the file
+  // page, the skill page — `PageToolsContext` lists them). Everywhere else
+  // the page gets `bevel.tools = null`.
   const pageTools = usePageTools();
   const openPageInPlatform = useOpenPageInPlatform();
   const toolPagePath = surface === null && pageTools ? pageTools.pagePath : null;

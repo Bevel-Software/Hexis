@@ -7,3 +7,4 @@ export type { WriteValidator } from './locking-filesystem.js';
 export { WorkspaceMutex, WorkspaceIdMutex } from './mutex.js';
 export { readRefSha, readRevSha, type RefFileAnswer } from './ref-files.js';
 export { gitDirOf, readGitfile } from './git-dir.js';
+export { normalizeWorkspacePath } from './repo-path.js';

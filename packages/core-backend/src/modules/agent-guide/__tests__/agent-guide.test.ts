@@ -387,6 +387,11 @@ describe('the HTML views section', () => {
     }
     expect(text).toContain('`window.bevel.tools` is `null` wherever tools are not available');
     expect(text).toContain('Check it before every use');
+    // The skill page answers a page's tools as the file page does
+    // (htmlToolBridge.ts's host list): the guide says so, and never that a
+    // skill page leaves `tools` null.
+    expect(text).toContain("on the app's file page and on a skill's page");
+    expect(text).not.toMatch(/on a skill page and in any preview/);
     expect(text).toContain('**Reading runs at once; writing asks first.**');
     expect(text).toContain('"<page name> wants to write to the knowledge base"');
     expect(text).toContain('Allow while open and Deny');
