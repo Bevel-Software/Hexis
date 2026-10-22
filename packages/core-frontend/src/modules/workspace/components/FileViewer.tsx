@@ -14,7 +14,7 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
 import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { LayoutContext } from '../../layout/state/layout.context';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
@@ -58,7 +58,8 @@ import {
   FullScreenButton,
 } from './FullScreenView';
 import { useFullScreenView } from '../hooks/useFullScreenView';
-import { DOCUMENT_COLUMN, documentSideGutters } from '../../../shared/theme/measure';
+import { carryReadingOffset, readingAnchorIn, readingOffset, readingWidthOf } from './readingCarry';
+import { DOCUMENT_COLUMN_CONTENT, documentSideGutters } from '../../../shared/theme/measure';
 import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
 import { useStarterPacks } from '../../onboarding/state/starter-packs';
 
@@ -950,7 +951,19 @@ export function FileViewer() {
   // its scrollTop with it), so the position is carried across by hand: into
   // the pane's own scroller on the way in, back into the shell's on the way
   // out. A full-bleed renderer scrolls inside itself and keeps its own.
+  //
+  // Measured against the document's BODY (`readingAnchor`), not the pane:
+  // between the two views the pane gains padding and the card loses its bar,
+  // so the pane's top is a different distance above the text in each, and a
+  // carry against it lands the reader that many pixels off. And the text is
+  // laid out at the SAME width in both (`readingWidth`): a column that wraps
+  // differently puts every line below the first at a different height, and
+  // no pixel offset survives that — Section 24 came back as Section 30.
   const readingOffsetRef = useRef<number | null>(null);
+  // The card's width on the page at the moment of entry, held while filling
+  // the window. Null when the view was opened by URL: there was no page, and
+  // the column's own content width stands in.
+  const [readingWidth, setReadingWidth] = useState<number | null>(null);
   const { enter: enterFullScreenView, leave: leaveFullScreenView } = fullScreen;
   // Focus crosses the switch the way it crosses a dialog's: in on opening,
   // back on closing. The control that was pressed is captured HERE, before
@@ -962,28 +975,29 @@ export function FileViewer() {
   const enterFullScreen = useCallback(() => {
     focusBeforeFullScreenRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const shell = editorContainerRef.current;
-    const pane = readPaneRef.current;
-    if (shell && pane) {
-      readingOffsetRef.current = shell.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+    const anchor = readingAnchorIn(readPaneRef.current);
+    if (shell && anchor) {
+      readingOffsetRef.current = readingOffset(shell, anchor);
+      setReadingWidth(readingWidthOf(anchor));
     }
     enterFullScreenView();
   }, [enterFullScreenView]);
   const leaveFullScreen = useCallback(() => {
-    if (readPaneRef.current) readingOffsetRef.current = readPaneRef.current.scrollTop;
+    const pane = readPaneRef.current;
+    const anchor = readingAnchorIn(readPaneRef.current);
+    if (pane && anchor) readingOffsetRef.current = readingOffset(pane, anchor);
+    setReadingWidth(null);
     leaveFullScreenView();
   }, [leaveFullScreenView]);
   useLayoutEffect(() => {
     const offset = readingOffsetRef.current;
     readingOffsetRef.current = null;
-    const shell = editorContainerRef.current;
-    const pane = readPaneRef.current;
-    if (offset === null || !shell || !pane) return;
-    if (filling) {
-      pane.scrollTop = Math.max(0, offset);
-    } else {
-      const paneTop = pane.getBoundingClientRect().top - shell.getBoundingClientRect().top + shell.scrollTop;
-      shell.scrollTop = paneTop + offset;
-    }
+    const scroller = filling ? readPaneRef.current : editorContainerRef.current;
+    const anchor = readingAnchorIn(readPaneRef.current);
+    if (offset === null || !scroller || !anchor) return;
+    // Put the scroller's top edge `offset` px below the body's top, as it was
+    // in the view just left.
+    carryReadingOffset(scroller, anchor, offset);
   }, [filling]);
   // Focus still inside the renderer (an editor's caret, a page's control) is
   // where the reader is working, and stays there both ways. Otherwise: on
@@ -1775,7 +1789,9 @@ export function FileViewer() {
                   fileTitle={fileNameTooltip(openFilePath, kbDirName)}
                   actions={paneActions}
                   chromeless={filling}
-                  className={filling ? DOCUMENT_COLUMN : undefined}
+                  className={filling ? DOCUMENT_COLUMN_CONTENT : undefined}
+                  // The page's own width, so every line wraps where it did.
+                  style={filling && readingWidth !== null ? { maxWidth: readingWidth } : undefined}
                 >
                   {rendererElement}
                 </FilePaneCard>

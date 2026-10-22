@@ -19,7 +19,7 @@ import {
 } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { useGit } from '../../../git/state/git.context';
+import { useGit } from '../../../git';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
 import { kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav } from '../../../workspace';
 import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';

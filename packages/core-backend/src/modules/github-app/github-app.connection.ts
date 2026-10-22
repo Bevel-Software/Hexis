@@ -1,5 +1,5 @@
 import { logger } from '../../shared/logging.js';
-import type { GitHubAppRepository, SettingReader } from '../settings/repository-source.js';
+import type { GitHubAppRepository, SettingReader } from '../settings/index.js';
 import {
   GitHubAppClient,
   type GitHubAppCredentials,

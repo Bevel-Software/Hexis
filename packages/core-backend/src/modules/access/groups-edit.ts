@@ -20,7 +20,7 @@ import {
   EMAIL_REGEX,
   GROUP_REF_PREFIX,
   RESERVED_ROLE_NAMES,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import { GROUPS_YAML, parseGroupsFile, unsafeNameReason } from '../access-model/group-files.js';
 
 /** Bad-input failure when editing groups.yaml. */

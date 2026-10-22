@@ -1,5 +1,5 @@
 import { Worker } from 'node:worker_threads';
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 import {
   type IPatternMatcher,
   type IPatternSearch,

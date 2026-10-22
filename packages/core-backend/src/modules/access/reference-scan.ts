@@ -31,7 +31,7 @@ import {
   isAccessMdPath,
   parseAccessEntry,
   stripComment,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 
 /**
  * Resolve the [start, end) line range that role rewrites may touch — the YAML
