@@ -25,7 +25,7 @@ export interface ChangeRequestOpenedEvent {
   openedBy: ChangeRequestPerson;
   /**
    * The distinct people eligible to approve some changed path, as accounts —
-   * the eligibility the request's `## Affected owners` block lists, with the
+   * the eligibility the request's per-file approvals show, with the
    * roles and groups expanded to their members, each person once however
    * many paths or roles name them. Only a person with an account is here: a
    * listener writes to accounts. The author is not left out; a listener that

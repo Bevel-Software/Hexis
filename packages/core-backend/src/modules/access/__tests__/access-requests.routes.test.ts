@@ -49,7 +49,8 @@ interface HarnessOpts {
   lastClosed?: { number: number; state: 'closed' | 'merged' } | null;
   liveRules?: string | null;
   branchRules?: string | null;
-  detailBody?: string;
+  /** What `getChangeRequestDetail` answers for every request: the body, and the access request's own facts. */
+  detail?: { body?: string; accessRequest?: { level: 'write' | 'owner'; note?: string } };
 }
 
 async function makeHarness(opts: HarnessOpts = {}) {
@@ -62,7 +63,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     lastClosed = null,
     liveRules = '---\n---\nwrite:\n  - Ed <ed@x.io>\n',
     branchRules = null,
-    detailBody = '',
+    detail = {},
   } = opts;
 
   const absent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -92,7 +93,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     }),
     latestClosedChangeRequest: vi.fn(async () => lastClosed),
     getChangeRequest: vi.fn(async (n: number) => ({ number: n, state: 'open' })),
-    getChangeRequestDetail: vi.fn(async () => ({ body: detailBody })),
+    getChangeRequestDetail: vi.fn(async () => ({ body: '', ...detail })),
   } as unknown as IWorkflowService;
 
   const workspaceService = {
@@ -345,13 +346,14 @@ describe('GET /workspace/:id/access/request — what the requester is told', () 
   it('reports the open request, taking the level off the REQUEST rather than the branch', async () => {
     // The branch is where the proposal lives, but a clone whose refs are
     // seconds stale cannot read a branch cut moments ago. "Requested: Owner"
-    // is a promise about a request, so it is answered from the request — here
-    // the branch is deliberately unreadable and the line is still right.
+    // is a promise about a request, so it is answered from the request's own
+    // row — here the branch is deliberately unreadable and the line is still
+    // right.
     const branch = joinBranchFor(RITA.email, FOLDER);
     const h = await makeHarness({
       openCrs: [{ number: 31, branch, state: 'open' }],
       proposals: null,
-      detailBody: '<!--hexis:access-request-level:owner-->\nRita asked for Owner.',
+      detail: { body: 'Rita asked for Owner.', accessRequest: { level: 'owner' } },
     });
     server = h.server;
     expect(await (await status(h)).json()).toEqual({ state: 'pending', level: 'owner', number: 31 });
@@ -361,7 +363,7 @@ describe('GET /workspace/:id/access/request — what the requester is told', () 
     const branch = joinBranchFor(RITA.email, FOLDER);
     const h = await makeHarness({
       openCrs: [{ number: 31, branch, state: 'open' }],
-      detailBody: 'Opened before the level was recorded.',
+      detail: { body: 'Opened before the level was recorded.' },
     });
     server = h.server;
     expect(await (await status(h)).json()).toMatchObject({ state: 'pending', level: 'write' });
@@ -410,12 +412,14 @@ describe('the editors\' side', () => {
   const listUrl = (base: string) =>
     `${base}/${LIVE_WS}/access/requests?path=${encodeURIComponent(`${KB}/${FOLDER}`)}&kind=folder`;
 
-  it('lists the item\'s open requests for an editor, with the note read back as plain text', async () => {
+  it("lists the item's open requests for an editor, with the note off the request's own row", async () => {
     const h = await makeHarness({
       writable: [`${FOLDER}/access.md`],
       proposals: [proposalFor('owner')],
-      detailBody:
-        'x\n\n<!--hexis:access-request-note-->\n> I maintain these pages now\n<!--/hexis:access-request-note-->\n',
+      detail: {
+        body: 'x\n\nNote from Rita:\n\n> I maintain these pages now',
+        accessRequest: { level: 'owner', note: 'I maintain these pages now' },
+      },
     });
     server = h.server;
     const body = await (await fetch(listUrl(h.base))).json();
@@ -565,19 +569,29 @@ describe('a branch left over from an answered request', () => {
     // request asking for Owner.
     const h = await makeHarness({
       openCrs: [{ number: 31, branch: stale, state: 'open' }],
-      detailBody: '<!--hexis:access-request-level:owner-->',
+      detail: { accessRequest: { level: 'owner' } },
     });
     server = h.server;
     const res = await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, level: 'write' });
     expect(await res.json()).toEqual({ ok: true, state: 'pending', number: 31, level: 'owner' });
   });
 
-  it('records the level on the request itself, so it can be read back', async () => {
+  it('records the level and the note on the request itself, never hidden in its description', async () => {
     const h = await makeHarness();
     server = h.server;
-    await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, level: 'owner' });
-    const { description } = h.opened[0] as { description: string };
-    expect(description).toContain('<!--hexis:access-request-level:owner-->');
+    await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, level: 'owner', note: 'For the Q3 review' });
+    const { description, accessRequest } = h.opened[0] as { description: string; accessRequest: unknown };
+    expect(accessRequest).toEqual({ level: 'owner', note: 'For the Q3 review' });
+    // The description is prose for the people who read it: no marker, no fence.
+    expect(description).not.toMatch(/<!--/);
+    expect(description).toContain('For the Q3 review');
+  });
+
+  it('records no note when none was written', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, level: 'write' });
+    expect((h.opened[0] as { accessRequest: unknown }).accessRequest).toEqual({ level: 'write' });
   });
 });
 

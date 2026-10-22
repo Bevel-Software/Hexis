@@ -1,5 +1,5 @@
 {
-  "id": "f3c457f5-f29d-49e2-90a3-3af807c443a0",
+  "id": "11ab3ef3-6f98-4d76-8ddd-18e78908c740",
   "prevId": "a36676cf-375f-4576-afe7-f833962bd4fe",
   "version": "7",
   "dialect": "postgresql",
@@ -494,6 +494,18 @@
           "notNull": true,
           "default": "''"
         },
+        "access_request_level": {
+          "name": "access_request_level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "access_request_note": {
+          "name": "access_request_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "author_email": {
           "name": "author_email",
           "type": "text",
@@ -649,6 +661,10 @@
         "change_requests_state_check": {
           "name": "change_requests_state_check",
           "value": "\"change_requests\".\"state\" IN ('open', 'merged', 'closed')"
+        },
+        "change_requests_access_request_level_check": {
+          "name": "change_requests_access_request_level_check",
+          "value": "\"change_requests\".\"access_request_level\" IS NULL OR \"change_requests\".\"access_request_level\" IN ('write', 'owner')"
         }
       },
       "isRLSEnabled": false
@@ -1794,136 +1810,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.pr_comments": {
-      "name": "pr_comments",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "pr_number": {
-          "name": "pr_number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "author_email": {
-          "name": "author_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "author_email_bidx": {
-          "name": "author_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "author_name": {
-          "name": "author_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "path": {
-          "name": "path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "line": {
-          "name": "line",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "head_sha": {
-          "name": "head_sha",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "body": {
-          "name": "body",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "parent_id": {
-          "name": "parent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "pr_comments_by_pr": {
-          "name": "pr_comments_by_pr",
-          "columns": [
-            {
-              "expression": "pr_number",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "pr_comments_by_thread": {
-          "name": "pr_comments_by_thread",
-          "columns": [
-            {
-              "expression": "pr_number",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "path",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "line",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.pr_file_approvals": {
       "name": "pr_file_approvals",
       "schema": "",
@@ -2367,13 +2253,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "session_version": {
-          "name": "session_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
         },
         "onboarding_done": {
           "name": "onboarding_done",
