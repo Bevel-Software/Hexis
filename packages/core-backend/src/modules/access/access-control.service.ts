@@ -1104,30 +1104,52 @@ async function frontmatterHead(file: string): Promise<string> {
   const handle = await fs.open(file, 'r');
   try {
     const decoder = new StringDecoder('utf8');
-    let text = '';
-    let lineStart = 0;
+    // What was read, kept as it was decoded and joined once, when answered:
+    // each character is scanned once, however long a line runs.
+    const pieces: string[] = [];
+    let before = 0;
+    // The line being read so far, folded (see `foldLine`), or null once it
+    // can no longer be a fence.
+    let line: string | null = '';
     let first = true;
     let position = 0;
     for (let size = HEAD_FIRST_READ; ; size = Math.min(size * 2, HEAD_LAST_READ)) {
       const chunk = Buffer.allocUnsafe(size);
       const { bytesRead } = await handle.read(chunk, 0, size, position);
-      if (bytesRead === 0) return text + decoder.end();
+      if (bytesRead === 0) return pieces.join('') + decoder.end();
       position += bytesRead;
-      text += decoder.write(chunk.subarray(0, bytesRead));
-      for (let nl = text.indexOf('\n', lineStart); nl !== -1; nl = text.indexOf('\n', lineStart)) {
-        const fence = isFrontmatterFence(text.slice(lineStart, nl));
+      const piece = decoder.write(chunk.subarray(0, bytesRead));
+      pieces.push(piece);
+      let from = 0;
+      for (let nl = piece.indexOf('\n'); nl !== -1; nl = piece.indexOf('\n', from)) {
+        const fence = line !== null && isFrontmatterFence(foldLine(line, piece.slice(from, nl)));
         // The first line opens a block or there is none; after it, the first
         // fence closes the block.
-        if (first ? !fence : fence) return text.slice(0, nl);
+        if (first ? !fence : fence) return pieces.join('').slice(0, before + nl);
         first = false;
-        lineStart = nl + 1;
+        line = '';
+        from = nl + 1;
+      }
+      if (line !== null) {
+        line = foldLine(line, piece.slice(from));
+        if (!'---'.startsWith(line.trim())) line = null;
       }
       // A first line still unfinished that already cannot be a fence.
-      if (first && !'---'.startsWith(text.trim())) return text;
+      if (first && line === null) return pieces.join('');
+      before += piece.length;
     }
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * `line` continued by `more`, every run of whitespace folded to one space.
+ * Trimmed, it is `---` exactly when the unfolded line is, so it judges a fence
+ * as `isFrontmatterFence` does while staying a few characters long.
+ */
+function foldLine(line: string, more: string): string {
+  return `${line}${more}`.replace(/\s+/g, ' ');
 }
 
 /**

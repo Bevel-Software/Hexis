@@ -1,6 +1,8 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   compareSearchPaths,
@@ -52,6 +54,40 @@ async function put(rel: string, content: string | Buffer): Promise<void> {
   const p = join(dir, rel);
   await mkdir(join(p, '..'), { recursive: true });
   await writeFile(p, content);
+}
+
+/**
+ * The real `rg`, put first on PATH behind a script that records where each
+ * tree search starts (what follows its `--`); `last()` answers the latest.
+ */
+async function recordWalks(): Promise<{ last(): Promise<string[]>; remove(): Promise<void> }> {
+  const real = (await promisify(execFile)('sh', ['-c', 'command -v rg'])).stdout.trim();
+  const shim = await mkdtemp(join(tmpdir(), 'rec-rg-'));
+  const log = join(shim, 'walks');
+  await writeFile(
+    join(shim, 'rg'),
+    [
+      '#!/bin/sh',
+      'seen=; roots=',
+      'for a in "$@"; do if [ -n "$seen" ]; then roots="$roots$a|"; elif [ "$a" = "--" ]; then seen=1; fi; done',
+      `if [ -n "$seen" ]; then echo "$roots" >> '${log}'; fi`,
+      `exec '${real}' "$@"`,
+      '',
+    ].join('\n'),
+  );
+  await chmod(join(shim, 'rg'), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${shim}${delimiter}${path ?? ''}`;
+  return {
+    async last() {
+      const lines = (await readFile(log, 'utf8')).split('\n').filter(Boolean);
+      return lines[lines.length - 1]!.split('|').filter(Boolean);
+    },
+    async remove() {
+      process.env.PATH = path;
+      await rm(shim, { recursive: true, force: true });
+    },
+  };
 }
 
 beforeEach(async () => {
@@ -156,6 +192,53 @@ describe('RipgrepPatternMatcher', () => {
       { path: 'a.md', lines: [1, 2, 3].map((line) => ({ line, text: 'needle' })) },
       { path: 'b.md', lines: [{ line: 2, text: 'needle b' }] },
     ]);
+  });
+
+  it('walks only the folders holding the files it is given, in the order one walk of the root would', async () => {
+    for (const p of ['A/x/1.md', 'A/y/0.md', 'B/2.md', 'C/y/3.md', 'C/z/9.md', 'T/a/1.md', 'T/a/2.md', 'T/b/3.md', 'top.md', 'U/u.md']) {
+      await put(`kb/${p}`, 'needle\n');
+    }
+    const walked = await recordWalks();
+    try {
+      const found = async (root: string, only: string[]): Promise<{ paths: string[]; roots: string[] }> => {
+        const scope = { cwd: root === '.' ? join(dir, 'kb') : dir, root };
+        const paths: string[] = [];
+        for await (const f of (await search('needle')).files(scope, { only, maxLinesPerFile: 10 })) paths.push(f.path);
+        return { paths, roots: await walked.last() };
+      };
+      expect(await found('kb', ['T/a/1.md', 'T/a/2.md'])).toEqual({ paths: ['T/a/1.md', 'T/a/2.md'], roots: ['kb/T/a'] });
+      // The first and last folder are narrowed, every one between walked whole.
+      expect(await found('kb', ['A/x/1.md', 'B/2.md', 'C/y/3.md'])).toEqual({
+        paths: ['A/x/1.md', 'B/2.md', 'C/y/3.md'],
+        roots: ['kb/A/x', 'kb/B', 'kb/C/y'],
+      });
+      expect(await found('.', ['T/a/2.md', 'T/b/3.md'])).toEqual({ paths: ['T/a/2.md', 'T/b/3.md'], roots: ['./T/a', './T/b'] });
+      // A file directly in a folder is reached only by walking that folder.
+      expect(await found('kb', ['T/b/3.md', 'top.md'])).toEqual({ paths: ['T/b/3.md', 'top.md'], roots: ['kb'] });
+    } finally {
+      await walked.remove();
+    }
+  });
+
+  it('walks from the root when a folder it would start at has become a link, so the link is not followed', async () => {
+    await put('kb/T/a/1.md', 'x\n');
+    await put('outside/1.md', 'needle\n');
+    const s = await search('needle');
+    const scope = { cwd: dir, root: 'kb' };
+    const only = await s.list(scope);
+    expect(only).toEqual(['T/a/1.md']);
+    // Listed as a folder, then swapped for a link out before the search runs.
+    await rm(join(dir, 'kb/T/a'), { recursive: true });
+    await symlink(join(dir, 'outside'), join(dir, 'kb/T/a'));
+    const walked = await recordWalks();
+    try {
+      const paths: string[] = [];
+      for await (const f of s.files(scope, { only, maxLinesPerFile: 10 })) paths.push(f.path);
+      expect(paths).toEqual([]);
+      expect(await walked.last()).toEqual(['kb']);
+    } finally {
+      await walked.remove();
+    }
   });
 
   it('places each matching line in the text it came from', async () => {

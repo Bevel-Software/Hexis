@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
+import { join } from 'node:path';
 import { MAX_TIMER_MS, sizingOption } from './worker-pool.js';
 import { ToolError } from '../tool-helpers/index.js';
 import { logger } from '../../shared/logging.js';
@@ -175,10 +177,12 @@ class RipgrepSearch implements IPatternSearch {
     // Each file is named by a whitelist glob anchored at `cwd`, where ripgrep
     // runs: the walk stays the walk (no link followed, `.git` left out), and
     // a file not named is never opened. Whitelist globs filter files only, so
-    // every folder is still walked into.
+    // the walk starts at the folders holding the named files rather than at
+    // the root, and a batch of a large tree walks about its own stretch of it.
     const under = scope.root === '.' ? '' : `${scope.root}/`;
     const only = opts.only.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
-    const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', scope.root];
+    const roots = await realFolders(scope, walkRoots(opts.only));
+    const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...roots];
     let current: FileMatches | null = null;
     for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
       // A file that has given all the lines it may answer: the rest of its
@@ -439,6 +443,57 @@ function underRoot(root: string, path: string | null): string | null {
 function exactGlob(path: string): string {
   if (/[\r\n]/.test(path)) throw new Error(`a search cannot name ${JSON.stringify(path)} exactly: it holds a line break`);
   return `/${path.replace(/[\\*?[\]{}!# ]/g, (c) => `\\${c}`)}`;
+}
+
+/**
+ * The folders a walk of `paths` (in {@link compareSearchPaths} order, relative
+ * to the root; `''` is the root) starts at, in that order: the deepest that
+ * hold them all, a folder holding one of them directly walked whole. The
+ * paths are one stretch of a sorted walk, so only the first and the last
+ * folder can hold files outside it and only they are narrowed further; walked
+ * one after another, the folders visit the files in the order one walk of the
+ * root would.
+ */
+function walkRoots(paths: readonly string[]): string[] {
+  const roots: string[] = [];
+  const cover = (folder: string, depth: number, group: readonly string[][]): void => {
+    if (group.some((segments) => segments.length === depth + 1)) {
+      roots.push(folder);
+      return;
+    }
+    const children: string[][][] = [];
+    for (const segments of group) {
+      const last = children[children.length - 1];
+      if (last !== undefined && last[0]![depth] === segments[depth]) last.push(segments);
+      else children.push([segments]);
+    }
+    children.forEach((child, i) => {
+      const name = child[0]!.slice(0, depth + 1).join('/');
+      if (i === 0 || i === children.length - 1) cover(name, depth + 1, child);
+      else roots.push(name);
+    });
+  };
+  if (paths.length > 0) cover('', 0, paths.map((p) => p.split('/')));
+  return roots;
+}
+
+/**
+ * `folders` (relative to the scope's root) as ripgrep is given them — when
+ * each is still the real folder the walk listed. ripgrep follows a link it
+ * is GIVEN, so a folder that has become a link since (or is gone) sends the
+ * walk back to the root, whose `--no-follow` never enters it. The root itself
+ * was checked the same way where the scope was made.
+ */
+async function realFolders(scope: TreeScope, folders: readonly string[]): Promise<string[]> {
+  const real = await Promise.all(
+    folders.map(async (folder) => {
+      if (folder === '') return true;
+      const absolute = join(scope.cwd, scope.root, folder);
+      return (await realpath(absolute).catch(() => null)) === absolute;
+    }),
+  );
+  if (folders.length === 0 || !real.every(Boolean)) return [scope.root];
+  return folders.map((folder) => (folder === '' ? scope.root : `${scope.root}/${folder}`));
 }
 
 function countLines(text: string): number {

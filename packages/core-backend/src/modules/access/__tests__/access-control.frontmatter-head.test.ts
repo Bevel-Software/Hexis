@@ -68,6 +68,15 @@ describe('AccessControlService — a file is read only as far as its frontmatter
     expect(await verdicts('long-fm.md')).toEqual({ ali: false, felix: true, single: false });
   });
 
+  it('scans a frontmatter line far longer than one read once, not again with every read', async () => {
+    // A 40 MB line inside the frontmatter, then the rule; and a closing fence
+    // padded with 3 MB of spaces, which stays a fence however long it runs.
+    await put('long-value.md', `---\nsummary: "${'x'.repeat(40_000_000)}"\n${RULE}${' '.repeat(3_000_000)}---${' '.repeat(3_000_000)}\nbody\n`);
+    const started = Date.now();
+    expect(await verdicts('long-value.md')).toEqual({ ali: false, felix: true, single: false });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
   it('applies the fence rule as the whole-file scan does: CRLF, a BOM, padding around the fence', async () => {
     await put('crlf.md', `---\r\n${RULE.replace(/\n/g, '\r\n')}---\r\nbody\r\n`);
     await put('bom.md', `\uFEFF---\n${RULE}---\n`);
