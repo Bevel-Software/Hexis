@@ -2346,32 +2346,72 @@ describe('FileViewer full screen', () => {
 
   // The pane leaving the shell's flow collapses the shell's scroll, so the
   // reader's place is carried by hand: into the pane's own scroller on the
-  // way in, back into the shell's on the way out. happy-dom lays nothing out,
-  // so the geometry is given: the pane starts 100px into the shell's content.
-  it('keeps the reader\'s place in a prose document across entry and exit', async () => {
+  // way in, back into the shell's on the way out. It is measured against the
+  // document's BODY, because the two views put a different distance above it:
+  // on the page the body starts below the card's bar (here 144px into the
+  // shell's content), filling the window it starts below the pane's padding
+  // (40px). happy-dom lays nothing out, so that geometry is given.
+  it('keeps the reader\'s place in a prose document across entry and exit, measured at the text', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness renderers={stubFor('.md')} />);
     await screen.findByTestId('stub-renderer');
     const shell = screen.getByTestId('kb-document-shell');
     const pane = readPane();
-    const PANE_START = 100;
+    const body = pane.querySelector('[data-file-pane-body]') as HTMLElement;
+    const BODY_ON_PAGE = 144;
+    const BODY_FILLING = 40;
     const rect = (top: number) => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) });
     vi.spyOn(shell, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
-    vi.spyOn(pane, 'getBoundingClientRect').mockImplementation(
-      () => rect(pane.hasAttribute('data-full-screen') ? 0 : PANE_START - shell.scrollTop) as DOMRect,
+    vi.spyOn(pane, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(
+      () =>
+        rect(
+          pane.hasAttribute('data-full-screen')
+            ? BODY_FILLING - pane.scrollTop
+            : BODY_ON_PAGE - shell.scrollTop,
+        ) as DOMRect,
     );
 
-    // 300px into the document.
-    shell.scrollTop = PANE_START + 300;
+    // 300px into the text.
+    shell.scrollTop = BODY_ON_PAGE + 300;
     await user.click(screen.getByRole('button', { name: 'Full screen' }));
     expect(readPane()).toBe(pane);
-    expect(pane.scrollTop).toBe(300);
+    expect(pane.scrollTop).toBe(BODY_FILLING + 300);
 
-    // Read on to 500px, then leave: the shell lands on the same place.
-    pane.scrollTop = 500;
+    // Read on to 500px into the text, then leave: the shell lands on the same line.
+    pane.scrollTop = BODY_FILLING + 500;
     await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
     expect(pane).not.toHaveAttribute('data-full-screen');
-    expect(shell.scrollTop).toBe(PANE_START + 500);
+    expect(shell.scrollTop).toBe(BODY_ON_PAGE + 500);
+  });
+
+  // A column that wraps differently puts every later line at a different
+  // height, and no carried offset survives that (staging: Section 24 came
+  // back as Section 30). So the text keeps the page's width to the pixel.
+  it('lays the text out at the width it had on the page', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    const card = screen.getByTestId('file-pane-card');
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(
+      () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 752, height: 0, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(card.style.maxWidth).toBe('752px');
+    // The edges go transparent, not away: the box is as wide as it was.
+    expect(card).toHaveClass('border-transparent');
+    expect(card).not.toHaveClass('border-0');
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(card.style.maxWidth).toBe('');
+  });
+
+  it('opened by URL, with no page to match, takes the column\'s content width', () => {
+    render(<ViewerHarness renderers={stubFor('.md')} routeSearch="?fullscreen=1" />);
+    const card = screen.getByTestId('file-pane-card');
+    expect(card).toHaveClass('mx-auto', 'max-w-[800px]');
+    expect(card.style.maxWidth).toBe('');
   });
 
   it('keeps an edit unsaved across the toggle, and Ctrl+S saves it while filling the window', async () => {
@@ -2407,7 +2447,7 @@ describe('FileViewer full screen', () => {
     await user.click(screen.getByRole('button', { name: 'Full screen' }));
 
     const card = screen.getByTestId('file-pane-card');
-    expect(card).toHaveClass('mx-auto', 'max-w-[880px]', 'border-0');
+    expect(card).toHaveClass('mx-auto', 'max-w-[800px]', 'border-transparent');
     expect(card).not.toHaveClass('shadow-card');
     // The bar (the file's name and its actions) is withdrawn.
     expect(within(card).queryByText('Foo.md')).toBeNull();

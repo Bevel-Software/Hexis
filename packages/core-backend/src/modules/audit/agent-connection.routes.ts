@@ -1,7 +1,7 @@
 import express from 'express';
 import { logger } from '../../shared/logging.js';
 import type { IAgentConnectionStatus } from './audit.contract.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId)
+import '../auth/index.js'; // Express Request augmentation (req.userId)
 
 const log = logger('audit');
 

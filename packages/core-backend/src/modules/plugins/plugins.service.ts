@@ -3,13 +3,13 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
 import path from 'node:path';
-import { isPrivateAccessMd } from '../access-model/access-grammar.js';
+import { isPrivateAccessMd } from '../access-model/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import type { ISkillService } from '../skills/skills.contract.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
+import type { ISkillService } from '../skills/index.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';

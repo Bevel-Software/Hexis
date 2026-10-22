@@ -15,7 +15,7 @@ import {
   type AccessRequestTarget,
   type IAccessRequestLifecycle,
 } from '../access/access-requests.contract.js';
-import type { Verb } from '../access-model/access-grammar.js';
+import type { Verb } from '../access-model/index.js';
 import { pendingProposals, type JoinProposal } from './join-proposals.js';
 
 /** One open join change request, with what it still proposes. */

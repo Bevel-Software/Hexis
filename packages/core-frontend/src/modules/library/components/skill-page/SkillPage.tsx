@@ -19,14 +19,10 @@ import {
 } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { useGit } from '../../../git/state/git.context';
+import { useGit } from '../../../git';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import {
-  kbFileUrl,
-  openExternalHref,
-  resolveKbHref,
-  useNodeIdNav,
-} from '../../../workspace/routing/kb-routes';
+import { kbFileUrl, resolveKbHref } from '../../../workspace';
+import { openExternalHref, useNodeIdNav } from '../../../workspace/routing/kb-routes';
 import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';

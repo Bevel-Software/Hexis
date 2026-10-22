@@ -25,7 +25,7 @@ import type { FileContent } from '@mastra/core/workspace';
 import { GROUP_REF_PREFIX, canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
 import type { GroupsIndex } from './group-files.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 
 /** Repo-relative basename of the roles file (it lives at the KB repo root). */
 export const ROLES_YAML_BASENAME = 'roles.yaml';

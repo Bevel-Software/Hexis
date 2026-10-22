@@ -1,8 +1,8 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
-import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
+import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/index.js';
 import { isCommitSha } from '../../../shared/git.contract.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';

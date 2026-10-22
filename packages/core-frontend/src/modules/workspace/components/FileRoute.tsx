@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { readPersistedTabs } from '../utils/tab-persistence';
 import { syncFileTraceFlag, traceFiles } from '../utils/file-trace';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
