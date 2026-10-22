@@ -1,15 +1,12 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry } from '../tool-registry/tool.contract.js';
-import { ToolError } from '../tool-helpers/index.js';
-import { toolDef } from '../tool-helpers/index.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../tool-helpers/index.js';
+import type { IToolRegistry } from '../tool-registry/index.js';
+import { ToolError, toolDef } from '../tool-helpers/index.js';
+import type { ToolHandlerFactory, ToolContext } from '../tool-helpers/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ReadForTool } from '../workspace/workspace.tools.js';
+import type { ReadForTool } from '../workspace/index.js';
 import type { IEmbedService } from './embed.interface.js';
-import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
-import { SESSION_ID_INPUT, type ToolDescriptionNotes } from '../workspace/index.js';
-import { sessionIdInputOf } from '../workspace/workspace.tools.js';
+import { requireExternalSource } from '../tool-auth/index.js';
+import { SESSION_ID_INPUT, type ToolDescriptionNotes, sessionIdInputOf } from '../workspace/index.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
 export const OPEN_PAGE_TOOL = 'open_page';
@@ -207,7 +204,7 @@ export function toRepoRelative(path: string, kbDirName: string): string | null {
   // Traversal and the odd segment are refused HERE rather than deeper: the
   // path is about to become part of a signed token, and a token is the one
   // place a bad path would outlive the request that sent it.
-  // eslint-disable-next-line no-control-regex
+   
   if (/[\x00-\x1f\x7f]/.test(rel)) return null;
   if (!rel.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..')) return null;
   return rel;

@@ -60,28 +60,26 @@ import { PR_STALE_EVENT, SUGGESTIONS_RETRACTED_EVENT } from '../../../core/event
 import {
   listChangeRequestsUnderFolder,
   removeFolderFromChangeRequests,
-} from '../../change-requests/services/change-requests.api';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
+} from '../../change-requests';
+import { cancelPullRequest } from '../../pr';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useSearchParams } from 'react-router-dom';
 import { CR_FILE_PARAM, CR_PARAM, useFileNav } from '../routing/kb-routes';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
-import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
-import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
+import { Banner, MenuPanel, MenuItem, TextField, IconButton, useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { AdminContext } from '../../admin/state/admin.context';
+import { AdminContext } from '../../admin';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { offersManageAccess } from '../../access/manage-access-affordance';
+import { offersManageAccess, fetchFileAccess, fetchProspectiveAccess } from '../../access';
 import {
   useAppRegistry,
   type FolderMenuContext,
   type FolderMenuItemDef,
   type FolderMenuTools,
 } from '../../../core/registry';
-import { fetchFileAccess, fetchProspectiveAccess } from '../../access/api';
 import {
   TreeActionConfirmDialog,
   type DeleteMode,

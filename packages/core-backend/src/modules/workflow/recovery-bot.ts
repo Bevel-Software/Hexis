@@ -21,8 +21,8 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('pending-commits');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
 
 export const RECOVERY_BOT_EMAIL = (
   process.env.RECOVERY_BOT_EMAIL ?? 'recovery-bot@bevel.local'

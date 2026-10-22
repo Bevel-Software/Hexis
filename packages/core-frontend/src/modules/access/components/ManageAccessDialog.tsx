@@ -33,11 +33,10 @@ import {
   MenuPanel,
   useDismissableMenu,
 } from '../../../shared/components';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useAuth } from '../../auth/state/auth.context';
-import { useSignInMethods } from '../../auth/state/use-sign-in-methods';
-import { AdminContext } from '../../admin/state/admin.context';
-import { useInviteDialog } from '../../onboarding/state/invite-dialog.context';
+import { useWorkspace } from '../../workspace';
+import { useAuth, useSignInMethods } from '../../auth';
+import { AdminContext } from '../../admin';
+import { useInviteDialog } from '../../onboarding';
 import {
   fetchFileAccess,
   grantAccess,

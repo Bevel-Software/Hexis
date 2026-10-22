@@ -30,15 +30,15 @@ import type {
   IWorkflowService,
   OpenChangeRequestInput,
 } from '@bevel-software/platform-shared';
-import type { AuthService } from '../auth/auth.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { canReadWorkspacePath, toKbRelative } from '../access-model/kb-read-filter.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { AuthService } from '../auth/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, toKbRelative } from '../access-model/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { assertReadableAtCommits } from './read-on-branch.js';
-import { assertValidRelativePath } from '../kb-fs/branch-name.js';
+import { assertValidRelativePath } from '../kb-fs/index.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import '../auth/index.js'; // Express Request augmentation

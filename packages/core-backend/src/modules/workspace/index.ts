@@ -35,3 +35,10 @@ export {
   type AgentAccessGate,
 } from './agent-access.gate.js';
 export { SpillStore } from './spill-store.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { isTextBytes } from './file-readers/text-reader.js';
+export { isUntouchedStarterPage, knowledgeFolderIsNew } from './first-run.js';
+export type { FirstRunStarter, FirstRunStarterSource, MayRead } from './first-run.js';
+export type { WorkspaceService } from './workspace.service.js';
+export { sessionIdInputOf } from './workspace.tools.js';
+export type { ReadForTool } from './workspace.tools.js';

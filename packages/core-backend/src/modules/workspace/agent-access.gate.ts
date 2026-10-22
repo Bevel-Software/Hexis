@@ -19,9 +19,9 @@
  * all branches and to reads).
  */
 
-import type { JsonSchema } from '../tool-registry/tool.contract.js';
+import type { JsonSchema } from '../tool-registry/index.js';
 import type { ToolContext } from '../tool-helpers/index.js';
-import type { WorkflowHooks } from '../workflow/workflow-hooks.js';
+import type { WorkflowHooks } from '../workflow/index.js';
 
 /**
  * What the `sessionId` input says on its own, before any deployment note. The

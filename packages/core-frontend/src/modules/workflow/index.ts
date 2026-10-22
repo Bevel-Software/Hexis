@@ -6,3 +6,6 @@
  */
 export { useFileLock, type AcquireOutcome } from './hooks/useFileLock';
 export { LockApiError, SELF_HOLD_MESSAGE } from './services/lock.api';
+// Reached by other modules; exported here so they stop importing the files.
+export { useEventBusSubscription } from './hooks/useEventBusSubscription';
+export { canonicalizeWorkspaceId, useEventBus } from './state/event-bus.context';

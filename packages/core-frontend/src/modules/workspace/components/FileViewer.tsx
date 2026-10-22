@@ -15,12 +15,12 @@ import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../s
 import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git';
-import { LayoutContext } from '../../layout/state/layout.context';
+import { LayoutContext } from '../../layout';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
-import { useFileAccess } from '../../access/hooks/useFileAccess';
+import { useFileAccess, formatEligible } from '../../access';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
@@ -29,19 +29,18 @@ import {
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
 import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../workflow';
-import { useAuth } from '../../auth/state/auth.context';
+import { useAuth } from '../../auth';
 import {
   knowledgeSuggestionBranchFor,
   proposeKnowledgeChange,
-} from '../../change-requests/services/propose.api';
+} from '../../change-requests';
 import {
   listMyChangeRequests,
   readFileOnBranch,
-} from '../../change-requests/services/change-requests.api';
+} from '../../change-requests';
 import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
-import { othersPendingBesides } from '../../change-requests/utils/author';
+import { othersPendingBesides } from '../../change-requests';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
-import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
 import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
@@ -60,7 +59,7 @@ import {
 import { useFullScreenView } from '../hooks/useFullScreenView';
 import { DOCUMENT_COLUMN, documentSideGutters } from '../../../shared/theme/measure';
 import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
-import { useStarterPacks } from '../../onboarding/state/starter-packs';
+import { useStarterPacks } from '../../onboarding';
 
 /**
  * How many pages the empty viewer offers. Enough to look like a starting

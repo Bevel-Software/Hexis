@@ -6,7 +6,7 @@ import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { changeRequestLink, changeRequestLinkBase } from '../workflow/index.js';
 import type { FileReaderRegistry } from '../workspace/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
@@ -682,7 +682,7 @@ function nodeNameFor(repoRelative: string): string {
  * renderer hands it.
  */
 export function resolveBeside(from: string, path: string): string | null {
-  // eslint-disable-next-line no-control-regex
+   
   if (/[\x00-\x1f\x7f]/.test(path)) return null;
   let decoded = path;
   try {
@@ -691,7 +691,7 @@ export function resolveBeside(from: string, path: string): string | null {
     return null;
   }
   // Judged again decoded: `%0a` is a newline once the escape is undone.
-  // eslint-disable-next-line no-control-regex
+   
   if (/[\x00-\x1f\x7f]/.test(decoded)) return null;
   const absolute = decoded.startsWith('/');
   const base = absolute ? [] : from.split('/').slice(0, -1);

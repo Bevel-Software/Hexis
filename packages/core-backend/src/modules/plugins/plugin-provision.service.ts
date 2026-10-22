@@ -51,10 +51,9 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { creatorPrincipal } from '../access-model/creator.js';
-import { spliceGrant } from '../access-model/access-splice.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
@@ -203,7 +202,7 @@ export class PluginProvisionService {
     if (!name) throw new PluginProvisionError('A plugin needs a name.', 422);
     // NUL and control chars are exactly what a filesystem path cannot carry;
     // refusing them here keeps the refusal a 422 instead of the fs layer's 500.
-    // eslint-disable-next-line no-control-regex
+     
     if (/[/\\\u0000-\u001f\u007f]/.test(name) || name === '.' || name === '..' || name.startsWith('.')) {
       throw new PluginProvisionError(
         'A plugin name can\'t contain / or \\ or control characters, or start with a dot.',

@@ -4,13 +4,12 @@ import { logger } from '../../shared/logging.js';
 const log = logger('skills');
 import '../auth/index.js'; // Express Request.userId / userEmail augmentation
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { folderTarget } from '../access/access-requests.contract.js';
-import { AccessRequestsService } from '../access/access-requests.service.js';
+import type { IAccessControl } from '../access/index.js';
+import { folderTarget, AccessRequestsService } from '../access/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { JoinRequestsService } from '../plugins/index.js';
 import type { ISkillService } from './skills.contract.js';
 
