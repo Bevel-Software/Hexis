@@ -189,6 +189,12 @@ const opened = (number: number): WorkflowEventPayload => ({
   target: 'main',
   authorIdHash: null,
 });
+const documentUnreadable = (path: string): WorkflowEventPayload => ({
+  kind: 'document-unreadable',
+  workspaceId: WS,
+  path,
+  reason: 'could not be parsed as a PDF (Invalid XRef stream header)',
+});
 /** Something everybody on the workspace may have; once it arrives, everything emitted before it was judged. */
 const SENTINEL: WorkflowEventPayload = { kind: 'fs-tree-changed', workspaceId: WS, branch: WS };
 const isSentinel = (e: WorkflowEvent) => e.kind === 'fs-tree-changed';
@@ -225,6 +231,25 @@ describe('events route — delivery rule', () => {
       `approval-changed:${FINANCE_REPO}`,
     ]);
     expect(kinds(bob)).toEqual([]);
+  });
+
+  it("a document that could not be read is told to the reader of its folder, never to the other person — the notice quotes the parser", async () => {
+    // The kind names a path on a workspace, so the structural rule judges it
+    // as it judges a write: the same gate the file routes apply, and nothing
+    // the rule has to be taught per kind.
+    const bus = new WorkflowEventBus();
+    const base = listen(bus, fakeAccess());
+    const alice = await open(base, 'alice', 's-alice');
+    const bob = await open(base, 'bob', 's-bob');
+    await focus(base, 'alice', 's-alice');
+    await focus(base, 'bob', 's-bob');
+
+    await emitAndSettle(bus, [documentUnreadable(FINANCE), documentUnreadable(PUBLIC)], alice, bob);
+
+    expect(kinds(alice)).toEqual([`document-unreadable:${FINANCE}`, `document-unreadable:${PUBLIC}`]);
+    expect(kinds(bob)).toEqual([`document-unreadable:${PUBLIC}`]);
+    const toBob = bob.events.find((e) => e.kind === 'document-unreadable');
+    expect(toBob).toMatchObject({ path: PUBLIC, reason: 'could not be parsed as a PDF (Invalid XRef stream header)' });
   });
 
   it('a person keeps every event for what they may read, unchanged and in order', async () => {
