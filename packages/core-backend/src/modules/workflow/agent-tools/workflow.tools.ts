@@ -36,11 +36,9 @@ const branchSchema: JsonSchema = {
   properties: {
     name: { type: 'string' },
     isProtected: { type: 'boolean' },
-    ahead: { type: ['integer', 'null'], description: 'Commits ahead of upstream / nearest protected base; null if unresolved.' },
-    behind: { type: ['integer', 'null'], description: 'Commits behind; null if unresolved.' },
     hasRemote: { type: 'boolean', description: 'True iff `origin/<name>` exists after the last fetch.' },
   },
-  required: ['name', 'isProtected', 'ahead', 'behind', 'hasRemote'],
+  required: ['name', 'isProtected', 'hasRemote'],
 };
 
 const commitSchema: JsonSchema = {
@@ -258,7 +256,8 @@ export function registerWorkflowTools(
     name: 'list_branches',
     description:
       'List every draft known to the repository (protected versions + unprotected drafts, ' +
-      'local and on the shared remote). Returns `{ branches: [{ name, isProtected, ahead, behind, hasRemote }] }`. ' +
+      'local and on the shared remote). Returns `{ branches: [{ name, isProtected, hasRemote }] }`; ' +
+      'how far one branch is ahead or behind is `branch_status`\'s answer. ' +
       'Takes no arguments — branch listing is repo-global, not scoped to any one draft.',
     // Repo-global: the branch set is the same from any clone, so don't require
     // (and risk cloning) a model-named branch — resolve any existing workspace.
@@ -978,9 +977,10 @@ export function registerWorkflowTools(
       // and a save or sync landing between two of them is tolerated — the
       // next call reports it. (The one answer that must be exact, what a
       // merge is of, is taken under one reservation by `update_branch`.)
-      const [status, branches, pending, forkBase] = await Promise.all([
+      const [status, branches, counts, pending, forkBase] = await Promise.all([
         ctx.workflowService.branchStatus(workspaceId),
         ctx.workflowService.listBranches(workspaceId),
+        ctx.workflowService.branchCounts(workspaceId),
         ctx.workflowService.listPendingChangePaths(workspaceId),
         ctx.workflowService.resolveForkBase(workspaceId, branch),
       ]);
@@ -1000,8 +1000,8 @@ export function registerWorkflowTools(
         branch,
         isProtected: info?.isProtected ?? kb.protectedBranches.has(branch),
         hasRemote: info?.hasRemote ?? status.hasUpstream,
-        ahead: info?.ahead ?? null,
-        behind: info?.behind ?? null,
+        ahead: counts.ahead,
+        behind: counts.behind,
         behindRemote: status.unmergedFromUpstream,
         uncommittedPaths,
         forkBase,

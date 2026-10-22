@@ -8,6 +8,8 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
+import { NodeGitRunner } from '../node-git-runner.js';
+import type { IGitRunner } from '../../../../shared/git.contract.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -155,7 +157,7 @@ describe('GitService.listBranches', () => {
     expect(names).toEqual(['alice/draft-one', 'current-company-state', 'target-company-state']);
   });
 
-  it('returns local branches before remote-only ones, order preserved through parallel ahead/behind', async () => {
+  it('returns local branches before remote-only ones, then alphabetically', async () => {
     await seedWorkspace(root, workspaceId);
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
@@ -165,8 +167,7 @@ describe('GitService.listBranches', () => {
 
     // current-company-state is the workspace clone's checked-out branch (the
     // only local head); the rest are remote-only. The result order must be
-    // local-first then alphabetical — `listBranches` now computes ahead/behind
-    // with `Promise.all`, so this pins that the mapping preserves row order.
+    // local-first then alphabetical.
     const branches = await svc.listBranches(workspaceId);
     expect(branches.map((b) => b.name)).toEqual([
       'current-company-state',
@@ -230,5 +231,131 @@ describe('GitService.listBranches', () => {
     await expect(svc.listBranches(workspaceId)).resolves.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'alice/draft-one' })]),
     );
+  });
+
+  // A listing names branches; it counts nothing. Counting cost one to three
+  // `rev-list` spawns a branch — about 120 git processes a listing on a
+  // knowledge base with 121 branches — for numbers no listing reader shows.
+  it('runs no git per branch: a listing over many branches spawns the same few commands as one over three', async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const pusher = path.join(root, '.pusher');
+    await runGit(root, ['clone', upstream, pusher]);
+    const drafts = Array.from({ length: 12 }, (_, i) => `team/draft-${String(i).padStart(2, '0')}`);
+    for (const d of drafts) {
+      await runGit(pusher, ['checkout', '-q', '-b', d, 'origin/current-company-state']);
+      await runGit(pusher, ['commit', '--allow-empty', '-m', d]);
+    }
+    await runGit(pusher, ['push', '-q', 'origin', ...drafts]);
+    // The workspace's own branch carries an upstream and local commits too:
+    // exactly what the old listing counted against.
+    const repo = path.join(root, workspaceId, 'knowledge-base');
+    await runGit(repo, ['commit', '--allow-empty', '-m', 'unshared']);
+
+    const { runner, commands } = recordingRunner();
+    const svc = new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new WorkflowHooks(),
+      testKbContext(),
+      undefined,
+      null,
+      runner,
+    );
+    const branches = await svc.listBranches(workspaceId);
+
+    expect(branches.map((b) => b.name)).toEqual([
+      'current-company-state',
+      'alice/draft-one',
+      'target-company-state',
+      ...drafts,
+    ]);
+    expect(branches[0]).toEqual({ name: 'current-company-state', isProtected: true, hasRemote: true });
+    for (const b of branches) expect(Object.keys(b).sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+    expect(commands.filter((c) => c === 'rev-list')).toEqual([]);
+    // Its fetch, and the two reads of what the repository holds — whatever
+    // the number of branches.
+    expect([...commands].sort()).toEqual(['fetch', 'for-each-ref', 'symbolic-ref']);
+  });
+});
+
+/** The real runner, recording the subcommand of every git it is asked to run. */
+function recordingRunner(): { runner: IGitRunner; commands: string[] } {
+  const inner = new NodeGitRunner();
+  const commands: string[] = [];
+  const runner = {
+    defaultTimeoutMs: inner.defaultTimeoutMs,
+    credentials: inner.credentials,
+    run: async (cwd: string, args: string[], opts?: object) => {
+      // Skip `-c key=value` pairs: the subcommand is the first bare word.
+      let i = 0;
+      while (i < args.length && args[i].startsWith('-')) i += args[i] === '-c' ? 2 : 1;
+      commands.push(args[i] ?? '');
+      return inner.run(cwd, args, opts as never);
+    },
+  } as unknown as IGitRunner;
+  return { runner, commands };
+}
+
+describe('GitService.branchCounts', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  const draftWs = encodeURIComponent('alice/draft-one');
+
+  /** The draft's own workspace, on the draft, three commits ahead of what it shared. */
+  async function seedDraft(): Promise<{ upstream: string; repo: string }> {
+    const { upstream, repo } = await seedWorkspace(root, draftWs);
+    await runGit(repo, ['checkout', '-q', 'alice/draft-one']);
+    for (const m of ['one', 'two', 'three']) await runGit(repo, ['commit', '--allow-empty', '-m', m]);
+    return { upstream, repo };
+  }
+
+  function svcFor(runner: IGitRunner = new NodeGitRunner(), kb = testKbContext()): GitService {
+    return new GitService(stubWorkspaceService(draftWs, path.join(root, draftWs)), new WorkflowHooks(), kb, undefined, null, runner);
+  }
+
+  it('counts the workspace\'s own branch against its upstream, with rev-list for that branch alone', async () => {
+    const { upstream, repo } = await seedDraft();
+    // A teammate shares one commit on the same draft, which this clone fetches.
+    const pusher = path.join(root, '.pusher');
+    await runGit(root, ['clone', '-q', '-b', 'alice/draft-one', upstream, pusher]);
+    await runGit(pusher, ['commit', '--allow-empty', '-m', 'teammate']);
+    await runGit(pusher, ['push', '-q', 'origin', 'alice/draft-one']);
+    await runGit(repo, ['fetch', '-q', 'origin']);
+
+    const { runner, commands } = recordingRunner();
+    await expect(svcFor(runner).branchCounts(draftWs)).resolves.toEqual({ ahead: 3, behind: 1 });
+    // The upstream resolved, so one count was enough.
+    expect(commands.filter((c) => c === 'rev-list')).toHaveLength(1);
+  });
+
+  it('falls back to the protected branch on origin it is fewest commits ahead of when it has no upstream', async () => {
+    const { upstream, repo } = await seedDraft();
+    await runGit(repo, ['branch', '--unset-upstream']);
+    // `target-company-state` moves on by two commits; `current-company-state` stays.
+    const pusher = path.join(root, '.pusher');
+    await runGit(root, ['clone', '-q', '-b', 'target-company-state', upstream, pusher]);
+    for (const m of ['t1', 't2']) await runGit(pusher, ['commit', '--allow-empty', '-m', m]);
+    await runGit(pusher, ['push', '-q', 'origin', 'target-company-state']);
+    await runGit(repo, ['fetch', '-q', 'origin']);
+
+    const { runner, commands } = recordingRunner();
+    // Three ahead of both; ties keep the first protected branch, which is behind by nothing.
+    await expect(svcFor(runner).branchCounts(draftWs)).resolves.toEqual({ ahead: 3, behind: 0 });
+    // The upstream it tried, then each protected branch.
+    expect(commands.filter((c) => c === 'rev-list')).toHaveLength(3);
+  });
+
+  it('answers null for a branch never shared, with no protected base to count against', async () => {
+    const { repo } = await seedDraft();
+    await runGit(repo, ['branch', '--unset-upstream']);
+    const kb = testKbContext({ branchModel: { defaultBranch: 'main', protectedBranches: ['main'] } });
+    await expect(svcFor(undefined, kb).branchCounts(draftWs)).resolves.toEqual({ ahead: null, behind: null });
   });
 });
