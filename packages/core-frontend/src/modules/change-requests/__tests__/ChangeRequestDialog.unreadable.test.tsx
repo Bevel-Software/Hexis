@@ -99,7 +99,6 @@ const detail = {
       rawUrl: '',
     },
   ],
-  comments: [],
   approvals: [],
   mergeableInBevel: true,
   mergeBlockedReasons: [],

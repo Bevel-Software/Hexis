@@ -18,7 +18,7 @@
  */
 
 import type { AuthUser } from '../auth/types.js';
-import type { ChangeRequestApplyFailureKind } from '../git/pr.types.js';
+import type { ChangeRequestApplyFailureKind, UpdateChangeRequestFields } from '../git/pr.types.js';
 import type {
   AcquireLockResult,
   Branch,
@@ -28,7 +28,6 @@ import type {
   Change,
   ChangeInput,
   ChangeRequest,
-  ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestUpdateResult,
   ChangeRequestState,
@@ -42,7 +41,6 @@ import type {
   MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
-  PostChangeRequestCommentInput,
   UpdateBranchOutcome,
 } from './types.js';
 import type { MergeResolution } from '../git/types.js';
@@ -554,17 +552,6 @@ export interface IWorkflowService {
     number: number,
   ): Promise<ChangeRequestUpdateResult>;
 
-  // Comments
-  listComments(number: number): Promise<ChangeRequestComment[]>;
-  postComment(
-    number: number,
-    user: AuthUser,
-    input: PostChangeRequestCommentInput,
-    headSha: string,
-  ): Promise<ChangeRequestComment>;
-  editComment(commentId: string, number: number, user: AuthUser, body: string): Promise<ChangeRequestComment>;
-  deleteComment(commentId: string, number: number, user: AuthUser): Promise<void>;
-
   // Approvals — per-file, tied to the file's current change. New changes
   // invalidate approvals on the affected file.
   approveFile(
@@ -643,6 +630,18 @@ export interface IWorkflowService {
    * request.
    */
   deleteChangeRequest(number: number, user: AuthUser): Promise<void>;
+
+  /**
+   * Change an OPEN request's title and/or description. Its author, an admin,
+   * or the holder of write on every changed file — the people who may close
+   * it; anyone else gets a worded 403, and a merged or closed request a
+   * worded 409.
+   */
+  updateChangeRequest(
+    number: number,
+    user: AuthUser,
+    input: UpdateChangeRequestFields,
+  ): Promise<ChangeRequest>;
 
   /**
    * Reject a change request without merging. Authorized for the author or

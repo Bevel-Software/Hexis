@@ -85,5 +85,15 @@ export function publicConfig(kb: KbContext, { marketplaceGitUrl, mcpUrl }: Publi
      * there.
      */
     catalogRevision: true as const,
+    /**
+     * This deployment serves `GET /api/agent/tool-hints`, the read-only hint
+     * of every platform tool and code-mode meta-tool (see
+     * modules/tool-registry/read-only-hints.ts). The local `hexis-mcp` bridge
+     * reads it on every `tools/list` only when this is advertised — on the
+     * same terms as the two flags above: an older deployment answers the
+     * unknown route with 401, and an OAuth bridge reads a 401 as an expired
+     * token and refreshes its sign-in on every listing.
+     */
+    toolHints: true as const,
   };
 }

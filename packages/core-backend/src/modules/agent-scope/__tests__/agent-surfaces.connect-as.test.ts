@@ -156,7 +156,7 @@ async function start(opts: { agentScope?: boolean } = {}): Promise<string> {
     toolDef({ name: 'write_file', description: 'Write.', path: '/api/agent/tools/write_file', inputs: { type: 'object', properties: {} } }),
   );
   router.post('/agent/tools/write_file', toolAuth, th(async () => ({ written: true })));
-  router.use(createManualRoutes(registry, toolAuth, async () => ADA.email, agentScope));
+  router.use(createManualRoutes(registry, toolAuth, async () => ADA.email, undefined, agentScope));
   router.use(createToolManualsAgentRoutes(toolManualService, toolAuth, async () => ADA.email, undefined, agentScope));
   const app = express();
   app.use(express.json());

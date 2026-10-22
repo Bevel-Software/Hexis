@@ -16,3 +16,10 @@ export const GIT_MENU_ITEMS: readonly AdminMenuItem[] = [BRANCH_DELETE_CONFIRM_M
 
 /** The branch state a page reads (`useGit`), and the context a test provides it through. */
 export { GitContext, useGit, type GitContextValue } from './state/git.context';
+
+/**
+ * The HTTP helpers git's own services are built on, for the modules whose
+ * services talk to the same API: the response reader that turns a refusal
+ * into a thrown `GitApiError` carrying the server's words and status.
+ */
+export { GitApiError, handleApiResponse } from './services/git.api';
