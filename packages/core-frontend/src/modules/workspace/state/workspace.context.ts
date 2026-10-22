@@ -139,9 +139,9 @@ export interface DeleteEntryResult {
 
 /** What a `hydrateTabs` call read, and whether its result reached the strip. */
 export interface HydrateResult {
-  /** Paths that were read successfully. */
+  /** Paths whose tab the strip holds: read successfully, or kept on a remount. */
   surviving: string[];
-  /** Paths that 404'd — no longer on this branch. */
+  /** Paths that 404'd and were not kept — no longer on this branch. */
   dropped: string[];
   /** Paths that 403'd — the user may not read them. */
   denied: string[];
@@ -323,7 +323,11 @@ export interface WorkspaceContextValue {
    * agent's change awaiting review stays as it is, whatever its read
    * answered: it is the only copy of what it holds until Close. That holds
    * when `paths` has not caught up with it, `[]` included: such tabs are read
-   * as well. A 404 on such a tab marks it deleted. A 403 still wins: a tab no
+   * as well. A 404 on such a tab marks it deleted. Any other tab still open
+   * is kept too when its read answers 404, marked deleted rather than
+   * dropped, and keeps what it shows when bytes or a write landed after its
+   * read was issued, or a later read found the file gone: a remount's read
+   * lands under the same order as every refresh read. A 403 still wins: a tab no
    * longer readable closes, kept or not and even when an open overtook the
    * restore, and is reported in `denied`. A read of a tab already open is an
    * existence check: `saveFile` and Reject wait on it.

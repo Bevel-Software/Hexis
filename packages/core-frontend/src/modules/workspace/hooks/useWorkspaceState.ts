@@ -930,10 +930,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Copy edits and Copy agent's version read it until Close —
     // so it stays as it is, whatever its read answered, unless the read is a
     // 403: a file this person may no longer read closes like any other.
-    const liveTabsNow = () =>
+    const openTabsNow = () =>
       hydratedKey !== null && hydratedKeyRef.current === hydratedKey
-        ? new Map(openTabsRef.current.filter((t) => t.deletedBy || t.isDirty || t.pendingFileContent !== null).map((t) => [t.path, t]))
+        ? new Map(openTabsRef.current.map((t) => [t.path, t]))
         : new Map<string, OpenTab>();
+    const liveTabsNow = () =>
+      new Map([...openTabsNow()].filter(([, t]) => t.deletedBy || t.isDirty || t.pendingFileContent !== null));
     // Read them too, even when the persisted list has not caught up with them
     // (or is empty), so the 403 rule below holds for every tab kept.
     const readPaths = [...uniqPaths, ...[...liveTabsNow().keys()].filter((p) => !uniqPaths.includes(p))];
@@ -946,7 +948,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
 
     // Fetch every path in parallel. 404s are silently dropped (file no longer
-    // on this branch); 403s are dropped too — a persisted tab the user can no
+    // on this branch) — except on a remount for a tab still open, which stays
+    // and shows the deleted notice, as every other read of an open tab that
+    // finds it gone does (`applyReadGone`); 403s are dropped too — a persisted tab the user can no
     // longer read auto-closes rather than erroring the whole hydrate into a
     // retry loop — but reported separately so a denied DEEPLINK can surface an
     // access message instead of "file not found". Other errors throw so the
@@ -975,12 +979,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const outranked = requestId !== addRequestIdRef.current;
     // As they are now: a tab may have been edited or marked while reads ran.
     const liveTabs = liveTabsNow();
+    // On a remount, the other tabs still open: clean ones. Their reads land
+    // under the same order every refresh read obeys (`applyReadBytes`): bytes
+    // or a write that landed after this read was issued are newer than its
+    // answer, and a read issued after it that found the file gone outranks
+    // its find. Such a tab is kept as it is now.
+    const openNow = openTabsNow();
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
     const landed: { path: string; seq: number }[] = [];
     const dropped: string[] = [];
     const denied: string[] = [];
-    // Live tabs kept whose read found the file gone: marked deleted below.
+    // Open tabs kept whose read found the file gone: marked deleted below.
     const goneLive: { path: string; seq: number }[] = [];
     for (let i = 0; i < readPaths.length; i++) {
       const path = readPaths[i];
@@ -997,6 +1007,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 404) {
           goneLive.push({ path, seq: seqs[i] });
         }
+      } else if (res.status === 'fulfilled' && openNow.has(path)
+        && (isStaleLanding(workspaceId, path, seqs[i]) || isStaleFind(workspaceId, path, seqs[i]))) {
+        survivors.push(openNow.get(path)!);
+        surviving.push(path);
       } else if (res.status === 'fulfilled') {
         survivors.push({
           path,
@@ -1011,7 +1025,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         if (workspaceIdRef.current === workspaceId) forgetOwnDelete(path, issuedAt);
       } else {
         const err = res.reason;
-        if (err instanceof WorkspaceApiError && err.status === 404) {
+        if (err instanceof WorkspaceApiError && err.status === 404 && openNow.has(path)) {
+          // Open and clean: deleted while the route was away. The notice says
+          // so; dropping the tab would show "File not found" instead.
+          survivors.push(openNow.get(path)!);
+          surviving.push(path);
+          goneLive.push({ path, seq: seqs[i] });
+        } else if (err instanceof WorkspaceApiError && err.status === 404) {
           dropped.push(path);
         } else if (err instanceof WorkspaceApiError && err.status === 403) {
           denied.push(path);
@@ -1067,7 +1087,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setActiveTabPath(requested);
     hydratedKeyRef.current = hydratedKey;
     return { surviving, dropped, denied, superseded: false };
-  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, trackExistenceCheck, applyReadGone]);
+  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 

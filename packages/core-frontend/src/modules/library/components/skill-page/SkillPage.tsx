@@ -54,7 +54,8 @@ import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
 import { isBinaryFile } from '../../../workspace/components/renderers';
-import { DeletedFileNotice, landingAfterClose, useItemDeletedElsewhere } from '../../../workspace';
+import { landingAfterClose, useItemDeletedElsewhere } from '../../../workspace';
+import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of

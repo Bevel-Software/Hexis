@@ -1603,6 +1603,23 @@ describe('a write that answers after a branch switch', () => {
     expect(tab.savedContent).toBe('as on feature');
     expect(tab.pendingFileContent).toBe('the agent, on feature');
   });
+
+  it("a move on the branch just left does not rename this branch's tab", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    let answer!: () => void;
+    apiMocks.moveEntry.mockImplementationOnce(() => new Promise<void>((resolve) => { answer = resolve; }));
+    let moving!: Promise<void>;
+    act(() => { moving = result.current.moveEntry('KB/Draft.md', 'KB/Renamed.md'); });
+    await waitFor(() => expect(apiMocks.moveEntry).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', 'KB/Renamed.md'));
+
+    await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
+    await act(async () => { answer(); await moving; });
+
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['KB/Draft.md']);
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+    expect(result.current.activeTab?.content).toBe('as on feature');
+  });
 });
 
 describe('the editor writing back after our own delete', () => {
@@ -1883,6 +1900,48 @@ describe('the Knowledge page mounted again while a deleted tab is open', () => {
     expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
     expect(result.current.openTabs.map((t) => t.content)).not.toContain('# Draft\n\nMy edit.');
     expect(result.current.activeTab?.path).toBe('KB/Keep.md');
+  });
+
+  it('keeps a clean open tab whose file is gone and marks it deleted, rather than dropping it', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    // Deleted while the route was away: no event reached this tab.
+    disk.delete('KB/Draft.md');
+
+    let outcome!: { surviving: string[]; dropped: string[] };
+    await act(async () => { outcome = await result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+
+    expect(outcome.dropped).toEqual([]);
+    expect(outcome.surviving).toEqual(['KB/Keep.md', 'KB/Draft.md']);
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: null });
+    expect(result.current.activeTab?.path).toBe('KB/Draft.md');
+  });
+
+  it('a remount read that answers after newer bytes landed keeps the newer bytes', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    const older = disk.get('KB/Draft.md')!;
+    // The remount's read of the open tab is held with the bytes it read then.
+    const read = apiMocks.readFile.getMockImplementation()!;
+    let answer!: () => void;
+    let taken = false;
+    apiMocks.readFile.mockImplementation((ws: string, p: string) => {
+      if (p !== 'KB/Draft.md' || taken) return read(ws, p);
+      taken = true;
+      return new Promise<string>((resolve) => { answer = () => resolve(older); });
+    });
+    let hydrating!: Promise<unknown>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(taken).toBe(true));
+
+    // A change lands on the branch, and its read lands first.
+    disk.set('KB/Draft.md', '# Draft\n\nChanged on the branch.');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.content).toBe('# Draft\n\nChanged on the branch.'));
+    await act(async () => { answer(); await hydrating; });
+
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBe('# Draft\n\nChanged on the branch.');
+    expect(tabAt(result, 'KB/Draft.md')?.savedContent).toBe('# Draft\n\nChanged on the branch.');
   });
 
   it('still drops a persisted tab whose file is gone when the branch is first opened', async () => {

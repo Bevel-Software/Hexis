@@ -22,12 +22,8 @@ import { DeleteToolDialog } from './DeleteToolDialog';
 import { copyToClipboard } from '../../utils/clipboard';
 import { useLibraryToast } from '../../state/toast.context';
 import { NameWithBadges } from '../NameWithBadges';
-import {
-  DeletedFileNotice,
-  WorkspaceContext,
-  landingAfterClose,
-  useItemDeletedElsewhere,
-} from '../../../workspace';
+import { WorkspaceContext, landingAfterClose, useItemDeletedElsewhere } from '../../../workspace';
+import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
 
 /**
  * One tool, as a page.

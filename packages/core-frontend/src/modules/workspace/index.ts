@@ -36,10 +36,11 @@
  *    file page's provider its tests mount it under.
  *
  * Its routing contract (the Knowledge URL prefix and the segment decode),
- * where the page lands once the file on screen has closed, the "This file
- * was deleted" notice and the hook that says when an item on screen was
- * deleted elsewhere, and the workspace context those pages read the checkout
- * from.
+ * where the page lands once the file on screen has closed, the hook that
+ * says when an item on screen was deleted elsewhere, and the workspace
+ * context those pages read the checkout from. The "This file was deleted"
+ * notice itself is a component: other modules compose it from
+ * `components/DeletedFileNotice`, not from here.
  */
 export {
   CanDownloadContext,
@@ -76,5 +77,4 @@ export { checkoutRoot, findEntryByPath, knowledgeFiles, pathExistsInTree } from 
 export { labelFor, parseFrontmatter } from './utils/frontmatter';
 export type { FrontmatterData } from './utils/frontmatter';
 export { landingAfterClose } from './routing/landing';
-export { DeletedFileNotice } from './components/DeletedFileNotice';
 export { useItemDeletedElsewhere } from './hooks/useItemDeletedElsewhere';
