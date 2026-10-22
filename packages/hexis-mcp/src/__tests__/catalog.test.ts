@@ -383,12 +383,13 @@ describe('resolveDeployment', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
   }
 
-  it('reads the endpoint and both capability flags from the one config fetch', async () => {
-    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true, catalogRevision: true });
+  it('reads the endpoint and every capability flag from the one config fetch', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true, catalogRevision: true, toolHints: true });
     expect(await resolveDeployment(config)).toEqual({
       mcpUrl: 'https://x.example/api/mcp',
       agentInstructions: true,
       catalogRevision: true,
+      toolHints: true,
     });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -398,6 +399,7 @@ describe('resolveDeployment', () => {
     const resolved = await resolveDeployment(config);
     expect(resolved.agentInstructions).toBe(false);
     expect(resolved.catalogRevision).toBe(false);
+    expect(resolved.toolHints).toBe(false);
   });
 
   /**
@@ -407,10 +409,11 @@ describe('resolveDeployment', () => {
    * `true` has to mean "not there".
    */
   it('only a literal true advertises a capability', async () => {
-    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes', catalogRevision: 1 });
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes', catalogRevision: 1, toolHints: 'true' });
     const resolved = await resolveDeployment(config);
     expect(resolved.agentInstructions).toBe(false);
     expect(resolved.catalogRevision).toBe(false);
+    expect(resolved.toolHints).toBe(false);
   });
 
   it('still falls back to <base>/api/mcp on a deployment too old to advertise either', async () => {
@@ -420,6 +423,7 @@ describe('resolveDeployment', () => {
       mcpUrl: 'https://x.example/api/mcp',
       agentInstructions: false,
       catalogRevision: false,
+      toolHints: false,
     });
   });
 });

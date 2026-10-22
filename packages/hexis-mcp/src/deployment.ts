@@ -167,6 +167,14 @@ export interface ResolvedDeployment {
    * would report a dead credential for a route that is merely not there.
    */
   catalogRevision: boolean;
+  /**
+   * Whether the deployment serves `GET /api/agent/tool-hints`, the read-only
+   * hint of every platform tool. Absent on an older deployment and, as above,
+   * absence is the ONLY signal: that deployment answers the unknown route with
+   * 401, and an OAuth config reads a 401 as an expired token — it would
+   * refresh its sign-in on every `tools/list`.
+   */
+  toolHints: boolean;
 }
 
 /**
@@ -177,11 +185,12 @@ export interface ResolvedDeployment {
 export async function resolveDeployment(config: HexisMcpConfig): Promise<ResolvedDeployment> {
   const body = (await getJson(`${config.baseUrl}/api/config`, {
     label: 'the deployment config',
-  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown };
+  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown; toolHints?: unknown };
   return {
     mcpUrl: mcpUrlFromConfig(config, body),
     agentInstructions: body?.agentInstructions === true,
     catalogRevision: body?.catalogRevision === true,
+    toolHints: body?.toolHints === true,
   };
 }
 
@@ -612,3 +621,65 @@ export async function fetchMcpApps(
     return kept;
   }
 }
+
+/**
+ * The read-only hint of every platform tool and every code-mode meta-tool, as
+ * the deployment has them now: its built-in value, or an admin's override.
+ *
+ * Read per LISTING rather than once: an admin who flips a hint on the Tools
+ * page expects the next `tools/list` to carry it, and the tool discovery this
+ * server registered at startup goes through the deployment's MCP endpoint,
+ * whose `annotations` the UTCP MCP protocol drops on the way in. One small
+ * read, beside the catalog check a listing already awaits.
+ *
+ * Asked only of a deployment that advertises the route (`toolHints` in
+ * `/api/config`, see {@link ResolvedDeployment}). Never fatal, and never
+ * louder than once per kind of failure and deployment: a route that answers
+ * 404 anyway is treated as absent, and the right listing for it is the one an
+ * older deployment gets — no hints at all. A transient failure keeps `previous`, the
+ * hints already served, so a deployment mid-redeploy does not flip every hint
+ * off for one listing.
+ */
+export async function fetchToolHints(
+  config: HexisMcpConfig,
+  previous: Readonly<Record<string, boolean>> = {},
+): Promise<Record<string, boolean>> {
+  try {
+    const body = await getJson(`${config.baseUrl}/api/agent/tool-hints`, {
+      label: 'the tool hints',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+    const tools = (body as { tools?: unknown } | null)?.tools;
+    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) {
+      throw new Error('the answer is not a tool-hint map (expected { tools: { <name>: true | false } })');
+    }
+    // Own properties (`fromEntries`), so no tool name reaches the prototype.
+    const hints = Object.fromEntries(
+      Object.entries(tools as Record<string, unknown>).filter(([, value]) => typeof value === 'boolean'),
+    ) as Record<string, boolean>;
+    lastToolHintsFailure.delete(config.baseUrl);
+    return hints;
+  } catch (err) {
+    // A rejected key is the discovery's to report, as for the app manifest.
+    const gone = err instanceof ConnectionKeyRejectedError || (err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0));
+    const kept = gone ? {} : { ...previous };
+    const reason = err instanceof Error ? err.message : String(err);
+    const key = gone ? 'gone' : reason;
+    if (lastToolHintsFailure.get(config.baseUrl) !== key) {
+      lastToolHintsFailure.set(config.baseUrl, key);
+      console.error(
+        `[hexis-mcp] could not read the deployment's tool hints (${reason}); ` +
+          (Object.keys(kept).length ? 'keeping the hints read before.' : 'tools are listed without a read-only hint.'),
+      );
+    }
+    return kept;
+  }
+}
+
+/**
+ * The last tool-hint failure logged, per deployment, so a failing route is said
+ * once rather than per listing — and one deployment's failure or recovery
+ * never silences or re-arms another's.
+ */
+const lastToolHintsFailure = new Map<string, string>();
