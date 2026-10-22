@@ -1277,8 +1277,8 @@ export function FileViewer() {
     // above — not a component created during render. The provider hands the
     // open file's `download:` verdict to any DownloadFileButton inside the
     // renderer without widening the renderer contract. The page-tools
-    // provider is what makes this the file page for an HTML page: the one
-    // place its `window.bevel.tools` is answered, under its own path.
+    // provider is what answers an HTML page's `window.bevel.tools` here,
+    // under its own path (`htmlToolBridge.ts` lists every host that does).
     <CanDownloadContext.Provider value={access.canDownload}>
     <PageToolsContext.Provider value={{ pagePath: repoRelativePath ?? openFilePath }}>
     {/* eslint-disable-next-line react-hooks/static-components */}
