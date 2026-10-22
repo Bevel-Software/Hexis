@@ -682,7 +682,7 @@ function nodeNameFor(repoRelative: string): string {
  * renderer hands it.
  */
 export function resolveBeside(from: string, path: string): string | null {
-   
+  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(path)) return null;
   let decoded = path;
   try {
@@ -691,7 +691,7 @@ export function resolveBeside(from: string, path: string): string | null {
     return null;
   }
   // Judged again decoded: `%0a` is a newline once the escape is undone.
-   
+  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(decoded)) return null;
   const absolute = decoded.startsWith('/');
   const base = absolute ? [] : from.split('/').slice(0, -1);

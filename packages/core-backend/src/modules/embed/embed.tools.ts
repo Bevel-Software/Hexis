@@ -204,7 +204,7 @@ export function toRepoRelative(path: string, kbDirName: string): string | null {
   // Traversal and the odd segment are refused HERE rather than deeper: the
   // path is about to become part of a signed token, and a token is the one
   // place a bad path would outlive the request that sent it.
-   
+  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(rel)) return null;
   if (!rel.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..')) return null;
   return rel;

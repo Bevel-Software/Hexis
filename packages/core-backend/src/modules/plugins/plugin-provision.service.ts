@@ -202,7 +202,7 @@ export class PluginProvisionService {
     if (!name) throw new PluginProvisionError('A plugin needs a name.', 422);
     // NUL and control chars are exactly what a filesystem path cannot carry;
     // refusing them here keeps the refusal a 422 instead of the fs layer's 500.
-     
+    // eslint-disable-next-line no-control-regex
     if (/[/\\\u0000-\u001f\u007f]/.test(name) || name === '.' || name === '..' || name.startsWith('.')) {
       throw new PluginProvisionError(
         'A plugin name can\'t contain / or \\ or control characters, or start with a dot.',

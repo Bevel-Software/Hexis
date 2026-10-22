@@ -15,7 +15,7 @@ import '../audit/index.js'; // Express Request augmentation (req.agentConnection
 export type McpCallerKind = 'key' | 'oauth' | 'internal' | 'session';
 
 declare global {
-   
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       /**
