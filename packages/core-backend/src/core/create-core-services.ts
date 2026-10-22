@@ -34,6 +34,8 @@ import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-f
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
+import { ToolReadOnlyHints } from '../modules/tool-registry/read-only-hints.js';
+import type { IToolReadOnlyHints } from '../modules/tool-registry/read-only-hints.contract.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
@@ -67,7 +69,11 @@ import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-down
 import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
 import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
-import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
+import {
+  DocExtractService,
+  WorkerDocumentExtractor,
+  type IDocumentExtractor,
+} from '../modules/workspace/index.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
@@ -75,6 +81,7 @@ import { AccountErasureService } from '../modules/auth/account-erasure.service.j
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
@@ -122,7 +129,7 @@ import { assertGitVersion } from '../modules/workflow/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
 import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
 import { FileLockService } from '../modules/workflow/file-lock.service.js';
-import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
+import { WorkflowEventBus } from '../modules/workflow/index.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
@@ -256,6 +263,8 @@ export interface CoreServices {
    * download route can refuse a link presented by someone it was not issued to.
    */
   agentDownloadFetcher: (req: Request) => Promise<string[]>;
+  /** Runs every document extraction off the request thread under a budget; its workers end when the graph stops. */
+  documentExtractor: IDocumentExtractor;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -399,6 +408,8 @@ export interface CoreServices {
   /** The Audit log: what every connected agent and key called, and the revoke of an agent's grant. */
   agentAuditService: AgentAuditService;
   toolRegistry: ToolRegistry;
+  /** Each platform tool's and meta-tool's read-only hint, and an admin's overrides of them. */
+  readOnlyHints: IToolReadOnlyHints;
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
@@ -791,9 +802,9 @@ export async function createCoreServices(
     // `<tenant>-down_`: recognisable by shape beside the upload token.
     tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
   });
-  // Office-document/PDF text extraction for `read_file`/`grep`, cached by
-  // content hash beside the workspaces root (see `DocExtractionCache`).
-  const docExtractService = new DocExtractService(config.docExtractCacheRoot);
+  // The worker threads every office/PDF/email extraction runs in, under a
+  // 10 s budget per file (see `WorkerDocumentExtractor`).
+  const documentExtractor = new WorkerDocumentExtractor();
   // The deployment owner counts as Admin for the two hardcoded `write`
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
@@ -952,6 +963,14 @@ export async function createCoreServices(
   // browser sessions. Single instance per Node process — survives across
   // requests, doesn't survive restarts (clients reconnect + resync).
   const eventBus = new WorkflowEventBus();
+  // Office-document/PDF/email text extraction for `read_file`/`grep`, cached
+  // by content hash beside the workspaces root (see `DocExtractionCache`),
+  // failures included. A fresh failure is told to the people looking at the
+  // file: the events route delivers it only to sessions that may read it.
+  const docExtractService = new DocExtractService(config.docExtractCacheRoot, documentExtractor, {
+    onUnreadable: ({ workspaceId, path, reason }) =>
+      eventBus.emit({ kind: 'document-unreadable', workspaceId, path, reason }),
+  });
   // In-process post-commit hook (distinct from the SSE bus): fires once per
   // committed change (batched paths) so catalogs refresh instantly and the
   // id-repair keeps the id namespace collision-free. Subscribers are registered
@@ -1038,6 +1057,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    new AccessMutationService(workspaceService, accessControl, kb.kbDirName),
     skillService,
     pluginLinkIndex,
     kb,
@@ -1386,6 +1406,8 @@ export async function createCoreServices(
       // the setup save applies lands without a restart.
       kbLayout: () => kb.layout,
       secretsScope,
+      // Read at listing time, by when the hints below exist.
+      readOnlyOverrides: () => readOnlyHints.overrides(),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1454,6 +1476,9 @@ export async function createCoreServices(
   // `internalTokenService` minted above (shared with the agent factories) is
   // the same one the tool-auth middleware verifies internal tokens against.
   const toolRegistry = new ToolRegistry();
+  // What MCP clients are told about each platform tool's effect: its write
+  // declaration, or an admin's override from the Tools page.
+  const readOnlyHints = new ToolReadOnlyHints(toolRegistry, settings);
   const resolveToolContext = createToolContextResolver({
     authService,
     workspaceService,
@@ -1650,6 +1675,7 @@ export async function createCoreServices(
     agentDownloadStore,
     patternMatcher,
     agentDownloadFetcher,
+    documentExtractor,
     docExtractService,
     accessControl,
     creatorAccess,
@@ -1708,6 +1734,7 @@ export async function createCoreServices(
     mcpResourceMetadataUrl,
     agentAuditService,
     toolRegistry,
+    readOnlyHints,
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,

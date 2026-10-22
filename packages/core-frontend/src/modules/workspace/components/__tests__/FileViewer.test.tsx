@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation, useNavigationType } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import type {
@@ -155,6 +155,9 @@ import { ReviewContext, type ReviewContextValue } from '../../../review/state/re
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
+import { AppRegistryContext, makeRegistry, type FileRendererDef } from '../../../../core/registry';
+import { Dialog } from '../../../../shared/components';
+import type { FileRendererProps } from '../renderers';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
 
@@ -206,9 +209,12 @@ function makeGit(
  */
 function LocationEcho() {
   const location = useLocation();
+  const navigationType = useNavigationType();
   return (
     <>
       <div data-testid="location">{location.pathname}</div>
+      <div data-testid="location-search">{location.search}</div>
+      <div data-testid="navigation-type">{navigationType}</div>
       <div data-testid="location-state">{JSON.stringify(location.state ?? null)}</div>
     </>
   );
@@ -231,6 +237,8 @@ function ViewerHarness({
   routePath,
   workspaceBranch = 'main',
   onSaveFile,
+  routeSearch,
+  renderers,
 }: {
   initialContent?: string;
   /** What git reports about itself; the history views need `'ready'`. */
@@ -271,6 +279,10 @@ function ViewerHarness({
   workspaceBranch?: string | null;
   /** Observes every write the viewer asks the workspace to make. */
   onSaveFile?: (relativePath: string, content: string) => void;
+  /** The query the entry opens with, e.g. `?fullscreen=1`. */
+  routeSearch?: string;
+  /** Renderers a deployment registers, as the enterprise overlay's `.html` one. */
+  renderers?: FileRendererDef[];
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
@@ -413,10 +425,16 @@ function ViewerHarness({
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
   );
-  return (
+  const routed = (
     <MemoryRouter
       initialEntries={[
-        routeState !== undefined || routePath !== undefined
+        routeSearch !== undefined
+          ? {
+              pathname: `/workspace/${encodeURIComponent(urlBranch)}`,
+              search: routeSearch,
+              state: routeState ?? null,
+            }
+          : routeState !== undefined || routePath !== undefined
           ? {
               pathname: `/workspace/${encodeURIComponent(urlBranch)}/${(routePath ?? filePath ?? '')
                 .split('/')
@@ -431,6 +449,11 @@ function ViewerHarness({
         <Route path="/workspace/:branch/*" element={tree} />
       </Routes>
     </MemoryRouter>
+  );
+  return renderers ? (
+    <AppRegistryContext.Provider value={makeRegistry({ renderers })}>{routed}</AppRegistryContext.Provider>
+  ) : (
+    routed
   );
 }
 
@@ -1978,5 +2001,466 @@ describe('FileViewer: opening straight into the editor', () => {
     expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Full screen ───────────────────────────────────────────────────────────
+// The view is the host's: a renderer registered by a deployment (the
+// enterprise overlay's `.html` one) gets it without knowing it exists, so
+// every case below runs through registry stubs that know nothing about it.
+describe('FileViewer full screen', () => {
+  const mounts = { count: 0 };
+
+  /** A renderer with its own state, that counts its mounts. */
+  function CountingRenderer({ onSave, readOnly }: FileRendererProps) {
+    const [scratch, setScratch] = useState('');
+    const [dialogOpen, setDialogOpen] = useState(false);
+    useEffect(() => {
+      mounts.count += 1;
+    }, []);
+    return (
+      <div data-testid="stub-renderer">
+        <input aria-label="Scratch" value={scratch} onChange={(e) => setScratch(e.target.value)} />
+        <button type="button" onClick={() => void onSave(`saved:${scratch}`)} disabled={readOnly}>
+          Stub save
+        </button>
+        <button type="button" onClick={() => setDialogOpen(true)}>
+          Open stub dialog
+        </button>
+        <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="Stub dialog">
+          A dialog over the view
+        </Dialog>
+        <iframe title="Stub page" />
+      </div>
+    );
+  }
+
+  const stubFor = (...extensions: string[]): FileRendererDef[] => [
+    { extensions, Component: CountingRenderer },
+  ];
+
+  afterEach(() => {
+    mounts.count = 0;
+  });
+
+  const readPane = () => screen.getByTestId('stub-renderer').closest('[data-read-pane]') as HTMLElement;
+  const header = () => screen.getByTestId(PAGE_HEADER_TESTID);
+  const paneCard = () => screen.queryByTestId('file-pane-card');
+
+  it.each([
+    ['Markdown', 'knowledge-base/Knowledge/Foo.md'],
+    ['text', 'knowledge-base/Knowledge/notes.txt'],
+  ])('offers Full screen in the pane bar for a prose file (%s)', async (_kind, filePath) => {
+    render(<ViewerHarness filePath={filePath} renderers={stubFor('.md', '.txt')} />);
+    const card = await screen.findByTestId('file-pane-card');
+    expect(within(card).getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+    expect(within(header()).queryByRole('button', { name: 'Full screen' })).toBeNull();
+  });
+
+  it.each([
+    ['HTML', 'knowledge-base/Dashboards/Roadmap.html'],
+    ['PDF', 'knowledge-base/Docs/Guide.pdf'],
+    ['tool', 'knowledge-base/Tools/search.tool'],
+    ['spreadsheet', 'knowledge-base/Data/Sheet.xlsx'],
+    ['CSV', 'knowledge-base/Data/rows.csv'],
+    ['image', 'knowledge-base/Assets/diagram.png'],
+  ])('offers Full screen in the page header for a full-bleed file (%s)', async (_kind, filePath) => {
+    render(
+      <ViewerHarness
+        filePath={filePath}
+        renderers={stubFor('.html', '.pdf', '.tool', '.xlsx', '.csv', '.png')}
+      />,
+    );
+    await screen.findByTestId('stub-renderer');
+    expect(within(header()).getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+    expect(paneCard()).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Full screen' })).toHaveLength(1);
+  });
+
+  it('offers Full screen in edit mode too', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(within(screen.getByTestId('file-pane-card')).getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+  });
+
+  it('enters by replacing the entry with ?fullscreen=1, and leaves by taking it off again', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness filePath="knowledge-base/Dashboards/Roadmap.html" renderers={stubFor('.html')} />);
+    await screen.findByTestId('stub-renderer');
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('?fullscreen=1');
+    expect(screen.getByTestId('navigation-type').textContent).toBe('REPLACE');
+    expect(readPane()).toHaveAttribute('data-full-screen');
+    expect(readPane()).toHaveClass('fixed', 'inset-0', 'z-40', 'bg-canvas');
+    // The entry control gives way to the exit control.
+    expect(screen.queryByRole('button', { name: 'Full screen' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(screen.getByTestId('navigation-type').textContent).toBe('REPLACE');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(readPane()).not.toHaveClass('fixed');
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+  });
+
+  it("gives way to an agent update that waits for the reader's answer", async () => {
+    render(<ViewerHarness renderers={stubFor('.md')} routeSearch="?fullscreen=1" pendingValue="agent replacement" />);
+    await screen.findByTestId('stub-renderer');
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+
+    await act(async () => {
+      injectPendingFromTest?.();
+    });
+
+    // Accept and Reject sit in the shell the filled view covered: the view
+    // gives way, and the entry is taken off the URL as a manual exit would.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Exit full screen' })).toBeNull());
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(await screen.findByText(/Previewing agent's changes/i)).toBeInTheDocument();
+  });
+
+  it('keeps the rest of the query when it enters and leaves', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?trace=1"
+      />,
+    );
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('?trace=1&fullscreen=1');
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('?trace=1');
+  });
+
+  it('opens filling the window when the URL carries ?fullscreen=1, from the first render', () => {
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    // No waitFor: the first commit is already the filling view, so the
+    // app's chrome is never painted around it.
+    expect(readPane()).toHaveAttribute('data-full-screen');
+    expect(readPane()).toHaveClass('fixed', 'inset-0');
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+  });
+
+  it('does not remount the renderer across the toggle: its state survives both ways', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.type(screen.getByLabelText('Scratch'), 'unsaved');
+    expect(mounts.count).toBe(1);
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(readPane()).toHaveAttribute('data-full-screen');
+    expect(screen.getByLabelText('Scratch')).toHaveValue('unsaved');
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByLabelText('Scratch')).toHaveValue('unsaved');
+    expect(mounts.count).toBe(1);
+  });
+
+  // The pane leaving the shell's flow collapses the shell's scroll, so the
+  // reader's place is carried by hand: into the pane's own scroller on the
+  // way in, back into the shell's on the way out. It is measured against the
+  // document's BODY, because the two views put a different distance above it:
+  // on the page the body starts below the card's bar (here 144px into the
+  // shell's content), filling the window it starts below the pane's padding
+  // (40px). happy-dom lays nothing out, so that geometry is given.
+  it('keeps the reader\'s place in a prose document across entry and exit, measured at the text', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    const shell = screen.getByTestId('kb-document-shell');
+    const pane = readPane();
+    const body = pane.querySelector('[data-file-pane-body]') as HTMLElement;
+    const BODY_ON_PAGE = 144;
+    const BODY_FILLING = 40;
+    const rect = (top: number) => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) });
+    vi.spyOn(shell, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
+    vi.spyOn(pane, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(
+      () =>
+        rect(
+          pane.hasAttribute('data-full-screen')
+            ? BODY_FILLING - pane.scrollTop
+            : BODY_ON_PAGE - shell.scrollTop,
+        ) as DOMRect,
+    );
+
+    // 300px into the text.
+    shell.scrollTop = BODY_ON_PAGE + 300;
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(readPane()).toBe(pane);
+    expect(pane.scrollTop).toBe(BODY_FILLING + 300);
+
+    // Read on to 500px into the text, then leave: the shell lands on the same line.
+    pane.scrollTop = BODY_FILLING + 500;
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(pane).not.toHaveAttribute('data-full-screen');
+    expect(shell.scrollTop).toBe(BODY_ON_PAGE + 500);
+  });
+
+  // A column that wraps differently puts every later line at a different
+  // height, and no carried offset survives that (staging: Section 24 came
+  // back as Section 30). So the text keeps the page's width to the pixel.
+  it('lays the text out at the width it had on the page', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    const card = screen.getByTestId('file-pane-card');
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(
+      () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 752, height: 0, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(card.style.maxWidth).toBe('752px');
+    // The edges go transparent, not away: the box is as wide as it was.
+    expect(card).toHaveClass('border-transparent');
+    expect(card).not.toHaveClass('border-0');
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(card.style.maxWidth).toBe('');
+  });
+
+  it('opened by URL, with no page to match, takes the column\'s content width', () => {
+    render(<ViewerHarness renderers={stubFor('.md')} routeSearch="?fullscreen=1" />);
+    const card = screen.getByTestId('file-pane-card');
+    expect(card).toHaveClass('mx-auto', 'max-w-[800px]');
+    expect(card.style.maxWidth).toBe('');
+  });
+
+  it('keeps an edit unsaved across the toggle, and Ctrl+S saves it while filling the window', async () => {
+    const user = userEvent.setup();
+    const saved: string[] = [];
+    render(
+      <ViewerHarness
+        initialContent="Base content"
+        captureTyped
+        onSaveFile={(_path, content) => saved.push(content)}
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' and more');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByRole('textbox')).toBe(textarea);
+    expect(textarea).toHaveValue('Base content and more');
+
+    textarea.focus();
+    await user.keyboard('{Control>}s{/Control}');
+    await waitFor(() => expect(saved).toEqual(['Base content and more']));
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByRole('textbox')).toBe(textarea);
+  });
+
+  it('draws a prose document alone: its reading column centred, no card edges, no bar', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+
+    const card = screen.getByTestId('file-pane-card');
+    expect(card).toHaveClass('mx-auto', 'max-w-[800px]', 'border-transparent');
+    expect(card).not.toHaveClass('shadow-card');
+    // The bar (the file's name and its actions) is withdrawn.
+    expect(within(card).queryByText('Foo.md')).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Version history' })).toBeNull();
+    expect(readPane()).toHaveClass('fixed', 'inset-0', 'overflow-auto');
+  });
+
+  it('sizes a full-bleed renderer to the viewport', async () => {
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Docs/Guide.pdf"
+        renderers={stubFor('.pdf')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    expect(readPane()).toHaveClass('fixed', 'inset-0', 'flex', 'flex-col');
+    expect(readPane()).not.toHaveClass('min-h-0');
+  });
+
+  it('pins the exit control to the top right, above the renderer', () => {
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    const exit = screen.getByRole('button', { name: 'Exit full screen' });
+    expect(exit).toHaveAttribute('aria-keyshortcuts', 'Escape');
+    // Fixed to the viewport, so the renderer's own scroll cannot take it away,
+    // and on a layer above the surface (z-40) the renderer sits in.
+    expect(exit).toHaveClass('fixed', 'top-3', 'right-3', 'z-[41]');
+    // Inside the filling surface, after the renderer: on top in paint order too.
+    expect(readPane()).toContainElement(exit);
+    expect(
+      screen.getByTestId('stub-renderer').compareDocumentPosition(exit) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // The control that was pressed is withdrawn by the switch, so focus would
+  // otherwise fall to the body each way and the next Tab restart at the top.
+  it.each([
+    ['prose, from the pane bar', 'knowledge-base/Knowledge/Foo.md'],
+    ['full-bleed, from the page header', 'knowledge-base/Dashboards/Roadmap.html'],
+  ])('moves focus to the exit control on entry and back to Full screen on exit (%s)', async (_kind, filePath) => {
+    const user = userEvent.setup();
+    render(<ViewerHarness filePath={filePath} renderers={stubFor('.md', '.html')} />);
+    await screen.findByTestId('stub-renderer');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByRole('button', { name: 'Full screen' })).toHaveFocus();
+  });
+
+  it('moves focus into the view when the URL opens it, and to Full screen when it is left', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(screen.getByRole('button', { name: 'Full screen' })).toHaveFocus();
+  });
+
+  it('leaves focus in the renderer when the reader is working there', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+
+    await user.click(screen.getByLabelText('Scratch'));
+    await user.keyboard('{Escape}');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(screen.getByLabelText('Scratch')).toHaveFocus();
+  });
+
+  it('leaves on Escape, but a dialog opened on top takes Escape first', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Open stub dialog' }));
+    expect(screen.getByRole('dialog', { name: 'Stub dialog' })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Stub dialog' })).toBeNull();
+    expect(screen.getByTestId('location-search').textContent).toBe('?fullscreen=1');
+    expect(readPane()).toHaveAttribute('data-full-screen');
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(mounts.count).toBe(1);
+  });
+});
+
+// An Escape pressed with focus inside a page's frame never reaches the app;
+// the frame posts it (`bevel.key`, see `htmlSandbox.ts`) and the view treats
+// it as the key it is — through the same modal layer order.
+describe('FileViewer full screen: Escape from inside a page', () => {
+  function StubPage() {
+    const [dialogOpen, setDialogOpen] = useState(false);
+    return (
+      <div data-testid="stub-renderer">
+        <button type="button" onClick={() => setDialogOpen(true)}>
+          Open stub dialog
+        </button>
+        <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="Stub dialog">
+          A card over the page
+        </Dialog>
+        <iframe title="Stub page" />
+      </div>
+    );
+  }
+
+  const renderFilling = () =>
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={[{ extensions: ['.html'], Component: StubPage }]}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+  const frameWindow = () => (screen.getByTitle('Stub page') as HTMLIFrameElement).contentWindow!;
+  const postFrom = (source: MessageEventSource | null, data: unknown = { type: 'bevel.key', key: 'Escape' }) =>
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data, source }));
+    });
+  const search = () => screen.getByTestId('location-search').textContent;
+
+  it('leaves on an Escape the page hands up', () => {
+    renderFilling();
+    postFrom(frameWindow());
+    expect(search()).toBe('');
+  });
+
+  it('lets a card over the page take the handed-up Escape first, then leaves on the next', async () => {
+    const user = userEvent.setup();
+    renderFilling();
+    await user.click(screen.getByRole('button', { name: 'Open stub dialog' }));
+
+    postFrom(frameWindow());
+    expect(screen.queryByRole('dialog', { name: 'Stub dialog' })).toBeNull();
+    expect(search()).toBe('?fullscreen=1');
+
+    postFrom(frameWindow());
+    expect(search()).toBe('');
+  });
+
+  it('ignores the message from a window that is not a frame in the view, and any other key', () => {
+    renderFilling();
+    const stranger = document.createElement('iframe');
+    document.body.appendChild(stranger);
+    try {
+      postFrom(stranger.contentWindow);
+      postFrom(null);
+      postFrom(frameWindow(), { type: 'bevel.key', key: 'Enter' });
+      postFrom(frameWindow(), { type: 'bevel.navigate', href: 'Escape' });
+      expect(search()).toBe('?fullscreen=1');
+    } finally {
+      stranger.remove();
+    }
+  });
+
+  // The command menu and the single-key commands refuse to open while a modal
+  // is up (`[aria-modal="true"]`); the filling view is one, so Ctrl+K cannot
+  // open the menu unseen in the covered header.
+  it('is modal while it fills the window, and only then', async () => {
+    const user = userEvent.setup();
+    renderFilling();
+    const pane = screen.getByTestId('stub-renderer').closest('[data-read-pane]');
+    expect(document.querySelector('[aria-modal="true"]')).toBe(pane);
+    expect(screen.getByRole('dialog', { name: 'Roadmap.html, full screen' })).toBe(pane);
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(document.querySelector('[aria-modal="true"]')).toBeNull();
   });
 });

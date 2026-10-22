@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { printable } from '../../shared/printable.js';
 import { logger } from '../../shared/logging.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../workflow/index.js';
 import { probeCredentialArgs, probeGitEnv } from './connection-check.js';
 
 const log = logger('setup');

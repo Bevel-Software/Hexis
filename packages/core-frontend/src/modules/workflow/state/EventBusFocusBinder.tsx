@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { useEventBus } from './event-bus.context';
 
 /**

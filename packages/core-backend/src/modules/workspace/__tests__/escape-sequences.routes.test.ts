@@ -17,6 +17,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { createMcpRoutes } from '../../mcp/mcp.routes.js';
 import { McpService } from '../../mcp/mcp.service.js';
@@ -136,7 +137,7 @@ async function startPlatform(): Promise<Platform> {
     fakeAuth,
     createToolHandlerFactory(resolve),
     new SpillStore(join(tempDir, 'spills')),
-    new DocExtractService(join(tempDir, 'doc-extract')),
+    new DocExtractService(join(tempDir, 'doc-extract'), new WorkerDocumentExtractor()),
     allowAll,
     testKbContext({ kbDirName: KB_DIR }),
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },

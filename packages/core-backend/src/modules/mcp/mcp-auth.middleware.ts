@@ -3,14 +3,13 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import type { AuthService } from '../auth/auth.service.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/account-admission.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
-import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
+import type { AuthService } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
+import { rejectConnectionKey } from '../tool-auth/index.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
-import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
-import '../audit/audit.contract.js'; // Express Request augmentation (req.agentConnectionId)
+import '../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../audit/index.js'; // Express Request augmentation (req.agentConnectionId)
 
 /** Which of the four credentials below an MCP request was authenticated with. */
 export type McpCallerKind = 'key' | 'oauth' | 'internal' | 'session';

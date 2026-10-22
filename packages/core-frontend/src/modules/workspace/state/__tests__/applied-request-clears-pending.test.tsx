@@ -208,7 +208,6 @@ describe('an applied change request stops showing as pending — for every viewe
         source: 'suggestions/bo/knowledge',
         target: 'main',
         authorIdHash: null,
-        title: 'Upload into Plugins/x',
       }),
     );
     await waitFor(() => expect(pending(result)).toBe(true));

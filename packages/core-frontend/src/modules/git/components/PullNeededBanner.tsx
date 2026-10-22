@@ -5,7 +5,7 @@ import { useGit } from '../state/git.context';
 import { useAutoUpdate } from '../state/auto-update.context';
 import { useCrCreationPort } from '../../../core/registry';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { sanitizeErrorText } from '../services/error-messages';
 import { describePullFailure, pullFailurePhrase } from '../services/pull-failure';
 import { Button } from '../../../shared/components';

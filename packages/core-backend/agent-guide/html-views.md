@@ -44,9 +44,10 @@ name.
 
 ### Calling tools: `window.bevel.tools`
 
-On the app's file page, a page calls the tools of the person viewing it —
+On the app's file page, and on a skill's page in the Library (Skills & Tools →
+the skill → its file), a page calls the tools of the person viewing it —
 exactly the tools that person's own agent gets from the hosted MCP server,
-with the same names, answers and refusals — through four functions, each
+with the same names, answers and refusals — through five functions, each
 returning a promise:
 
 - `window.bevel.tools.searchTools(query)` — `{ tools: [names] }`: what
@@ -60,6 +61,8 @@ returning a promise:
   rejects the promise with the tool's own message.
 - `window.bevel.tools.callToolChain(code)` — what `call_tool_chain` answers
   for `code`.
+- `window.bevel.tools.uploadFile(file, options)` — what `apply_file_upload`
+  answers after the app has uploaded `file` for the viewer (below).
 
 The two kinds of name differ. `searchTools` and `toolsInfo` use the
 namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`, `notion.search`);
@@ -69,9 +72,10 @@ namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`, `notion.search`);
 fails as an unknown tool — convert it, or call it from `callToolChain`.
 
 `window.bevel.tools` is `null` wherever tools are not available: on the
-embed, on a skill page and in any preview that is not the app's file page.
-Check it before every use, and render the page without tools when it is
-`null` — never assume it is there:
+embed (a page shown on another site, or in a chat's MCP App pane), and in a
+change request's or a file history's preview of a page. Check it before
+every use, and render the page without tools when it is `null` — never
+assume it is there:
 
 ```js
 const tools = window.bevel?.tools;
@@ -97,12 +101,44 @@ is the app's, outside the frame: the page cannot draw, dismiss or answer it.
 Every call a page makes is recorded in the Audit log under the viewer, with
 the page's path as the agent; a denied call is recorded as refused.
 
+**Putting a file in: `uploadFile`.** `write_file` carries text only, so a
+spreadsheet, a document, an image or a zip the viewer picks goes in through
+`uploadFile(file, { branch, destination, mode })`. `file` is a `File` (from an
+`<input type="file">` or a drop) or a `Blob` with a `name` option; `branch`
+and `destination`, the folder it lands in, are required; `mode` is `create`
+(the default), `overwrite` or `update`, with `write_file`'s meaning. The app
+does what an agent does, as the viewer: `request_file_upload`, the bytes sent
+to the upload address, `apply_file_upload`. The file lands under its own name
+with its bytes unchanged, and a zip lands as its entries. The promise resolves
+with `apply_file_upload`'s answer, `{ destination, count, total, files }`,
+`files` naming every path (a zip's every entry) with its outcome, and
+rejects with the refusal: a file over the deployment's upload limit (the
+message names it), a destination the viewer may not write, or, when nothing
+landed, the first path's refusal, with its code in `error.code` (`exists`
+under `create`, `missing` under `update`). A refused upload writes nothing,
+and the bytes it sent are deleted at once. An upload is a writing call: the
+first one shows the card above, and Allow while open covers it and every
+later upload and writing call of the page view. The upload's token stays in
+the app; the page never sees it.
+
+```js
+const input = document.getElementById('briefing');
+input.addEventListener('change', async () => {
+  const answer = await window.bevel.tools.uploadFile(input.files[0], {
+    branch: 'main',
+    destination: '{{knowledgeBaseDir}}/Campaigns/Easter',
+  });
+  // answer.files[0].path is where it landed
+});
+```
+
 **A page that needs tools asks for them.** `window.bevel.requireTools()`
-resolves `true` at once, with nothing shown, on the app's file page. Anywhere
-else the app shows a card, "<page name> uses tools that are only available in
-the platform", with Continue without tools and Open in the platform; Open in
-the platform opens the page on the app's file page (in a new tab when the page
-is shown on another site). Either way the call resolves `false`, and the page
+resolves `true` at once, with nothing shown, on the app's file page and on a
+skill's page. Anywhere else the app shows a card,
+"<page name> uses tools that are only available in the platform", with
+Continue without tools and Open in the platform; Open in the platform opens
+the page on the app's file page (in a new tab when the page is shown on
+another site). Either way the call resolves `false`, and the page
 goes on rendering without tools:
 
 ```js

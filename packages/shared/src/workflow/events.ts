@@ -102,6 +102,24 @@ export interface FsTreeChangedEvent {
 }
 
 /**
+ * A document's text could not be extracted, just now: the parser refused it,
+ * or the extraction outlived its budget. Emitted once per FRESH failure —
+ * never for one answered from memory — so a person looking at the file's row
+ * in the explorer is told in place, and nothing is kept for later.
+ *
+ * `reason` follows "Could not be read:" in the explorer's notice. It names the
+ * file and quotes the parser; like every kind that names a path on a
+ * workspace, it is delivered only to sessions whose person may read `path`
+ * (the events route's delivery rule, judged by the access rules).
+ */
+export interface DocumentUnreadableEvent {
+  kind: 'document-unreadable';
+  workspaceId: string;
+  path: string;
+  reason: string;
+}
+
+/**
  * A commit landed locally but could not be pushed to the remote.
  *
  * Saving is deliberately not blocked on this: the commit is safe on the
@@ -201,6 +219,12 @@ export interface AgentToolCallEvent {
 
 // ── Global ───────────────────────────────────────────────────────────────────
 
+/**
+ * A change request was opened. Reaches EVERY session, so it says only that a
+ * request exists: its number, its branches and who opened it — no title and
+ * no paths, which a person may not be allowed to read. A reader fetches the
+ * request, and sees of it what the request routes show them.
+ */
 export interface ChangeRequestOpenedEvent {
   kind: 'change-request-opened';
   number: number;
@@ -208,7 +232,6 @@ export interface ChangeRequestOpenedEvent {
   target: string;
   /** Hash of the author's email (matches the marker in the CR body); null when unattributable. */
   authorIdHash: string | null;
-  title: string;
 }
 
 export interface ChangeRequestMergedEvent {
@@ -218,6 +241,16 @@ export interface ChangeRequestMergedEvent {
 
 export interface ChangeRequestRejectedEvent {
   kind: 'change-request-rejected';
+  number: number;
+}
+
+/**
+ * A request's title or description was edited. Carries no text: every
+ * viewer re-reads the request through the list and detail endpoints it
+ * already uses, which apply its own read rules.
+ */
+export interface ChangeRequestEditedEvent {
+  kind: 'change-request-edited';
   number: number;
 }
 
@@ -282,7 +315,14 @@ export interface ChangeRequestMergeFailedEvent {
 export interface ApprovalChangedEvent {
   kind: 'approval-changed';
   number: number;
+  /** The approved file, KB-repo-relative. */
   path: string;
+  /**
+   * The request's target branch: the event names a path, and whether a
+   * session's person may hear of it is judged by their read access to that
+   * path at the target — the same rule the request's own detail is scoped by.
+   */
+  targetBranch: string;
   approverUserId: string;
   change: 'added' | 'removed';
 }
@@ -341,6 +381,7 @@ export type WorkflowEventPayload =
   | LockAcquiredEvent
   | LockReleasedEvent
   | FsTreeChangedEvent
+  | DocumentUnreadableEvent
   | GitSyncFailedEvent
   | GitSyncRecoveredEvent
   | BranchSwitchedEvent
@@ -349,6 +390,7 @@ export type WorkflowEventPayload =
   | ChangeRequestOpenedEvent
   | ChangeRequestMergedEvent
   | ChangeRequestRejectedEvent
+  | ChangeRequestEditedEvent
   | ChangeRequestMergeFailedEvent
   | ChangeRequestApplyFailedEvent
   | ApprovalChangedEvent
@@ -366,6 +408,7 @@ export function isWorkspaceScoped(
     e.kind === 'lock-acquired' ||
     e.kind === 'lock-released' ||
     e.kind === 'fs-tree-changed' ||
+    e.kind === 'document-unreadable' ||
     e.kind === 'git-sync-failed' ||
     e.kind === 'git-sync-recovered'
   );

@@ -39,3 +39,5 @@ export type {
   ResolvedPrincipals,
   ResolvedReaders,
 } from './plugins.contract.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { BUNDLE_FILE } from './discovery/bundle-dialect/bundle.source.js';

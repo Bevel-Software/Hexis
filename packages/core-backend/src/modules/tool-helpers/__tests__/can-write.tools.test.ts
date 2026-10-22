@@ -17,7 +17,7 @@ import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
@@ -188,7 +188,7 @@ beforeAll(async () => {
     toolAuth,
     toolHandler,
     spills,
-    new DocExtractService(docCache),
+    new DocExtractService(docCache, new WorkerDocumentExtractor()),
     counted,
     kb,
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks, notes: new ToolDescriptionNotes() },

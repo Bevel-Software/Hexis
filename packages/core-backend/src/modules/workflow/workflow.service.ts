@@ -18,6 +18,8 @@
  */
 
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { logger } from '../../shared/logging.js';
 
 // One logger per tag this file has always written under, so a line's prefix
@@ -31,8 +33,6 @@ const mergeLog = logger('merge');
 /** Who the leftover cleanup deletes as. Its deletions skip the authorship check, and the log names them `system`. */
 const SYSTEM_ACTOR: AuthUser = { id: 'system', email: 'system', name: 'system' };
 import { promises as fs } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   AcquireLockResult,
   AuthUser,
@@ -44,7 +44,6 @@ import type {
   ChangeInput,
   ChangeRequest,
   ChangeRequestApplyFailureKind,
-  ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestUpdateResult,
   ChangeRequestState,
@@ -60,42 +59,42 @@ import type {
   MergeChangeRequestOutcome,
   MergeResolution,
   OpenChangeRequestInput,
-  PostChangeRequestCommentInput,
   RemoteSyncPullResult,
   UpdateBranchOutcome,
+  UpdateChangeRequestFields,
 } from '@bevel-software/platform-shared';
 import {
   isFolderPlaceholder,
   folderPlaceholderPath,
   isPlatformRestoreShape,
+  CHANGE_REQUEST_DESCRIPTION_MAX,
+  CHANGE_REQUEST_TITLE_MAX,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { changeRequests } from '../database/schema.js';
-import { pgErrorCode } from '../database/pg-error.js';
+import type { Database } from '../database/index.js';
+import { changeRequests, pgErrorCode } from '../database/index.js';
 import type { GitService } from './git/git.service.js';
 import { redactSecret } from '../../shared/redact-secret.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { FileLockService } from './file-lock.service.js';
+import type { IAccessControl } from '../access/index.js';
+import type { FileLockService } from './file-lock.service.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
-import { PendingCommitsService } from './pending-commits.service.js';
+import type { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
-import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
+import type { FileChangeNotifier } from '../kb-fs/index.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import {
   ChangeRequestHooks,
   type ChangeRequestPerson,
   type IChangeRequestHooks,
 } from './change-request-hooks.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   BranchAuthorshipError,
@@ -185,89 +184,40 @@ function redactTokens(msg: string, token: string | null | undefined): string {
 }
 
 /**
- * Cap on how many changed paths the `## Affected owners` CR-body block lists
- * individually. The block is passed to `gh pr create --body`, an argv string,
- * so an uncapped per-path list on a large changeset (hundreds/thousands of
- * files) makes the whole command exceed the OS arg limit and fail with E2BIG.
+ * Only an open request's title and description may change: an applied one is
+ * history, and a closed one is no longer asking anything. A worded 409 either
+ * way, so the refusal says which.
  */
-export const MAX_AFFECTED_PATHS_LISTED = 50;
-
-type EligibleWriters = Map<
-  string,
-  { roles: string[]; users: { name: string; email: string }[] }
->;
-
-const formatWriter = (u: { name: string; email: string }): string =>
-  u.name ? `${u.name} <${u.email}>` : u.email;
-
 /**
- * Render the `## Affected owners` block for the CR body: eligible approvers per
- * changed path, but only the first `maxListed` paths are listed individually;
- * the overflow is collapsed into a single deduped summary of every eligible
- * approver across the change. This keeps the body bounded regardless of how
- * many files the change touches (see {@link MAX_AFFECTED_PATHS_LISTED}).
- * Returns '' when no path has resolvable eligibility. The empty-folder
- * placeholder is never listed or counted: it is not content, and no one
- * reviews it.
+ * A description — on opening, a replacement, or what an append leaves — is
+ * at most {@link CHANGE_REQUEST_DESCRIPTION_MAX} characters; a worded 400
+ * past it. Undefined (no description given) always fits.
  */
-export function formatAffectedOwnersBlock(
-  paths: string[],
-  resolved: EligibleWriters,
-  maxListed: number = MAX_AFFECTED_PATHS_LISTED,
-): string {
-  const listed: string[] = [];
-  const allRoles = new Set<string>();
-  const allUsers = new Map<string, string>(); // email -> display, deduped
-  let eligible = 0;
-  for (const p of paths) {
-    if (isFolderPlaceholder(p)) continue;
-    const info = resolved.get(p);
-    if (!info) continue;
-    const parts: string[] = [];
-    if (info.roles.length > 0) {
-      info.roles.forEach((r) => allRoles.add(r));
-      parts.push(info.roles.join(', '));
-    }
-    if (info.users.length > 0) {
-      info.users.forEach((u) => allUsers.set(u.email, formatWriter(u)));
-      parts.push(info.users.map(formatWriter).join(', '));
-    }
-    if (parts.length === 0) continue;
-    eligible++;
-    if (listed.length < maxListed) listed.push(`- \`${p}\` — ${parts.join('; ')}`);
-  }
-  if (eligible === 0) return '';
-
-  const out = ['## Affected owners', '', ...listed];
-  if (eligible > listed.length) {
-    const summary = [
-      allRoles.size > 0 ? [...allRoles].sort().join(', ') : '',
-      allUsers.size > 0 ? [...allUsers.values()].sort().join(', ') : '',
-    ].filter((s) => s.length > 0);
-    out.push(
-      '',
-      `…and ${eligible - listed.length} more changed path(s). ` +
-        `All eligible approvers across this change: ${summary.join('; ')}`,
+function assertDescriptionFits(description: string | undefined): void {
+  if (description !== undefined && description.length > CHANGE_REQUEST_DESCRIPTION_MAX) {
+    throw new WorkflowValidationError(
+      `A change request's description is at most ${CHANGE_REQUEST_DESCRIPTION_MAX} characters; this one would have ${description.length}.`,
     );
   }
-  return out.join('\n');
+}
+
+function assertEditable(state: string): void {
+  if (state === 'merged') {
+    throw new WorkflowDomainError(
+      'This change request has already been applied; its title and description can no longer be changed.',
+      409,
+    );
+  }
+  if (state !== 'open') {
+    throw new WorkflowDomainError(
+      'This change request is closed; its title and description can no longer be changed.',
+      409,
+    );
+  }
 }
 
 /** What the access layer answers for the changed paths of a request, or null when it cannot. */
 type EligibleWritersAtRef = Awaited<ReturnType<IAccessControl['eligibleWritersForPathsAtRef']>>;
-
-/**
- * The `## Affected owners` markdown block appended to the CR body, from the
- * eligibility already resolved. The per-path list is capped (see
- * {@link formatAffectedOwnersBlock}) so the body stays within the
- * `gh pr create --body` arg limit on large changesets. The empty string when
- * nothing was resolvable — keeps the body clean rather than printing a stub
- * heading.
- */
-function buildAffectedOwnersBlock(paths: string[], resolved: EligibleWritersAtRef): string {
-  if (!resolved || resolved.size === 0) return '';
-  return formatAffectedOwnersBlock(paths, resolved);
-}
 
 /**
  * The one question the open asks of accounts: which of these addresses have
@@ -761,7 +711,6 @@ export class WorkflowService implements IWorkflowService {
             source: summary.branch,
             target: summary.base,
             authorIdHash: summary.authorId ?? null,
-            title: summary.title,
           });
         }
       }
@@ -2331,6 +2280,7 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError('source and target branches must differ');
     }
     if (!input.title?.trim()) throw new WorkflowValidationError('title is required');
+    assertDescriptionFits(input.description?.trim());
     if (this.kb.isProtectedBranch(input.sourceBranch)) {
       throw new WorkflowValidationError(
         `Cannot open a change request *from* a protected branch ("${input.sourceBranch}").`,
@@ -2417,26 +2367,21 @@ export class WorkflowService implements IWorkflowService {
     const workspacePath = await this.workspaceService.getWorkspacePath(workspaceId);
     const cwd = path.join(workspacePath, this.kbDirName);
 
-    // Touched paths between target and source — basis for the
-    // affected-owners block we append to the CR body. We compute it
-    // ourselves rather than waiting for GitHub to expose `pr.files`
-    // (which only populates after the PR exists). Three-dot range
-    // matches what `gh pr create` will eventually show as the diff.
+    // Touched paths between target and source — the diff the request will
+    // surface — and the eligible approvers per path at the target, resolved
+    // once for the opened event, which hands the same people to the
+    // deployment's listeners. None of it is written into the body: the request
+    // is a DB row whose author is a column, whose body is the description and
+    // nothing else, and whose access-request level and note are columns of
+    // their own. Who must approve each file is resolved live, per file,
+    // whenever the request is read.
     const touchedPaths = await this.listChangedPathsBetweenBranches(
       cwd,
       input.targetBranch,
       input.sourceBranch,
     );
-    // Resolved once: the body lists this eligibility, and the opened event
-    // hands the same people to the deployment's listeners.
     const eligible = await this.eligibleWritersFor(workspaceId, input.targetBranch, touchedPaths);
-    const affectedOwnersBlock = buildAffectedOwnersBlock(touchedPaths, eligible);
-
-    // The change request is a plain DB row now — no provider PR. Author is a
-    // real column (no hidden body marker needed, since nothing runs as a shared
-    // service account anymore).
-    const description = input.description?.trim() ?? '';
-    const body = [description, affectedOwnersBlock].filter((s) => s.length > 0).join('\n\n');
+    const note = input.accessRequest?.note?.trim();
 
     let prNumber: number;
     try {
@@ -2446,10 +2391,12 @@ export class WorkflowService implements IWorkflowService {
           sourceBranch: input.sourceBranch,
           targetBranch: input.targetBranch,
           title: input.title.trim(),
-          body,
+          body: input.description?.trim() ?? '',
           authorEmail: canonicalEmail(user.email),
           authorEmailBidx: user.email,
           authorName: user.name,
+          accessRequestLevel: input.accessRequest?.level ?? null,
+          accessRequestNote: note ? note : null,
         })
         .returning({ number: changeRequests.number });
       prNumber = row.number;
@@ -2506,7 +2453,6 @@ export class WorkflowService implements IWorkflowService {
       source: input.sourceBranch,
       target: input.targetBranch,
       authorIdHash: hashEmail(user.email),
-      title: input.title,
     } as const;
     if (pushRefused) {
       // The request exists; its detail reads the published refs, which the
@@ -2862,37 +2808,6 @@ export class WorkflowService implements IWorkflowService {
     return { ...refreshed, updatedPaths };
   }
 
-  listComments(number: number): Promise<ChangeRequestComment[]> {
-    return this.reviewWorkflow.listComments(number);
-  }
-
-  async postComment(
-    number: number,
-    user: AuthUser,
-    input: PostChangeRequestCommentInput,
-    headSha: string,
-  ): Promise<ChangeRequestComment> {
-    const comment = await this.reviewWorkflow.postComment(number, user, input, headSha);
-    this.prs.invalidateDetailCache(number);
-    return comment;
-  }
-
-  async editComment(
-    commentId: string,
-    number: number,
-    user: AuthUser,
-    body: string,
-  ): Promise<ChangeRequestComment> {
-    const updated = await this.reviewWorkflow.editComment(commentId, number, user, body);
-    this.prs.invalidateDetailCache(number);
-    return updated;
-  }
-
-  async deleteComment(commentId: string, number: number, user: AuthUser): Promise<void> {
-    await this.reviewWorkflow.deleteComment(commentId, number, user);
-    this.prs.invalidateDetailCache(number);
-  }
-
   async approveFile(
     number: number,
     path: string,
@@ -2928,6 +2843,7 @@ export class WorkflowService implements IWorkflowService {
       kind: 'approval-changed',
       number,
       path,
+      targetBranch: baseBranch,
       approverUserId: user.id,
       change: 'added',
     });
@@ -2959,6 +2875,7 @@ export class WorkflowService implements IWorkflowService {
       kind: 'approval-changed',
       number,
       path,
+      targetBranch: baseBranch,
       approverUserId: user.id,
       change: 'removed',
     });
@@ -3541,6 +3458,204 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * The one rule for who may DECIDE an open change request — close it
+   * (`rejectChangeRequest`) or rewrite what it asks (`updateChangeRequest`):
+   *   - its author (the stored author hash, never anything the caller sends),
+   *   - an admin (write on `roles.yaml` at `origin/<base>`), or
+   *   - the holder of write on every file it changes at `origin/<base>`,
+   *     i.e. anyone who may merge it.
+   * Returns which grant the caller holds, or `null` for none.
+   *
+   * The grants beyond authorship are read at `origin/<base>`, never a local
+   * ref, behind a STRICT fetch: a right revoked a moment ago must not still
+   * pass against a stale tree, so an unreachable origin is a worded 409, not
+   * a refusal. The path list comes from a fresh detail read, so the rule
+   * applies to the current head. A base that cannot be read, or a detail read
+   * that fails (one of the request's branches is gone), kicks the
+   * deleted-branch sweep; see `kickDeletedBranchSweep`.
+   */
+  private async changeRequestDecisionGrant(
+    number: number,
+    user: AuthUser,
+    authorIdHash: string | null,
+    baseBranch: string,
+    resolveWorkspaceId: () => Promise<string>,
+  ): Promise<'author' | 'admin' | 'writes-every-file' | null> {
+    if (authorIdHash && authorIdHash === hashEmail(user.email)) return 'author';
+    const workspaceId = await resolveWorkspaceId();
+    // `force` as well as `strict`: `strict` alone trusts a fetch from
+    // within the cache window, so a right revoked inside it — with origin
+    // down for the refresh — would still pass against the older refs.
+    try {
+      await this.workspaceService.ensureRemotesFetched(workspaceId, { strict: true, force: true });
+    } catch {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `Could not verify the base branch "${baseBranch}" — origin was unreachable. Retry in a moment.`,
+        409,
+      );
+    }
+    const isAdmin = await this.accessControl.canWriteAtRef(
+      workspaceId,
+      `origin/${baseBranch}`,
+      user.email,
+      'roles.yaml',
+    );
+    if (isAdmin === true) return 'admin';
+    // A base that cannot be read decides nothing further: the per-file check
+    // below reads the same tree and would answer the same, after a detail
+    // read and a batch lookup done for nothing.
+    if (isAdmin === null) {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `The base branch "${baseBranch}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
+        409,
+      );
+    }
+    let detail;
+    try {
+      detail = await this.prs.getPrDetail(number, {
+        fresh: true,
+        workspaceId,
+        viewerEmail: user.email,
+        // Only `files[].path` is read below; a patch per file would be one
+        // git subprocess each, generated for nothing.
+        patches: false,
+      });
+    } catch (err) {
+      this.kickDeletedBranchSweep();
+      throw err;
+    }
+    const paths = detail?.files.map((f) => f.path) ?? [];
+    if (paths.length > 0) {
+      const writeMap = await this.accessControl.canWriteBatchAtRef(
+        workspaceId,
+        `origin/${baseBranch}`,
+        user.email,
+        paths,
+      );
+      if (writeMap && paths.every((p) => writeMap.get(p) === true)) return 'writes-every-file';
+    }
+    return null;
+  }
+
+  /**
+   * Change an OPEN request's title and/or description. Who may: the people
+   * who may close it — `changeRequestDecisionGrant`, the one rule both verbs
+   * share. What a request asks belongs to the same people who may decide it.
+   *
+   * `description` replaces the body whole — the body is the description and
+   * nothing else; `appendDescription` adds a paragraph after it as stored.
+   */
+  async updateChangeRequest(
+    number: number,
+    user: AuthUser,
+    input: UpdateChangeRequestFields,
+  ): Promise<ChangeRequest> {
+    const title = input.title === undefined ? undefined : input.title.trim();
+    const description = input.description === undefined ? undefined : input.description.trim();
+    const appended = input.appendDescription === undefined ? undefined : input.appendDescription.trim();
+    if (title === undefined && description === undefined && appended === undefined) {
+      throw new WorkflowValidationError('Give a new title, a new description, or both.');
+    }
+    if (description !== undefined && appended !== undefined) {
+      throw new WorkflowValidationError('Give either a new description or text to append to it, not both.');
+    }
+    if (title !== undefined && title.length === 0) {
+      throw new WorkflowValidationError('A change request needs a title; it cannot be empty.');
+    }
+    if (title !== undefined && title.length > CHANGE_REQUEST_TITLE_MAX) {
+      throw new WorkflowValidationError(
+        `A change request's title is at most ${CHANGE_REQUEST_TITLE_MAX} characters; this one has ${title.length}.`,
+      );
+    }
+    // A replacement is measured here; an append is measured on what it
+    // leaves, inside the transaction, since that depends on the body as
+    // stored.
+    assertDescriptionFits(description);
+    const summary = await this.prs.getPr(number);
+    if (!summary) throw new WorkflowDomainError('change request not found', 404);
+    assertEditable(summary.state);
+
+    // The grants beyond authorship are read in the base branch's own workspace,
+    // resolved only once authorship has not already decided: an author's edit
+    // touches no workspace. Any failure to resolve it kicks the deleted-branch
+    // sweep, as delete does.
+    const grant = await this.changeRequestDecisionGrant(
+      number,
+      user,
+      summary.authorId ?? null,
+      summary.base,
+      async () => {
+        try {
+          return (await this.workspaceService.getOrCreateForBranch(summary.base)).id;
+        } catch (err) {
+          this.kickDeletedBranchSweep();
+          throw err;
+        }
+      },
+    );
+    if (grant === null) {
+      throw new WorkflowDomainError(
+        "Only the request's author, an admin, or someone who may approve every file it changes can edit its title and description.",
+        403,
+      );
+    }
+
+    // The body is rewritten from the row as stored, not from the summary read
+    // above, inside one transaction holding the row's lock (`FOR UPDATE`) from
+    // the read to the write: a merge or close that won the race leaves no open
+    // row and refuses the edit instead of being written over, and an edit
+    // racing this one waits for it and then applies to the body it left — so
+    // two appends racing each other both land. The lock, never a comparison of
+    // the stored body, is what serialises them: `body` is encrypted with a
+    // fresh IV on every write, so its ciphertext never equals a re-encryption
+    // of the same text.
+    const updated = await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ body: changeRequests.body })
+        .from(changeRequests)
+        .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+        .limit(1)
+        .for('update');
+      if (!row) return false;
+      // The body IS the description: a replacement is written as given, an
+      // append goes after the text as stored. An access request's level and
+      // note live on their own columns and are never touched by an edit.
+      const body =
+        appended === undefined
+          ? description
+          : [row.body.trim(), appended].filter((s) => s.length > 0).join('\n\n');
+      // What an append leaves is measured against the same ceiling as a
+      // replacement; a refusal here rolls the transaction back and writes
+      // nothing.
+      assertDescriptionFits(body);
+      const written = await tx
+        .update(changeRequests)
+        .set({
+          ...(title !== undefined ? { title } : {}),
+          ...(body !== undefined ? { body } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+        .returning({ id: changeRequests.id });
+      return written.length > 0;
+    });
+    this.prs.invalidateDetailCache(number);
+    if (!updated) {
+      const fresh = await this.prs.getPr(number);
+      if (!fresh) throw new WorkflowDomainError('change request not found', 404);
+      assertEditable(fresh.state);
+      throw new WorkflowDomainError('This change request changed while it was being edited. Retry in a moment.', 409);
+    }
+    crLog.info(`#${number} title/description edited`);
+    this.events?.emit({ kind: 'change-request-edited', number });
+    const fresh = await this.prs.getPr(number);
+    if (!fresh) throw new WorkflowDomainError('change request not found', 404);
+    return fresh;
+  }
+
+  /**
    * Close an open change request whose diff has EMPTIED — everything it
    * proposed has since landed on the target, been reverted, or been undone on
    * its own branch — and retire its source branch, exactly as a merge would
@@ -4046,20 +4161,13 @@ export class WorkflowService implements IWorkflowService {
 
 
   /**
-   * Reject (close-without-merging) a change request. Per PLAN.md spec, the
-   * authorized set is:
-   *   - the CR author (hash-matched against the body marker), OR
-   *   - any user with write permission to *every* changed file on the
-   *     target branch, OR
-   *   - an admin (write on `roles.yaml` at `origin/<target>`).
+   * Reject (close-without-merging) a change request. Who may: the people
+   * `changeRequestDecisionGrant` names — its author, an admin, or the holder
+   * of write on every file it changes at `origin/<target>`.
    *
-   * The first and third are enforced by the underlying `cancelPr`. The
-   * second is the workflow's broader rule; we check it here and, on
-   * success, spoof `authorIdHash` to `hashEmail(user.email)` so `cancelPr`
-   * accepts the call via its existing "viewer is author" branch. The
-   * spoofing is safe because no caller outside this method can construct
-   * an `authorIdHash` that matches its own email's hash — `cancelPr`
-   * receives the hash via this internal call only.
+   * A caller holding a grant reaches the underlying `cancelPr` as the author
+   * (its `authorIdHash` is set to the caller's own hash); one holding none is
+   * passed through unchanged, and `cancelPr` refuses it.
    */
   async rejectChangeRequest(
     number: number,
@@ -4070,49 +4178,22 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
   ): Promise<CancelChangeRequestResult> {
     let effectiveAuthorIdHash = authorIdHash;
-    const callerHash = hashEmail(user.email);
-    const callerIsAuthor = !!(authorIdHash && authorIdHash === callerHash);
-
-    if (!callerIsAuthor) {
-      // Broader rule: write perm on every changed file at origin/<target>.
-      // The path list comes from the PR detail — fetch fresh so the rule
-      // applies against the current head (a stale list would let a user
-      // reject a CR whose files they no longer all own).
-      let detail;
-      try {
-        detail = await this.prs.getPrDetail(number, {
-          fresh: true,
-          workspaceId,
-          viewerEmail: user.email,
-          // Only `files[].path` is read below; a patch per file would be one
-          // git subprocess each, generated for nothing, on every reject by a
-          // non-author.
-          patches: false,
-        });
-      } catch (err) {
-        // The detail read resolves both branch tips (`resolvePrShas`), so a
-        // request one of whose branches is gone fails HERE, on the verb that
-        // exists to get rid of it. Kick the sweep (which proves the absence
-        // and closes the stranded rows) and surface the failure; see
-        // `kickDeletedBranchSweep`.
-        this.kickDeletedBranchSweep();
-        throw err;
-      }
-      const paths = detail?.files.map((f) => f.path) ?? [];
-      if (paths.length > 0) {
-        const writeMap = await this.accessControl.canWriteBatchAtRef(
-          workspaceId,
-          `origin/${baseBranch}`,
-          user.email,
-          paths,
-        );
-        const writesAll = !!writeMap && paths.every((p) => writeMap.get(p) === true);
-        if (writesAll) {
-          // Spoof so the underlying `cancelPr` authorizes via its viewer-
-          // is-author branch. The admin branch (write on roles.yaml) still
-          // works alongside — `cancelPr` checks both.
-          effectiveAuthorIdHash = callerHash;
-        }
+    // A request that is no longer open is refused by `cancelPr` with its own
+    // already-applied / already-cancelled answer; no grant is read for it.
+    if (state === 'open') {
+      const grant = await this.changeRequestDecisionGrant(
+        number,
+        user,
+        authorIdHash,
+        baseBranch,
+        async () => workspaceId,
+      );
+      if (grant !== null) {
+        // Spoof so the underlying `cancelPr` authorizes via its viewer-is-
+        // author branch. The spoofing is safe because no caller outside this
+        // method can construct an `authorIdHash` that matches its own email's
+        // hash — `cancelPr` receives the hash via this internal call only.
+        effectiveAuthorIdHash = hashEmail(user.email);
       }
     }
 

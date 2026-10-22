@@ -424,6 +424,33 @@ describe('buildSandboxedHtml', () => {
     expect(out).toContain('jumpTo(href)');
   });
 
+  // A key pressed inside the frame never reaches the app, so the app's
+  // Escape (a card's close, leaving full screen) would go deaf once the
+  // reader clicked into the page. The frame hands the parent an Escape the
+  // page did not use, and nothing else.
+  it('hands the parent an Escape the page left alone, and no other key', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape');
+    await bridge.press('a');
+    await bridge.press('Enter');
+    expect(bridge.posted).toEqual([{ type: 'bevel.key', key: 'Escape' }]);
+  });
+
+  it('keeps an Escape the page cancelled to the page', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape', { alreadyPrevented: true });
+    expect(bridge.posted).toEqual([]);
+  });
+
+  // A handler the page adds after the bridge ran comes after the bridge's in
+  // the same phase; the page's word on the key is final only once the
+  // dispatch is over, so that is when the bridge reads it.
+  it('keeps an Escape to the page when a handler of its own cancels it after the bridge\'s', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape', { preventedAfter: true });
+    expect(bridge.posted).toEqual([]);
+  });
+
   it('injects no height reporter: the frame tells its parent where a link goes, never how tall it is', () => {
     // The frame's height is the reader's (`frameResizeHandle.ts`), never
     // read off the page: a page laid out in the frame and measured there
@@ -600,25 +627,57 @@ describe('buildSandboxedHtml', () => {
 });
 
 describe('window.bevel.tools in the frame', () => {
-  type Tools = Record<'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain', (...a: unknown[]) => Promise<unknown>>;
+  type Tools = Record<'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain' | 'uploadFile', (...a: unknown[]) => Promise<unknown>>;
   const toolsOf = (bridge: ReturnType<typeof runBridge>) => bridge.bevel.tools as Tools | null;
 
-  it('has the four functions where the app answers tools, each posting a call with a request id', async () => {
+  it('has the five functions where the app answers tools, each posting a call with a request id', async () => {
     const bridge = runBridge({}, { toolBridge: true });
     const tools = toolsOf(bridge)!;
-    expect(Object.keys(tools).sort()).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo']);
+    expect(Object.keys(tools).sort()).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo', 'uploadFile']);
     void tools.searchTools('change request');
     void tools.toolsInfo(['read_file']);
     void tools.callTool('read_file', { body: { path: 'a.md' } });
     void tools.callToolChain('return 1');
+    const file = new Blob(['a,b\n']);
+    void tools.uploadFile(file, { name: 'Budget.csv', branch: 'main', destination: 'Data', mode: 'overwrite', all: true });
     const posted = bridge.posted as Array<{ type: string; requestId: string; fn: string; args: unknown[] }>;
     expect(posted.map((m) => [m.type, m.fn, m.args])).toEqual([
       ['bevel.tool.call', 'searchTools', ['change request']],
       ['bevel.tool.call', 'toolsInfo', [['read_file']]],
       ['bevel.tool.call', 'callTool', ['read_file', { body: { path: 'a.md' } }]],
       ['bevel.tool.call', 'callToolChain', ['return 1']],
+      // The file itself, for the parent to clone; of the options, only the four it reads.
+      ['bevel.tool.call', 'uploadFile', [file, { name: 'Budget.csv', branch: 'main', destination: 'Data', mode: 'overwrite' }]],
     ]);
-    expect(new Set(posted.map((m) => m.requestId)).size).toBe(4);
+    expect((posted[4]!.args as unknown[])[0]).toBe(file);
+    expect(new Set(posted.map((m) => m.requestId)).size).toBe(5);
+  });
+
+  it('stamps every message with the identity the app built the document with, and none without one', async () => {
+    // The real runtime, given the identity the app minted for this document:
+    // tool calls and requireTools alike carry it, so the app can tell this
+    // document's messages from a replaced document's. Built with `true`, the
+    // runtime posts no identity; built with `tools: false`, the document has
+    // no tools but still asks `requireTools` as itself.
+    const named = runBridge({}, { toolBridge: { documentId: 'doc-abc' } });
+    void toolsOf(named)!.callTool('read_file', { body: { path: 'a.md' } });
+    void (named.bevel.requireTools as () => Promise<boolean>)();
+    expect((named.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tool.call', 'doc-abc'],
+      ['bevel.tools.require', 'doc-abc'],
+    ]);
+
+    const anonymous = runBridge({}, { toolBridge: true });
+    void toolsOf(anonymous)!.callTool('read_file', {});
+    void (anonymous.bevel.requireTools as () => Promise<boolean>)();
+    expect((anonymous.posted as Array<Record<string, unknown>>).every((m) => !('documentId' in m))).toBe(true);
+
+    const toolless = runBridge({}, { toolBridge: { documentId: 'doc-xyz', tools: false } });
+    expect(toolsOf(toolless)).toBeNull();
+    void (toolless.bevel.requireTools as () => Promise<boolean>)();
+    expect((toolless.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tools.require', 'doc-xyz'],
+    ]);
   });
 
   it("resolves with the parent's answer and rejects with its error and code, matched by request id", async () => {

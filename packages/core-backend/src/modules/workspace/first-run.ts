@@ -32,7 +32,7 @@ import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { NEW_KNOWLEDGE_BASE_SECTION_ID } from '../agent-guide/index.js';
-import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
+import { BevelIgnoreStack } from '../kb-fs/index.js';
 
 /**
  * The starter guide the template seeds at the top of the knowledge folder

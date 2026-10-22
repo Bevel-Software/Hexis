@@ -3,9 +3,8 @@ import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
-import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
-import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
-import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
+import type { IToolRegistry, JsonSchema } from '../tool-registry/index.js';
+import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler, BRANCH_INPUT, toolDef, CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/index.js';
 import {
   notifyAgentRead,
   assertAgentWriteAllowed,
@@ -13,9 +12,8 @@ import {
   type AgentAccessGate,
 } from './agent-access.gate.js';
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts } from '../tool-helpers/index.js';
-import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
+import type { ToolHandlerFactory } from '../tool-helpers/index.js';
+import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
@@ -27,19 +25,17 @@ import {
   isInsideRepo,
   normalizePathArgs,
   normalizeWorkspacePath,
-} from '../kb-fs/repo-path.js';
-import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
+} from '../kb-fs/index.js';
+import { GitGuardedFilesystem, MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/index.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
+import { isRolesYamlPath, toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
-import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
-import { accessRoster, resolveAccessView } from '../access/access-view.js';
-import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/access-mutation.service.js';
-import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
+import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
+import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry, type ReadResult } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
@@ -59,26 +55,25 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
 import {
   AGENT_GUIDE_FILE,
   isAgentGuidePath,
   isManagedGuide,
   withPlatformGuideAppended,
   type AgentGuideReader,
-} from '../agent-guide/agent-guide.js';
+} from '../agent-guide/index.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { endsTheSearch, type IPatternMatcher, type IPatternSearch } from './pattern-matcher.contract.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
-import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
+import type { IChangeReadGate } from '../access-model/index.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
-import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
+import type { AgentUploadStore} from './agent-upload.store.js';
+import { type ClaimedUpload } from './agent-upload.store.js';
 import type { IAgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
 import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
@@ -311,6 +306,8 @@ const UNCACHED_DOCS_PER_GREP = 20;
 /** Per-grep-walk extraction state: the shared budget + how many documents it left unsearched. */
 interface DocGrepState {
   readers: FileReaderRegistry;
+  /** The workspace searched — where a document that fails to extract during the walk is reported. */
+  origin: ReadOrigin;
   uncachedBudget: number;
   skippedUncached: number;
 }
@@ -651,7 +648,7 @@ function modeOf(a: Record<string, unknown>): WriteMode {
 type FileGrepOutcome =
   /** Its text was searched; any matches are in `out`. */
   | 'searched'
-  /** No searchable text at all: an image, binary content, a corrupt document. */
+  /** No searchable text at all: an image, binary content, a corrupt document (remembered or fresh). */
   | 'no-text'
   /** A cold document the per-call extraction budget could not afford (counted in `docs`). */
   | 'budget-skipped';
@@ -680,19 +677,26 @@ async function grepOneFile(
 ): Promise<FileGrepOutcome> {
   const reader = docs.readers.readerFor(path);
   const bytes = asBytes(await fs.readFile(path));
-  let content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
-  if (content === null && reader instanceof DocumentReader) {
-    // Cold document (extraction not yet cached): cached ones above are free,
-    // extracting draws on the per-walk budget (see UNCACHED_DOCS_PER_GREP) —
-    // beyond it the search skips the document and counts it.
-    if (docs.uncachedBudget <= 0) {
-      docs.skippedUncached++;
-      return 'budget-skipped';
+  let content: string | null;
+  if (reader instanceof DocumentReader) {
+    // What the cache remembers is free — an extraction is searched, a failure
+    // (a damaged file, or one that overran its budget within the hour) is
+    // skipped without extracting it again. A cold document draws on the
+    // per-walk budget (see UNCACHED_DOCS_PER_GREP) — beyond it the search
+    // skips the document and counts it.
+    let res = await reader.cachedRead(bytes, path);
+    if (res === undefined) {
+      if (docs.uncachedBudget <= 0) {
+        docs.skippedUncached++;
+        return 'budget-skipped';
+      }
+      docs.uncachedBudget--;
+      res = await reader.read(bytes, path, docs.origin);
     }
-    docs.uncachedBudget--;
-    const res = await reader.read(bytes, path);
-    // A non-text outcome is a corrupt document — nothing searchable.
+    // A non-text outcome is a document that could not be read — nothing searchable.
     content = res.kind === 'text' ? res.text : null;
+  } else {
+    content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
   }
   if (content === null) return 'no-text';
   const lines = content.split('\n');
@@ -1878,7 +1882,7 @@ export function registerWorkspaceTools(
     // the access gate and the read hook above — a document read is still a
     // KB read. ONE registry dispatch picks the reader by extension.
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-    return { result: await readers.readerFor(p).read(bytes, p), guide: null };
+    return { result: await readers.readerFor(p).read(bytes, p, { workspaceId: workspaceIdForBranch(branch) }), guide: null };
   };
 
   /**
@@ -2228,6 +2232,7 @@ export function registerWorkspaceTools(
           description: 'Files only: where `mime` came from. `fallback` means no type was detected.',
         },
         textEditable: { type: 'boolean', description: 'Files only: whether write_file/write_files/edit_file accept this file as it is now.' },
+        unreadable: str('Documents only, and only when its text could not be extracted: the one-line notice read_file answers for it.'),
         mimeNote: str('Present when `mimeSource` is `fallback`: says the MIME type is a fallback, not a detected type.'),
         platformGuide: {
           type: 'boolean',
@@ -2382,7 +2387,16 @@ export function registerWorkspaceTools(
       const bytes = needsContent(reader)
         ? await orNotFound(p, async () => asBytes(await fs.readFile(p)))
         : undefined;
-      return { ...out, ...fileTypeOf(reader, p, bytes) };
+      // A document whose extraction failed answers that failure's notice here
+      // too, from what the cache remembers — never by extracting, so stat
+      // stays as cheap as it was. The notice quotes the parser, so only a
+      // caller who may read the file hears it.
+      const type = fileTypeOf(reader, p, bytes);
+      if (reader instanceof DocumentReader && verdicts.read) {
+        const remembered = await reader.cachedRead(await orNotFound(p, async () => asBytes(await fs.readFile(p))), p);
+        if (remembered?.kind === 'refusal') return { ...out, ...type, unreadable: remembered.message };
+      }
+      return { ...out, ...type };
     },
   });
 
@@ -2445,7 +2459,12 @@ export function registerWorkspaceTools(
         const gate = readGateFor(a.branch as string, ctx);
         const out: { path: string; line: number; text: string }[] = [];
         const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
-        const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
+        const docs: DocGrepState = {
+          readers,
+          origin: { workspaceId: workspaceIdForBranch(a.branch as string) },
+          uncachedBudget: UNCACHED_DOCS_PER_GREP,
+          skippedUncached: 0,
+        };
         // The empty root is the workspace itself — always a directory, and never
         // worth a stat.
         // A placeholder named on its own is searched as what it is to every

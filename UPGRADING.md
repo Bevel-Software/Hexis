@@ -33,6 +33,33 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+### A change request's body is its description (0.32+)
+
+From 0.32 a change request's stored body is exactly its description. Until
+now the app appended an "Affected owners" block (the eligible approvers at
+the moment of opening) to every request, and kept an access request's level
+and note in hidden markers inside its text. The first start on this release
+rewrites every stored request once: the level and the note move to columns
+of their own, the generated block and the markers are removed, and the
+description is kept as it was written. The log says how many were moved, and
+the pass records itself in the new `data_migrations` table so it never runs
+twice. Nothing in the compose files changes.
+
+Two things to know:
+
+- **Stop the old version before the new one starts.** The rewrite runs once.
+  A deployer that starts the new container, waits for it to be healthy and
+  only then stops the old one (a rolling update) leaves the old version
+  opening requests in the old shape after the rewrite, and those are never
+  rewritten: their descriptions keep the generated block. Turn rolling
+  updates off for this release, or stop the app first — as the 0.24
+  upgrade required.
+- **Change-request comments are gone.** No screen ever showed one, so
+  anything posted through the API or an agent tool was invisible; the routes,
+  the `post_change_request_comment` and `list_change_request_comments` tools
+  and the `pr_comments` table are removed. A request's title and description
+  can be edited in place instead, in the app and with `update_change_request`.
+
 ### Branch workspaces are worktrees of one repository (0.30+)
 
 From 0.30 a deployment holds ONE git repository per knowledge base, on the

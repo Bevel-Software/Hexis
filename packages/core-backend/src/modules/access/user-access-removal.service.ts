@@ -37,7 +37,7 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
@@ -55,11 +55,8 @@ import {
   stripComment,
   type ParsedEntry,
   type Verb,
-} from '../access-model/access-grammar.js';
-import { spliceRevoke } from '../access-model/access-splice.js';
-import { scanFrontmatter } from '../access-model/frontmatter-lines.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
-import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+} from '../access-model/index.js';
+import { spliceRevoke, scanFrontmatter, GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile, makeRolesYamlWriteValidator } from '../access-model/index.js';
 import { emitRolesModel, isGroupRefMember, parseRolesModel } from './roles-edit.js';
 import { emitGroupsModel, parseGroupsModel } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';

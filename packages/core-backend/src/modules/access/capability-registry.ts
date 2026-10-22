@@ -18,7 +18,7 @@
  * really a group; the roles admin surface flags it with a convert action.
  */
 
-import { ADMIN_CANONICAL, canonicalRoleName } from '../access-model/access-grammar.js';
+import { ADMIN_CANONICAL, canonicalRoleName } from '../access-model/index.js';
 
 /** A capability an app surface gates on. Grow this union with the gates. */
 export type Capability =

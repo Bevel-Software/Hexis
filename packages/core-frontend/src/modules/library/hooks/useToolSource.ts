@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { readFileOnBranch } from '../../change-requests/services/change-requests.api';
+import { readFileOnBranch } from '../../change-requests';
 
 /**
  * The raw bytes of a tool's definition file, read LAZILY — nothing is asked

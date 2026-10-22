@@ -15,7 +15,7 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
-import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
+import { BevelIgnoreStack, assertRepoRootNameFree, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
 import {
   DestinationTakenError,
   inspectDestination,
@@ -23,9 +23,8 @@ import {
 } from '../../shared/rename-no-replace.js';
 import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../workflow/index.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
-import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isZipNoiseEntry, readZipEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
 import {
@@ -42,8 +41,6 @@ import {
   WorkflowDomainError,
   isMissingRemoteBranchFailure,
 } from '../../shared/domain-errors.js';
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { normalizeRepositoryAddress, sameRepository } from '../kb-fs/remote-url.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
@@ -53,8 +50,8 @@ import {
   credentialHelperValue,
   cloneTrackingConfigArgs,
   SAFE_IMPLICIT_FETCH_ARGS,
-} from '../kb-fs/clone-config.js';
-import type { IDiffService } from '../diff/diff.interface.js';
+} from '../kb-fs/index.js';
+import type { IDiffService } from '../diff/index.js';
 
 /** One held path turn: the settled tail of the nested mutations launched inside it. */
 interface HeldTurn {

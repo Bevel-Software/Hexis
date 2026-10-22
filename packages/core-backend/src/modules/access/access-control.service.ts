@@ -7,9 +7,9 @@ const log = logger('access');
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { assertOneSpecPerLine, isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../workflow/index.js';
 import { readRevSha } from '../kb-fs/index.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type {
   IAccessControl,
   AccessDecision,
@@ -32,14 +32,13 @@ import {
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
-import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
+import { AccessConfigError, AccessUnreadableError, synthesizePluginPrincipals } from '../access-model/index.js';
 import {
   GROUPS_YAML,
   SYNCED_GROUPS_YAML,
   parseGroupsFile,
   type GroupsIndex,
-} from '../access-model/group-files.js';
+} from '../access-model/index.js';
 import {
   ADMIN_CANONICAL,
   EVERYONE_CANONICAL,
@@ -61,7 +60,7 @@ import {
   type ParsedEntry,
   type RolesIndex,
   type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,

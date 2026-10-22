@@ -17,45 +17,34 @@ import {
   Surface,
   useFocusHandoff,
 } from '../../../../shared/components';
-import { useAuth } from '../../../auth/state/auth.context';
-import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { useGit } from '../../../git/state/git.context';
+import { useAuth } from '../../../auth';
+import { useWorkspace, kbFileUrl, resolveKbHref, openExternalHref, useNodeIdNav, useWorkspaceImageResolver } from '../../../workspace';
+import { useGit } from '../../../git';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import {
-  kbFileUrl,
-  openExternalHref,
-  resolveKbHref,
-  useNodeIdNav,
-} from '../../../workspace/routing/kb-routes';
-import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
-import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
-import { useFileAccess } from '../../../access/hooks/useFileAccess';
-import { proposeChange, suggestionBranchFor } from '../../services/library.api';
+import { cancelPullRequest } from '../../../pr';
+import { useFileAccess, offersManageAccess } from '../../../access';
+import { proposeChange, suggestionBranchFor, listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import {
   getOrCreateWorkspace,
   writeFile,
   type SkillToolWarning,
-} from '../../../workspace/services/workspace.api';
+} from '../../../workspace';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import {
   refusalLine,
   useApplyChangeRequest,
-} from '../../../change-requests/hooks/useApplyChangeRequest';
-import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
-import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
+} from '../../../change-requests';
+import { useCrFileDiffs, useDefaultBranchFile, useFileOnBranch, changeAuthorName, formatWhen, conflictResolutionPrompt } from '../../../change-requests';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { CONNECT_TOOLS_PATH, libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
-import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { SharedViaPlugins } from './SharedViaPlugins';
 import { AccessRequestsBanner } from '../../../access/components/AccessRequestsBanner';
 import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
-import { listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
-import { offersManageAccess } from '../../../access/manage-access-affordance';
 import { ShareButton } from '../ShareButton';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
@@ -64,7 +53,6 @@ import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
-import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
 import { isBinaryFile } from '../../../workspace/components/renderers';
 
 /**
@@ -853,11 +841,16 @@ export function SkillPage({
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
-          // A page of the skill opens on the Knowledge file page, where its
-          // tools are. The URL alone would route straight back here (every
-          // file under a skill's folder IS the skill page); `rawFile` asks the
-          // item route for the file route itself, as the plugin page's file
-          // links do.
+          // The page's tools are answered here, as on its file page, under
+          // the path the file page uses for it (repo-relative, kbDirName
+          // stripped): one identity per page in the Audit log and the
+          // consent card, never the skill-relative tab name.
+          pagePath={fileWorkspacePath ? fileRepoPath : undefined}
+          // The renderer's own target for Open in the platform, which it
+          // offers only to a page mounted without tools. The URL alone would
+          // route straight back here (every file under a skill's folder IS
+          // the skill page); `rawFile` asks the item route for the file route
+          // itself, as the plugin page's file links do.
           onOpenInPlatform={
             fileWorkspacePath
               ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath), { state: { rawFile: true } })

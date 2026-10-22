@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
-import { OpenPageInPlatformContext, PageToolsContext } from '../htmlToolBridge';
+import { OpenPageInPlatformContext, PageToolsContext, RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
 import { GitContext, type GitContextValue } from '../../../../git';
+import { clearToken, setToken } from '../../../../../lib/api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
+import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
- * `window.bevel.tools` as the app gives it: present on the file page, `null`
- * everywhere else, and the two cards — consent to write, and the way to the
+ * `window.bevel.tools` as the app gives it: present where a host provides the
+ * bridge (the file page, the skill page), `null` everywhere else, and the two cards — consent to write, and the way to the
  * platform — drawn by the app around the frame, driven here by the very
  * messages the frame's runtime posts.
  */
@@ -20,22 +21,28 @@ const PAGE = 'Dashboards/Roadmap.html';
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 
-/** The page on the app's file page: in the app, with the file page's provider. */
+/**
+ * The page on the app's file page: in the app, with the file page's provider.
+ * `receive` is the file's content changing under the open page (a teammate's
+ * save arriving): the same frame, a new document in it.
+ */
 function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
-  return render(
+  const tree = (content: string) => (
     <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
       <WorkspaceContext.Provider value={workspace}>
         <GitContext.Provider value={git}>
           <PageToolsContext.Provider value={{ pagePath: PAGE }}>
-            <HtmlRenderer content="<h1>Roadmap</h1>" filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
+            <HtmlRenderer content={content} filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
           </PageToolsContext.Provider>
         </GitContext.Provider>
       </WorkspaceContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const result = render(tree('<h1>Roadmap</h1>'));
+  return { ...result, receive: (content: string) => result.rerender(tree(content)) };
 }
 
-/** The page in the app but not on the file page — a skill page, a history preview. */
+/** The page in the app on a host without the bridge — a history or change-request preview. */
 function inAppElsewhere() {
   return render(
     <MemoryRouter initialEntries={['/workspace/main']}>
@@ -80,37 +87,6 @@ async function frameOf(container: HTMLElement): Promise<HTMLIFrameElement> {
   });
 }
 
-/** Post `data` as the frame would, and collect what the app posts back to it. */
-function frameChannel(iframe: HTMLIFrameElement) {
-  const win = iframe.contentWindow!;
-  const replies: Array<Record<string, unknown>> = [];
-  vi.spyOn(win, 'postMessage').mockImplementation(((msg: Record<string, unknown>) => void replies.push(msg)) as never);
-  return {
-    replies,
-    post: (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: win })),
-  };
-}
-
-/** The hosted server and the manual, as the app's fetch sees them. */
-function stubServer() {
-  const mcp: string[] = [];
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === '/api/agent/utcp') return Response.json({ tools: [{ name: 'read_file', tags: [] }, { name: 'edit_file', tags: ['write'] }] });
-      if (url === '/api/mcp/page-refusals') return new Response(null, { status: 204 });
-      const body = JSON.parse(String(init!.body)) as { id: number; params: { name: string } };
-      mcp.push(body.params.name);
-      return Response.json({
-        jsonrpc: '2.0',
-        id: body.id,
-        result: { content: [{ type: 'text', text: JSON.stringify({ ran: body.params.name }) }] },
-      });
-    }),
-  );
-  return { mcp };
-}
-
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -118,11 +94,11 @@ afterEach(() => {
 });
 
 describe('window.bevel.tools on the file page and elsewhere', () => {
-  it('gives the page the four functions on the file page', async () => {
+  it('gives the page the five functions on the file page', async () => {
     const { container } = onFilePage();
     const srcdoc = (await frameOf(container)).getAttribute('srcdoc')!;
     expect(srcdoc).toContain('globalThis.bevel.tools = Object.freeze({');
-    for (const fn of ['searchTools', 'toolsInfo', 'callTool', 'callToolChain']) expect(srcdoc).toContain(`${fn}: function`);
+    for (const fn of ['searchTools', 'toolsInfo', 'callTool', 'callToolChain', 'uploadFile']) expect(srcdoc).toContain(`${fn}: function`);
   });
 
   it('gives it null on the embed and on any other preview in the app', async () => {
@@ -212,6 +188,86 @@ describe('the consent card on the file page', () => {
   });
 });
 
+describe('an upload from the file page', () => {
+  const TOKEN = 'bevel-up_s3cret';
+
+  /** The hosted server and the upload endpoint, as the app's fetch sees them: every request, with its headers. */
+  function stubUploadServer() {
+    const requests: Array<{ step: string; headers: Headers; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        if (url === '/api/agent/utcp') return Response.json({ tools: [] });
+        if (url === '/api/mcp/page-refusals') {
+          requests.push({ step: 'refusal', headers, body: JSON.parse(String(init!.body)) });
+          return new Response(null, { status: 204 });
+        }
+        if (url.startsWith('/api/agent/uploads')) {
+          requests.push({ step: `${init?.method} ${url}`, headers, body: init?.body });
+          return Response.json({ filename: 'Assets.xlsx', bytes: 4, kind: 'file' });
+        }
+        const rpc = JSON.parse(String(init!.body)) as { id: number; params: { name: string; arguments: { body: Record<string, unknown> } } };
+        requests.push({ step: rpc.params.name, headers, body: rpc.params.arguments });
+        const answer =
+          rpc.params.name === 'request_file_upload'
+            ? { uploadUrl: `https://kb.example.com/api/agent/uploads/${TOKEN}`, token: TOKEN, maxBytes: 1024 }
+            : { destination: 'Data/Campaigns/Easter', count: 1, total: 1, files: [{ path: 'knowledge-base/Data/Campaigns/Easter/Assets.xlsx', outcome: 'created' }] };
+        return Response.json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify(answer) }] } });
+      }),
+    );
+    return { requests };
+  }
+
+  const file = () => new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'Assets.xlsx');
+
+  it('asks with the write card, and on Allow runs the three steps in order with the viewer\'s session', async () => {
+    setToken('viewer-session');
+    try {
+      const server = stubUploadServer();
+      const { container } = onFilePage();
+      const frame = frameChannel(await frameOf(container));
+      frame.post({ type: 'bevel.tool.call', requestId: 'u1', fn: 'uploadFile', args: [file(), { branch: 'main', destination: 'Data/Campaigns/Easter' }] });
+      expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
+      expect(server.requests).toEqual([]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Allow while open' }));
+      await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'u1', ok: true, result: { count: 1, destination: 'Data/Campaigns/Easter' } }));
+      expect(server.requests.map((r) => r.step)).toEqual([
+        'request_file_upload',
+        'POST /api/agent/uploads?filename=Assets.xlsx',
+        'apply_file_upload',
+      ]);
+      for (const r of server.requests) expect(r.headers.get('Authorization')).toBe('Bearer viewer-session');
+      for (const r of server.requests.filter((x) => x.step.endsWith('_upload'))) {
+        expect(decodeURIComponent(r.headers.get('X-Bevel-Page')!)).toBe(PAGE);
+      }
+      expect(server.requests[1]!.headers.get('x-upload-token')).toBe(TOKEN);
+      // The token went to the server and nowhere else: not into an address, not back to the frame.
+      expect(server.requests[1]!.step).not.toContain(TOKEN);
+      expect(JSON.stringify(frame.replies)).not.toContain(TOKEN);
+
+      // Allow holds for the view: the next upload runs with no card.
+      frame.post({ type: 'bevel.tool.call', requestId: 'u2', fn: 'uploadFile', args: [file(), { branch: 'main', destination: 'Data' }] });
+      await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'u2', ok: true }));
+      expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    } finally {
+      clearToken();
+    }
+  });
+
+  it('Deny answers denied, uploads nothing, and reports a refused apply_file_upload under the page', async () => {
+    const server = stubUploadServer();
+    const { container } = onFilePage();
+    const frame = frameChannel(await frameOf(container));
+    frame.post({ type: 'bevel.tool.call', requestId: 'u1', fn: 'uploadFile', args: [file(), { branch: 'main', destination: 'Data/Campaigns/Easter' }] });
+    fireEvent.click(await screen.findByRole('button', { name: 'Deny' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'u1', ok: false, error: 'denied', code: 'denied' }));
+    await waitFor(() => expect(server.requests.map((r) => r.step)).toEqual(['refusal']));
+    expect(server.requests[0]!.body).toMatchObject({ page: PAGE, tool: 'apply_file_upload' });
+  });
+});
+
 describe('the platform card where there are no tools', () => {
   it('on the embed offers Continue without tools (false) and Open in the platform (opens the page, false)', async () => {
     const openFilePage = vi.fn();
@@ -268,5 +324,75 @@ describe('the platform card where there are no tools', () => {
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'bevel.tools.require', requestId: 'x' }, source: window }));
     await new Promise((r) => setTimeout(r, 10));
     expect(screen.queryByText(/only available in the platform/)).toBeNull();
+  });
+});
+
+describe('a call whose view ended before it was decided', () => {
+  // An ended view's calls are decided `closed` and their replies are never
+  // posted: the controller fences replies by view generation, which its own
+  // suite pins with a frame that keeps its window across a view change. A
+  // rebuilt document is a new frame window here, so this renderer shows the
+  // rest: no card in the new view, nothing run, and neither window hearing
+  // an answer meant for a view that is gone.
+  const settled = () => new Promise((r) => setTimeout(r, 50));
+
+  it('shows no card and runs nothing when the document changes under it while the lookup is in flight', async () => {
+    const server = stubServer({ holdManual: true });
+    const page = onFilePage();
+    const iframe = await frameOf(page.container);
+    const frame = frameChannel(iframe);
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
+
+    // The lookup of whether edit_file writes is still in flight when the page's document is replaced.
+    page.receive('<h1>Roadmap, v2</h1>');
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('Roadmap, v2'));
+    const changed = frameChannel(iframe);
+    server.releaseManual();
+    await settled();
+
+    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(server.mcp).toEqual([]);
+    expect(changed.replies).toEqual([]);
+  });
+
+  it('does not run on an Allow the ended view gave', async () => {
+    const server = stubServer({ holdManual: true });
+    const page = onFilePage();
+    const iframe = await frameOf(page.container);
+    const frame = frameChannel(iframe);
+    // A chain asks without the manual: Allow it, so the view holds an Allow.
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callToolChain', args: ['return 1'] });
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+
+    frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
+    page.receive('<h1>Roadmap, v2</h1>');
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('Roadmap, v2'));
+    server.releaseManual();
+    await settled();
+
+    expect(server.mcp).toEqual(['call_tool_chain']);
+  });
+
+  it('opens no card in the reloaded view and sends the server nothing when the viewer reloads first', async () => {
+    const server = stubServer({ holdManual: true });
+    const { container } = onFilePage();
+    const frame = frameChannel(await frameOf(container));
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
+
+    fireEvent.click(screen.getByTitle('Reload preview'));
+    const reloaded = frameChannel(await waitFor(() => {
+      const el = container.querySelector('iframe')!;
+      if (el.contentWindow === null) throw new Error('not yet');
+      return el;
+    }));
+    server.releaseManual();
+    await settled();
+
+    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(server.mcp).toEqual([]);
+    // Neither document hears an answer meant for a view that is gone.
+    expect(frame.replies).toEqual([]);
+    expect(reloaded.replies).toEqual([]);
   });
 });

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useMemo, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History, Users } from 'lucide-react';
 import {
   KNOWLEDGE_BASE_DIR,
@@ -14,13 +14,13 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
 import { displayFileName, fileNameTooltip, isAccessRulesFile } from '../utils/display-file-name';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useGit } from '../../git/state/git.context';
-import { LayoutContext } from '../../layout/state/layout.context';
+import { useGit } from '../../git';
+import { LayoutContext } from '../../layout';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
-import { useFileAccess } from '../../access/hooks/useFileAccess';
+import { useFileAccess, formatEligible } from '../../access';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
@@ -29,30 +29,37 @@ import {
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
 import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../workflow';
-import { useAuth } from '../../auth/state/auth.context';
+import { useAuth } from '../../auth';
 import {
   knowledgeSuggestionBranchFor,
   proposeKnowledgeChange,
-} from '../../change-requests/services/propose.api';
+} from '../../change-requests';
 import {
   listMyChangeRequests,
   readFileOnBranch,
-} from '../../change-requests/services/change-requests.api';
+} from '../../change-requests';
 import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
-import { othersPendingBesides } from '../../change-requests/utils/author';
+import { othersPendingBesides } from '../../change-requests';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
-import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
-import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
+import { PageToolsContext, getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
 import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
-import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
+import {
+  ExitFullScreenButton,
+  FULL_SCREEN_ENTRY_SELECTOR,
+  FULL_SCREEN_SURFACE,
+  FullScreenButton,
+} from './FullScreenView';
+import { useFullScreenView } from '../hooks/useFullScreenView';
+import { carryReadingOffset, readingAnchorIn, readingOffset, readingWidthOf } from './readingCarry';
+import { DOCUMENT_COLUMN_CONTENT, documentSideGutters } from '../../../shared/theme/measure';
 import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
-import { useStarterPacks } from '../../onboarding/state/starter-packs';
+import { useStarterPacks } from '../../onboarding';
 
 /**
  * How many pages the empty viewer offers. Enough to look like a starting
@@ -926,6 +933,106 @@ export function FileViewer() {
     return () => el.removeEventListener('scroll', onScroll, { capture: true } as EventListenerOptions);
   }, [editMode, recordActivity]);
 
+  // ── Full screen ──────────────────────────────────────────────────────────
+  // The view is the HOST's: the read pane below — the element that already
+  // holds the renderer, prose and full-bleed alike — switches its classes to
+  // fill the viewport. Same element, same tree, so the renderer never
+  // remounts: an editor keeps its unsaved text, an HTML page its script state
+  // and its page-tool bridge. A portal, or a second tree, would lose all three.
+  // History and comparison are not the renderer, so the view waits for the
+  // document to be back (`filling`).
+  const fullScreen = useFullScreenView();
+  const filling = fullScreen.fullscreen && activeTab === 'content';
+  const readPaneRef = useRef<HTMLDivElement>(null);
+  // How far into the document the reader was when the view switched. The
+  // pane leaving the shell's flow collapses the shell's scroll height (and
+  // its scrollTop with it), so the position is carried across by hand: into
+  // the pane's own scroller on the way in, back into the shell's on the way
+  // out. A full-bleed renderer scrolls inside itself and keeps its own.
+  //
+  // Measured against the document's BODY (`readingAnchor`), not the pane:
+  // between the two views the pane gains padding and the card loses its bar,
+  // so the pane's top is a different distance above the text in each, and a
+  // carry against it lands the reader that many pixels off. And the text is
+  // laid out at the SAME width in both (`readingWidth`): a column that wraps
+  // differently puts every line below the first at a different height, and
+  // no pixel offset survives that — Section 24 came back as Section 30.
+  const readingOffsetRef = useRef<number | null>(null);
+  // The card's width on the page at the moment of entry, held while filling
+  // the window. Null when the view was opened by URL: there was no page, and
+  // the column's own content width stands in.
+  const [readingWidth, setReadingWidth] = useState<number | null>(null);
+  const { enter: enterFullScreenView, leave: leaveFullScreenView } = fullScreen;
+  // Focus crosses the switch the way it crosses a dialog's: in on opening,
+  // back on closing. The control that was pressed is captured HERE, before
+  // the switch, because the switch itself withdraws it (the pane bar, or the
+  // header's button) and focus would fall to the body with it.
+  const focusBeforeFullScreenRef = useRef<HTMLElement | null>(null);
+  const exitFullScreenRef = useRef<HTMLButtonElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const enterFullScreen = useCallback(() => {
+    focusBeforeFullScreenRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const shell = editorContainerRef.current;
+    const anchor = readingAnchorIn(readPaneRef.current);
+    if (shell && anchor) {
+      readingOffsetRef.current = readingOffset(shell, anchor);
+      setReadingWidth(readingWidthOf(anchor));
+    }
+    enterFullScreenView();
+  }, [enterFullScreenView]);
+  const leaveFullScreen = useCallback(() => {
+    const pane = readPaneRef.current;
+    const anchor = readingAnchorIn(readPaneRef.current);
+    if (pane && anchor) readingOffsetRef.current = readingOffset(pane, anchor);
+    setReadingWidth(null);
+    leaveFullScreenView();
+  }, [leaveFullScreenView]);
+  // The banners that need the reader's hand — a refused save with what to
+  // fix, an agent's update to accept or reject — render in the shell the
+  // filled view covers. The view gives way so they are seen, rather than
+  // leave the reader pressing Save at a surface that answers nothing.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a response to state that arrived from a save's refusal or an agent's update, not a derivation of it; it settles in one extra render
+    if (filling && (saveError || isReviewingPending || waitingOnAgentUpdate)) leaveFullScreen();
+  }, [filling, saveError, isReviewingPending, waitingOnAgentUpdate, leaveFullScreen]);
+
+  useLayoutEffect(() => {
+    const offset = readingOffsetRef.current;
+    readingOffsetRef.current = null;
+    const scroller = filling ? readPaneRef.current : editorContainerRef.current;
+    const anchor = readingAnchorIn(readPaneRef.current);
+    if (offset === null || !scroller || !anchor) return;
+    // Put the scroller's top edge `offset` px below the body's top, as it was
+    // in the view just left.
+    carryReadingOffset(scroller, anchor, offset);
+  }, [filling]);
+  // Focus still inside the renderer (an editor's caret, a page's control) is
+  // where the reader is working, and stays there both ways. Otherwise: on
+  // the way in — the button, a URL, a reload — the exit control; on the way
+  // out, the element that had focus before, or, when that is gone or there
+  // never was one (opened by URL), the way back in, else the read pane.
+  // `preventScroll`, so the reading offset carried above is not undone.
+  const wasFillingRef = useRef(false);
+  useEffect(() => {
+    const pane = readPaneRef.current;
+    const keepsFocus = (el: Element | null) => !!pane && !!el && pane.contains(el) && el !== pane;
+    if (filling) {
+      wasFillingRef.current = true;
+      if (!keepsFocus(document.activeElement)) exitFullScreenRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (!wasFillingRef.current) return;
+    wasFillingRef.current = false;
+    const before = focusBeforeFullScreenRef.current;
+    focusBeforeFullScreenRef.current = null;
+    if (keepsFocus(document.activeElement)) return;
+    const target =
+      (before?.isConnected ? before : null) ??
+      pageRef.current?.querySelector<HTMLElement>(FULL_SCREEN_ENTRY_SELECTOR) ??
+      pane;
+    target?.focus({ preventScroll: true });
+  }, [filling]);
+
   // A page opened for writing (the `startEditing` request above) gets the
   // caret at its END — under the title it was created with — rather than
   // where a freshly focused textarea puts it, in front of the `#`. Only for
@@ -1191,8 +1298,8 @@ export function FileViewer() {
     // above — not a component created during render. The provider hands the
     // open file's `download:` verdict to any DownloadFileButton inside the
     // renderer without widening the renderer contract. The page-tools
-    // provider is what makes this the file page for an HTML page: the one
-    // place its `window.bevel.tools` is answered, under its own path.
+    // provider is what answers an HTML page's `window.bevel.tools` here,
+    // under its own path (`htmlToolBridge.ts` lists every host that does).
     <CanDownloadContext.Provider value={access.canDownload}>
     <PageToolsContext.Provider value={{ pagePath: repoRelativePath ?? openFilePath }}>
     {/* eslint-disable-next-line react-hooks/static-components */}
@@ -1337,16 +1444,20 @@ export function FileViewer() {
       <History size={14} />
     </IconButton>
   ) : null;
-  const paneActions =
-    historyAction || writeAction ? (
-      <>
-        {historyAction}
-        {writeAction}
-      </>
-    ) : null;
+  // Full screen sits with the file's other actions: here in the pane bar for
+  // a prose document, in the page header for a full-bleed one (which has no
+  // bar). Every file that reaches this point has a renderer, so every one
+  // gets it — read mode and edit mode alike.
+  const paneActions = (
+    <>
+      {historyAction}
+      <FullScreenButton onEnter={enterFullScreen} />
+      {writeAction}
+    </>
+  );
 
   return (
-    <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
+    <div ref={pageRef} className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <PullNeededBanner />
       <GitSyncFailedBanner />
       {/* No "you don't have permission to edit" banner, deliberately: for a
@@ -1413,6 +1524,8 @@ export function FileViewer() {
             onShare={handleShare}
             onCopyPage={canCopyPage ? handleCopyPage : undefined}
             onCopyLink={handleCopyLink}
+            // Withdrawn while filling the window: the exit control replaces it.
+            onFullScreen={shellVariant === 'full-bleed' && !filling ? enterFullScreen : undefined}
           />
         }
       >
@@ -1650,20 +1763,50 @@ export function FileViewer() {
               restart at the top of the page. This wrapper stays mounted through
               every state the read goes through, prose and full-bleed alike, so
               it is what focus lands on. See `RetryReadButton`. */}
+          {/* Full screen is THIS element's classes changing, not a second
+              tree: fixed over the whole viewport, above the app's chrome, on
+              the page background. A full-bleed renderer takes the viewport's
+              definite height; a prose one keeps its reading column, centred,
+              with its card's edges and bar withdrawn. While it fills the window
+              it is modal, and says so: everything else of the app is covered,
+              so the shortcuts that open something in that chrome (the command
+              menu, the single-key commands) stand down, as they do for a
+              dialog, rather than open it unseen behind this surface. */}
           <div
             {...READ_PANE}
-            className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}
+            ref={readPaneRef}
+            data-full-screen={filling ? '' : undefined}
+            role={filling ? 'dialog' : undefined}
+            aria-modal={filling ? true : undefined}
+            aria-label={filling ? `${fileBaseName}, full screen` : undefined}
+            className={
+              shellVariant === 'full-bleed'
+                ? filling
+                  ? `${FULL_SCREEN_SURFACE} flex flex-col`
+                  : 'flex min-h-0 flex-1 flex-col'
+                : filling
+                  ? `${FULL_SCREEN_SURFACE} ${documentSideGutters(false)} py-10`
+                  : 'min-w-0'
+            }
           >
             {shellVariant === 'prose' ? (
               <>
-                <FilePaneCard file={fileBaseName} fileTitle={fileNameTooltip(openFilePath, kbDirName)} actions={paneActions}>
+                <FilePaneCard
+                  file={fileBaseName}
+                  fileTitle={fileNameTooltip(openFilePath, kbDirName)}
+                  actions={paneActions}
+                  chromeless={filling}
+                  className={filling ? DOCUMENT_COLUMN_CONTENT : undefined}
+                  // The page's own width, so every line wraps where it did.
+                  style={filling && readingWidth !== null ? { maxWidth: readingWidth } : undefined}
+                >
                   {rendererElement}
                 </FilePaneCard>
                 {/* Every open proposal on this file, under the file it is
                     about — the same boxes, the same dialog, as the skill
                     page. Hidden while the reader IS editing or proposing:
                     the diffs are against text that is changing under them. */}
-                {!editMode && !proposeMode && repoRelativePath && requestsOnThisFile.length > 0 && (
+                {!filling && !editMode && !proposeMode && repoRelativePath && requestsOnThisFile.length > 0 && (
                   <FileChangeBoxes
                     repoRelativePath={repoRelativePath}
                     requests={requestsOnThisFile}
@@ -1693,6 +1836,7 @@ export function FileViewer() {
             ) : (
               rendererElement
             )}
+            {filling && <ExitFullScreenButton ref={exitFullScreenRef} onExit={leaveFullScreen} surface={readPaneRef} />}
           </div>
         </>
       )}

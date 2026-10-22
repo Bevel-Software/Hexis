@@ -138,7 +138,24 @@ export interface CodeModeMetaToolsOptions {
    * Absent, the description carries the chain's rules itself.
    */
   sharedRulesPointer?: string;
+  /**
+   * The read-only hint each meta-tool is listed with, by name, where the
+   * deployment overrides it. A name left out lists its built-in value
+   * ({@link META_TOOL_READ_ONLY}).
+   */
+  readOnly?: Readonly<Record<string, boolean>>;
 }
+
+/**
+ * Each meta-tool's built-in read-only hint. `list_tools` and `tools_info`
+ * describe the registry and change nothing; `call_tool_chain` runs code that
+ * can call any tool, writers included, so it is not read-only.
+ */
+export const META_TOOL_READ_ONLY: Readonly<Record<string, boolean>> = Object.freeze({
+  list_tools: true,
+  tools_info: true,
+  call_tool_chain: false,
+});
 
 /**
  * The three meta-tools, with every example written against the namespace this
@@ -160,7 +177,7 @@ export function codeModeMetaTools(
 ): McpTool[] {
   const example = chainExample(namespace, tools);
   const { name } = example;
-  return withCallExamples([
+  const metaTools = withCallExamples([
     {
       name: 'list_tools',
       description: `List every UTCP tool currently registered, in TypeScript-accessible form${name ? ` (e.g. \`${name}\`)` : ''} for use inside \`call_tool_chain\`.`,
@@ -199,6 +216,13 @@ export function codeModeMetaTools(
       } as McpTool['inputSchema'],
     },
   ]);
+  // The one annotation the platform emits (see `toListedTool`): the
+  // deployment's override where it has one, the built-in value otherwise.
+  return metaTools.map((t) => {
+    const override = options.readOnly && Object.hasOwn(options.readOnly, t.name) ? options.readOnly[t.name] : undefined;
+    const readOnlyHint = typeof override === 'boolean' ? override : META_TOOL_READ_ONLY[t.name] === true;
+    return { ...t, annotations: { readOnlyHint } };
+  });
 }
 
 /**

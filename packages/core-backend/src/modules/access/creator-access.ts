@@ -34,17 +34,15 @@ const log = logger('creator-access');
 
 import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { spliceGrant, type Principal } from '../access-model/access-splice.js';
-import { isAccessMdPath } from '../access-model/access-grammar.js';
-import { toKbRelative } from '../access-model/kb-read-filter.js';
+import { spliceGrant, type Principal, isAccessMdPath, toKbRelative } from '../access-model/index.js';
 import {
   creatorPrincipal,
   type CreationGrantPlan,
   type Creator,
   type ICreatorAccess,
-} from '../access-model/creator.js';
+} from '../access-model/index.js';
 
 export class CreatorAccessService implements ICreatorAccess {
   constructor(

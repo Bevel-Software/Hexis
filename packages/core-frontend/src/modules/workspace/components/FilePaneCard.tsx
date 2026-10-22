@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import { Surface } from '../../../shared/components';
 
@@ -29,29 +29,54 @@ export interface FilePaneCardProps {
   actions?: ReactNode;
   /** Sits between the bar and the body: the "your suggestions are inline" strip. */
   notice?: ReactNode;
+  /**
+   * Draw nothing but the body: no edges, no bar, no notice. For the file
+   * page's full-screen view, which shows the document and nothing else. A
+   * flag rather than a second tree, because a different tree around
+   * `children` would remount the renderer — and lose an editor's unsaved text.
+   */
+  chromeless?: boolean;
   className?: string;
+  /** Inline geometry the caller measured, e.g. a width to hold across a layout switch. */
+  style?: CSSProperties;
   children: ReactNode;
 }
 
-export function FilePaneCard({ file, fileTitle, actions, notice, className, children }: FilePaneCardProps) {
+export function FilePaneCard({
+  file,
+  fileTitle,
+  actions,
+  notice,
+  chromeless = false,
+  className,
+  style,
+  children,
+}: FilePaneCardProps) {
   return (
     <Surface
       tone="surface"
       radius="lg"
-      elevation="card"
+      elevation={chromeless ? 'none' : 'card'}
       data-testid="file-pane-card"
-      className={cn('overflow-hidden', className)}
+      // The border goes TRANSPARENT, not away: the box keeps its width to the
+      // pixel, so the text inside wraps exactly as it did with the edges drawn.
+      className={cn('overflow-hidden', chromeless && 'border-transparent bg-transparent', className)}
+      style={style}
     >
-      <div className="flex min-h-11 items-center gap-3 border-b border-line px-3.5 py-2">
-        <span className="mr-auto truncate font-mono text-meta text-ink-muted" title={fileTitle}>
-          {file}
-        </span>
-        {actions}
+      {!chromeless && (
+        <div className="flex min-h-11 items-center gap-3 border-b border-line px-3.5 py-2">
+          <span className="mr-auto truncate font-mono text-meta text-ink-muted" title={fileTitle}>
+            {file}
+          </span>
+          {actions}
+        </div>
+      )}
+
+      {!chromeless && notice}
+
+      <div data-file-pane-body="" className="px-6 py-4">
+        {children}
       </div>
-
-      {notice}
-
-      <div className="px-6 py-4">{children}</div>
     </Surface>
   );
 }

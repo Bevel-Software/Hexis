@@ -6,12 +6,12 @@ import {
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
