@@ -691,6 +691,37 @@ describe('registerWorkflowTools', () => {
       ]);
     });
 
+    it('names each user owner by name, or by email when the name is empty — never a blank string', async () => {
+      const base = await start();
+      opened = detailOf([
+        { path: 'Skills/Owned/SKILL.md', status: 'modified', additions: 1, deletions: 1, isBinary: false, sha: 'b5', rawUrl: 'r5' },
+      ]);
+      // What the resolver hands back for owners `roles.yaml` lists by email:
+      // an empty name. QA saw `users: [""]` here while `mergeBlockedReasons`
+      // named qa-user2@example.com.
+      opened.approvals = [
+        {
+          path: 'Skills/Owned/SKILL.md',
+          eligibleApprovers: {
+            roles: [],
+            users: [
+              { name: '', email: 'qa-user2@example.com' },
+              { name: 'Razvan Radulescu', email: 'razvan.radulescu@bevel.software' },
+              { name: '  ', email: 'qa-user3@example.com' },
+              { name: '', email: '' },
+            ],
+          },
+          approvedBy: [],
+          eligibilityResolved: true,
+          isApproved: false,
+          inMergeGate: true,
+        },
+      ];
+      const [entry] = (await open(base)).approvals as { users: string[] }[];
+      expect(entry.users).toEqual(['qa-user2@example.com', 'Razvan Radulescu', 'qa-user3@example.com']);
+      expect(entry.users.every((u) => u.trim() !== '')).toBe(true);
+    });
+
     it('surfaces the `change-request-conflicts` error as before', async () => {
       const base = await start();
       openFails = new ChangeRequestConflictsError('me/draft', 'target-company-state', ['KnowledgeBase/Clash.md']);
