@@ -11,7 +11,7 @@ import {
   sourceVerbsFor,
   type ParsedEntry,
   type Verb,
-} from '../../../access-model/access-grammar.js';
+} from '../../../access-model/index.js';
 import { spliceGrant } from '../../../access-model/access-splice.js';
 import { isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';

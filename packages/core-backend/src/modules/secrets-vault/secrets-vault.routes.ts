@@ -13,12 +13,13 @@ import {
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
 import type { ISkippedToolsService } from './skipped-tools.service.js';
-import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
-import type { IConnectionProbeService } from '../connection-probe/connection-probe.contract.js';
+import type { IToolManualService, ToolManualSummary } from '../tool-manuals/index.js';
+import type { ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
+import type { IConnectionProbeService } from '../connection-probe/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;

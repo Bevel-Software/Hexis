@@ -1,5 +1,8 @@
 import type { ExtractResult } from './doc-extract.types.js';
 import { MAX_DOC_PART_BYTES } from './ooxml-text.js';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('documents');
 
 /**
  * Extract a PDF's TEXT LAYER page by page with pdf.js (`pdfjs-dist`,
@@ -67,9 +70,19 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   // The loading TASK is what gets destroyed at the end, not the document:
   // pdf.js 6 dropped `PDFDocumentProxy.destroy()`, and destroying the task
   // frees the document (and its pages) with it — the shape the viewer uses.
-  let task: Awaited<ReturnType<typeof openPdf>>;
+  let getDocument: PdfJs['getDocument'];
   try {
-    task = await openPdf(bytes);
+    ({ getDocument } = await loadPdfJs());
+  } catch (err) {
+    // The reader, not the file: a later read must try this file again. Why
+    // it did not load is the server's to know (a module path, a missing
+    // dependency) — logged here, never quoted to the reader.
+    log.error('the PDF reader did not load', { err });
+    return { ok: false, transient: true, message: READER_DID_NOT_LOAD };
+  }
+  let task: ReturnType<typeof openPdf>;
+  try {
+    task = openPdf(getDocument, bytes);
   } catch (err) {
     return { ok: false, message: `could not be parsed as a PDF (${(err as Error).message})` };
   }
@@ -167,10 +180,13 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   }
 }
 
+/** What a PDF read answers when pdf.js itself failed to load: the same words, whatever the cause. */
+export const READER_DID_NOT_LOAD = 'could not be read: the PDF reader did not load on the server; try again later';
+
 type PdfJs = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
 let pdfjsPromise: Promise<PdfJs> | undefined;
 
-async function openPdf(bytes: Buffer) {
+function loadPdfJs(): Promise<PdfJs> {
   pdfjsPromise ??= import('pdfjs-dist/legacy/build/pdf.mjs').catch((err: unknown) => {
     // A FAILED load must not be memoized: left in place, the rejected promise
     // would answer every later read and disable PDF extraction for the whole
@@ -178,7 +194,10 @@ async function openPdf(bytes: Buffer) {
     pdfjsPromise = undefined;
     throw err;
   });
-  const { getDocument } = await pdfjsPromise;
+  return pdfjsPromise;
+}
+
+function openPdf(getDocument: PdfJs['getDocument'], bytes: Buffer) {
   // Returns the loading task; the caller awaits `.promise` for the document
   // and destroys the task when done (see `extractPdf`).
   return getDocument({

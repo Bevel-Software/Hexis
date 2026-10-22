@@ -8,7 +8,7 @@ import { WorkflowDomainError, WorkflowValidationError } from '../../shared/domai
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import '../auth/auth.middleware.js';
+import '../auth/index.js';
 
 function toHttpError(
   err: unknown,

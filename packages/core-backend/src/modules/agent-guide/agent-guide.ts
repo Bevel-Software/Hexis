@@ -35,7 +35,7 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { agentGuideDir } from '../../assets.js';
-import { sharedFileRulesSection } from '../agent-instructions/shared-file-rules.js';
+import { sharedFileRulesSection } from '../agent-instructions/index.js';
 
 /** One section of the guide. */
 export interface AgentGuideSection {

@@ -69,7 +69,11 @@ import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-down
 import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
 import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
-import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
+import {
+  DocExtractService,
+  WorkerDocumentExtractor,
+  type IDocumentExtractor,
+} from '../modules/workspace/index.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
@@ -260,6 +264,8 @@ export interface CoreServices {
    * download route can refuse a link presented by someone it was not issued to.
    */
   agentDownloadFetcher: (req: Request) => Promise<string[]>;
+  /** Runs every document extraction off the request thread under a budget; its workers end when the graph stops. */
+  documentExtractor: IDocumentExtractor;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -799,9 +805,9 @@ export async function createCoreServices(
     // `<tenant>-down_`: recognisable by shape beside the upload token.
     tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
   });
-  // Office-document/PDF text extraction for `read_file`/`grep`, cached by
-  // content hash beside the workspaces root (see `DocExtractionCache`).
-  const docExtractService = new DocExtractService(config.docExtractCacheRoot);
+  // The worker threads every office/PDF/email extraction runs in, under a
+  // 10 s budget per file (see `WorkerDocumentExtractor`).
+  const documentExtractor = new WorkerDocumentExtractor();
   // The deployment owner counts as Admin for the two hardcoded `write`
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
@@ -960,6 +966,14 @@ export async function createCoreServices(
   // browser sessions. Single instance per Node process — survives across
   // requests, doesn't survive restarts (clients reconnect + resync).
   const eventBus = new WorkflowEventBus();
+  // Office-document/PDF/email text extraction for `read_file`/`grep`, cached
+  // by content hash beside the workspaces root (see `DocExtractionCache`),
+  // failures included. A fresh failure is told to the people looking at the
+  // file: the events route delivers it only to sessions that may read it.
+  const docExtractService = new DocExtractService(config.docExtractCacheRoot, documentExtractor, {
+    onUnreadable: ({ workspaceId, path, reason }) =>
+      eventBus.emit({ kind: 'document-unreadable', workspaceId, path, reason }),
+  });
   // In-process post-commit hook (distinct from the SSE bus): fires once per
   // committed change (batched paths) so catalogs refresh instantly and the
   // id-repair keeps the id namespace collision-free. Subscribers are registered
@@ -1666,6 +1680,7 @@ export async function createCoreServices(
     agentDownloadStore,
     patternMatcher,
     agentDownloadFetcher,
+    documentExtractor,
     docExtractService,
     accessControl,
     creatorAccess,

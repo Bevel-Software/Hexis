@@ -55,7 +55,7 @@ import {
   stripComment,
   type ParsedEntry,
   type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import { spliceRevoke } from '../access-model/access-splice.js';
 import { scanFrontmatter } from '../access-model/frontmatter-lines.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';

@@ -25,6 +25,7 @@ import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workfl
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessControlService } from '../../access/access-control.service.js';
@@ -309,7 +310,7 @@ async function start(
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, testKbContext({ kbDirName: KB_DIR }), {
+  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir, new WorkerDocumentExtractor()), access, testKbContext({ kbDirName: KB_DIR }), {
     // The hooks and the notes a test registers against; with neither
     // registered (the default, and every Hexis-only deployment) the gate
     // refuses nothing and the descriptions say nothing extra.
@@ -2191,7 +2192,7 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), access, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), new WorkerDocumentExtractor()), access, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
@@ -2323,7 +2324,7 @@ describe('start_session', () => {
     const noopAuth: express.RequestHandler = (_req, _res, next) => next();
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), new WorkerDocumentExtractor()), allowAll, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
@@ -2498,7 +2499,7 @@ describe('branch is a required parameter in the tool contract', () => {
       noopAuth,
       toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
+      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), new WorkerDocumentExtractor()),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
