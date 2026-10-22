@@ -31,6 +31,8 @@ export interface IAgentScopeResolver {
   /**
    * The `.agent` files on the default branch `userEmail` may read, by name —
    * what the consent step and the key-mint dialog offer below Everything.
+   * Rejects when the default branch cannot be opened: that is a failed
+   * listing, which the caller says, never an empty one.
    */
   listChoices(userEmail: string): Promise<AgentChoice[]>;
   /**

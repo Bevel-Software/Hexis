@@ -90,8 +90,10 @@ export class AgentScopeService implements IAgentScopeResolver {
   }
 
   async listChoices(userEmail: string): Promise<AgentChoice[]> {
-    const located = await this.defaultCheckout();
-    if (!located) return [];
+    // A branch that cannot be opened is a failed listing, not "no agents": the
+    // consent step and the key-mint dialog say so instead of offering
+    // Everything as though nothing else existed.
+    const located = await this.openDefaultBranch();
     const found = await this.disk.walkFiles(located.kbRoot, (name) => name.endsWith(AGENT_FILE_EXTENSION));
     const candidates = found.map((p) => p.split(path.sep).join('/'));
     if (candidates.length === 0) return [];
@@ -142,12 +144,20 @@ export class AgentScopeService implements IAgentScopeResolver {
     }
   }
 
-  /** The default branch's clone, or null when it cannot be had — which every caller reads as "no agents". */
+  /** The default branch's clone; rejects when it cannot be had. */
+  private async openDefaultBranch(): Promise<{ wsId: string; kbRoot: string }> {
+    const wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
+    const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kb.kbDirName);
+    return { wsId, kbRoot };
+  }
+
+  /**
+   * The default branch's clone, or null when it cannot be had — which reading
+   * one chosen file takes as "not there", so its connection loads nothing.
+   */
   private async defaultCheckout(): Promise<{ wsId: string; kbRoot: string } | null> {
     try {
-      const wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
-      const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kb.kbDirName);
-      return { wsId, kbRoot };
+      return await this.openDefaultBranch();
     } catch (err) {
       log.warn('the default branch could not be opened to read agent files:', { err });
       return null;

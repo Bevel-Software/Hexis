@@ -250,6 +250,27 @@ describe('the choices', () => {
     ]);
   });
 
+  it('a default branch that cannot be opened fails the listing, never answers "no agents", and still resolves a chosen file to nothing', async () => {
+    const svc = new AgentScopeService(
+      {
+        getOrCreateForBranch: async () => {
+          throw new Error('clone failed');
+        },
+        getWorkspacePath: async () => '/ws',
+        readFile: async () => '',
+      },
+      { canReadBatch: async () => new Map() },
+      { kbDirName: 'knowledge-base', defaultBranch: 'main' },
+      { walkFiles: async () => [] },
+      { membership: async () => ({ byPlugin: new Map() }) },
+    );
+    await expect(svc.listChoices(ADA)).rejects.toThrow('clone failed');
+    expect(await svc.choosable(ADA, 'Agents/a.agent')).toBeNull();
+    const scope = await svc.resolve(ADA, 'Agents/a.agent');
+    expect(scope.isEverything()).toBe(false);
+    expect(scope.allowsPlatformTool('read_file')).toBe(false);
+  });
+
   it('choosable: a choice on offer, normalized; one answer for missing and unreadable', async () => {
     const kb = kbWith(
       { 'Agents/a.agent': agentFile('name: A'), 'Agents/s.agent': agentFile('name: S') },

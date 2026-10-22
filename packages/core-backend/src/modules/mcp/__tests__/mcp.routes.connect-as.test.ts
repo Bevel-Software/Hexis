@@ -78,6 +78,14 @@ describe('minting a connection key', () => {
       agents: [{ path: 'Agents/ops.agent', name: 'ops', description: 'Watches the dashboards.' }],
     });
   });
+
+  it('answers a failed listing as a failure, never as "no agents"', async () => {
+    const failing = { listChoices: async () => Promise.reject(new Error('clone failed')), choosable: async () => null };
+    const base = await mountMcpRoutes({ agents: failing });
+    const res = await fetch(`${base}/api/mcp/agent-choices`, { headers: { 'x-test-email': ADA } });
+    expect(res.status).toBe(500);
+    expect(await res.json()).not.toHaveProperty('agents');
+  });
 });
 
 describe('the local server’s exchanged grant', () => {
