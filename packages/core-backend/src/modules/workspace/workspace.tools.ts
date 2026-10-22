@@ -859,7 +859,8 @@ async function grepTree(
       batch.push(raw[from]!);
       chars += raw[from]!.length;
     }
-    const readable = await readableFiles(gate, batch.map(at));
+    // Judging is part of the search: it is spent from the same budget.
+    const readable = await search.charged(() => readableFiles(gate, batch.map(at)));
     const only = batch.filter((p) => readable.has(at(p)));
     for await (const file of search.files(scope, { only, maxLinesPerFile: max - out.length })) {
       const p = at(file.path);
@@ -879,7 +880,7 @@ async function grepTree(
     .filter((p) => ownedBy(p, readerOwned))
     .map(at)
     .filter((p) => last === undefined || compareSearchPaths(p, last) <= 0);
-  const readable = await readableFiles(gate, candidates);
+  const readable = await search.charged(() => readableFiles(gate, candidates));
   const texts: { path: string; text: string }[] = [];
   for (const p of candidates) {
     if (!readable.has(p)) continue;

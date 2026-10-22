@@ -1454,6 +1454,23 @@ describe('grep runs ripgrep', () => {
     expect(res.body.matches).toEqual([{ path: `${KB_DIR}/open.md`, line: 1, text: 'needle open' }]);
   }, 20_000);
 
+  it('spends the budget on judging who may read what too: a verdict that outlasts it answers the 400 at the budget', async () => {
+    matcherOptions = { budgetMs: 1_000 };
+    // An access check that takes ten seconds, as a cold one over a large tree could.
+    const slowAccess = {
+      ...allowAll,
+      canReadBatch: (_w: string, _u: string, paths: string[]) =>
+        new Promise<Map<string, boolean>>((resolve) => setTimeout(() => resolve(new Map(paths.map((p) => [p, true]))), 10_000)),
+    } as unknown as IAccessControl;
+    const base = await start('read', slowAccess);
+    await fs.writeFile(`${KB_DIR}/open.md`, 'needle open\n');
+    const started = Date.now();
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('pattern_too_expensive');
+    expect(Date.now() - started).toBeLessThan(3_000);
+  }, 20_000);
+
   it('stops the search at the file that fills max_results, so what comes after it costs nothing', async () => {
     matcherOptions = { budgetMs: 1_500 };
     const base = await start();

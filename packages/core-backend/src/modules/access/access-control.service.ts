@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('access');
@@ -27,6 +28,7 @@ import type {
 import {
   DEFAULT_KB_LAYOUT,
   PLUGIN_MANIFEST_FILE,
+  isFrontmatterFence,
   isPersonalPluginDir,
   pluginIdentityOf,
   platformRestoreDestination,
@@ -1083,6 +1085,49 @@ function withRelocatedAccessFiles(
 function parentDirOf(relativePath: string): string {
   const cut = relativePath.lastIndexOf('/');
   return cut === -1 ? '' : relativePath.slice(0, cut);
+}
+
+/** The first read of {@link frontmatterHead}; each later one doubles, up to the last. */
+const HEAD_FIRST_READ = 1_024;
+const HEAD_LAST_READ = 64 * 1_024;
+
+/**
+ * The start of `file` that holds everything its frontmatter can say: its
+ * first line when that is no fence (no frontmatter at all), the text through
+ * the closing fence when there is one, and the whole file when an opening
+ * fence is never closed. Scanned for its frontmatter (`scanFrontmatter`), it
+ * answers exactly as the whole file does, by the same fence rule
+ * (`isFrontmatterFence`) — and a file with no frontmatter costs one small
+ * read however long it is.
+ */
+async function frontmatterHead(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const decoder = new StringDecoder('utf8');
+    let text = '';
+    let lineStart = 0;
+    let first = true;
+    let position = 0;
+    for (let size = HEAD_FIRST_READ; ; size = Math.min(size * 2, HEAD_LAST_READ)) {
+      const chunk = Buffer.allocUnsafe(size);
+      const { bytesRead } = await handle.read(chunk, 0, size, position);
+      if (bytesRead === 0) return text + decoder.end();
+      position += bytesRead;
+      text += decoder.write(chunk.subarray(0, bytesRead));
+      for (let nl = text.indexOf('\n', lineStart); nl !== -1; nl = text.indexOf('\n', lineStart)) {
+        const fence = isFrontmatterFence(text.slice(lineStart, nl));
+        // The first line opens a block or there is none; after it, the first
+        // fence closes the block.
+        if (first ? !fence : fence) return text.slice(0, nl);
+        first = false;
+        lineStart = nl + 1;
+      }
+      // A first line still unfinished that already cannot be a fence.
+      if (first && !'---'.startsWith(text.trim())) return text;
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -2515,15 +2560,20 @@ export class AccessControlService implements IAccessControl {
    * in the new (body-governed) format, where its frontmatter is self-access —
    * see {@link accessMdSelfEntries}. A legacy `access.md` still yields null:
    * its frontmatter IS the folder rules the dir chain already applies.
+   *
+   * Any other file declares them in its frontmatter alone, so only as much of
+   * it is read as the frontmatter takes (see {@link frontmatterHead}): a batch
+   * over a tree of megabyte transcripts reads a line of each, not the tree.
    */
   private async readOwnEntries(
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
+    const file = path.join(repoDir, relativePath);
     let text: string;
     try {
-      text = await fs.readFile(path.join(repoDir, relativePath), 'utf-8');
+      text = isAccessMdPath(relativePath) ? await fs.readFile(file, 'utf-8') : await frontmatterHead(file);
     } catch {
       return null;
     }

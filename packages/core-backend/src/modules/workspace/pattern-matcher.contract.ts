@@ -89,6 +89,15 @@ export interface IPatternSearch {
    * the pattern matches, in order.
    */
   matchingLines(texts: readonly string[]): Promise<number[][]>;
+  /**
+   * Run `work` the search waits on between its runs (judging which files the
+   * caller may read) under the search's one budget: the time it takes is
+   * spent from it, and work still running when the budget is gone is
+   * answered with {@link PatternTooExpensiveError} — or
+   * {@link SearchAbandonedError} when the caller has gone — at once, whatever
+   * `work` itself does after.
+   */
+  charged<T>(work: () => Promise<T>): Promise<T>;
 }
 
 /**

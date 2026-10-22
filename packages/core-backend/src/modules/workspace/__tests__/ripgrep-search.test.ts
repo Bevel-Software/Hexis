@@ -216,6 +216,29 @@ describe('RipgrepPatternMatcher', () => {
     }
   });
 
+  it('spends the budget on the work it is charged with, and answers the 400 at the budget when that work outlasts it', async () => {
+    const s = await search('needle', { budgetMs: 600 });
+    const sleep = (ms: number) => () => new Promise<string>((r) => setTimeout(() => r('done'), ms));
+    expect(await s.charged(sleep(200))).toBe('done');
+    const started = Date.now();
+    await expect(s.charged(sleep(5_000))).rejects.toMatchObject({ status: 400, details: { code: 'pattern_too_expensive' } });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // Spent: neither more work nor another run is started.
+    await expect(s.charged(sleep(1))).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+    await expect(s.matchingLines(['needle'])).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+    // A failure of the work itself is the caller's to hear.
+    const t = await search('needle');
+    await expect(t.charged(() => Promise.reject(new Error('verdict failed')))).rejects.toThrow('verdict failed');
+  });
+
+  it('answers charged work as abandoned when the caller goes away', async () => {
+    const gone = new AbortController();
+    const s = await matcher().search('needle', { ignoreCase: false, signal: gone.signal });
+    const waiting = s.charged(() => new Promise((r) => setTimeout(r, 5_000)));
+    gone.abort();
+    await expect(waiting).rejects.toMatchObject({ status: 499 });
+  });
+
   it('ends the run when the caller stops reading, and gives its slot back', async () => {
     for (let i = 0; i < 50; i++) await put(`kb/f${String(i).padStart(2, '0')}.md`, 'needle\n');
     const m = matcher({ maxRunning: 1, maxWaiting: 0 });

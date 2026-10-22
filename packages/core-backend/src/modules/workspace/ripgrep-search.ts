@@ -241,6 +241,33 @@ class RipgrepSearch implements IPatternSearch {
     return hits;
   }
 
+  async charged<T>(work: () => Promise<T>): Promise<T> {
+    if (this.signal?.aborted) throw new SearchAbandonedError();
+    const remaining = this.budgetMs - this.spentMs;
+    if (remaining <= 0) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
+    const started = Date.now();
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    // The work is not ours to stop; what it settles with after the budget is
+    // gone goes nowhere.
+    const pending = work();
+    pending.catch(() => undefined);
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new PatternTooExpensiveError(this.pattern, this.budgetMs)), remaining);
+          onAbort = () => reject(new SearchAbandonedError());
+          this.signal?.addEventListener('abort', onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) this.signal?.removeEventListener('abort', onAbort);
+      this.spentMs += Date.now() - started;
+    }
+  }
+
   /**
    * Run ripgrep and yield its stdout split on `separator`. The run is this
    * generator's: it is killed when the caller stops reading, when the
