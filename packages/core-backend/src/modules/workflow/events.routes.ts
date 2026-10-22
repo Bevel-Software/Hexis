@@ -44,7 +44,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('events');
 import express from 'express';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import { type WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
 import type { IEventDelivery } from './events-delivery.js';
 import '../auth/index.js'; // Express Request augmentation

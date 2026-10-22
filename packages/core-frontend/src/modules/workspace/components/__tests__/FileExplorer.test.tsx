@@ -18,6 +18,8 @@ import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.con
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { PR_STALE_EVENT } from '../../../../core/events';
+import { EventBusProvider } from '../../../workflow';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,
   makeRegistry,
@@ -4270,5 +4272,140 @@ describe('FileExplorer: deleting the file on screen', () => {
     expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
     alertSpy.mockRestore();
     errorSpy.mockRestore();
+  });
+});
+
+describe('FileExplorer: a document the server could not read', () => {
+  // Legal is open (a folder above depth 2 opens by default); Archive/Old is
+  // at depth 2 and starts closed, so its file has no row on screen until opened.
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'Legal',
+        relativePath: 'Legal',
+        type: 'directory',
+        children: [
+          { name: 'Supplier-Agreement.pdf', relativePath: 'Legal/Supplier-Agreement.pdf', type: 'file' },
+          { name: 'Terms-2026.md', relativePath: 'Legal/Terms-2026.md', type: 'file' },
+        ],
+      },
+      {
+        name: 'Archive',
+        relativePath: 'Archive',
+        type: 'directory',
+        children: [
+          {
+            name: 'Old',
+            relativePath: 'Archive/Old',
+            type: 'directory',
+            children: [{ name: 'Hidden.pdf', relativePath: 'Archive/Old/Hidden.pdf', type: 'file' }],
+          },
+        ],
+      },
+    ],
+  };
+
+  /**
+   * The app's own event bus, driven as the server drives it. jsdom ships no
+   * EventSource, so the provider gets this stand-in for the stream it opens
+   * on mount; `deliver` hands it one server event the way the stream would.
+   */
+  class FakeEventSource {
+    static current: FakeEventSource | null = null;
+    private readonly listeners = new Map<string, ((e: Event) => void)[]>();
+    constructor() {
+      FakeEventSource.current = this;
+    }
+    addEventListener(type: string, fn: (e: Event) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+    }
+    removeEventListener(type: string, fn: (e: Event) => void) {
+      this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
+    }
+    close() {}
+    deliver(event: WorkflowEvent) {
+      for (const fn of [...(this.listeners.get('message') ?? [])]) {
+        fn(new MessageEvent('message', { data: JSON.stringify(event) }));
+      }
+    }
+  }
+
+  beforeEach(() => {
+    FakeEventSource.current = null;
+    vi.stubGlobal('EventSource', FakeEventSource);
+    // The provider posts its focus to the server; nothing here reads the answer.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'ok' }), { status: 200 })));
+    window.sessionStorage.setItem('bevel-event-bus-session-id', 'sess-explorer');
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.sessionStorage.clear();
+  });
+
+  function renderWithBus() {
+    const workspace = makeWorkspaceFixture({ fileTree: inCheckout(TREE) });
+    render(
+      <MemoryRouter>
+        <AuthContext.Provider value={makeAuth()}>
+          <WorkspaceContext.Provider value={workspace}>
+            <GitContext.Provider value={makeGit()}>
+              <EventBusProvider>
+                <FileExplorer />
+              </EventBusProvider>
+            </GitContext.Provider>
+          </WorkspaceContext.Provider>
+        </AuthContext.Provider>
+      </MemoryRouter>,
+    );
+    let id = 1;
+    const push = (payload: { workspaceId: string; path: string; reason: string }) =>
+      act(() => {
+        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as WorkflowEvent;
+        FakeEventSource.current!.deliver(event);
+      });
+    return { push };
+  }
+
+  const damaged = kbPath('Legal/Supplier-Agreement.pdf');
+
+  it('shows the notice under the row of the file, with the reason after "Could not be read:"', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'ws-1', path: damaged, reason: "could not extract the PDF's text (Bad (uncompressed) XRef entry: 4R)" });
+    const notice = screen.getByTestId('tree-unreadable-notice');
+    expect(notice).toHaveTextContent("Could not be read: could not extract the PDF's text (Bad (uncompressed) XRef entry: 4R)");
+    // Under THAT row: the row's own element is the one right before it.
+    const row = screen.getByText('Supplier-Agreement.pdf').closest('button')!;
+    expect(row.nextElementSibling).toBe(notice);
+    // The row itself carries no marker of its own.
+    expect(within(row).queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('words a timeout as the mock does, and Dismiss removes it for good', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'ws-1', path: damaged, reason: 'extracting its text took longer than 10 seconds' });
+    expect(screen.getByTestId('tree-unreadable-notice')).toHaveTextContent(
+      'Could not be read: extracting its text took longer than 10 seconds.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss could not be read' }));
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('shows nothing for a file in another workspace, or for another file', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'someone%2Felse', path: damaged, reason: 'x' });
+    push({ workspaceId: 'ws-1', path: kbPath('Legal/Terms-2026.md.pdf'), reason: 'x' });
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('keeps nothing for a row that was not on screen when the failure was pushed', () => {
+    const { push } = renderWithBus();
+    expect(screen.queryByText('Hidden.pdf')).toBeNull();
+    push({ workspaceId: 'ws-1', path: kbPath('Archive/Old/Hidden.pdf'), reason: 'x' });
+    fireEvent.click(screen.getByText('Old'));
+    expect(screen.getByText('Hidden.pdf')).toBeInTheDocument();
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
   });
 });

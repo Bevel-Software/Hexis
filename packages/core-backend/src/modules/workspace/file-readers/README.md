@@ -8,6 +8,15 @@ under an `[extracted text of …]` marker whose summary states what was left out
 When an extractor's OUTPUT changes, bump `EXTRACTION_SCHEMA` in
 `doc-extract.service.ts` so cached extractions of unchanged bytes refresh.
 
+No extractor runs on the server's request thread: `DocExtractService` hands the
+bytes to `WorkerDocumentExtractor` (`extract-in-worker.ts`), a pool of worker
+threads running `extract.worker.ts` (the table in `document-extractors.ts`)
+under a 10-second budget per file. A failed extraction is cached under the same
+key — a parser's refusal for good, a timeout or crash for an hour — and a fresh
+failure is reported as the `document-unreadable` event. A new format is added
+to `document-formats.ts` and to the worker's table; the compiler holds the two
+together.
+
 ## Word (`.docx`)
 
 - Paragraphs become lines; table rows become lines of tab-separated cells.
