@@ -58,6 +58,7 @@ import {
   FullScreenButton,
 } from './FullScreenView';
 import { useFullScreenView } from '../hooks/useFullScreenView';
+import { carryReadingOffset, readingAnchorIn, readingOffset, readingWidthOf } from './readingCarry';
 import { DOCUMENT_COLUMN_CONTENT, documentSideGutters } from '../../../shared/theme/measure';
 import { StarterPackCard } from '../../onboarding/components/StarterPackCard';
 import { useStarterPacks } from '../../onboarding/state/starter-packs';
@@ -84,18 +85,6 @@ function governedFolderLabel(folder: string, kbDirName: string | null): string {
   const rel = kbDirName && folder.startsWith(`${kbDirName}/`) ? folder.slice(kbDirName.length + 1) : folder;
   if (rel === KNOWLEDGE_BASE_DIR) return 'everything in Knowledge';
   return rel.slice(rel.lastIndexOf('/') + 1);
-}
-
-/**
- * The prose document's body inside the read pane — what the full-screen
- * switch measures the reader's place against. Null for a full-bleed file,
- * which has no card and scrolls inside its own renderer.
- */
-function readingAnchorIn(pane: HTMLElement | null): HTMLElement | null {
-  // The body of the pane's own card (its direct child), found by the body's
-  // own marker: a test id is the tests' to rename, and a selector hung on it
-  // would stop the carry silently the day one is.
-  return pane?.querySelector<HTMLElement>(':scope > * > [data-file-pane-body]') ?? null;
 }
 
 /** The folder a page sits in, or '' for one that sits at a root. */
@@ -988,18 +977,15 @@ export function FileViewer() {
     const shell = editorContainerRef.current;
     const anchor = readingAnchorIn(readPaneRef.current);
     if (shell && anchor) {
-      readingOffsetRef.current = shell.getBoundingClientRect().top - anchor.getBoundingClientRect().top;
-      const card = anchor.parentElement;
-      setReadingWidth(card ? card.getBoundingClientRect().width || null : null);
+      readingOffsetRef.current = readingOffset(shell, anchor);
+      setReadingWidth(readingWidthOf(anchor));
     }
     enterFullScreenView();
   }, [enterFullScreenView]);
   const leaveFullScreen = useCallback(() => {
     const pane = readPaneRef.current;
     const anchor = readingAnchorIn(readPaneRef.current);
-    if (pane && anchor) {
-      readingOffsetRef.current = pane.getBoundingClientRect().top - anchor.getBoundingClientRect().top;
-    }
+    if (pane && anchor) readingOffsetRef.current = readingOffset(pane, anchor);
     setReadingWidth(null);
     leaveFullScreenView();
   }, [leaveFullScreenView]);
@@ -1011,7 +997,7 @@ export function FileViewer() {
     if (offset === null || !scroller || !anchor) return;
     // Put the scroller's top edge `offset` px below the body's top, as it was
     // in the view just left.
-    scroller.scrollTop += anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + offset;
+    carryReadingOffset(scroller, anchor, offset);
   }, [filling]);
   // Focus still inside the renderer (an editor's caret, a page's control) is
   // where the reader is working, and stays there both ways. Otherwise: on
