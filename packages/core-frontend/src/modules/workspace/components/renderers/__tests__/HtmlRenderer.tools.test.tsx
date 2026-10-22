@@ -328,10 +328,12 @@ describe('the platform card where there are no tools', () => {
 });
 
 describe('a call whose view ended before it was decided', () => {
-  // A rebuilt document is a new frame window here, so what the old view's
-  // call is answered reaches nobody — `closed` itself is pinned through the
-  // controller's own suite, whose frame keeps its window. What this renderer
-  // must show is the rest: no card in the new view, and nothing run.
+  // An ended view's calls are decided `closed` and their replies are never
+  // posted: the controller fences replies by view generation, which its own
+  // suite pins with a frame that keeps its window across a view change. A
+  // rebuilt document is a new frame window here, so this renderer shows the
+  // rest: no card in the new view, nothing run, and neither window hearing
+  // an answer meant for a view that is gone.
   const settled = () => new Promise((r) => setTimeout(r, 50));
 
   it('shows no card and runs nothing when the document changes under it while the lookup is in flight', async () => {

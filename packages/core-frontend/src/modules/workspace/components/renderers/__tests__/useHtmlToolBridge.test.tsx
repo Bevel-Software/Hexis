@@ -19,7 +19,9 @@ import { frameChannel, stubServer } from './pageToolsHarness';
  * its file and its view key, and renders the cards it hands back — exactly
  * what a distribution's own HTML renderer does. Everything comes from the
  * renderers module's entry. The frame stays the same element across a view
- * change here, so what an ended view's calls are answered is visible.
+ * change here — the one window a browser keeps when a document is rebuilt in
+ * place — so the suite can show that an ended view's calls are answered into
+ * nobody: the controller decides them `closed` and never posts the reply.
  */
 
 const PATH = 'knowledge-base/Dashboards/Roadmap.html';
