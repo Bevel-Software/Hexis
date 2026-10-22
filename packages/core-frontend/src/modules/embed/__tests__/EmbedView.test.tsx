@@ -4,10 +4,10 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
 import type { EmbedFileView } from '../services/embed.api';
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { EMBED_EXPIRED, EMBED_HEIGHT_MESSAGE } from '../embed-host';
 import { configureEmbed, resetEmbedConfig } from '../embed-config';
-import { useKbGraphLoader, useRendererSurface } from '../../workspace';
+import { PageToolsContext, useKbGraphLoader, useRendererSurface } from '../../workspace';
 
 /**
  * The HTTP surface, stubbed. The error CLASS is hoisted with the rest: the
@@ -548,6 +548,23 @@ describe('the renderer', () => {
     window.history.replaceState({}, '', '/embed?token=tok');
     mount({ ...EMPTY_REGISTRY, renderers } as unknown as AppRegistry);
     expect((await screen.findByTestId('sizing-reader')).textContent).toBe('false');
+  });
+
+  /**
+   * The embed is outside the platform: a page there gets no tools — the
+   * renderer shows it the "only available in the platform" card instead —
+   * even for a skill's page, which the skill page answers.
+   */
+  it('mounts the renderer without the page-tool bridge, a skill page included', async () => {
+    api.loadEmbed.mockResolvedValue(
+      view({ repoRelative: 'Skills/qa-bridge/view.html', workspacePath: `${KB}/Skills/qa-bridge/view.html`, content: '<p>qa</p>' }),
+    );
+    const BridgeReader = () => {
+      const tools = useContext(PageToolsContext);
+      return <div data-testid="bridge-reader">{tools ? tools.pagePath : 'no tools'}</div>;
+    };
+    mount({ ...EMPTY_REGISTRY, renderers: [{ extensions: ['.html'], Component: BridgeReader }] } as unknown as AppRegistry);
+    expect((await screen.findByTestId('bridge-reader')).textContent).toBe('no tools');
   });
 
   it("opens a page on its FILE PAGE in a new tab by an address that asks for it — a skill's page would claim the bare one", async () => {
