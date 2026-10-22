@@ -86,7 +86,6 @@ const WRITERS = [
   'commit_change',
   'share_current_branch',
   'open_change_request',
-  'update_change_request',
   'create_plugin',
   'my_plugin',
 ];
