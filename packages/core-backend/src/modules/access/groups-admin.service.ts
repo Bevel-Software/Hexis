@@ -28,7 +28,7 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';

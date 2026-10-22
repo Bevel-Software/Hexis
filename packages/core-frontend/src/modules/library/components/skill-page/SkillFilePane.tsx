@@ -5,7 +5,7 @@ import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdo
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
 import { OpenPageInPlatformContext, PageToolsContext } from '../../../workspace';
-import type { DiffLine } from '../../../change-requests/utils/diff';
+import type { DiffLine } from '../../../change-requests';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
 const NOOP_SAVE = async () => {};

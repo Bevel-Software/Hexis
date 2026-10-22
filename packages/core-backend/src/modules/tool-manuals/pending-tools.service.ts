@@ -6,9 +6,9 @@ import {
   type IWorkflowService,
   type KbLayout,
 } from '@bevel-software/platform-shared';
-import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { readAt, visibleProposedFiles } from '../../shared/pending-proposals.js';
 import { utcpNamespacePrefix } from '../../shared/utcp-namespace.js';
 import { baseName, normalizeToolManual } from './tool-manuals.service.js';

@@ -5,7 +5,7 @@ const log = logger('marketplace');
 import { spawn } from 'node:child_process';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { MarketplaceRepoService } from './marketplace-repo.service.js';
-import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
 
 /** How a bearer string resolves to a user — the connection-key service's shape. */
 export interface MarketplaceKeyResolver {

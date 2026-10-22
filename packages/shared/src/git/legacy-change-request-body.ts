@@ -36,6 +36,23 @@ export interface LegacyChangeRequestBody {
 }
 
 const AFFECTED_OWNERS_HEADING = '## Affected owners';
+/** One line of the generated block: a changed path in backticks, an em dash, its approvers. */
+const GENERATED_PATH_LINE = /^- `[^`]+` — .+$/;
+/** The block's closing summary, written when more paths changed than it listed. */
+const GENERATED_SUMMARY_LINE = /^…and \d+ more changed path\(s\)\. All eligible approvers across this change: /;
+
+/**
+ * Whether what follows the heading is the block `openChangeRequest` wrote and
+ * nothing else: at least one path line, and every non-blank line a path line
+ * or the summary. An author who wrote the heading themselves, with prose
+ * under it, keeps both — the cut would otherwise take their text and the
+ * ledger would record the move as done.
+ */
+function isGeneratedBlock(lines: string[]): boolean {
+  const written = lines.filter((line) => line.trim() !== '');
+  return written.length > 0 && written.every((line) => GENERATED_PATH_LINE.test(line) || GENERATED_SUMMARY_LINE.test(line));
+}
+
 const LEVEL_MARK = /<!--hexis:access-request-level:(write|owner)-->/;
 const NOTE_OPEN = '<!--hexis:access-request-note-->';
 const NOTE_CLOSE = '<!--/hexis:access-request-note-->';
@@ -54,8 +71,9 @@ export function parseLegacyChangeRequestBody(body: string): LegacyChangeRequestB
   // The generated block starts at the LAST line reading exactly the heading
   // and runs to the end — it was appended after everything the author wrote.
   const lines = text.split('\n');
+  // Cut only when what follows IS that block: the heading alone proves nothing.
   const generatedAt = lines.lastIndexOf(AFFECTED_OWNERS_HEADING);
-  if (generatedAt !== -1) text = lines.slice(0, generatedAt).join('\n');
+  if (generatedAt !== -1 && isGeneratedBlock(lines.slice(generatedAt + 1))) text = lines.slice(0, generatedAt).join('\n');
 
   const level = LEVEL_MARK.exec(text);
   const accessRequestLevel = level ? (level[1] as AccessRequestLevel) : undefined;

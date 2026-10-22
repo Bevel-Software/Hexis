@@ -4,13 +4,10 @@ import { PanelRight } from 'lucide-react';
 import { ProfileMenu } from './ProfileMenu';
 import { AppSwitcher } from './AppSwitcher';
 import { SearchPalette } from './SearchPalette';
-import { useLayout } from '../../layout/state/layout.context';
-import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
+import { useLayout, useMediaQuery, toggleSidebar, useSidebar, TOOLBAR_STACK_QUERY } from '../../layout';
 import { useActiveAppId, useAppRegistry } from '../../../core/registry';
 import { SidebarToggle } from '../../layout/components/SidebarToggle';
-import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
-import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
-import { isSettingsNavPath } from '../../settings/settings-nav-items';
+import { isSettingsNavPath } from '../../settings';
 import { InviteButton } from '../../onboarding/components/InviteButton';
 
 /**

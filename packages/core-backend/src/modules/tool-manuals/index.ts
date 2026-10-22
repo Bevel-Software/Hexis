@@ -15,3 +15,9 @@ export {
   type ToolCapability,
   type ToolManualType,
 } from './tool-manuals.contract.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { judgeMcpServerEntry } from './mcp-json-discovery.js';
+export type { PortableHttpEntry, PortableStdioEntry } from './mcp-json-discovery.js';
+export { MAX_CAPABILITIES } from './tool-manuals.contract.js';
+export type { ToolHealthCheck, ToolManualDescriptor, ToolProbeTarget, ToolVariable } from './tool-manuals.contract.js';
+export { normalizeToolManual } from './tool-manuals.service.js';

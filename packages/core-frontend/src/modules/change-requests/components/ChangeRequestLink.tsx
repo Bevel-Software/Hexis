@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { getPullRequest } from '../../git/services/pr.api';
-import { GitApiError } from '../../git/services/git.api';
-import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { getPullRequest, GitApiError } from '../../git';
+import { KB_ROUTE_PREFIX } from '../../workspace';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
 
 /**

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
-import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
+import { renderRolesYaml } from '../../../access-model/index.js';
 import { reservedRootDirs } from './template-files.step.js';
 import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from './template-source.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';

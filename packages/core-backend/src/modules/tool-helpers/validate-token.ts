@@ -1,6 +1,5 @@
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import { InternalTokenService } from '../tool-auth/internal-token.service.js';
-import { createTokenVerifier } from '../tool-auth/tool-auth.middleware.js';
+import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
+import { createTokenVerifier } from '../tool-auth/index.js';
 import { createToolContextResolver, type ToolContextDeps } from './tool-context.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
 

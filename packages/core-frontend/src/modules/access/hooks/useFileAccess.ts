@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { currentBranchModel, isProtectedBranch } from '@bevel-software/platform-shared';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { fetchFileAccess, type AccessEligible } from '../api';
 
 export interface FileAccessState {

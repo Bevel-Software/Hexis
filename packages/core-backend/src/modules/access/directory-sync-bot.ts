@@ -3,8 +3,8 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('directory-sync');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/core-schema.js';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
 
 /**
  * Synthetic identity for the synced-groups materializer's commits: every

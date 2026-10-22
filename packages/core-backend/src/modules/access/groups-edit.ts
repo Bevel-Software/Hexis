@@ -21,7 +21,7 @@ import {
   GROUP_REF_PREFIX,
   RESERVED_ROLE_NAMES,
 } from '../access-model/index.js';
-import { GROUPS_YAML, parseGroupsFile, unsafeNameReason } from '../access-model/group-files.js';
+import { GROUPS_YAML, parseGroupsFile, unsafeNameReason } from '../access-model/index.js';
 
 /** Bad-input failure when editing groups.yaml. */
 export class GroupsEditError extends Error {

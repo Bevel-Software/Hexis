@@ -6,7 +6,7 @@ import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { changeRequestLink, changeRequestLinkBase } from '../workflow/index.js';
 import type { FileReaderRegistry } from '../workspace/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';

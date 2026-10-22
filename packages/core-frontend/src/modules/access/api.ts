@@ -1,6 +1,6 @@
 import type { Verb } from '@bevel-software/platform-shared';
 import { authFetch } from '../../lib/api';
-import { GitApiError, handleApiResponse } from '../git/services/git.api';
+import { GitApiError, handleApiResponse } from '../git';
 
 /**
  * A collective grantee with WHAT it is — role (capability), group (audience),

@@ -17,14 +17,12 @@ import type {
   GrantPrincipal,
   GrantSources,
 } from './access-control.interface.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { IAccountSwitchGuard } from '../auth/account-switch-guard.js';
-import type { WorkflowService } from '../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { AuthService, IAccountSwitchGuard } from '../auth/index.js';
+import type { WorkflowService, WorkflowEventBus } from '../workflow/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { AccessDeniedError } from '../access-model/index.js';
 import {
@@ -53,8 +51,8 @@ import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView 
 import type { AccessView, LabelledAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import '../auth/index.js';
 

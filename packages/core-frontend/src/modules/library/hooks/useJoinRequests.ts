@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import {
   useAccessRequests,
   type AccessRequestsState,
-} from '../../access/hooks/useAccessRequests';
+} from '../../access';
 import {
   listJoinRequests,
   reconcileJoinRequest,

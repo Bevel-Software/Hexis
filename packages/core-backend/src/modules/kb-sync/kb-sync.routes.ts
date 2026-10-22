@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('sync');
 import type { IAdminAccessService } from '../admin/index.js';
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { assertValidBranchName } from '../kb-fs/index.js';
 import type { IKbSyncService, SyncResult } from './kb-sync.interface.js';
 import { parseSyncPayload, type SyncPayloadSource } from './sync-payload.js';
 import { verifySyncCredential } from './sync-auth.js';

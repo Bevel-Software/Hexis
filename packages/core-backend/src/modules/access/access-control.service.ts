@@ -7,9 +7,9 @@ const log = logger('access');
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { assertOneSpecPerLine, isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../workflow/index.js';
 import { readRevSha } from '../kb-fs/index.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type {
   IAccessControl,
   AccessDecision,

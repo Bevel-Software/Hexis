@@ -3,7 +3,7 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import {
   listMyChangeRequests,
   listOpenChangeRequests,
-} from '../../change-requests/services/change-requests.api';
+} from '../../change-requests';
 import { useWorkspace } from './workspace.context';
 import {
   PR_STALE_FALLBACK_MS,

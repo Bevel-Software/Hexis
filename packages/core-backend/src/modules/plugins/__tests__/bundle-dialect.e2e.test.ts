@@ -8,6 +8,7 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
+import { AccessMutationService } from '../../access/access-mutation.service.js';
 import { SkillService } from '../../skills/skills.service.js';
 import { ToolManualService } from '../../tool-manuals/tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -103,7 +104,7 @@ describe('bundle dialect, end to end', () => {
     links = new PluginLinkIndex(workspaceService, skills, access, kb, source);
     index = new PluginIndexService(workspaceService, access, skills, tools, kb, source, Date.now, links);
     compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, kb, { name: 'acme', owner: 'Acme' }, source, disk, new NodeGitRunner());
-    linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, skills, links, kb);
+    linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, new AccessMutationService(workspaceService, access, kb.kbDirName), skills, links, kb);
   });
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });

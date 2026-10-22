@@ -1,10 +1,9 @@
 import { branchAuthorLocalpart, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { ToolError } from '../tool-helpers/index.js';
-import { AccessDeniedError } from '../access-model/index.js';
+import { AccessDeniedError, toKbRelative } from '../access-model/index.js';
 import type { IChangeReadGate } from '../access-model/index.js';
-import { toKbRelative } from '../access-model/kb-read-filter.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 
 /** One step of the proposal route, named by the tool the agent calls. */
