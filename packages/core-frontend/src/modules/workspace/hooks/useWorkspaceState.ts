@@ -608,9 +608,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * `path` was read back: it exists again, so a marker covering it no longer
    * describes the branch — a later 404 on it is a new delete, not ours.
+   * `readIssuedAt`: when the read that found it was sent. A read sent before
+   * the delete answered found the file as it was before it; that marker stays,
+   * or a save still waiting would re-create the file (`awaitStillOnBranch`).
    */
-  const forgetOwnDelete = useCallback((path: string) => {
-    for (const deleted of ownDeletesRef.current.keys()) {
+  const forgetOwnDelete = useCallback((path: string, readIssuedAt?: number) => {
+    for (const [deleted, at] of ownDeletesRef.current) {
+      if (readIssuedAt !== undefined && at >= readIssuedAt) continue;
       if (path === deleted || path.startsWith(deleted + '/')) ownDeletesRef.current.delete(deleted);
     }
   }, []);
@@ -1049,9 +1053,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const createFile = useCallback(async (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => {
     if (!workspaceId) return;
     await writeFile(workspaceId, relativePath, content ?? '', options);
+    // A file created where this session deleted one is not the deleted file:
+    // saving it is not re-creating that one (`awaitStillOnBranch`).
+    if (workspaceIdRef.current === workspaceId) forgetOwnDelete(relativePath);
     await refreshFileTree();
     bumpFs();
-  }, [workspaceId, refreshFileTree, bumpFs]);
+  }, [workspaceId, refreshFileTree, bumpFs, forgetOwnDelete]);
 
   const createDirectory = useCallback(async (relativePath: string) => {
     if (!workspaceId) return;
@@ -1705,10 +1712,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * deleted file and wiped the notice. A rejected agent change wrote its
    * baseline back the same way. The edits and the agent's version stay on the
    * tab, offered to copy; nothing writes them back unasked.
+   *
+   * This session's own delete refuses it too: a save waiting here (autosave,
+   * idle release, unmount cleanup) can outlive the closed tab, whose
+   * `deletedPathsRef` entry goes with it, and would re-create the file.
    */
   const awaitStillOnBranch = useCallback(async (readFrom: string, relativePath: string) => {
     const refuse = () => new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
-    if (deletedPathsRef.current.has(relativePath)) throw refuse();
+    const deleted = () => deletedPathsRef.current.has(relativePath)
+      || (workspaceIdRef.current === readFrom && isOwnDelete(relativePath));
+    if (deleted()) throw refuse();
     // A read deciding whether the file still exists is in flight: its answer
     // first, so a 404 it is about to deliver refuses this write too.
     // Its own answer, not the guard set: the tab may have closed meanwhile.
@@ -1724,9 +1737,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const newer = existenceChecksRef.current.get(checkKey);
       existenceCheck = newer !== existenceCheck ? newer : undefined;
     }
-    if (deletedPathsRef.current.has(relativePath)) throw refuse();
+    if (deleted()) throw refuse();
     return found;
-  }, [isCheckGone]);
+  }, [isCheckGone, isOwnDelete]);
 
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;
@@ -1734,6 +1747,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // below found newer ones.
     const editedFrom = openTabsRef.current.find((t) => t.path === relativePath)?.savedContent ?? null;
     const found = await awaitStillOnBranch(workspaceId, relativePath);
+    // The tabs are another branch's once the person switched while this
+    // waited: one at the same path holds that branch's file, not this one.
+    const stillHere = () => workspaceIdRef.current === workspaceId;
     // A read waited on found other bytes on disk than `content` was edited
     // from: a commit pulled from the git host, which the `file-changed` read
     // merges the tab's edits onto. Writing `content` as it was would overwrite
@@ -1751,6 +1767,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         // clean as the editor closes, so that read took the bytes as onto a
         // clean tab, silently.
         const pulled = found.bytes;
+        if (!stillHere()) return;
         setOpenTabs((prev) => {
           const idx = prev.findIndex((t) => t.path === relativePath);
           if (idx < 0) return prev;
@@ -1768,6 +1785,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     await writeFile(workspaceId, relativePath, toWrite);
     markWritten(workspaceId, relativePath);
+    if (!stillHere()) return;
     // Update the matching tab — both the cached current value and the on-disk
     // baseline now equal what was written; clear dirty. A save that merged
     // onto a pulled commit keeps the banner: the person has not seen it yet.
@@ -1800,6 +1818,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const moveEntry = useCallback(async (oldPath: string, newPath: string) => {
     if (!workspaceId) return;
     await moveEntryApi(workspaceId, oldPath, newPath);
+    // Switched branch meanwhile: the tabs at these paths are the other branch's.
+    if (workspaceIdRef.current !== workspaceId) return;
+    forgetOwnDelete(newPath);
     // Rewrite all matching tab paths in place — exact match OR directory prefix.
     const oldPrefix = oldPath + '/';
     setOpenTabs((prev) => prev.map((t) => {
@@ -1814,7 +1835,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     await refreshFileTree();
     bumpFs();
-  }, [workspaceId, refreshFileTree, bumpFs]);
+  }, [workspaceId, refreshFileTree, bumpFs, forgetOwnDelete]);
 
   // ── Pending-content (agent edits) — routed to active tab ──────────────────
 
@@ -1862,6 +1883,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     await awaitStillOnBranch(workspaceId, path);
     await writeFile(workspaceId, path, baseline);
     markWritten(workspaceId, path);
+    // Switched branch meanwhile: a tab at `path` now is the other branch's.
+    if (workspaceIdRef.current !== workspaceId) return;
     setOpenTabs((prev) => prev.map((t) => (
       t.path === path
         ? { ...t, content: baseline, savedContent: baseline, pendingFileContent: null, isDirty: false }
@@ -2092,6 +2115,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // freshly-fetched disk bytes (which may include the agent's
       // write) would silently end their review.
       if (matchingTab.pendingFileContent !== null) return;
+      const issuedAt = Date.now();
       const read = readFile(subscribedWorkspaceId, event.path);
       const seq = trackExistenceCheck(subscribedWorkspaceId, event.path, read);
       read
@@ -2107,7 +2131,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           if (workspaceIdRef.current === subscribedWorkspaceId) {
             // The file is there: writing it is no longer re-creating it.
             deletedPathsRef.current.delete(event.path);
-            forgetOwnDelete(event.path);
+            forgetOwnDelete(event.path, issuedAt);
           }
           if (workspaceIdRef.current !== subscribedWorkspaceId) {
             // Workspace switched while the refetch was in flight. The

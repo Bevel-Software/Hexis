@@ -640,9 +640,10 @@ export function SkillPage({
   if (deletedBy) {
     return (
       <DeletedFileNotice
-        // The file on screen, under the skill's own folder name, so the
-        // notice says which skill it was as well as which file.
-        fileName={`${skillPath.slice(skillPath.lastIndexOf('/') + 1)}/${active}`}
+        // The file whose delete this is: the notice comes from SKILL.md's
+        // 404, and another file of the skill on screen may still exist.
+        // Under the skill's own folder name, so it says which skill it was.
+        fileName={`${skillPath.slice(skillPath.lastIndexOf('/') + 1)}/SKILL.md`}
         branch={DEFAULT_BRANCH}
         deletedBy={deletedBy}
         edits={editing ? draft : null}

@@ -236,6 +236,14 @@ export function FileViewer() {
    * sends what the editor showed, never what it replaced.
    */
   const proposeBufferRef = useRef<string | null>(null);
+  /**
+   * The text a proposal opened on: its seed, or the tab's text when there is
+   * no open proposal. The editor mounts on it and keeps one mount for the
+   * whole session, so a change pulled onto the tab meanwhile neither remounts
+   * it nor reaches its buffer — Send sends what is on screen. Read only while
+   * `proposeMode`; set on every entry.
+   */
+  const [proposeBase, setProposeBase] = useState<string | null>(null);
   // Picker overrides set by the chat tool-card's "View full comparison" link.
   // Cleared when the user opens a different file so a deep-link doesn't stick
   // around and override their natural defaults on the next open.
@@ -793,6 +801,7 @@ export function FileViewer() {
       // Switched files while the seed loaded — this propose is moot.
       if (openFilePathRef.current !== targetPath) return;
       setProposeSeed(seed);
+      setProposeBase(seed ?? openFileContentRef.current);
       proposeBufferRef.current = seed ?? openFileContentRef.current;
       setProposeMode(true);
     })().finally(() => setIsEnteringPropose(false));
@@ -1307,10 +1316,10 @@ export function FileViewer() {
       // savedContent stays stable through an edit until the save
       // commits, then advances once.
       // A change pulled from the git host remounts the editor onto the merged
-      // buffer (`remoteRevision`) — but not a proposal in progress: its
-      // buffer is seeded from the proposal, not the tab, and a remount would
-      // put the old seed back over the keystrokes Send still holds.
-      key={editMode || proposeMode ? `${openFilePath}|edit|${proposeMode && proposeSeed !== null ? 'proposal' : remoteRevision}` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
+      // buffer (`remoteRevision`) — but not a proposal in progress: a remount
+      // would put the text it opened on (or the tab's, pulled over) back over
+      // the keystrokes Send still holds.
+      key={editMode || proposeMode ? `${openFilePath}|edit|${proposeMode ? 'proposal' : remoteRevision}` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
       // In propose mode with an open proposal, the buffer AND the dirty
       // baseline are the PROPOSED text (the seed) — the editor continues the
       // pending change, and "dirty" means "differs from what I already
@@ -1318,8 +1327,8 @@ export function FileViewer() {
       content={
         isReviewingPending
           ? pendingFileContent!
-          : proposeMode && proposeSeed !== null
-            ? proposeSeed
+          : proposeMode
+            ? proposeSeed ?? proposeBase ?? openFileContent
             : openFileContent
       }
       savedContent={

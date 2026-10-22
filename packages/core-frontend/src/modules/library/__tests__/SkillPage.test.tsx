@@ -1810,6 +1810,24 @@ describe('SkillPage: deleted by someone else', () => {
     );
   });
 
+  it('names SKILL.md, the file that was deleted, while another file of the skill is on screen', async () => {
+    const bus = makeFakeBus();
+    renderPage(false, [], [], bus);
+    await settled();
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    await waitFor(() =>
+      expect(apiMock.getSkillFile).toHaveBeenCalledWith('newsletter', 'sources.yaml'),
+    );
+
+    gone();
+    act(() => bus.emit(changed()));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `newsletter/SKILL.md was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
+    );
+  });
+
   it('keeps unsaved edits on the notice with Copy edits', async () => {
     accessMock.result = {
       canWrite: true,

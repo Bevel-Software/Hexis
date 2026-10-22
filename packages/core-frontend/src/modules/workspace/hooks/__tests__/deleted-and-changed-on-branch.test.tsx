@@ -1517,6 +1517,139 @@ describe('a change pulled from the git host onto the open file', () => {
   });
 });
 
+/**
+ * A write started on one branch that answers after the person switched to
+ * another and opened the same path there: the tab at that path is the other
+ * branch's file now. Its text, baseline and agent preview stay as they are.
+ */
+describe('a write that answers after a branch switch', () => {
+  /** Switch to `feature` (workspace ws-2), where Draft.md holds `bytes`, and open it there. */
+  async function switchToFeatureAndOpen(result: Hook, path: string, bytes: string) {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'ws-2', name: 'Workspace', absolutePath: '/tmp/ws-2', createdAt: '2026-10-09T00:00:00.000Z' },
+      fileTree: treeOf([path]),
+    });
+    act(() => { result.current.setPersistenceBranch('feature'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-2'));
+    disk.set(path, bytes);
+    await open(result, path);
+    expect(result.current.activeTab?.content).toBe(bytes);
+  }
+  /** The next write is held until `answer` is called. */
+  function holdNextWrite() {
+    const held: { answer: () => void } = { answer: () => { throw new Error('No write was started'); } };
+    apiMocks.writeFile.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      held.answer = () => resolve();
+    }));
+    return held;
+  }
+
+  it("a save on the branch just left does not put its text on this branch's tab", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited on main');
+    const held = holdNextWrite();
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited on main'); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', 'edited on main'));
+
+    await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
+    await act(async () => { result.current.setPendingContent('the agent, on feature'); });
+    await act(async () => { held.answer(); await saving; });
+
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe('as on feature');
+    expect(tab.savedContent).toBe('as on feature');
+    expect(tab.pendingFileContent).toBe('the agent, on feature');
+    expect(tab.changedOnBranch ?? null).toBeNull();
+  });
+
+  it("a save on the branch just left, waiting on a change read, does not put the pulled bytes on this branch's tab", async () => {
+    const base = 'First.\n\nSecond.';
+    disk.set('KB/Notes.md', base);
+    const result = await mountReady();
+    await open(result, 'KB/Notes.md');
+    await typeInto(result, 'First.\n\nSecond, my way.');
+    const pulled = 'First.\n\nSecond, their way.';
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve(pulled);
+    }));
+    act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+    await waitFor(() => expect(answer).toBeDefined());
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Notes.md', 'First.\n\nSecond, my way.'); });
+
+    await switchToFeatureAndOpen(result, 'KB/Notes.md', 'as on feature');
+    await act(async () => { answer(); await saving; });
+
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe('as on feature');
+    expect(tab.savedContent).toBe('as on feature');
+    expect(tab.changedOnBranch ?? null).toBeNull();
+    expect(tab.remoteRevision ?? 0).toBe(0);
+  });
+
+  it("rejecting an agent's change on the branch just left does not put the old baseline on this branch's tab", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { result.current.setPendingContent('the agent, on main'); });
+    const held = holdNextWrite();
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', expect.any(String)));
+
+    await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
+    await act(async () => { result.current.setPendingContent('the agent, on feature'); });
+    await act(async () => { held.answer(); await rejecting; });
+
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe('as on feature');
+    expect(tab.savedContent).toBe('as on feature');
+    expect(tab.pendingFileContent).toBe('the agent, on feature');
+  });
+});
+
+describe('the editor writing back after our own delete', () => {
+  it('a save that was waiting when the tab closed cannot re-create the file', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    // A change read deciding whether Draft.md exists is out; the save waits on it.
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve('edited');
+    }));
+    act(() => bus.emit(fileChanged('KB/Draft.md', GIT_SYNC)));
+    await waitFor(() => expect(answer).toBeDefined());
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+
+    // Our own delete closes the tab meanwhile, and the tab's marker with it.
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    apiMocks.writeFile.mockClear();
+    await act(async () => {
+      answer();
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it('a file created where our own delete was saves as any other', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    await act(async () => { await result.current.createFile('KB/Draft.md', 'new'); });
+    await open(result, 'KB/Draft.md');
+
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'new, edited'); });
+    expect(disk.get('KB/Draft.md')).toBe('new, edited');
+  });
+});
+
 describe('a late 404 about a file that came back since', () => {
   const RESTORED = '# Draft\n\nRestored since.';
 

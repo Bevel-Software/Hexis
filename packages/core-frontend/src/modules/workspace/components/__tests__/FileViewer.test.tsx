@@ -1524,6 +1524,35 @@ describe('FileViewer: proposing a change without write access', () => {
     expect(screen.getByRole('textbox')).toHaveValue('first proposed paragraph plus a second thought');
   });
 
+  // No open proposal: the editor starts from the tab's text, and the pulled
+  // change remounted it onto the tab's new buffer — the typing gone from the
+  // screen while Send still held it.
+  it('keeps a new proposal being typed, and sends it, when a change is pulled onto the branch', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' plus my thought');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'official, updated', savedContent: 'official, updated', outcome: 'discarded' });
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('official plus my thought');
+    await user.click(screen.getByRole('button', { name: 'Send proposal' }));
+    await waitFor(() =>
+      expect(proposeMock).toHaveBeenCalledWith(expect.objectContaining({ content: 'official plus my thought' })),
+    );
+  });
+
   it('closes without sending when nothing was typed over the open proposal', async () => {
     denyWrite();
     myCrsMock.mockResolvedValue([
