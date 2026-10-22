@@ -439,7 +439,7 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * The frame has no network (`connect-src 'none'`), so a page reaches tools the
  * way it reaches navigation: it posts `bevel.tool.call` `{ requestId, fn, args }`
  * to the parent and awaits `bevel.tool.response` `{ requestId, ok, result |
- * error, code? }`. The parent (`HtmlRenderer`, through `htmlToolBridge.ts`)
+ * error, code? }`. The parent (an HTML renderer, through `useHtmlToolBridge`)
  * answers each one over the hosted MCP server with the viewer's session —
  * after asking the viewer, on the first call that writes. Nothing about the
  * consent lives in the frame: the card is the app's, drawn outside it, and a
@@ -464,11 +464,28 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * The `html-views` section of the agent guide documents the members, and
  * `htmlViewsGuide.test.ts` holds the two together.
  */
-function toolBridgeRuntime(enabled: boolean): string {
+/**
+ * `toolBridge`: what the document's runtime posts as, and whether it gets the
+ * tools. An object carries `documentId`, the identity the app minted for THIS
+ * document, which the runtime stamps on every message it posts (tool calls
+ * and `requireTools()` alike) — so the app can tell a message queued by a
+ * document it has since replaced (the frame's window survives a rebuild in
+ * place) from one the current document posts; `tools: false` gives such a
+ * document `bevel.tools = null` while it still asks as itself. `true` builds
+ * the tools without an identity, for a host that answers one document only;
+ * `false` or absent builds neither.
+ */
+export type ToolBridgeOption = boolean | { documentId: string; tools?: boolean };
+
+function toolBridgeRuntime(option: ToolBridgeOption | undefined): string {
+  const withIdentity = typeof option === 'object' && option !== null ? option : null;
+  const enabled = option === true || (withIdentity !== null && withIdentity.tools !== false);
+  const documentId = withIdentity?.documentId ?? null;
   return `
 ;(function () {
   var pending = {};
   var seq = 0;
+  var documentId = ${JSON.stringify(documentId)};
   function request(type, payload) {
     return new Promise(function (resolve, reject) {
       seq += 1;
@@ -479,6 +496,7 @@ function toolBridgeRuntime(enabled: boolean): string {
       }, ${TOOL_CALL_TIMEOUT_MS});
       pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
       var message = { type: type, requestId: requestId };
+      if (documentId !== null) message.documentId = documentId;
       for (var key in payload) message[key] = payload[key];
       parent.postMessage(message, '*');
     });
@@ -540,7 +558,7 @@ interface BuildSandboxedHtmlOptions {
    * Absent or false, the member is `null`; `requireTools()` exists either
    * way.
    */
-  toolBridge?: boolean;
+  toolBridge?: ToolBridgeOption;
 }
 
 /**
@@ -552,7 +570,7 @@ interface BuildSandboxedHtmlOptions {
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
   const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge === true));
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent

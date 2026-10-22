@@ -44,10 +44,9 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
-import { getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
+import { PageToolsContext, getRendererLayout, isViewOnlyFile, pickFileRenderer } from './renderers';
 import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
-import { PageToolsContext } from './renderers/htmlToolBridge';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
