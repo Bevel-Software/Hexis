@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('review-workflow');
@@ -8,13 +8,11 @@ import type {
   FileApprovalEntry,
   FileApprovalState,
   MergePrResult,
-  PostPrCommentInput,
-  PrReviewComment,
   PullRequestFile,
   PullRequestState,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
-import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
+import { changeRequests, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
@@ -62,16 +60,6 @@ const EVERYONE_CANONICAL = 'everyone';
  */
 function redactTokens(msg: string, token: string | null | undefined): string {
   return redactSecret(msg, [token]);
-}
-
-class CommentAuthError extends WorkflowDomainError {
-  constructor(reason: 'not-found' | 'forbidden') {
-    super(
-      reason === 'not-found' ? 'Comment not found' : 'You can only edit your own comments',
-      reason === 'not-found' ? 404 : 403,
-    );
-    this.name = 'CommentAuthError';
-  }
 }
 
 /**
@@ -174,31 +162,6 @@ function assertValidPrNumber(n: number): void {
   }
 }
 
-function assertValidBody(body: string): void {
-  const trimmed = body.trim();
-  if (!trimmed) throw new WorkflowValidationError('comment body is required');
-  if (trimmed.length > 64_000) {
-    throw new WorkflowValidationError('comment body exceeds 64k character limit');
-  }
-}
-
-function assertValidLine(line: number | undefined): void {
-  if (line === undefined) return;
-  if (!Number.isInteger(line) || line < 1 || line > 1_000_000) {
-    throw new WorkflowValidationError('line must be a positive integer');
-  }
-}
-
-// RFC 4122 — accepts any variant/version so legacy v1 ids still pass. Stricter
-// than "any 32 hex" because Drizzle/PG reject mis-shaped strings with a 500,
-// and we want a 4xx on malformed input from URL params / body fields.
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function assertValidUuid(value: unknown, fieldName: string): asserts value is string {
-  if (typeof value !== 'string' || !UUID_RE.test(value)) {
-    throw new WorkflowValidationError(`${fieldName} must be a valid UUID`);
-  }
-}
-
 /**
  * Approval enforcement binds every touched file that has someone eligible to
  * approve it per the access tree — Markdown notes, the access-config files
@@ -279,20 +242,6 @@ function assertValidPath(p: unknown): asserts p is string | undefined {
   if (p.includes('\0')) throw new WorkflowValidationError('path contains NUL');
 }
 
-function toDTO(row: typeof prComments.$inferSelect): PrReviewComment {
-  return {
-    id: row.id,
-    author: { email: row.authorEmail, name: row.authorName },
-    body: row.body,
-    path: row.path ?? undefined,
-    line: row.line ?? undefined,
-    headSha: row.headSha,
-    parentId: row.parentId ?? undefined,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt ? row.updatedAt.toISOString() : undefined,
-  };
-}
-
 export class ReviewWorkflowService implements IReviewWorkflowService {
   constructor(
     private readonly db: Database,
@@ -300,114 +249,6 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     private readonly workspaceService: WorkspaceService,
     private readonly git: GitService,
   ) {}
-
-  async listComments(prNumber: number): Promise<PrReviewComment[]> {
-    assertValidPrNumber(prNumber);
-    const rows = await this.db
-      .select()
-      .from(prComments)
-      .where(eq(prComments.prNumber, prNumber))
-      .orderBy(asc(prComments.createdAt));
-    return rows.map(toDTO);
-  }
-
-  async postComment(
-    prNumber: number,
-    user: AuthUser,
-    input: PostPrCommentInput,
-    headSha: string,
-  ): Promise<PrReviewComment> {
-    assertValidPrNumber(prNumber);
-    assertValidBody(input.body);
-    assertValidPath(input.path);
-    assertValidLine(input.line);
-    if (!headSha) throw new WorkflowValidationError('head sha is required');
-
-    // Inline (line-level) comments must have a path; general comments may have neither.
-    if (input.line !== undefined && !input.path) {
-      throw new WorkflowValidationError('line comments require a file path');
-    }
-
-    // Validate parentId references a real comment on the same PR. UUID format
-    // check first — PG rejects mis-shaped ids with a 500 from its uuid type,
-    // so we convert that to a structured 4xx before hitting the DB. We skip a
-    // depth check — trees deeper than two levels are rare and the UI flattens
-    // them into a single reply chain for display.
-    if (input.parentId !== undefined && input.parentId !== null) {
-      assertValidUuid(input.parentId, 'parentId');
-      const parent = await this.db
-        .select()
-        .from(prComments)
-        .where(
-          and(eq(prComments.id, input.parentId), eq(prComments.prNumber, prNumber)),
-        )
-        .limit(1);
-      if (parent.length === 0) {
-        throw new WorkflowValidationError('parent comment not found on this PR');
-      }
-    }
-
-    const [row] = await this.db
-      .insert(prComments)
-      .values({
-        prNumber,
-        authorEmail: canonicalEmail(user.email),
-        authorEmailBidx: user.email,
-        authorName: user.name,
-        path: input.path ?? null,
-        line: input.line ?? null,
-        headSha,
-        body: input.body.trim(),
-        parentId: input.parentId ?? null,
-      })
-      .returning();
-    return toDTO(row);
-  }
-
-  async editComment(
-    commentId: string,
-    prNumber: number,
-    user: AuthUser,
-    body: string,
-  ): Promise<PrReviewComment> {
-    assertValidPrNumber(prNumber);
-    assertValidUuid(commentId, 'comment id');
-    assertValidBody(body);
-    // Scope lookup to (id, prNumber) so a guessed id from another PR 404s
-    // rather than leaking existence / touching a foreign comment.
-    const existing = await this.db
-      .select()
-      .from(prComments)
-      .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
-      .limit(1);
-    if (existing.length === 0) throw new CommentAuthError('not-found');
-    if (existing[0].authorEmail !== canonicalEmail(user.email)) {
-      throw new CommentAuthError('forbidden');
-    }
-    const [row] = await this.db
-      .update(prComments)
-      .set({ body: body.trim(), updatedAt: new Date() })
-      .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
-      .returning();
-    return toDTO(row);
-  }
-
-  async deleteComment(commentId: string, prNumber: number, user: AuthUser): Promise<void> {
-    assertValidPrNumber(prNumber);
-    assertValidUuid(commentId, 'comment id');
-    const existing = await this.db
-      .select()
-      .from(prComments)
-      .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
-      .limit(1);
-    if (existing.length === 0) throw new CommentAuthError('not-found');
-    if (existing[0].authorEmail !== canonicalEmail(user.email)) {
-      throw new CommentAuthError('forbidden');
-    }
-    await this.db
-      .delete(prComments)
-      .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)));
-  }
 
   async getApprovalStates(
     prNumber: number,

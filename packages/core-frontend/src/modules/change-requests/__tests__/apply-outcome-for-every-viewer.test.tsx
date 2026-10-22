@@ -102,7 +102,6 @@ function detail(over: { state?: string; lastApplyFailure?: ChangeRequestApplyFai
         rawUrl: '',
       },
     ],
-    comments: [],
     approvals: [],
     mergeableInBevel: true,
     mergeBlockedReasons: [],

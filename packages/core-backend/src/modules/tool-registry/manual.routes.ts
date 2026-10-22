@@ -1,8 +1,9 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
-import type { IToolRegistry, ToolManualContext, UtcpTool } from './tool.contract.js';
+import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
 import { requireInternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -50,14 +51,18 @@ function toManual(tools: UtcpTool[]) {
  * on top of it. (External callers are always write-scoped, so the external
  * manual needs no variant.)
  */
-function isWriteTool(tool: { tags?: string[] }): boolean {
-  return (tool.tags ?? []).includes('write');
-}
-
 export function createManualRoutes(
   registry: IToolRegistry,
   manualAuth: RequestHandler,
   resolveUserEmail?: ResolveUserEmail,
+  /**
+   * The read-only hints (`read-only-hints.ts`), put on the AGENT manual's tools
+   * as the `read-only` tag the hosted MCP endpoint turns into
+   * `annotations.readOnlyHint` — the built-in value; the endpoint joins an
+   * admin's override on at listing time.
+   * Absent, the manual carries the tools' own tags only.
+   */
+  readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
   /**
    * Resolves the scope of a connection made as an `.agent` file: the external
    * manual then lists only the platform tools it loads, and the providers word
@@ -96,11 +101,12 @@ export function createManualRoutes(
     // A connection made as an `.agent` file is offered only the platform
     // tools that file loads; a call to another is refused at its route.
     const scope = ctx.connectionScope;
-    res.json(toManual(scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools));
+    const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
+    res.json(toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered));
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
     const internal = await registry.listInternal(await context(req));
-    const tools = req.toolAuth?.scope === 'read' ? internal.filter((t) => !isWriteTool(t)) : internal;
+    const tools = req.toolAuth?.scope === 'read' ? internal.filter((t) => !declaresWrite(t)) : internal;
     res.json(toManual(tools));
   });
 

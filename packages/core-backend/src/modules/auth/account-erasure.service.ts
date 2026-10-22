@@ -14,7 +14,6 @@ import {
   oauthTokens,
   pendingCommits,
   pluginJoinRequests,
-  prComments,
   prFileApprovals,
   prMergeLog,
   users,
@@ -88,7 +87,7 @@ export interface IErasureParticipant {
  *    CASCADE (account links, watchlist sources/findings, connector configs,
  *    vault secrets); deleting a connection key cascades its usage metering.
  *  - Audit rows that must survive for the review trail (approvals, merge log,
- *    review comments, change requests, queued commits — and, via participants,
+ *    change requests, queued commits — and, via participants,
  *    e.g. routine authorship) are kept but ANONYMIZED with the per-erasure
  *    placeholder identity.
  *
@@ -225,10 +224,6 @@ export class AccountErasureService implements IAccountErasureService {
         .update(prMergeLog)
         .set({ triggeredByEmail: target.erasedEmail, triggeredByEmailBidx: erasedBidx, triggeredByName: target.erasedName })
         .where(eq(prMergeLog.triggeredByEmailBidx, emailBidx));
-      await tx
-        .update(prComments)
-        .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
-        .where(eq(prComments.authorEmailBidx, emailBidx));
       await tx
         .update(changeRequests)
         .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
