@@ -24,6 +24,11 @@ describe('GET /api/config payload', () => {
     expect(body.catalogRevision).toBe(true);
   });
 
+  /** The local bridge reads the read-only hints on every listing, on the same terms. */
+  it('advertises the tool-hints capability, on the same terms', () => {
+    expect(body.toolHints).toBe(true);
+  });
+
   it('carries the branch model and the two addresses it was handed', () => {
     expect(body.branchModel.defaultBranch).toBe(DEFAULT_BRANCH);
     expect(body.branchModel.protectedBranches).toContain(DEFAULT_BRANCH);

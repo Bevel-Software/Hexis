@@ -112,7 +112,7 @@ export function myPluginDef(layout: KbLayout): UtcpTool {
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: PROVISIONED_OUTPUT,
     // `write`: both make folders and commit — a read-scoped caller's manual
-    // must not advertise them (see `isWriteTool` in the manual routes).
+    // must not advertise them (see `declaresWrite` in `tool.contract.ts`).
     tags: ['plugins', 'skills', 'write'],
   });
 }
@@ -143,6 +143,6 @@ export const CREATE_PLUGIN: UtcpTool = toolDef({
   },
   outputs: PROVISIONED_OUTPUT,
   // `write`: both make folders and commit — a read-scoped caller's manual
-  // must not advertise them (see `isWriteTool` in the manual routes).
+  // must not advertise them (see `declaresWrite` in `tool.contract.ts`).
   tags: ['plugins', 'skills', 'write'],
 });

@@ -30,7 +30,7 @@ const protectedInline = (kb: Pick<KbContext, 'protectedBranches'>) =>
   [...kb.protectedBranches].map((b) => `\`${b}\``).join(' / ');
 
 // Output sub-schemas for the git-aliased workflow payloads (Branch, Change,
-// ChangeRequestComment, …). Defined once and referenced by the individual tool
+// ChangeRequest, …). Defined once and referenced by the individual tool
 // defs below so each tool still declares its own `outputs`.
 const branchSchema: JsonSchema = {
   type: 'object',
@@ -83,22 +83,6 @@ const changeRequestApproversSchema: JsonSchema = {
   required: ['path', 'roles', 'users', 'approved', 'inMergeGate'],
 };
 
-const commentSchema: JsonSchema = {
-  type: 'object',
-  properties: {
-    id: { type: 'string' },
-    author: { type: 'object', properties: { email: { type: 'string' }, name: { type: 'string' } }, required: ['email', 'name'] },
-    body: { type: 'string' },
-    path: { type: 'string', description: 'Set for file-level / inline comments.' },
-    line: { type: 'integer', description: 'Set for inline comments.' },
-    headSha: { type: 'string', description: 'Head the comment was anchored to.' },
-    parentId: { type: 'string', description: 'Root comment id when this is a reply.' },
-    createdAt: { type: 'string', description: 'ISO timestamp.' },
-    updatedAt: { type: 'string', description: 'ISO timestamp; present once edited.' },
-  },
-  required: ['id', 'author', 'body', 'headSha', 'createdAt'],
-};
-
 const changeRequestUrlSchema: JsonSchema = {
   type: 'string',
   description:
@@ -106,13 +90,6 @@ const changeRequestUrlSchema: JsonSchema = {
     'has a public address configured, else the relative in-app path (with `urlNote`).',
 };
 const changeRequestUrlNoteSchema: JsonSchema = { type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
-
-/** The link to a change request, for a tool whose payload is not the change request itself. */
-const changeRequestLinkSchema: JsonSchema = {
-  type: 'object',
-  properties: { number: { type: 'integer' }, url: changeRequestUrlSchema, urlNote: changeRequestUrlNoteSchema },
-  required: ['number', 'url'],
-};
 
 /** `{ number, url, urlNote? }` of a change request summary or detail. */
 function linkOf(cr: { number: number; url: string; urlNote?: string }): { number: number; url: string; urlNote?: string } {
@@ -183,7 +160,9 @@ export function registerWorkflowTools(
   /**
    * Whether the caller may see change request `number` — `get_change_request`'s
    * own gate (`changeRequestScope(...).maySee`). `delete_branch` neither names
-   * nor links a request it answers no for.
+   * nor links a request it answers no for, and `update_change_request` answers
+   * such a request exactly as `get_change_request` does (404) before reading its
+   * state or who may edit it.
    */
   maySeeChangeRequest: (ctx: ToolContext, number: number) => Promise<boolean>,
   /**
@@ -472,7 +451,7 @@ export function registerWorkflowTools(
         sourceBranch: { type: 'string', minLength: 1, description: 'The draft branch carrying the changes.' },
         targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${kb.defaultBranch}').` },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'Short imperative title (≤256 chars).' },
-        description: { type: 'string', description: 'Optional markdown body shown verbatim to reviewers.' },
+        description: { type: 'string', maxLength: 64_000, description: 'Optional markdown body shown verbatim to reviewers (≤64,000 chars).' },
         include: {
           type: 'array',
           items: { type: 'string', enum: [...CHANGE_REQUEST_INCLUDES] },
@@ -507,66 +486,62 @@ export function registerWorkflowTools(
   });
 
   mount({
-    name: 'post_change_request_comment',
+    name: 'update_change_request',
     description:
-      'Post a review comment on a change request. Three modes: general (no path), file-level (path), ' +
-      'inline (path + line). Anchors to the CR\'s current head.',
+      'Change the title and/or the description of an OPEN change request. Allowed for its author and for anyone ' +
+      'who may merge it (an admin, or someone who may approve every file it changes) — the same rule as the app\'s ' +
+      'Edit control; anyone else is refused (403), and so is a merged or closed request (409), in words. ' +
+      "`description` replaces the request's description whole — the text `get_change_request` answers as `body`; " +
+      '`appendDescription` instead adds a paragraph after the description as it stands when the write happens, so two ' +
+      'notes racing each other both land (never together with `description`). Give at least one field; an absent one keeps its text. ' +
+      '`get_change_request` answers the new text at once. A request you may not see answers 404, as `get_change_request` does.',
     inputs: {
       type: 'object',
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
-        body: { type: 'string', minLength: 1, description: 'Comment body (Markdown).' },
-        path: { type: 'string', description: `Repository-relative path of the changed file for a file-level/inline comment (e.g. \`KnowledgeBase/Foo.md\`); the workspace form \`${kbDirName}/KnowledgeBase/Foo.md\`, with or without a leading slash, names the same file.` },
-        line: { type: 'integer', minimum: 1, description: 'Line number for an inline comment. Requires `path`.' },
-        parentId: { type: 'string', description: 'Comment id to reply to.' },
+        title: { type: 'string', minLength: 1, maxLength: 256, description: 'The new title (≤256 chars).' },
+        description: { type: 'string', maxLength: 64_000, description: 'The new description (Markdown, ≤64,000 chars); an empty string clears it.' },
+        appendDescription: { type: 'string', maxLength: 64_000, description: 'A paragraph (Markdown) added after the description as stored at the moment of the write; what it leaves is ≤64,000 chars. Not together with `description`.' },
       },
-      required: ['number', 'body'],
+      required: ['number'],
       additionalProperties: false,
     },
     outputs: {
       type: 'object',
       properties: {
-        comment: { ...commentSchema, description: 'The posted review comment.' },
-        changeRequest: { ...changeRequestLinkSchema, description: 'The change request commented on.' },
+        number: { type: 'integer' },
+        url: changeRequestUrlSchema,
+        urlNote: changeRequestUrlNoteSchema,
+        title: { type: 'string', description: 'The title as it now stands.' },
       },
-      required: ['comment', 'changeRequest'],
+      required: ['number', 'url', 'title'],
     },
     write: true,
-    // Keyed by change-request number, not a draft — the workspace is only a
-    // scratch clone to run the repo op in, so resolve any existing one rather
-    // than requiring a `branch`.
+    // Keyed by change-request number; the service resolves the request's own
+    // base branch for the permission check.
     skipBranch: true,
     handler: async (args, ctx: ToolContext) => {
+      const title = typeof args.title === 'string' ? args.title : undefined;
+      const description = typeof args.description === 'string' ? args.description : undefined;
+      const appendDescription = typeof args.appendDescription === 'string' ? args.appendDescription : undefined;
+      if (title === undefined && description === undefined && appendDescription === undefined) {
+        throw new ToolError('Give a new `title`, a new `description`, or an `appendDescription`.', 400);
+      }
+      // A request the caller may not read is not found — never a 403 or a
+      // state-specific 409, which would tell a probe that it exists.
       const number = args.number as number;
-      const line = typeof args.line === 'number' ? args.line : undefined;
-      // A change request's files are repository-relative; the workspace form
-      // Copy path gives (`/<kbDirName>/…`, its slash already dropped by the
-      // mount) carries the clone folder, which no changed file would match.
-      const path = typeof args.path === 'string' ? stripKbDir(args.path, kbDirName) : undefined;
-      if (line !== undefined && !path) {        throw new ToolError('`path` is required when `line` is provided (inline comments anchor to a file).', 400);
+      if (!(await maySeeChangeRequest(ctx, number))) {
+        throw new ToolError(`Change request #${number} not found.`, 404);
       }
-      const detail = await ctx.workflowService.getChangeRequestDetail(number, {
-        fresh: true,
-        workspaceId: await repoGlobalWorkspaceId(ctx),
-        viewerEmail: ctx.user.email,
+      const updated = await ctx.workflowService.updateChangeRequest(number, ctx.user, {
+        title,
+        description,
+        appendDescription,
       });
-      if (!detail) {        throw new ToolError(`Change request #${number} not found.`, 404);
-      }
-      // A comment anchors to a commit, and a DECLINED request has none to anchor
-      // to: nothing durable records what it proposed, so its detail carries no
-      // head (see `changeSourceFor`). Say that, rather than letting the service's
-      // `head sha is required` surface as a 400 about an argument the caller
-      // never passed. An APPLIED request still takes comments — its head is the
-      // source tip its merge commit recorded.
-      if (!detail.headSha) {        throw new ToolError(`Change request #${number} is ${detail.state} and has no commit to anchor a comment to.`, 409);
-      }
-      const comment = await ctx.workflowService.postComment(
-        number,
-        ctx.user,
-        { body: args.body as string, path, line, parentId: typeof args.parentId === 'string' ? args.parentId : undefined },
-        detail.headSha,
-      );
-      return { comment, changeRequest: linkOf(detail) };
+      return {
+        ...linkOf(updated),
+        title: updated.title,
+      };
     },
   });
 
