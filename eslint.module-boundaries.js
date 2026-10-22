@@ -128,8 +128,6 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'access-model/index.ts does not export CreationGrantPlan, Creator, ICreatorAccess and 4 more; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/access/directory-sync-bot.ts':
     'database has no index.ts',
-  'packages/core-backend/src/modules/access/groups-admin.routes.ts':
-    'admin has no index.ts',
   'packages/core-backend/src/modules/access/groups-admin.service.ts':
     'access-model/index.ts does not export GROUPS_YAML, SYNCED_GROUPS_YAML, makeRolesYamlWriteValidator and 1 more; workflow/index.ts does not export WorkflowEventBus',
   'packages/core-backend/src/modules/access/groups-edit.ts':
@@ -155,17 +153,15 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/audit/agent-rest-audit.middleware.ts':
     'tool-auth has no index.ts',
   'packages/core-backend/src/modules/audit/audit.routes.ts':
-    'admin has no index.ts; tool-auth has no index.ts',
+    'tool-auth has no index.ts',
   'packages/core-backend/src/modules/auth/account-erasure.service.ts':
     'database has no index.ts; workflow/index.ts does not export IReviewWorkflowService',
   'packages/core-backend/src/modules/auth/account-switch-lock.ts':
     'database has no index.ts',
   'packages/core-backend/src/modules/auth/account.routes.ts':
-    'access has no index.ts; admin has no index.ts',
+    'access/index.ts does not export the symbols account.routes.ts reaches for',
   'packages/core-backend/src/modules/auth/auth.service.ts':
     'access has no index.ts; database has no index.ts; workflow/index.ts does not export RECOVERY_BOT_EMAIL',
-  'packages/core-backend/src/modules/auth/oidc-auth-provider.ts':
-    'settings has no index.ts',
   'packages/core-backend/src/modules/connection-probe/connection-probe.service.ts':
     'tool-manuals/index.ts does not export ToolHealthCheck, ToolProbeTarget',
   'packages/core-backend/src/modules/diff/diff.routes.ts':
@@ -178,14 +174,10 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'access has no index.ts',
   'packages/core-backend/src/modules/embed/embed.tools.ts':
     'tool-auth has no index.ts; tool-helpers/index.ts does not export ToolHandlerFactory; tool-registry has no index.ts; workspace/index.ts does not export ReadForTool, sessionIdInputOf',
-  'packages/core-backend/src/modules/github-app/github-app.connection.ts':
-    'settings has no index.ts',
-  'packages/core-backend/src/modules/github-app/github-app.routes.ts':
-    'admin has no index.ts; settings has no index.ts',
   'packages/core-backend/src/modules/kb-fs/locking-filesystem.ts':
     'access-model/index.ts does not export CreationGrantPlan, ICreatorAccess',
   'packages/core-backend/src/modules/kb-sync/kb-sync.routes.ts':
-    'admin has no index.ts; kb-fs/index.ts does not export assertValidBranchName',
+    'kb-fs/index.ts does not export assertValidBranchName',
   'packages/core-backend/src/modules/kb-sync/kb-sync.service.ts':
     'workflow/index.ts does not export sanitizeError',
   'packages/core-backend/src/modules/kb-sync/sync-payload.ts':
@@ -209,7 +201,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/mcp/oauth/bevel-oauth-provider.ts':
     'database has no index.ts',
   'packages/core-backend/src/modules/onboarding/starter-pack.service.ts':
-    'access has no index.ts; admin has no index.ts; kb-fs/index.ts does not export FileChangeNotifier, LockingFilesystem; workspace/index.ts does not export FirstRunStarter, FirstRunStarterSource, MayRead and 2 more',
+    'access/index.ts does not export the symbols starter-pack.service.ts reaches for; kb-fs/index.ts does not export FileChangeNotifier, LockingFilesystem; workspace/index.ts does not export FirstRunStarter, FirstRunStarterSource, MayRead and 2 more',
   'packages/core-backend/src/modules/plugins/compile/compile-marketplace.ts':
     'tool-manuals/index.ts does not export judgeMcpServerEntry',
   'packages/core-backend/src/modules/plugins/compile/marketplace-compiler.service.ts':
@@ -253,7 +245,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/settings/git-root-folders.ts':
     'workflow/index.ts does not export NodeGitRunner',
   'packages/core-backend/src/modules/settings/setup.routes.ts':
-    'admin has no index.ts; kb-fs/index.ts does not export sameRepository',
+    'kb-fs/index.ts does not export sameRepository',
   'packages/core-backend/src/modules/skills/allowed-tools-check.ts':
     'tool-manuals/index.ts does not export MAX_CAPABILITIES; tool-registry has no index.ts',
   'packages/core-backend/src/modules/skills/pending-skills.service.ts':
@@ -264,8 +256,6 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'access has no index.ts; workspace/index.ts does not export WorkspaceService',
   'packages/core-backend/src/modules/skills/skills.tools.ts':
     'tool-helpers/index.ts does not export ToolHandlerFactory, bodyEnvelope, declareRouteTool; tool-registry has no index.ts',
-  'packages/core-backend/src/modules/tool-auth/connection-keys-admin.routes.ts':
-    'admin has no index.ts',
   'packages/core-backend/src/modules/tool-auth/external-api-key.service.ts':
     'database has no index.ts',
   'packages/core-backend/src/modules/tool-auth/tool-auth.middleware.ts':
@@ -300,8 +290,6 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'access has no index.ts; tool-helpers/index.ts does not export ToolHandlerFactory, declareRouteTool; tool-registry has no index.ts',
   'packages/core-backend/src/modules/tool-registry/manual.routes.ts':
     'tool-auth has no index.ts',
-  'packages/core-backend/src/modules/update-check/update-check.routes.ts':
-    'admin has no index.ts',
   'packages/core-backend/src/modules/workflow/agent-tools/change-request-read.tools.ts':
     'access has no index.ts; tool-helpers/index.ts does not export ToolHandlerFactory; tool-registry has no index.ts',
   'packages/core-backend/src/modules/workflow/agent-tools/workflow.tools.ts':
@@ -349,7 +337,7 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
   'packages/core-backend/src/modules/workspace/startup/steps/seed-tree.ts':
     'access-model/index.ts does not export renderRolesYaml',
   'packages/core-backend/src/modules/workspace/workspace.routes.ts':
-    'access has no index.ts; access-model/index.ts does not export ICreatorAccess, assertRolesYamlParsable, canReadWorkspacePath and 3 more; admin has no index.ts; auth/index.ts does not export AuthService; kb-fs/index.ts does not export normalizeWorkspacePath; workflow/index.ts does not export WorkflowEventBus',
+    'access/index.ts does not export the symbols workspace.routes.ts reaches for; access-model/index.ts does not export ICreatorAccess, assertRolesYamlParsable, canReadWorkspacePath and 3 more; auth/index.ts does not export AuthService; kb-fs/index.ts does not export normalizeWorkspacePath; workflow/index.ts does not export WorkflowEventBus',
   'packages/core-backend/src/modules/workspace/workspace.service.ts':
     'diff has no index.ts; kb-fs/index.ts does not export BevelIgnoreStack, SAFE_IMPLICIT_FETCH_ARGS, assertRepoRootNameFree and 7 more; workflow/index.ts does not export NodeGitRunner',
   'packages/core-backend/src/modules/workspace/workspace.tools.ts':
@@ -504,18 +492,6 @@ export const MODULE_BOUNDARY_EXCEPTIONS = {
     'auth has no index.ts',
   'packages/core-frontend/src/modules/onboarding/state/starter-packs.ts':
     'auth has no index.ts',
-  'packages/core-frontend/src/modules/pr/services/pr-approvals.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-cancel.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-comments.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-detail.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-merge.api.ts':
-    'git/index.ts does not export handleApiResponse',
-  'packages/core-frontend/src/modules/pr/services/pr-open.api.ts':
-    'git/index.ts does not export handleApiResponse',
   'packages/core-frontend/src/modules/review/components/DiffViewer.tsx':
     'workspace/index.ts does not export DiffLine, computeDiff',
   'packages/core-frontend/src/modules/review/components/MarkdownDiffViewer.tsx':

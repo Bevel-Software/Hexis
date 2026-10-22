@@ -1,8 +1,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express from 'express';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import { logger } from '../../shared/logging.js';
-import type { DeploymentSettingsService } from '../settings/deployment-settings.service.js';
+import type { DeploymentSettingsService } from '../settings/index.js';
 import { GitHubAppClient, GitHubAppError } from './github-app.client.js';
 import { repositoriesAsSetting, type GitHubAppConnection } from './github-app.connection.js';
 import '../auth/index.js'; // Express Request augmentation
