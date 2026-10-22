@@ -444,6 +444,8 @@ export class PageConsent {
 export interface ToolCallMessage {
   type: 'bevel.tool.call';
   requestId: string;
+  /** The identity the app minted for the document that posted this (see `htmlSandbox.ts`), when it was given one. */
+  documentId?: string;
   fn: PageToolFunction;
   args: unknown[];
 }
@@ -459,7 +461,13 @@ export function asToolCall(data: unknown): ToolCallMessage | null {
   const msg = data as Partial<ToolCallMessage>;
   if (msg.type !== 'bevel.tool.call' || typeof msg.requestId !== 'string') return null;
   if (typeof msg.fn !== 'string' || !PAGE_TOOL_FUNCTIONS.has(msg.fn)) return null;
-  return { type: 'bevel.tool.call', requestId: msg.requestId, fn: msg.fn, args: Array.isArray(msg.args) ? msg.args : [] };
+  return {
+    type: 'bevel.tool.call',
+    requestId: msg.requestId,
+    ...(typeof msg.documentId === 'string' ? { documentId: msg.documentId } : {}),
+    fn: msg.fn,
+    args: Array.isArray(msg.args) ? msg.args : [],
+  };
 }
 
 const CLOSED_MESSAGE = 'The page was closed before the viewer answered.';

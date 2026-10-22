@@ -7,14 +7,28 @@ import { vi } from 'vitest';
  * manual, as the app's fetch sees them).
  */
 
-/** Post `data` as the frame would, and collect what the app posts back to it. */
+/**
+ * Post `data` as the frame's CURRENT document would — stamped with the
+ * identity the app built into it (`documentId="…"` in the srcdoc), as the
+ * runtime stamps every message — and collect what the app posts back. A
+ * channel taken before a view change keeps the old document's identity, so
+ * it posts as that document would.
+ */
 export function frameChannel(iframe: HTMLIFrameElement) {
   const win = iframe.contentWindow!;
+  const documentId = /documentId\s*=\s*"([^"]+)"/.exec(iframe.getAttribute('srcdoc') ?? '')?.[1];
   const replies: Array<Record<string, unknown>> = [];
   vi.spyOn(win, 'postMessage').mockImplementation(((msg: Record<string, unknown>) => void replies.push(msg)) as never);
   return {
     replies,
-    post: (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: win })),
+    documentId,
+    post: (data: unknown) =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: documentId && data && typeof data === 'object' ? { documentId, ...(data as object) } : data,
+          source: win,
+        }),
+      ),
   };
 }
 

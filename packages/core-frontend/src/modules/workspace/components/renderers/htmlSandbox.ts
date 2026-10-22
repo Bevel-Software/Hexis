@@ -464,11 +464,25 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * The `html-views` section of the agent guide documents the members, and
  * `htmlViewsGuide.test.ts` holds the two together.
  */
-function toolBridgeRuntime(enabled: boolean): string {
+/**
+ * `toolBridge`: `false` builds the frame with `bevel.tools = null`; an object
+ * builds it with the tools and stamps every message the runtime posts with
+ * `documentId`, the identity the app minted for THIS document — so the app
+ * can tell a message queued by a document it has since replaced (the frame's
+ * window survives a rebuild in place) from one the current document posts.
+ * `true` builds the tools without an identity, for a host that answers one
+ * document only.
+ */
+export type ToolBridgeOption = boolean | { documentId: string };
+
+function toolBridgeRuntime(option: ToolBridgeOption | undefined): string {
+  const enabled = option === true || (typeof option === 'object' && option !== null);
+  const documentId = typeof option === 'object' && option !== null ? option.documentId : null;
   return `
 ;(function () {
   var pending = {};
   var seq = 0;
+  var documentId = ${JSON.stringify(documentId)};
   function request(type, payload) {
     return new Promise(function (resolve, reject) {
       seq += 1;
@@ -479,6 +493,7 @@ function toolBridgeRuntime(enabled: boolean): string {
       }, ${TOOL_CALL_TIMEOUT_MS});
       pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
       var message = { type: type, requestId: requestId };
+      if (documentId !== null) message.documentId = documentId;
       for (var key in payload) message[key] = payload[key];
       parent.postMessage(message, '*');
     });
@@ -540,7 +555,7 @@ interface BuildSandboxedHtmlOptions {
    * Absent or false, the member is `null`; `requireTools()` exists either
    * way.
    */
-  toolBridge?: boolean;
+  toolBridge?: ToolBridgeOption;
 }
 
 /**
@@ -552,7 +567,7 @@ interface BuildSandboxedHtmlOptions {
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
   const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge === true));
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent

@@ -34,9 +34,12 @@ const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 function OtherHtmlRenderer({ viewKey }: { viewKey: number }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath: PATH, viewKey });
+  // The document carries the identity the controller minted for it, as the
+  // real runtime does (`buildSandboxedHtml` with this `toolBridge`).
+  const srcDoc = toolBridge ? `with tools documentId="${toolBridge.documentId}"` : 'without tools';
   return (
     <>
-      <iframe ref={iframeRef} title="page" sandbox="allow-scripts" srcDoc={toolBridge ? 'with tools' : 'without tools'} />
+      <iframe ref={iframeRef} title="page" sandbox="allow-scripts" srcDoc={srcDoc} />
       {cards}
     </>
   );
@@ -89,10 +92,15 @@ function mount(where: Where, opts: { openFilePage?: (path: string) => void; open
   return {
     iframe,
     frame: frameChannel(iframe),
-    /** The renderer's view ends (a reload, a rebuilt document) while its frame stays. */
+    /**
+     * The renderer's view ends (a reload, a rebuilt document) while its
+     * frame stays. Answers a channel for the NEW document; the one taken
+     * before still posts as the old document.
+     */
     nextView: () => {
       viewKey += 1;
       result.rerender(tree(viewKey));
+      return frameChannel(iframe);
     },
   };
 }
@@ -107,12 +115,36 @@ afterEach(() => {
 });
 
 describe('useHtmlToolBridge through a renderer of its own', () => {
-  it('builds the frame with tools on the file page only', () => {
-    expect(mount('file page').iframe.getAttribute('srcdoc')).toBe('with tools');
+  it('builds the frame with tools on the file page only, each view\'s document with its own identity', () => {
+    const page = mount('file page');
+    expect(page.iframe.getAttribute('srcdoc')).toMatch(/^with tools documentId="doc-/);
+    const first = page.frame.documentId;
+    const next = page.nextView();
+    expect(next.documentId).toMatch(/^doc-/);
+    expect(next.documentId).not.toBe(first);
     cleanup();
     expect(mount('elsewhere').iframe.getAttribute('srcdoc')).toBe('without tools');
     cleanup();
     expect(mount('embed').iframe.getAttribute('srcdoc')).toBe('without tools');
+  });
+
+  it('ignores a message from the document a view change replaced, and answers the new document', async () => {
+    // The old document queued its call before the change and the frame's
+    // window delivered it after: same window, old identity. Nothing of it
+    // runs or shows; the new document's own call is answered.
+    const server = stubServer();
+    const { frame: old, nextView } = mount('file page');
+    const current = nextView();
+    old.post(write('w1'));
+    old.post({ type: 'bevel.tools.require', requestId: 'q1' });
+    await settled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(old.replies).toEqual([]);
+    expect(server.mcp).toEqual([]);
+
+    current.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
+    await waitFor(() => expect(current.replies).toEqual([{ type: 'bevel.tool.response', requestId: 'r1', ok: true, result: { ran: 'read_file' } }]));
+    expect(server.mcp).toEqual(['read_file']);
   });
 
   it('runs a read with no card', async () => {
@@ -141,8 +173,8 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w10', ok: true }));
     expect(screen.queryByText(CARD)).toBeNull();
 
-    nextView();
-    frame.post(write('w11'));
+    const next = nextView();
+    next.post(write('w11'));
     expect(await screen.findByText(CARD)).toBeTruthy();
   });
 
@@ -212,10 +244,11 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     const { frame, nextView } = mount('file page');
     frame.post(write('w1'));
     expect(await screen.findByText(CARD)).toBeTruthy();
-    nextView();
+    const next = nextView();
     await waitFor(() => expect(screen.queryByText(CARD)).toBeNull());
-    frame.post({ type: 'bevel.tool.call', requestId: 'r2', fn: 'callTool', args: ['read_file', {}] });
-    await waitFor(() => expect(frame.replies).toEqual([{ type: 'bevel.tool.response', requestId: 'r2', ok: true, result: { ran: 'read_file' } }]));
+    next.post({ type: 'bevel.tool.call', requestId: 'r2', fn: 'callTool', args: ['read_file', {}] });
+    await waitFor(() => expect(next.replies).toEqual([{ type: 'bevel.tool.response', requestId: 'r2', ok: true, result: { ran: 'read_file' } }]));
+    expect(frame.replies).toEqual([]);
     expect(server.mcp).toEqual(['read_file']);
   });
 

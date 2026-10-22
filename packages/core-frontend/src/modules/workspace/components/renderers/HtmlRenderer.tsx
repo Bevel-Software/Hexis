@@ -79,11 +79,12 @@ export function HtmlRenderer({
   // The page tool bridge: a page's `window.bevel.tools` and `requireTools()`,
   // answered for one view of the page — a new frame document (a reload, a
   // saved edit, another file) or the frame gone (Edit) is a new view. The
-  // view's key is a fresh identity whenever one of those changes, never the
-  // document itself: a distribution's document carries its inlined
-  // libraries, and a key built from it would be rebuilt and compared on
-  // every render.
-  const viewKey = useMemo(() => ({ reloadKey, mode, document: bundledSrcdoc }), [reloadKey, mode, bundledSrcdoc]);
+  // view's key is a fresh identity whenever one of the INPUTS of the
+  // document changes, never the built document itself: the bridge's
+  // `toolBridge` goes into the build, so a key read off the build would
+  // chase it; and a distribution's document carries its inlined libraries,
+  // which a key built from it would compare on every render.
+  const viewKey = useMemo(() => ({ reloadKey, mode, savedValue, filePath }), [reloadKey, mode, savedValue, filePath]);
   const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath, viewKey });
 
   const dirty = !readOnly && value !== savedValue;
