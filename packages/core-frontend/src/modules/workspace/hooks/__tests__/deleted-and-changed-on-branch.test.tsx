@@ -1798,6 +1798,93 @@ describe('the Knowledge page mounted again while a deleted tab is open', () => {
     expect(result.current.openTabs).toEqual([]);
   });
 
+  /** Hold the next read of `path`; `answer` settles it with `err`, as the server would have. */
+  function holdRead(path: string, err: Error) {
+    const held: { answer: () => void } = { answer: () => { throw new Error(`No read of ${path} was held`); } };
+    const read = apiMocks.readFile.getMockImplementation()!;
+    let taken = false;
+    apiMocks.readFile.mockImplementation((ws: string, p: string) => {
+      if (p !== path || taken) return read(ws, p);
+      taken = true;
+      return new Promise((_resolve, reject) => { held.answer = () => reject(err); });
+    });
+    return held;
+  }
+
+  it('a save while the remount read is out waits for it, and writes nothing when it finds the file gone', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nMy edit.');
+    disk.delete('KB/Draft.md');
+    const held = holdRead('KB/Draft.md', new WorkspaceApiError(404, 'Not found'));
+    let hydrating!: Promise<unknown>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md'));
+    apiMocks.writeFile.mockClear();
+
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', '# Draft\n\nMy edit.'); });
+    await act(async () => {
+      held.answer();
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+      await hydrating;
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    // Kept, and now says it was deleted, edits and all.
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: null });
+    expect(tabAt(result, 'KB/Draft.md')?.content).toBe('# Draft\n\nMy edit.');
+  });
+
+  it("Reject while the remount read is out waits for it, writes nothing, and keeps the agent's change", async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Draft.md'], 'KB/Draft.md');
+    await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
+    disk.delete('KB/Draft.md');
+    const held = holdRead('KB/Draft.md', new WorkspaceApiError(404, 'Not found'));
+    let hydrating!: Promise<unknown>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md'));
+    apiMocks.writeFile.mockClear();
+
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await act(async () => {
+      held.answer();
+      await expect(rejecting).rejects.toThrow('Draft.md was deleted from this branch');
+      await hydrating;
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBe('# Draft\n\nThe agent rewrote this.');
+  });
+
+  it('a 403 on the remount read closes the tab even when an open overtook the restore', async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md');
+    await typeInto(result, '# Draft\n\nMy edit.');
+    disk.delete('KB/Draft.md');
+    act(() => bus.emit(fileChanged('KB/Draft.md')));
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
+    const held = holdRead('KB/Draft.md', new WorkspaceApiError(403, 'Forbidden'));
+    let hydrating!: Promise<{ denied: string[] }>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md'));
+
+    // A tree click on the deleted tab itself while the restore's reads are out.
+    await act(async () => { await result.current.addTab('KB/Draft.md'); });
+    let outcome!: { denied: string[] };
+    await act(async () => { held.answer(); outcome = await hydrating; });
+
+    expect(outcome.denied).toEqual(['KB/Draft.md']);
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    expect(result.current.openTabs.map((t) => t.content)).not.toContain('# Draft\n\nMy edit.');
+    expect(result.current.activeTab?.path).toBe('KB/Keep.md');
+  });
+
   it('still drops a persisted tab whose file is gone when the branch is first opened', async () => {
     const result = await mountReady();
     disk.delete('KB/Draft.md');
