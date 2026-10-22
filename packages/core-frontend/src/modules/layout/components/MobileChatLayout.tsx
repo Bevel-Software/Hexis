@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useLocation, useMatch, useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { LayoutContext, type LayoutController } from '../state/layout.context';
-import { kbFileUrl } from '../../workspace';
-import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { kbFileUrl, KB_ROUTE_PREFIX } from '../../workspace';
 import { SlideOverlay } from './SlideOverlay';
 import { SidebarFrame } from './SidebarFrame';
 import {

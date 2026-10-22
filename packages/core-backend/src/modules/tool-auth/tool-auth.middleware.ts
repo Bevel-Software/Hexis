@@ -3,9 +3,9 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
+import type { AuthService } from '../auth/index.js';
 import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/index.js';
-import { InternalTokenService } from './internal-token.service.js';
+import type { InternalTokenService } from './internal-token.service.js';
 import {
   INVALID_CONNECTION_KEY_CHALLENGE,
   INVALID_CONNECTION_KEY_MESSAGE,

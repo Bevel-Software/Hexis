@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { ReviewContext } from './review.context';
 import { useReviewState } from '../hooks/useReviewState';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { useGit } from '../../git';
 
 /**

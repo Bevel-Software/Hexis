@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Trash2, Eye, ChevronDown, X } from 'lucide-react';
 import type { PendingChange } from '@bevel-software/platform-shared';
 import { useReview } from '../state/review.context';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useFileNav, useNodeIdNav, stripJunkBeforeKbDir } from '../../workspace';
-import { useWorkspaceImageResolver } from '../../workspace/hooks/useWorkspaceImageResolver';
+import { useWorkspace, useWorkspaceImageResolver } from '../../workspace';
+import {
+  useFileNav,
+  useNodeIdNav,
+  stripJunkBeforeKbDir,
+} from '../../workspace';
 import { pluginOfPath, currentKbLayout, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';

@@ -1,8 +1,8 @@
 import { PageShell } from '../../../shared/components/PageShell';
 import { Banner, Button } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
-import { useAdmin } from '../../admin/state/admin.context';
-import { useSetupStatus } from '../../setup/hooks/useSetupStatus';
+import { useAdmin } from '../../admin';
+import { useSetupStatus } from '../../setup';
 import { SetupScreen } from '../../setup/components/SetupScreen';
 import { useAppRegistry } from '../../../core/registry';
 

@@ -2,7 +2,7 @@ import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('sync');
-import { sanitizeError } from '../workflow/sanitize-error.js';
+import { sanitizeError } from '../workflow/index.js';
 import type {
   IKbSyncService,
   LastSync,

@@ -164,7 +164,7 @@ describe('lint: module boundaries', () => {
     const cases = [
       [`${BE}/modules/mcp/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/', 'audit', 'request-audit.js'],
       [`${BE}/modules/mcp/oauth/__lint_fixture__.ts`, '@bevel-software/platform-core-backend/modules/', 'audit', 'request-audit.js'],
-      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/', 'workspace', 'components/FileTree'],
+      [`${FE}/modules/library/__lint_fixture__.tsx`, '@bevel-software/platform-core-frontend/src/modules/', 'workspace', 'hooks/useFileTree'],
     ] as const;
     for (const [file, prefix, other, internal] of cases) {
       const deep = await lintAs(file, `import { a } from '${prefix}${other}/${internal}';\nexport { a };\n`);
@@ -237,7 +237,7 @@ describe('lint: module boundaries', () => {
   it('holds core-frontend modules to the same rule', async () => {
     const deep = await lintAs(
       `${FE}/modules/library/__lint_fixture__.tsx`,
-      "import { FileTree } from '../workspace/components/FileTree';\nexport const a = FileTree;\n",
+      "import { useFileTree } from '../workspace/hooks/useFileTree';\nexport const a = useFileTree;\n",
     );
     expect(boundaryHits(deep)).toHaveLength(1);
     expect(deep[0]).toContain('modules/workspace/index.ts');
@@ -246,6 +246,21 @@ describe('lint: module boundaries', () => {
         [],
       );
     }
+  });
+
+  it("lets a core-frontend module compose another module's components and stylesheets by their file, and nothing else", async () => {
+    // A component is composed into a screen, not called; an index that
+    // re-exported components would load every screen behind any hook — see
+    // COMPOSED in eslint.module-boundaries.js. Hooks, services, state and
+    // utilities still go through the index.
+    for (const spec of ['../workspace/components/FileTree', '../workspace/components/renderers/HtmlRenderer', '../change-requests/change-requests.css']) {
+      expect(await lintAs(`${FE}/modules/library/__lint_fixture__.tsx`, `import { a } from '${spec}';\nexport { a };\n`)).toEqual([]);
+    }
+    for (const spec of ['../workspace/services/workspace.api', '../workspace/state/workspace.context', '../workspace/utils/diff', '../workspace/componentsx/Thing']) {
+      expect(boundaryHits(await lintAs(`${FE}/modules/library/__lint_fixture__.tsx`, `import { a } from '${spec}';\nexport { a };\n`))).toHaveLength(1);
+    }
+    // The backend has no such allowance: a `components/` folder there is an internal like any other.
+    expect(boundaryHits(await lintAs(`${BE}/modules/mcp/__lint_fixture__.ts`, "import { a } from '../workspace/components/thing.js';\nexport { a };\n"))).toHaveLength(1);
   });
 
   it('finds no deep import in any module file outside the exception list', async () => {
@@ -267,6 +282,9 @@ describe('lint: module boundaries', () => {
       expect(existsSync(join(REPO_ROOT, file)), `${file} is listed but does not exist`).toBe(true);
       expect(reason.trim(), `${file} is listed without a reason`).not.toBe('');
     }
+    // An empty list is the goal state; `lintFiles([])` would lint the whole
+    // repository instead of nothing, so it is answered here.
+    if (listed.length === 0) return;
     // The rule as written, with nobody excused: every listed file must still trip it.
     const tseslint = (await import('typescript-eslint')).default;
     const overrideConfig = [

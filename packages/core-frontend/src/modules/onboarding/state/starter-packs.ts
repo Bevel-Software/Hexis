@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useSyncExternalStore } from 'react';
-import { AuthContext } from '../../auth/state/auth.context';
+import { AuthContext } from '../../auth';
 import {
   StarterPackApiError,
   chooseStarterPack,

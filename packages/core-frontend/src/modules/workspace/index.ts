@@ -29,6 +29,10 @@
  *    platform (a skill page provides it; without it the renderer opens the
  *    file's own address). `PageLinkHomeContext`: the file such a page's
  *    links resolve against, where its `filePath` is not one (a skill page).
+ *  - `useHtmlToolBridge`, `PageToolsContext` and their types: the page
+ *    tool bridge a distribution's own HTML renderer calls to answer a page's
+ *    `window.bevel.tools` exactly as the app's renderer does, and the
+ *    file page's provider its tests mount it under.
  *  - `useFileNav` and `useNodeIdNav` (with `KbLinkTarget`, `OpenLinkOptions`
  *    and `stripJunkBeforeKbDir`): where a link inside rendered content leads
  *    and how it is followed — the one rule for those links, which a surface
@@ -39,28 +43,46 @@
 export {
   CanDownloadContext,
   isViewOnlyFile,
+  OpenPageInPlatformContext,
+  PageToolsContext,
   pickFileRenderer,
   RendererSurfaceContext,
+  useHtmlToolBridge,
   useKbGraphLoader,
   useRendererSurface,
+  type HtmlToolBridgeOptions,
+  type HtmlToolBridgeResult,
+  type PageTools,
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
+export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
+export { PageLinkHomeContext } from './components/renderers/htmlToolBridge';
+export type { KbLinkTarget } from './components/renderers/KbAppLink';
+export { scrollToHeading } from './components/renderers/scrollToHeading';
+// Reached by other modules; exported here so they stop importing the files.
+export { useCreatePage } from './hooks/useCreatePage';
+export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
+export { useOpenChangeRequests } from './hooks/useOpenChangeRequests';
+export { useWorkspaceImageResolver } from './hooks/useWorkspaceImageResolver';
 export {
-  asksForFilePage,
-  kbFilePageUrl,
-  kbFileUrl,
-  resolveKbHref,
+  KB_ROUTE_PREFIX,
+  openExternalHref,
+  safeDecode,
   stripJunkBeforeKbDir,
   useFileNav,
   useFileNodeId,
   useNodeIdNav,
   type OpenLinkOptions,
 } from './routing/kb-routes';
-export {
-  OpenPageInPlatformContext,
-  PageLinkHomeContext,
-  PageToolsContext,
-} from './components/renderers/htmlToolBridge';
-export type { KbLinkTarget } from './components/renderers/KbAppLink';
-export { scrollToHeading } from './components/renderers/scrollToHeading';
+export { WorkspaceApiError, deleteFile, getOrCreateWorkspace, listFiles, readFile, writeFile } from './services/workspace.api';
+export type { SkillToolWarning } from './services/workspace.api';
+export { useEditablePage } from './state/editable-page';
+export { WorkspaceContext, libraryUploadTarget, useWorkspace } from './state/workspace.context';
+export type { WorkspaceContextValue } from './state/workspace.context';
+export { computeDiff } from './utils/diff';
+export type { DiffLine } from './utils/diff';
+export { displayFileName, fileNameTooltip } from './utils/display-file-name';
+export { checkoutRoot, findEntryByPath, knowledgeFiles, pathExistsInTree } from './utils/fileTree';
+export { labelFor, parseFrontmatter } from './utils/frontmatter';
+export type { FrontmatterData } from './utils/frontmatter';

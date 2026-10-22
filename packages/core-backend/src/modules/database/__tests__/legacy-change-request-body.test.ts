@@ -30,6 +30,19 @@ describe('parseLegacyChangeRequestBody', () => {
     expect(out.description).not.toContain('Avi-Checkin');
   });
 
+  it("keeps a heading the author wrote with prose under it: the cut takes only the block openChangeRequest wrote", () => {
+    const prose = 'Lead.\n\n## Affected owners\n\nThe GTM ones, I think.';
+    expect(parseLegacyChangeRequestBody(prose)).toEqual({ description: prose, changed: false });
+    const mixed = 'Lead.\n\n## Affected owners\n\nSee below.\n\n- `KnowledgeBase/GTM/Notes.md` — GTM Team';
+    expect(parseLegacyChangeRequestBody(mixed)).toEqual({ description: mixed, changed: false });
+  });
+
+  it('cuts a block that ends in the summary line a request with many paths got', () => {
+    const long = `${GENERATED}\n\n…and 3 more changed path(s). All eligible approvers across this change: Admin; GTM Team`;
+    expect(parseLegacyChangeRequestBody(`Lead.\n\n${long}`)).toEqual({ description: 'Lead.', changed: true });
+  });
+
+
   it("moves an access request's level and note out of the prose, keeping the quoted lines as prose", () => {
     const body = [
       '<!--hexis:access-request-level:owner-->',

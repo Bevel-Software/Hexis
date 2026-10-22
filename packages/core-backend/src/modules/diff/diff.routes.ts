@@ -1,12 +1,12 @@
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { IDiffService } from './diff.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { canReadWorkspacePath, toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
+import type { AuthService } from '../auth/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, toKbRelative, resolveReadableMap } from '../access-model/index.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { LockingFilesystem } from '../kb-fs/index.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import '../auth/index.js';
 

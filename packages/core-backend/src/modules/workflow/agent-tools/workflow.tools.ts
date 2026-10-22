@@ -1,16 +1,15 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
-import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/index.js';
+import type { IToolRegistry, JsonSchema } from '../../tool-registry/index.js';
+import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler, toolDef } from '../../tool-helpers/index.js';
 import { isCommitSha } from '../../../shared/git.contract.js';
-import { toolDef } from '../../tool-helpers/index.js';
-import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { ToolHandlerFactory } from '../../tool-helpers/index.js';
+import { requireInternalSource } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/index.js';
 import { readablePathsAt, readableAtCommits, assertReadableAtCommits } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/index.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
 import {
   CHANGE_REQUEST_INCLUDES,

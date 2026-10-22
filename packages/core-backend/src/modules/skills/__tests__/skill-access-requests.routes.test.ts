@@ -11,6 +11,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { JoinRequestsService } from '../../plugins/join-requests.service.js';
 import type { ISkillService } from '../skills.contract.js';
 import { createSkillAccessRequestRoutes } from '../skill-access-requests.routes.js';
+import { AccessRequestsService } from '../../access/access-requests.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -49,15 +50,17 @@ async function makeHarness(listBranches: IWorkflowService['listBranches']) {
 
   const app = express();
   app.use(express.json());
+  const joinRequests = { list: vi.fn(), reconcile: vi.fn() } as unknown as JoinRequestsService;
+  const kb = testKbContext({ kbDirName: KB });
   app.use(
     '/api',
     createSkillAccessRequestRoutes({
       skillService,
       accessControl,
       workflow,
-      workspaceService,
-      joinRequests: { list: vi.fn(), reconcile: vi.fn() } as unknown as JoinRequestsService,
-      kb: testKbContext({ kbDirName: KB }),
+      requests: new AccessRequestsService({ workflow, workspaceService, lifecycle: joinRequests, kb }),
+      joinRequests,
+      kb,
       resolveUser: async () => MIA,
     }),
   );

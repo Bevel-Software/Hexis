@@ -11,7 +11,7 @@ import {
   scrollToHeading,
   type KbLinkTarget,
 } from '../../../workspace';
-import type { DiffLine } from '../../../change-requests/utils/diff';
+import type { DiffLine } from '../../../change-requests';
 
 /** The pane never writes — editing goes through the page's Edit / Propose. */
 const NOOP_SAVE = async () => {};

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { currentBranchModel, isProtectedBranch, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { fetchFileAccessBatch } from '../../access/api';
+import { fetchFileAccessBatch } from '../../access';
 import { useWorkspace } from '../state/workspace.context';
 import { useMergedWorkspaceTree } from './useMergedWorkspaceTree';
 import { findEntryByPath } from '../utils/fileTree';

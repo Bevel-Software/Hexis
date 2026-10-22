@@ -65,7 +65,7 @@ export interface BridgeRun {
  */
 export function runBridge(
   page: { ids?: string[]; names?: string[]; namedControls?: string[] } = {},
-  opts: { toolBridge?: boolean } = {},
+  opts: { toolBridge?: boolean | { documentId: string; tools?: boolean } } = {},
 ): BridgeRun {
   // No lib sources: a vm script cannot parse an `export`. The bridge is
   // appended after the lib either way.

@@ -21,15 +21,12 @@ import type {
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError } from '../../access-model/index.js';
-import { WorkspaceIdMutex, type WorkspaceMutex } from '../../kb-fs/index.js';
+import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
-import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
-import { readRefSha } from '../../kb-fs/index.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
 import { lstatOrNull } from '../../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../../shared/no-link-below.js';
@@ -38,7 +35,7 @@ import {
   assertValidRelativePath,
   isBranchAuthoredBy,
   isOwnSuggestionsBranch,
-} from '../../kb-fs/branch-name.js';
+} from '../../kb-fs/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
   AppliedChangeMismatchError,

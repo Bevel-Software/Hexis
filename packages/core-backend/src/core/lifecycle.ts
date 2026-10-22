@@ -455,6 +455,12 @@ export interface CoreStopDeps {
    */
   patternMatcher?: { close(): Promise<void> };
   /**
+   * The document extractor, whose worker threads are this graph's own for the
+   * same reason: ended here, so no extraction worker outlives its graph.
+   * Optional like the matcher.
+   */
+  documentExtractor?: { close(): Promise<void> };
+  /**
    * The workflow service, for the tidy-up it runs after each sweep (closing
    * empty requests, removing leftover branches): detached from whatever
    * started it, so stopped and awaited here before the pool goes. Optional:
@@ -590,6 +596,10 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // Its workers end with the graph; a search still running is answered busy.
   if (deps.patternMatcher) {
     await bounded(deps.patternMatcher.close(), remaining(), 'ending the search workers', log);
+  }
+  // Likewise: an extraction still running is answered busy, and nothing about its file is remembered.
+  if (deps.documentExtractor) {
+    await bounded(deps.documentExtractor.close(), remaining(), 'ending the extraction workers', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);
