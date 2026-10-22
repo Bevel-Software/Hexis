@@ -39,7 +39,7 @@ import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry, type ReadResult } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
@@ -311,6 +311,8 @@ const UNCACHED_DOCS_PER_GREP = 20;
 /** Per-grep-walk extraction state: the shared budget + how many documents it left unsearched. */
 interface DocGrepState {
   readers: FileReaderRegistry;
+  /** The workspace searched — where a document that fails to extract during the walk is reported. */
+  origin: ReadOrigin;
   uncachedBudget: number;
   skippedUncached: number;
 }
@@ -651,7 +653,7 @@ function modeOf(a: Record<string, unknown>): WriteMode {
 type FileGrepOutcome =
   /** Its text was searched; any matches are in `out`. */
   | 'searched'
-  /** No searchable text at all: an image, binary content, a corrupt document. */
+  /** No searchable text at all: an image, binary content, a corrupt document (remembered or fresh). */
   | 'no-text'
   /** A cold document the per-call extraction budget could not afford (counted in `docs`). */
   | 'budget-skipped';
@@ -680,19 +682,26 @@ async function grepOneFile(
 ): Promise<FileGrepOutcome> {
   const reader = docs.readers.readerFor(path);
   const bytes = asBytes(await fs.readFile(path));
-  let content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
-  if (content === null && reader instanceof DocumentReader) {
-    // Cold document (extraction not yet cached): cached ones above are free,
-    // extracting draws on the per-walk budget (see UNCACHED_DOCS_PER_GREP) —
-    // beyond it the search skips the document and counts it.
-    if (docs.uncachedBudget <= 0) {
-      docs.skippedUncached++;
-      return 'budget-skipped';
+  let content: string | null;
+  if (reader instanceof DocumentReader) {
+    // What the cache remembers is free — an extraction is searched, a failure
+    // (a damaged file, or one that overran its budget within the hour) is
+    // skipped without extracting it again. A cold document draws on the
+    // per-walk budget (see UNCACHED_DOCS_PER_GREP) — beyond it the search
+    // skips the document and counts it.
+    let res = await reader.cachedRead(bytes, path);
+    if (res === undefined) {
+      if (docs.uncachedBudget <= 0) {
+        docs.skippedUncached++;
+        return 'budget-skipped';
+      }
+      docs.uncachedBudget--;
+      res = await reader.read(bytes, path, docs.origin);
     }
-    docs.uncachedBudget--;
-    const res = await reader.read(bytes, path);
-    // A non-text outcome is a corrupt document — nothing searchable.
+    // A non-text outcome is a document that could not be read — nothing searchable.
     content = res.kind === 'text' ? res.text : null;
+  } else {
+    content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
   }
   if (content === null) return 'no-text';
   const lines = content.split('\n');
@@ -1878,7 +1887,7 @@ export function registerWorkspaceTools(
     // the access gate and the read hook above — a document read is still a
     // KB read. ONE registry dispatch picks the reader by extension.
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-    return { result: await readers.readerFor(p).read(bytes, p), guide: null };
+    return { result: await readers.readerFor(p).read(bytes, p, { workspaceId: workspaceIdForBranch(branch) }), guide: null };
   };
 
   /**
@@ -2228,6 +2237,7 @@ export function registerWorkspaceTools(
           description: 'Files only: where `mime` came from. `fallback` means no type was detected.',
         },
         textEditable: { type: 'boolean', description: 'Files only: whether write_file/write_files/edit_file accept this file as it is now.' },
+        unreadable: str('Documents only, and only when its text could not be extracted: the one-line notice read_file answers for it.'),
         mimeNote: str('Present when `mimeSource` is `fallback`: says the MIME type is a fallback, not a detected type.'),
         platformGuide: {
           type: 'boolean',
@@ -2382,7 +2392,16 @@ export function registerWorkspaceTools(
       const bytes = needsContent(reader)
         ? await orNotFound(p, async () => asBytes(await fs.readFile(p)))
         : undefined;
-      return { ...out, ...fileTypeOf(reader, p, bytes) };
+      // A document whose extraction failed answers that failure's notice here
+      // too, from what the cache remembers — never by extracting, so stat
+      // stays as cheap as it was. The notice quotes the parser, so only a
+      // caller who may read the file hears it.
+      const type = fileTypeOf(reader, p, bytes);
+      if (reader instanceof DocumentReader && verdicts.read) {
+        const remembered = await reader.cachedRead(await orNotFound(p, async () => asBytes(await fs.readFile(p))), p);
+        if (remembered?.kind === 'refusal') return { ...out, ...type, unreadable: remembered.message };
+      }
+      return { ...out, ...type };
     },
   });
 
@@ -2445,7 +2464,12 @@ export function registerWorkspaceTools(
         const gate = readGateFor(a.branch as string, ctx);
         const out: { path: string; line: number; text: string }[] = [];
         const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
-        const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
+        const docs: DocGrepState = {
+          readers,
+          origin: { workspaceId: workspaceIdForBranch(a.branch as string) },
+          uncachedBudget: UNCACHED_DOCS_PER_GREP,
+          skippedUncached: 0,
+        };
         // The empty root is the workspace itself — always a directory, and never
         // worth a stat.
         // A placeholder named on its own is searched as what it is to every

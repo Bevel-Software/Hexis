@@ -55,6 +55,7 @@ import {
 } from '../utils/fileTree';
 import { uploadErrorNextStep } from '../utils/uploadError';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
+import { canonicalizeWorkspaceId, useEventBusSubscription } from '../../workflow';
 import {
   ChangeRequestDialog,
   listChangeRequestsUnderFolder,
@@ -1012,7 +1013,8 @@ function RenameInput({
 // ── Row Notice ──
 
 /**
- * One row's own bad news — a refused download, a refused drop — drawn under
+ * One row's own bad news — a refused download, a refused drop, a document
+ * whose text the server could not read — drawn under
  * the row at the row's indent, with a Dismiss. Never an `alert()`: a modal
  * popup stops the whole app to say something the tree can say in place, and
  * (the create flow learned this the hard way) it steals focus from whatever
@@ -1138,6 +1140,22 @@ export function FileTreeNode({
    * Sales.") is the whole message, so it is shown verbatim.
    */
   const [moveError, setMoveError] = useState<string | null>(null);
+  /**
+   * Why the server just failed to read this document's text, pushed as it
+   * happened (`document-unreadable`). Transient by design: only a row on
+   * screen at that moment shows it, Dismiss clears it, and nothing is kept —
+   * the reason stays available from `read_file` and `file_stat`.
+   */
+  const [unreadable, setUnreadable] = useState<string | null>(null);
+  const onDocumentUnreadable = useCallback(
+    (event: { workspaceId: string; path: string; reason: string }) => {
+      if (!workspaceId || canonicalizeWorkspaceId(event.workspaceId) !== canonicalizeWorkspaceId(workspaceId)) return;
+      if (entry.type !== 'file' || event.path !== entry.relativePath) return;
+      setUnreadable(event.reason);
+    },
+    [workspaceId, entry.type, entry.relativePath],
+  );
+  useEventBusSubscription('document-unreadable', onDocumentUnreadable);
   /**
    * Which download the notice is allowed to speak for. The menu closes on
    * click but the ROW does not, so a second Download can be started (reopen,
@@ -1305,6 +1323,15 @@ export function FileTreeNode({
       dismissLabel="Dismiss move error"
       paddingLeft={paddingLeft}
       onDismiss={() => setMoveError(null)}
+    />
+  );
+  const unreadableNotice = unreadable && (
+    <RowNotice
+      message={`Could not be read: ${unreadable}${/[.!?]$/.test(unreadable) ? '' : '.'}`}
+      testId="tree-unreadable-notice"
+      dismissLabel="Dismiss could not be read"
+      paddingLeft={paddingLeft}
+      onDismiss={() => setUnreadable(null)}
     />
   );
 
@@ -1565,6 +1592,7 @@ export function FileTreeNode({
         </div>
         {downloadNotice}
         {moveNotice}
+        {unreadableNotice}
         {isExpanded && (
           <div>
             {creating && (
@@ -1798,6 +1826,7 @@ export function FileTreeNode({
       </button>
       {downloadNotice}
       {moveNotice}
+      {unreadableNotice}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}

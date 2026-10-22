@@ -28,6 +28,7 @@ import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../git-internals.middleware.js';
 import { hasGitInternalsSegment } from '../../../shared/git-internals.js';
@@ -282,7 +283,7 @@ describe('workspace tools refuse the git folder', () => {
       fakeAuth,
       createToolHandlerFactory(resolve),
       new SpillStore(join(root, 'spills')),
-      new DocExtractService(join(root, 'doc-cache')),
+      new DocExtractService(join(root, 'doc-cache'), new WorkerDocumentExtractor()),
       allowAll,
       testKbContext({ kbDirName: KB }),
       { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
