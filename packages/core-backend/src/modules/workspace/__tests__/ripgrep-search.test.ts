@@ -75,6 +75,16 @@ describe('RipgrepPatternMatcher', () => {
     expect(files).toEqual([{ path: 'latin.txt', lines: [{ line: 2, text: 'needle ok' }] }]);
   });
 
+  it('reads a match on one very long line whole, however many chunks its record spans', async () => {
+    const long = `needle ${'é'.repeat(3_000_000)} end`;
+    await put('kb/minified.json', `${long}\nneedle short\n`);
+    const files = await all(await search('needle'));
+    expect(files).toHaveLength(1);
+    expect(files[0]!.lines).toHaveLength(2);
+    expect(files[0]!.lines[0]!.text === long).toBe(true);
+    expect(files[0]!.lines[1]).toEqual({ line: 2, text: 'needle short' });
+  });
+
   it('lists the files of the given extensions by the same walk, case-insensitively and outside .git', async () => {
     await put('kb/b.pdf', 'x');
     await put('kb/a/One.PDF', 'x');

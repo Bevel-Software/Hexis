@@ -276,17 +276,24 @@ class RipgrepSearch implements IPatternSearch {
         child.stdin!.end(input);
       }
       child.stdout!.setEncoding('utf8');
-      let pending = '';
+      // Only each new chunk is scanned, and a record's parts are joined once,
+      // when it ends: a record of many chunks (a match on one long line) costs
+      // its length, not its length times its chunks.
+      const parts: string[] = [];
       for await (const chunk of child.stdout! as AsyncIterable<string>) {
-        pending += chunk;
+        let from = 0;
         let at: number;
-        while ((at = pending.indexOf(separator)) >= 0) {
-          const record = pending.slice(0, at);
-          pending = pending.slice(at + 1);
+        while ((at = chunk.indexOf(separator, from)) >= 0) {
+          parts.push(chunk.slice(from, at));
+          const record = parts.join('');
+          parts.length = 0;
+          from = at + 1;
           yield record;
         }
+        if (from < chunk.length) parts.push(from === 0 ? chunk : chunk.slice(from));
       }
-      if (pending.length > 0 && !timedOut) yield pending;
+      const rest = parts.join('');
+      if (rest.length > 0 && !timedOut) yield rest;
       const { code } = await Promise.race([exit, failed]);
       if (timedOut) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
       if (code === null && this.runner.isClosed()) throw new SearchBusyError();
