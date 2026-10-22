@@ -23,14 +23,18 @@ const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(<?([^)>\s]+(?:\s[^)>]*)?)>?\)/g;
  * backlinks would need an index that does not exist. If one ever lands, the
  * rail gains a second section; it does not change this one.
  *
- * The predicate is the markdown pipeline's — the real internal-link test the
- * renderer itself uses to decide what opens in the workspace:
+ * The predicate is the markdown pipeline's `.md` rule — the internal-link
+ * test the renderer uses for a page link where it has no link-target
+ * resolver:
  *
  *     !isExternalHref(href) && !href.startsWith('#') && /\.md(#|$)/.test(href)
  *
  * (a scheme, not a prefix: `http-notes.md` is a page of the workspace)
- * so the rail lists exactly the links that are clickable as files, and
- * nothing that would take the reader off the workspace.
+ * so the rail lists the PAGES this one links to, and nothing that would take
+ * the reader off the workspace. It is narrower than the file page's clicks on
+ * purpose: with a resolver the pipeline also opens a link to an HTML page, a
+ * PDF or an image in a new tab, and follows a bare node-id link, none of
+ * which this rail lists — it is a list of pages, not of everything clickable.
  *
  * Non-markdown content yields `[]`, which the rail renders as no section
  * rather than an empty one.

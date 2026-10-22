@@ -106,12 +106,17 @@ export function MarkdownRenderer({
   // Deep-link scroll: when the URL has a `#heading-slug` fragment, scroll the
   // heading with that id (added by rehype-slug) into view. Re-runs when the
   // hash, the file, or the rendered value changes — the latter because the
-  // content may still be loading when the route first resolves.
+  // content may still be loading when the route first resolves. Also on
+  // `location.key`: a section link to this file navigates to this tab's own
+  // address plus the fragment, and when the tab is already there the hash
+  // string does not change — only the key, which `navigate` renews on every
+  // call — so a second click on the same link, after the reader scrolled
+  // away, scrolls again instead of doing nothing.
   useEffect(() => {
     if (!readOnly || !location.hash) return;
     const raf = requestAnimationFrame(() => scrollToHeading(scrollContainerRef.current, location.hash));
     return () => cancelAnimationFrame(raf);
-  }, [location.hash, filePath, value, readOnly]);
+  }, [location.hash, location.key, filePath, value, readOnly]);
 
   // Citation deep-link for a heading: the node's canonical URL (its id URL when
   // it's a node, else the path URL) plus the heading's `#slug`. Matches the "copy
