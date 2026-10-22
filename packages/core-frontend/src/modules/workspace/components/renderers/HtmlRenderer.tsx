@@ -4,16 +4,7 @@ import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
 import { useRendererSurface } from './rendererSurface';
-import { Button, Dialog } from '../../../../shared/components';
-import {
-  PageConsent,
-  PageToolsClient,
-  answerToolCall,
-  asToolCall,
-  pageName,
-  useOpenPageInPlatform,
-  usePageTools,
-} from './htmlToolBridge';
+import { useHtmlToolBridge } from './useHtmlToolBridge';
 import {
   HTML_FRAME_KEY_STEP,
   HTML_FRAME_MAX_HEIGHT,
@@ -21,13 +12,6 @@ import {
   HTML_FRAME_STANDARD_HEIGHT,
   attachFrameResizeHandle,
 } from './frameResizeHandle';
-
-/**
- * The card the app shows over a page, outside its frame: the page cannot draw,
- * see or answer it. `write`: the page's first writing call asks the viewer.
- * `platform`: a page that needs tools asked for them where there are none.
- */
-type PageCard = { kind: 'write' | 'platform'; answer: (ok: boolean | null) => void };
 
 /**
  * Where the reader's chosen frame height is kept, per browser: a
@@ -65,17 +49,11 @@ export function HtmlRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  const { openLink, openFilePage } = useFileNav();
+  const { openLink } = useFileNav();
   const surface = useRendererSurface();
   // Whether the surface's host grows with the page (an issue panel) rather
   // than giving it a pane to scroll in (the app, the MCP App's pane).
   const sizesToContent = surface?.sizesToContent === true;
-  // The viewer's tools, for a page on a host that provides them (the file
-  // page, the skill page — `PageToolsContext` lists them). Everywhere else
-  // the page gets `bevel.tools = null`.
-  const pageTools = usePageTools();
-  const openPageInPlatform = useOpenPageInPlatform();
-  const toolPagePath = surface === null && pageTools ? pageTools.pagePath : null;
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   /**
    * The frame's height where the host grows with the page: the standard
@@ -97,12 +75,17 @@ export function HtmlRenderer({
   const [reloadKey, setReloadKey] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const prevFilePathRef = useRef(filePath);
-  const [card, setCard] = useState<PageCard | null>(null);
-  const cardRef = useRef<PageCard | null>(null);
-  const toolsClient = useMemo(() => (toolPagePath ? new PageToolsClient(toolPagePath) : null), [toolPagePath]);
-  // The viewer's answer about this page's writes holds for one VIEW of it: a
-  // new frame document (a reload, a saved edit, another file) asks again.
-  const consentRef = useRef<PageConsent | null>(null);
+
+  // The page tool bridge: a page's `window.bevel.tools` and `requireTools()`,
+  // answered for one view of the page — a new frame document (a reload, a
+  // saved edit, another file) or the frame gone (Edit) is a new view. The
+  // view's key is a fresh identity whenever one of the INPUTS of the
+  // document changes, never the built document itself: the bridge's
+  // `toolBridge` goes into the build, so a key read off the build would
+  // chase it; and a distribution's document carries its inlined libraries,
+  // which a key built from it would compare on every render.
+  const viewKey = useMemo(() => ({ reloadKey, mode, savedValue, filePath }), [reloadKey, mode, savedValue, filePath]);
+  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath, viewKey });
 
   const dirty = !readOnly && value !== savedValue;
 
@@ -145,13 +128,13 @@ export function HtmlRenderer({
         // extension.)
         libModuleSources: [],
         bodyHtml: sanitizeAgentHtml(savedValue),
-        toolBridge: toolPagePath !== null,
+        toolBridge,
       });
       setBundledSrcdoc(doc);
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : 'Failed to build preview');
     }
-  }, [mode, savedValue, filePath, reloadKey, toolPagePath]);
+  }, [mode, savedValue, filePath, reloadKey, toolBridge]);
 
   // (The enterprise build additionally installs a postMessage bridge here that
   // serves the iframe's KB-graph client from `/api/workspace/:id/graph` — the
@@ -178,100 +161,6 @@ export function HtmlRenderer({
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
   }, [openLink, filePath]);
-
-  /** Show one of the app's cards over the page and resolve with the viewer's answer. A card already up answers this ask too. */
-  function showCard(kind: PageCard['kind']): Promise<boolean | null> {
-    const open = cardRef.current;
-    if (open && open.kind === kind) {
-      return new Promise((resolve) => {
-        const first = open.answer;
-        open.answer = (ok) => {
-          first(ok);
-          resolve(ok);
-        };
-      });
-    }
-    return new Promise((resolve) => {
-      const next: PageCard = { kind, answer: resolve };
-      cardRef.current = next;
-      setCard(next);
-    });
-  }
-
-  /** Close the card with the viewer's answer, or null when the view went before they gave one. */
-  const closeCard = useCallback((ok: boolean | null) => {
-    const open = cardRef.current;
-    cardRef.current = null;
-    setCard(null);
-    open?.answer(ok);
-  }, []);
-
-  // When the page's document goes (a reload, a saved edit, another file, or
-  // Edit, which unmounts the frame even when the document comes back the same)
-  // its consent goes with it, and a card left open answers no: nothing the old
-  // view asked for runs in the new one.
-  useEffect(
-    () => () => {
-      consentRef.current = null;
-      closeCard(null);
-    },
-    [bundledSrcdoc, reloadKey, mode, closeCard],
-  );
-
-  // Tool bridge: a page's `window.bevel.tools` calls and its
-  // `requireTools()`, posted by the runtime in the frame (see
-  // `htmlSandbox.ts`), answered here with the viewer's session.
-  useEffect(() => {
-    function onToolMessage(event: MessageEvent) {
-      const iframeWin = iframeRef.current?.contentWindow;
-      if (!iframeWin || event.source !== iframeWin) return;
-      const reply = (message: unknown) => {
-        // Only to the document that asked: a reloaded frame is a new window.
-        if (iframeRef.current?.contentWindow === iframeWin) iframeWin.postMessage(message, '*');
-      };
-      const data = event.data as { type?: unknown; requestId?: unknown } | null;
-      if (data && data.type === 'bevel.tools.require' && typeof data.requestId === 'string') {
-        const requestId = data.requestId;
-        if (toolsClient) {
-          reply({ type: 'bevel.tools.require.response', requestId, ok: true, result: true });
-          return;
-        }
-        void showCard('platform').then(() =>
-          // Either way the page that asked carries on without tools: Open in
-          // the platform opened it elsewhere, it did not give it tools here.
-          reply({ type: 'bevel.tools.require.response', requestId, ok: true, result: false }),
-        );
-        return;
-      }
-      const call = asToolCall(data);
-      if (!call) return;
-      if (!toolsClient) {
-        reply({
-          type: 'bevel.tool.response',
-          requestId: call.requestId,
-          ok: false,
-          error: 'Tools are only available on the page in the platform.',
-          code: 'unavailable',
-        });
-        return;
-      }
-      consentRef.current ??= new PageConsent(() => showCard('write'));
-      void answerToolCall(call, toolsClient, consentRef.current).then(reply);
-    }
-    window.addEventListener('message', onToolMessage);
-    return () => window.removeEventListener('message', onToolMessage);
-  }, [toolsClient]);
-
-  const openInPlatform = useCallback(() => {
-    closeCard(false);
-    // The host's own way when it has one (a skill page, whose filePath is
-    // relative to the skill); otherwise the file page, by an address that
-    // asks for it outright: on the embed the surface opens it through the
-    // host in a new tab, which carries no router state, and a page inside a
-    // skill's folder would otherwise open as that skill's page again.
-    if (openPageInPlatform) openPageInPlatform();
-    else openFilePage(filePath);
-  }, [closeCard, openPageInPlatform, openFilePage, filePath]);
 
   useEffect(() => {
     frameHeightRef.current = frameHeight;
@@ -450,42 +339,7 @@ export function HtmlRenderer({
           Loading preview…
         </div>
       )}
-      <Dialog
-        open={card?.kind === 'write'}
-        onClose={() => closeCard(false)}
-        title={`${pageName(filePath)} wants to write to the knowledge base`}
-        size="md"
-        footer={
-          <>
-            <Button variant="outline" onClick={() => closeCard(false)}>
-              Deny
-            </Button>
-            <Button variant="primary" onClick={() => closeCard(true)}>
-              Allow while open
-            </Button>
-          </>
-        }
-      >
-        <p className="font-mono text-detail text-ink-muted break-all">{toolPagePath ?? filePath}</p>
-      </Dialog>
-      <Dialog
-        open={card?.kind === 'platform'}
-        onClose={() => closeCard(false)}
-        title={`${pageName(filePath)} uses tools that are only available in the platform`}
-        size="md"
-        footer={
-          <>
-            <Button variant="outline" onClick={() => closeCard(false)}>
-              Continue without tools
-            </Button>
-            <Button variant="primary" onClick={openInPlatform}>
-              Open in the platform
-            </Button>
-          </>
-        }
-      >
-        <p className="font-mono text-detail text-ink-muted break-all">{filePath}</p>
-      </Dialog>
+      {cards}
     </div>
   );
 }
