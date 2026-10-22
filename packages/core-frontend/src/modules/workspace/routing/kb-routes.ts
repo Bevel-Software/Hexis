@@ -342,6 +342,17 @@ export function branchFromPathname(pathname: string): string | null {
   return segment ? safeDecode(segment) : null;
 }
 
+/**
+ * What a `/workspace/<branch>/…` pathname names after the branch, decoded
+ * segment by segment: a workspace path, or a node id (`NODE_ID_LINK_RE`).
+ * Null when it names nothing (Knowledge home) or is not a workspace URL.
+ */
+export function filePathFromPathname(pathname: string): string | null {
+  if (branchFromPathname(pathname) === null) return null;
+  const rest = pathname.slice(KB_ROUTE_PREFIX.length + 1).split('/').slice(1).filter(Boolean);
+  return rest.length > 0 ? rest.map(safeDecode).join('/') : null;
+}
+
 export function useFileNav() {
   // Outside the app every opener is the surface's: the embed opens a page in
   // a NEW TAB through its host and never navigates itself. Read before the

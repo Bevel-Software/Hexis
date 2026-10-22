@@ -4245,6 +4245,41 @@ describe('FileExplorer: deleting the file on screen', () => {
     expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
   });
 
+  // Knowledge home names no file: the tab strip may still hold an active tab,
+  // but nothing of it is on screen, so its delete moves nothing.
+  it('stays on Knowledge home when the active tab is deleted from there', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: kbPath('Keep.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: ['/workspace/main'], openFilePath: 'Gone.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(kbPath('Gone.md'));
+    expect(screen.getByTestId('location-pathname').textContent).toBe('/workspace/main');
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
+  });
+
+  it("stays on another file's page when the active tab is not the file it names", async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: kbPath('docs/a.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Keep.md')], openFilePath: 'Keep.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Keep.md'));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('POP');
+  });
+
+  // An id URL names its file only through the id; the active tab is the
+  // file it opened, so a delete that closed the active tab took that file.
+  it('lands on the tab that is left from the id URL of the deleted file', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: kbPath('Keep.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: ['/workspace/main/gone-note'], openFilePath: 'Gone.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    await waitFor(() => expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Keep.md')));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
+  });
+
   it('leaves the file open and the address unchanged when the delete is called off', async () => {
     // `false`: the person kept their unsaved tabs at the "Unsaved changes" question.
     const deleteEntry = vi.fn(async () => false as const);

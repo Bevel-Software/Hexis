@@ -65,7 +65,7 @@ import {
 import { cancelPullRequest } from '../../pr';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { CR_FILE_PARAM, CR_PARAM, branchFromPathname, useFileNav } from '../routing/kb-routes';
+import { CR_FILE_PARAM, CR_PARAM, NODE_ID_LINK_RE, branchFromPathname, filePathFromPathname, useFileNav } from '../routing/kb-routes';
 import { landingAfterClose } from '../routing/landing';
 import { deleteTookLibraryItem } from '../../library';
 import { rawFileUrl } from '../services/workspace.api';
@@ -661,7 +661,17 @@ function ContextMenu({
         // where the page is now: the user may have moved on while it ran.
         const pathname = pathnameNow();
         const branchOnScreen = branchFromPathname(pathname);
-        if (result?.closedActive && branchOnScreen !== null) {
+        // Only when the address names what was deleted. Knowledge home, or
+        // another file's page, keeps an active tab it does not show; an id
+        // URL names its file through the id, and the active tab is the file
+        // it opened, so a delete that closed that tab took it.
+        const named = filePathFromPathname(pathname);
+        const onScreen = named !== null && (
+          NODE_ID_LINK_RE.test(named)
+          || named === entry.relativePath
+          || named.startsWith(`${entry.relativePath}/`)
+        );
+        if (result?.closedActive && branchOnScreen !== null && onScreen) {
           navigate(landingAfterClose(pathname, branchOnScreen, result.newActivePath), { replace: true });
         } else if (result && branchOnScreen !== null && deleteTookLibraryItem(pathname, kbDirName, entry.relativePath)) {
           // A skill's or a tool's page holds no tab, so no tab closed — but

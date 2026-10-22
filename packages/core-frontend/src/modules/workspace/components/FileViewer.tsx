@@ -1355,8 +1355,10 @@ export function FileViewer() {
       savedContent={
         isReviewingPending
           ? pendingFileContent!
-          : proposeMode && proposeSeed !== null
-            ? proposeSeed
+          : proposeMode
+            // The same text `content` starts from: with no seed, the text the
+            // proposal opened on, so a change pulled since is not an edit.
+            ? (proposeSeed ?? proposeBase ?? openFileSavedContent ?? openFileContent)
             : (openFileSavedContent ?? openFileContent)
       }
       filePath={openFilePath}

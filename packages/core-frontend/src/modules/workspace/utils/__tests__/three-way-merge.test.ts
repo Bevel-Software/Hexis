@@ -52,6 +52,17 @@ describe('threeWayMerge', () => {
     expect(threeWayMerge(base, ours, theirs)).toBe([...many, 'up', 'b', 'mine'].join('\n'));
   });
 
+  it('keeps the CRLF endings of a long file edited near the end, diffing only what changed', () => {
+    // Blank lines repeat throughout a long Markdown file: diffed whole for
+    // its line endings, that is the slow case for the dependency.
+    const many = Array.from({ length: 200_000 }, (_, i) => (i % 2 ? '' : `line ${i}`));
+    const crlf = (lines: string[]) => lines.join('\r\n');
+    const base = crlf([...many, 'a', 'b', 'c']);
+    const ours = [...many, 'a', 'b', 'mine'].join('\n');
+    const theirs = crlf([...many, 'up', 'b', 'c']);
+    expect(threeWayMerge(base, ours, theirs)).toBe(crlf([...many, 'up', 'b', 'mine']));
+  });
+
   it('keeps the shared start and end around edits in the middle', () => {
     const base = 'h1\nh2\na\nb\nc\nt1\nt2';
     expect(threeWayMerge(base, 'h1\nh2\na\nb\nmine\nt1\nt2', 'h1\nh2\nup\nb\nc\nt1\nt2'))

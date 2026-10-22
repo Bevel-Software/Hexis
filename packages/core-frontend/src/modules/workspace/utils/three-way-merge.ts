@@ -90,21 +90,35 @@ function withEndingsOf(theirs: string, theirsLf: string, merged: string): string
   for (const [e, n] of counts) if (n > (counts.get(fallback) ?? 0)) fallback = e;
   const mLines = merged.split('\n');
   const ends: string[] = new Array(mLines.length).fill(fallback);
+  // The lines `merged` shares with `theirs` at the start and at the end keep
+  // their endings as they are, and only what lies between is diffed, as in
+  // `mergeLines`: a long file is slow to diff whole, and a long CRLF file
+  // is the case that reaches here.
+  const shortest = Math.min(mLines.length, tLines.length);
+  let head = 0;
+  while (head < shortest && mLines[head] === tLines[head]) head++;
+  let tail = 0;
+  while (tail < shortest - head
+    && mLines[mLines.length - 1 - tail] === tLines[tLines.length - 1 - tail]) tail++;
+  for (let k = 0; k < head; k++) ends[k] = tEnds[k] || fallback;
+  for (let k = 1; k <= tail; k++) ends[mLines.length - k] = tEnds[tLines.length - k] || fallback;
+  const mMid = mLines.slice(head, mLines.length - tail);
+  const tMid = tLines.slice(head, tLines.length - tail);
   // Lines between the differences are shared with `theirs`, in order.
   let i = 0;
   let j = 0;
   const shareUpTo = (mEnd: number, tEnd: number) => {
-    while (i < mEnd && j < tEnd) ends[i++] = tEnds[j++] || fallback;
+    while (i < mEnd && j < tEnd) ends[head + i++] = tEnds[head + j++] || fallback;
   };
-  for (const d of diffIndices(mLines, tLines)) {
+  for (const d of diffIndices(mMid, tMid)) {
     shareUpTo(d.buffer1[0], d.buffer2[0]);
     for (let k = 0; k < d.buffer1[1] && k < d.buffer2[1]; k++) {
-      ends[d.buffer1[0] + k] = tEnds[d.buffer2[0] + k] || fallback;
+      ends[head + d.buffer1[0] + k] = tEnds[head + d.buffer2[0] + k] || fallback;
     }
     i = d.buffer1[0] + d.buffer1[1];
     j = d.buffer2[0] + d.buffer2[1];
   }
-  shareUpTo(mLines.length, tLines.length);
+  shareUpTo(mMid.length, tMid.length);
   return mLines.map((line, k) => (k === mLines.length - 1 ? line : line + ends[k])).join('');
 }
 

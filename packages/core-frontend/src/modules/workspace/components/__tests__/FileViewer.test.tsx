@@ -1553,6 +1553,33 @@ describe('FileViewer: proposing a change without write access', () => {
     );
   });
 
+  // The editor shows the text the proposal opened on; its "unsaved" baseline
+  // has to be that text too, or the pull alone counts as an edit.
+  it('does not count a pulled change as typing in a proposal nobody typed into', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'official, updated', savedContent: 'official, updated', outcome: 'discarded' });
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('official');
+    // Leaving the page is not held up for unsaved work: there is none.
+    const leaving = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(false);
+  });
+
   it('closes without sending when nothing was typed over the open proposal', async () => {
     denyWrite();
     myCrsMock.mockResolvedValue([
