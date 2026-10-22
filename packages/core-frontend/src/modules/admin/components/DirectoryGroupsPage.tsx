@@ -190,8 +190,8 @@ export function DirectoryGroupsPage() {
               </div>
               <div>
                 A bare name in an access rule means the role when one of that name exists. These
-                rules resolve to the role, not the group — write the group as <code>group/&lt;Name&gt;</code>{' '}
-                if it was meant:
+                rules grant the role, not the group (a bare denial denies both until it is rewritten) —
+                write the group as <code>group/&lt;Name&gt;</code> if it was meant:
               </div>
               <ul className="mt-1 list-disc pl-4">
                 {bareCollisions.flatMap((g) =>

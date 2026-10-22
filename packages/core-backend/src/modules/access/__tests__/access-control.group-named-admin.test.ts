@@ -17,7 +17,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 
 const execFileAsync = promisify(execFile);
@@ -80,7 +80,10 @@ describe('a group named Admin (QA reproduction)', () => {
   });
 
   it('its members receive none of the Admin role grants', async () => {
-    expect(await fs.readFile(path.join(repo, 'groups.yaml'), 'utf-8')).toBe(PROPOSED_GROUPS);
+    // Line endings aside (Git may check the merge out with CRLF on Windows),
+    // main now holds the proposed groups file.
+    const merged = await fs.readFile(path.join(repo, 'groups.yaml'), 'utf-8');
+    expect(merged.replace(/\r\n/g, '\n')).toBe(PROPOSED_GROUPS);
 
     // `read: Admin` / `write: Admin` / `owner: Admin` are the ROLE's.
     expect(await svc.canRead(WS, BUSINESS, 'Knowledge/Board/Minutes.md')).toBe(false);

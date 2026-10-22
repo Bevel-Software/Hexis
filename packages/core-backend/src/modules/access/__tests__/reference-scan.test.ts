@@ -434,6 +434,33 @@ describe('KbReferenceScanner — a folder the walk cannot list', () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it('a scan that could not read a candidate file is not cached', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-unread-'));
+    try {
+      await write(path.join(root, KB), 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      // The walk lists team/Ghost.md, but there is no file to read.
+      const disk = new NodeFs();
+      let walks = 0;
+      const walker: ITreeWalker = {
+        walk: (r, o, l) => disk.walk(r, o, l),
+        walkFiles: (r, m, o) => disk.walkFiles(r, m, o),
+        walkKb: async (r, l, o) => {
+          walks++;
+          const result = await disk.walkKb(r, l, o);
+          for (const listener of l) listener.onFile?.('team', 'Ghost.md');
+          return result;
+        },
+      };
+      const scanner = new KbReferenceScanner(stubWorkspace(root), walker, KB);
+      expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
+      await scanner.scan('ws-1');
+      // Not served from cache: the second scan walked and read again.
+      expect(walks).toBe(2);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('KbReferenceScanner — event-bus cache invalidation', () => {

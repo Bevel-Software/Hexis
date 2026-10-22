@@ -378,6 +378,19 @@ function parseManifestText(text: string | null): Record<string, unknown> | null 
   }
 }
 
+/**
+ * The `group/<name>` key a BARE token also denies, or null: only when the
+ * bare name resolves to a role AND a group of that name exists (the
+ * collision `mergeGroupsIntoRoles` warns about). Prefixed tokens, and names
+ * held by one kind only, deny exactly what they name.
+ */
+function collidingGroupKey(roles: RolesIndex, token: string): string | null {
+  const { prefix, name } = splitPrincipalToken(token);
+  if (prefix !== null || roles.byCanonical.get(name)?.kind !== 'role') return null;
+  const groupKey = `${GROUP_TOKEN_PREFIX}${name}`;
+  return roles.byCanonical.get(groupKey)?.kind === 'group' ? groupKey : null;
+}
+
 function resolveScopes(
   model: AccessModel,
   verb: Verb,
@@ -438,6 +451,23 @@ function resolveScopes(
         if (map.has(key)) continue; // an own verdict (grant or deny) is already the answer
         map.set(key, 'denied');
         (entry.kind === 'role' ? implied.byRole : implied.byEmail).add(key);
+      }
+    }
+    // A BARE denial whose name a role and a group share fails closed: it
+    // denies the role (the bare name's meaning) AND the same-named group,
+    // which is what the line denied before bare names meant the role. So the
+    // switch never opens a folder to a group a file still says `deny <Name>`
+    // to; writing `deny role/<Name>` or `deny group/<Name>` picks one. A grant
+    // already in the scope (`read: group/<Name>` beside the denial) stands,
+    // and the group's denial is IMPLIED — it is the bare line's, not one the
+    // group's own entry can lift.
+    for (const src of [target, ...prerequisites]) {
+      for (const entry of entries[src]) {
+        if (!entry.deny || entry.kind !== 'role' || skip(entry)) continue;
+        const groupKey = collidingGroupKey(model.roles, entry.role);
+        if (!groupKey || byRole.has(groupKey)) continue;
+        byRole.set(groupKey, 'denied');
+        implied.byRole.add(groupKey);
       }
     }
     // The anonymous caller's verdict at this scope — what someone who holds

@@ -487,7 +487,8 @@ export class KbReferenceScanner {
    * Shares the candidate set with the rename rewrite, and the rewrite checks
    * its result against the same parse, so the delete warning and the rewrite
    * cannot disagree on what references a principal. A file we cannot
-   * read is skipped (this is an advisory read, not the atomic write path).
+   * read is skipped (this is an advisory read, not the atomic write path),
+   * and the scan that skipped it is not cached.
    * Cached per workspace (see class doc); reads are batched with Promise.all
    * rather than serial per-file awaits.
    */
@@ -532,9 +533,10 @@ export class KbReferenceScanner {
       // Cache only when no invalidation landed mid-scan; the caller still gets
       // this snapshot (at worst one write stale — same as the pre-scan world),
       // but a stale snapshot must never STICK for a TTL. The next call re-scans.
-      // An incomplete scan (a folder could not be listed) is never cached
-      // either: the next call retries the listing.
-      if (flight.gen === startedUnder && holes.length === 0) {
+      // An incomplete scan (a folder could not be listed, or a candidate file
+      // could not be read) is never cached either: the next call retries it.
+      const unread = texts.some((t) => t === null);
+      if (flight.gen === startedUnder && holes.length === 0 && !unread) {
         this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
       }
       return byToken;

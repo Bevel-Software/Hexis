@@ -780,6 +780,8 @@ export function parseRolesYaml(
  *     collides with a role's, the bare key stays the ROLE's (warned); the
  *     group is reachable only via `group/<canonical>`. So a group named
  *     `Admin` — whoever proposed it — never gains what `Admin` is granted.
+ *     A bare DENIAL of a colliding name still reaches the group as well
+ *     (fails closed, applied where scopes are built in the access service).
  *   - Role `group:<Name>` refs — Admin's included — expand against the
  *     merged groups; an unknown ref contributes nothing (warned).
  *   - `byEmail` is rebuilt so each member holds exactly the tokens that

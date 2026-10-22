@@ -2,20 +2,24 @@
  * The case table for a name shared by a role and a group (the moved property
  * of decision #315, "a bare name means the role"). Before this change a bare
  * name meant the GROUP when both existed; it now means the ROLE. Exactly the
- * colliding bare spellings change meaning — in grants AND in denials:
+ * colliding bare spellings change meaning. A bare GRANT moves to the role; a
+ * bare DENIAL fails closed and denies both, so no group a file still denies
+ * gains access by the switch:
  *
  *   rule                   | role-only member      | group-only member
  *   -----------------------|-----------------------|----------------------
  *   read: Reviewer         | was denied → granted  | was granted → denied
- *   deny Reviewer          | was allowed → denied  | was denied → allowed
+ *   deny Reviewer          | was allowed → denied  | denied (unchanged)
  *   read: group/Reviewer   | denied (unchanged)    | granted (new token)
  *   deny group/Reviewer    | allowed (unchanged)   | denied (new token)
  *   read: role/Reviewer    | granted (unchanged)   | denied (unchanged)
  *   deny role/Reviewer     | denied (unchanged)    | allowed (unchanged)
  *
- * A name held by only one kind resolves as before. Every file whose bare
- * entry changed meaning is listed by the groups roster
- * (`bareNameResolvesToRole`) so an Admin can rewrite it as `group/<Name>`.
+ * A grant in the same scope still beats the denial (`read: group/Reviewer`
+ * beside `deny Reviewer` lets the group in). A name held by only one kind
+ * resolves as before. Every file with a colliding bare entry is listed by
+ * the groups roster (`bareNameResolvesToRole`) so an Admin can rewrite it as
+ * `group/<Name>` or `role/<Name>`.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
@@ -23,7 +27,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 
 const KB_DIR = 'knowledge-base';
@@ -80,8 +84,12 @@ describe('a name shared by a role and a group: grant and deny case table', () =>
     expect(await readers(['Reviewer'])).toEqual({ role: true, group: false });
   });
 
-  it('a bare denial reaches the role only', async () => {
-    expect(await readers(['everyone', 'deny Reviewer'])).toEqual({ role: false, group: true });
+  it('a bare denial fails closed: it denies the role and the same-named group', async () => {
+    expect(await readers(['everyone', 'deny Reviewer'])).toEqual({ role: false, group: false });
+  });
+
+  it('an explicit group grant beside a bare denial still lets the group in', async () => {
+    expect(await readers(['group/Reviewer', 'deny Reviewer'])).toEqual({ role: false, group: true });
   });
 
   it('group/<Name> grants and denies the group only', async () => {
