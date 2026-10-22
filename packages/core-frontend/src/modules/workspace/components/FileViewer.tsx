@@ -1005,6 +1005,14 @@ export function FileViewer() {
     setReadingWidth(null);
     leaveFullScreenView();
   }, [leaveFullScreenView]);
+  // The banners that need the reader's hand — a refused save with what to
+  // fix, an agent's update to accept or reject — render in the shell the
+  // filled view covers. The view gives way so they are seen, rather than
+  // leave the reader pressing Save at a surface that answers nothing.
+  useEffect(() => {
+    if (filling && (saveError || isReviewingPending || waitingOnAgentUpdate)) leaveFullScreen();
+  }, [filling, saveError, isReviewingPending, waitingOnAgentUpdate, leaveFullScreen]);
+
   useLayoutEffect(() => {
     const offset = readingOffsetRef.current;
     readingOffsetRef.current = null;
