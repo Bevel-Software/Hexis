@@ -30,17 +30,21 @@ function matcher(opts?: RipgrepPatternMatcherOptions): RipgrepPatternMatcher {
 const search = (pattern: string, opts?: RipgrepPatternMatcherOptions, ignoreCase = false): Promise<IPatternSearch> =>
   matcher(opts).search(pattern, { ignoreCase });
 
+/**
+ * Every listed file searched, as grep's text pass does: the listing first,
+ * then the files it named, less those with an `exclude` extension or named in
+ * `skip`.
+ */
 async function all(
   s: IPatternSearch,
   exclude: string[] = [],
-  opts: Partial<TreeSearchOptions> & { root?: string } = {},
+  opts: Partial<Pick<TreeSearchOptions, 'maxLinesPerFile'>> & { root?: string; skip?: string[] } = {},
 ): Promise<FileMatches[]> {
+  const { root = 'kb', skip = [], maxLinesPerFile = 1_000 } = opts;
+  const scope = { cwd: root === '.' ? join(dir, 'kb') : dir, root };
+  const only = (await s.list(scope)).filter((p) => !exclude.some((ext) => p.toLowerCase().endsWith(ext)) && !skip.includes(p));
   const out: FileMatches[] = [];
-  const { root = 'kb', ...rest } = opts;
-  const cwd = root === '.' ? join(dir, 'kb') : dir;
-  for await (const f of s.files({ cwd, root }, { excludeExtensions: exclude, excludePaths: [], maxLinesPerFile: 1_000, ...rest })) {
-    out.push(f);
-  }
+  for await (const f of s.files(scope, { only, maxLinesPerFile })) out.push(f);
   return out;
 }
 
@@ -110,15 +114,38 @@ describe('RipgrepPatternMatcher', () => {
     expect(await s.list({ cwd: dir, root: 'kb' })).toEqual(['.hidden/e.eml', 'a/One.PDF', 'b.pdf', 'c.md']);
   });
 
-  it('never answers an excluded file, whatever its name, from any root, and still answers its siblings', async () => {
+  it('searches exactly the files it is given, whatever their names, from any root', async () => {
     const names = ['secret.md', 'we ird[1]/#c*.md', '!d.md', 'e.md ', '{f,g}.md', 'back\\slash.md', 'q?.md'];
     for (const n of names) await put(`kb/${n}`, 'needle\n');
     await put('kb/open.md', 'needle\n');
     await put('kb/qx.md', 'needle\n');
     for (const root of ['kb', '.']) {
-      const files = await all(await search('needle'), [], { root, excludePaths: names });
-      expect(files.map((f) => f.path), root).toEqual(['open.md', 'qx.md']);
+      // Each special name is given alone: it must name itself and nothing else.
+      expect((await all(await search('needle'), [], { root, skip: names })).map((f) => f.path), root).toEqual(['open.md', 'qx.md']);
+      const scope = { cwd: root === '.' ? join(dir, 'kb') : dir, root };
+      for (const n of names) {
+        const files: string[] = [];
+        for await (const f of (await search('needle')).files(scope, { only: [n], maxLinesPerFile: 10 })) files.push(f.path);
+        expect(files, `${root}: ${n}`).toEqual([n]);
+      }
     }
+  });
+
+  it('never follows a given name that is a link, refuses a name it cannot spell, and runs nothing for no file', async () => {
+    await put('kb/target.md', 'needle\n');
+    await symlink(join(dir, 'kb/target.md'), join(dir, 'kb/link.md'));
+    const s = await search('needle');
+    const scope = { cwd: dir, root: 'kb' };
+    const found = async (only: string[]): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const f of s.files(scope, { only, maxLinesPerFile: 10 })) out.push(f.path);
+      return out;
+    };
+    expect(await found(['link.md'])).toEqual([]);
+    expect(await found(['link.md', 'target.md'])).toEqual(['target.md']);
+    // No whitelist at all would have ripgrep search everything.
+    expect(await found([])).toEqual([]);
+    await expect(found(['a\nb.md'])).rejects.toThrow(/line break/);
   });
 
   it('keeps at most maxLinesPerFile lines of a file and still answers the next file', async () => {
@@ -193,7 +220,8 @@ describe('RipgrepPatternMatcher', () => {
     for (let i = 0; i < 50; i++) await put(`kb/f${String(i).padStart(2, '0')}.md`, 'needle\n');
     const m = matcher({ maxRunning: 1, maxWaiting: 0 });
     const s = await m.search('needle', { ignoreCase: false });
-    for await (const f of s.files({ cwd: dir, root: 'kb' }, { excludeExtensions: [], excludePaths: [], maxLinesPerFile: 1 })) {
+    const scope = { cwd: dir, root: 'kb' };
+    for await (const f of s.files(scope, { only: await s.list(scope), maxLinesPerFile: 1 })) {
       expect(f.path).toBe('f00.md');
       break;
     }

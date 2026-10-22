@@ -37,15 +37,14 @@ export interface TreeScope {
   root: string;
 }
 
-/** What a tree search leaves out, and how much of each file it keeps. */
+/** Which files a tree search opens, and how much of each it keeps. */
 export interface TreeSearchOptions {
-  /** Files whose extension (lowercase, with the dot) is one of these are not searched. */
-  excludeExtensions: readonly string[];
   /**
-   * Files, relative to the scope's `root` as {@link IPatternSearch.list}
-   * answers them, that are never opened: not one byte of them is searched.
+   * The files searched, relative to the scope's `root` as
+   * {@link IPatternSearch.list} answers them; no other file is opened. A name
+   * holding a line break cannot be named to ripgrep exactly and is refused.
    */
-  excludePaths: readonly string[];
+  only: readonly string[];
   /** The most lines one file answers; the lines past it are neither kept nor parsed. */
   maxLinesPerFile: number;
 }
@@ -69,18 +68,20 @@ export interface FileMatches {
  */
 export interface IPatternSearch {
   /**
-   * The lines the pattern matches in every text file under the scope, one
-   * file at a time in {@link compareSearchPaths} order. A file whose content is
-   * binary contributes nothing, and neither does a line that is not UTF-8.
-   * Each file is answered as soon as ripgrep has finished it (whether a file
-   * is binary is known only then), so stopping the iteration stops the search
-   * at the file the caller had enough with.
+   * The lines the pattern matches in the `only` files under the scope, one
+   * file at a time in {@link compareSearchPaths} order, found by the same walk
+   * as {@link list}: a named path that has since become a link is not
+   * followed. A file whose content is binary contributes nothing, and neither
+   * does a line that is not UTF-8. Each file is answered as soon as ripgrep
+   * has finished it (whether a file is binary is known only then), so
+   * stopping the iteration stops the search at the file the caller had
+   * enough with.
    */
   files(scope: TreeScope, opts: TreeSearchOptions): AsyncIterable<FileMatches>;
   /**
    * Every file under the scope, relative to the root, in
    * {@link compareSearchPaths} order: the walk {@link files} makes, without
-   * opening a file — what a caller judges before anything is searched.
+   * opening a file — what a caller judges before choosing what is searched.
    */
   list(scope: TreeScope): Promise<string[]>;
   /**

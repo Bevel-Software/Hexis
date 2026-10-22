@@ -1,7 +1,4 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { MAX_TIMER_MS, sizingOption } from './worker-pool.js';
 import { ToolError } from '../tool-helpers/index.js';
 import { logger } from '../../shared/logging.js';
@@ -173,60 +170,39 @@ class RipgrepSearch implements IPatternSearch {
   ) {}
 
   async *files(scope: TreeScope, opts: TreeSearchOptions): AsyncIterable<FileMatches> {
-    // The excluded files go to ripgrep as an ignore file of their own, so it
-    // never opens them, however many there are: a command line has a length
-    // limit and an ignore file has none. Its rules are anchored at `cwd`,
-    // where ripgrep runs.
-    let ignoreDir: string | undefined;
-    try {
-      const ignore: string[] = [];
-      if (opts.excludePaths.length > 0) {
-        ignoreDir = await mkdtemp(join(tmpdir(), 'hx-grep-'));
-        const file = join(ignoreDir, 'excluded');
-        const under = scope.root === '.' ? '' : `${scope.root}/`;
-        await writeFile(file, opts.excludePaths.map((p) => ignoreRule(`${under}${p}`)).join('\n') + '\n');
-        ignore.push('--ignore-file', file);
-      }
-      const args = [
-        ...BASE_ARGS,
-        '--json',
-        ...WALK_ARGS,
-        ...ignore,
-        ...opts.excludeExtensions.flatMap((ext) => ['--iglob', `!*${ext}`]),
-        ...NO_GIT,
-        ...this.flags,
-        '-e',
-        this.pattern,
-        '--',
-        scope.root,
-      ];
-      let current: FileMatches | null = null;
-      for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
-        // A file that has given all the lines it may answer: the rest of its
-        // matches are only waited through, never parsed, until its `end`.
-        if (current !== null && current.lines.length >= opts.maxLinesPerFile && record.startsWith(MATCH_RECORD)) continue;
-        const event = parseEvent(record);
-        if (event === null) continue;
-        if (event.type === 'begin') {
-          const path = underRoot(scope.root, pathOf(event.data?.path));
-          current = path === null ? null : { path, lines: [] };
-        } else if (event.type === 'match' && current !== null) {
-          const text = textOf(event.data?.lines);
-          const line = event.data?.line_number;
-          if (text !== null && typeof line === 'number' && current.lines.length < opts.maxLinesPerFile) {
-            current.lines.push({ line, text: withoutNewline(text) });
-          }
-        } else if (event.type === 'end' && current !== null) {
-          // A file ripgrep found binary part-way through is not text: whatever
-          // it matched before the NUL is dropped with the rest. That is known
-          // only here, so a file is answered at its end and not before.
-          const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
-          if (!binary && current.lines.length > 0) yield current;
-          current = null;
+    // Without a single whitelist glob ripgrep would search every file.
+    if (opts.only.length === 0) return;
+    // Each file is named by a whitelist glob anchored at `cwd`, where ripgrep
+    // runs: the walk stays the walk (no link followed, `.git` left out), and
+    // a file not named is never opened. Whitelist globs filter files only, so
+    // every folder is still walked into.
+    const under = scope.root === '.' ? '' : `${scope.root}/`;
+    const only = opts.only.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
+    const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', scope.root];
+    let current: FileMatches | null = null;
+    for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
+      // A file that has given all the lines it may answer: the rest of its
+      // matches are only waited through, never parsed, until its `end`.
+      if (current !== null && current.lines.length >= opts.maxLinesPerFile && record.startsWith(MATCH_RECORD)) continue;
+      const event = parseEvent(record);
+      if (event === null) continue;
+      if (event.type === 'begin') {
+        const path = underRoot(scope.root, pathOf(event.data?.path));
+        current = path === null ? null : { path, lines: [] };
+      } else if (event.type === 'match' && current !== null) {
+        const text = textOf(event.data?.lines);
+        const line = event.data?.line_number;
+        if (text !== null && typeof line === 'number' && current.lines.length < opts.maxLinesPerFile) {
+          current.lines.push({ line, text: withoutNewline(text) });
         }
+      } else if (event.type === 'end' && current !== null) {
+        // A file ripgrep found binary part-way through is not text: whatever
+        // it matched before the NUL is dropped with the rest. That is known
+        // only here, so a file is answered at its end and not before.
+        const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
+        if (!binary && current.lines.length > 0) yield current;
+        current = null;
       }
-    } finally {
-      if (ignoreDir !== undefined) await rm(ignoreDir, { recursive: true, force: true });
     }
   }
 
@@ -428,14 +404,14 @@ function underRoot(root: string, path: string | null): string | null {
 }
 
 /**
- * The ignore-file rule that names exactly `path` (relative to where ripgrep
- * runs): anchored with `/`, every character a gitignore glob or line reads
- * specially escaped. A line break cannot be written in a rule, so it is
- * matched by `?`, which may also leave out a sibling differing only there:
- * a file too many is left out, never one too few.
+ * The glob that names exactly `path` (relative to where ripgrep runs):
+ * anchored with `/`, every character a glob reads specially escaped. A line
+ * break has no exact spelling in a glob, and a near one could name a sibling
+ * too, so such a name is refused rather than approximated.
  */
-function ignoreRule(path: string): string {
-  return `/${path.replace(/[\\*?[\]{}!# ]/g, (c) => `\\${c}`).replace(/[\r\n]/g, '?')}`;
+function exactGlob(path: string): string {
+  if (/[\r\n]/.test(path)) throw new Error(`a search cannot name ${JSON.stringify(path)} exactly: it holds a line break`);
+  return `/${path.replace(/[\\*?[\]{}!# ]/g, (c) => `\\${c}`)}`;
 }
 
 function countLines(text: string): number {

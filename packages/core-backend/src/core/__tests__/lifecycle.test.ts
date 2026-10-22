@@ -548,7 +548,7 @@ describe('stopCore', () => {
       // A tree search that would hold its ripgrep for the whole 5 s budget when the graph is stopped.
       const search = await patternMatcher.search('needle', { ignoreCase: false });
       const running = (async () => {
-        for await (const file of search.files({ cwd: tmpdir(), root: '.' }, { excludeExtensions: [], excludePaths: [], maxLinesPerFile: 1 })) void file;
+        for await (const file of search.files({ cwd: tmpdir(), root: '.' }, { only: ['hit.md'], maxLinesPerFile: 1 })) void file;
       })();
       while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
       const started = Date.now();

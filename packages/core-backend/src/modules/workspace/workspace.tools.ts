@@ -679,6 +679,17 @@ interface GrepMatch {
 const GREP_LINE_CHARS = 300;
 
 /**
+ * Files the text pass judges, then searches, at a time: first this many, then
+ * twice as many each time, up to {@link GREP_MAX_BATCH}. A verdict reads the
+ * file's own access rules, so a batch costs one read of each of its files.
+ * Its names also go to ripgrep on the command line, so a batch also ends
+ * once they reach {@link GREP_BATCH_CHARS}, well inside the system's limit.
+ */
+const GREP_FIRST_BATCH = 256;
+const GREP_MAX_BATCH = 2_048;
+const GREP_BATCH_CHARS = 256 * 1024;
+
+/**
  * The text ONE file holds for `grep`, read through its reader: the text
  * content for a text reader (none on NUL bytes / invalid UTF-8 — binary is not
  * searchable), the EXTRACTION for a document reader (marker line included, so
@@ -774,19 +785,20 @@ async function treeScope(fs: LocalFilesystem, root: string): Promise<TreeScope> 
 }
 
 /**
- * grep over the directory `root`: the tree is listed and judged first, then
- * searched in two passes.
+ * grep over the directory `root`: the tree is listed, then searched in two
+ * passes, and no file is opened before it is judged.
  *
- * The listing opens no file, and every file in it is judged readable or not
- * BEFORE anything is searched: a file the caller may not read is never opened
- * by either pass, so what it holds can change neither the answer nor how
- * long the search takes, and so not whether it ends within its budget.
+ * The listing opens no file. Every file a pass searches is judged readable
+ * BEFORE the pass opens it, and a file the caller may not read is never
+ * opened: what it holds can change neither the answer nor how long the
+ * search takes, and so not whether it ends within its budget. A file that
+ * was not in the listing (it appeared since) is never judged, so never
+ * searched.
  *
  * The text pass is ripgrep's own: every file whose reader greps its bytes as
  * text (a TextReader) is searched by it, in path order, and read nowhere else.
  * Each file is answered as ripgrep finishes it, and the pass stops at the
- * `max`-th line. A file that was not in the listing (it appeared since) was
- * never judged, so it never answers.
+ * `max`-th line.
  *
  * The document pass reads the files every other reader owns through that
  * reader, as `read_file` does — extractions under the per-call budget — and
@@ -822,36 +834,55 @@ async function grepTree(
     const lower = p.toLowerCase();
     return exts.some((ext) => lower.endsWith(ext));
   };
-  const out: GrepMatch[] = [];
-
-  // Every file the walk covers, judged in one batched access check before a
-  // byte of any is searched. Only what is shown is judged, so the readable
-  // set is also what the caller may be answered from.
-  const all = await search.list(scope);
-  const readable = await readableFiles(gate, all.map(at).filter(shown));
-  const excludePaths = all.filter((p) => !readable.has(at(p)) && !ownedBy(p, notRaw));
-  for await (const file of search.files(scope, { excludeExtensions: notRaw, excludePaths, maxLinesPerFile: max })) {
-    const p = at(file.path);
-    if (!readable.has(p)) continue;
-    await notifyRead(p);
-    for (const l of file.lines.slice(0, max - out.length)) {
-      out.push({ path: p, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
-    }
-    // Enough: leaving the loop kills ripgrep at the file that filled the cap.
-    if (out.length >= max) break;
-  }
-
-  const last = out.length >= max ? out[out.length - 1]!.path : undefined;
   const readerOwned = notRaw.filter((ext) => {
     const reader = readerOf(ext);
     return reader instanceof DocumentReader || reader.greppableText !== undefined;
   });
-  const listed = all
-    .filter((p) => ownedBy(p, readerOwned))
+  // A name holding a line break cannot be named to ripgrep exactly, so its
+  // text is read and matched the way a document's is.
+  const nameable = (p: string): boolean => !/[\r\n]/.test(p);
+  const out: GrepMatch[] = [];
+
+  // Every file the walk covers, in path order. Only what is shown is ever
+  // judged, so what is judged readable is what may be answered.
+  const all = (await search.list(scope)).filter((p) => shown(at(p)));
+  const raw = all.filter((p) => !ownedBy(p, notRaw) && nameable(p));
+  // The text pass: a batch of files is judged, then its readable files, and
+  // only they, are searched. A batch is judged before ripgrep opens any of
+  // it, and the pass stops at the `max`-th line, so the verdicts asked for are
+  // those of the files the answer reached — few for a common word — and the
+  // batches double so a rare one still walks the tree in a handful of runs.
+  let size = GREP_FIRST_BATCH;
+  for (let from = 0; from < raw.length && out.length < max; size = Math.min(size * 2, GREP_MAX_BATCH)) {
+    const batch: string[] = [];
+    for (let chars = 0; from < raw.length && batch.length < size && (batch.length === 0 || chars < GREP_BATCH_CHARS); from++) {
+      batch.push(raw[from]!);
+      chars += raw[from]!.length;
+    }
+    const readable = await readableFiles(gate, batch.map(at));
+    const only = batch.filter((p) => readable.has(at(p)));
+    for await (const file of search.files(scope, { only, maxLinesPerFile: max - out.length })) {
+      const p = at(file.path);
+      // Only what was judged readable answers, whatever ripgrep printed.
+      if (!readable.has(p)) continue;
+      await notifyRead(p);
+      for (const l of file.lines.slice(0, max - out.length)) {
+        out.push({ path: p, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
+      }
+      // Enough: leaving the loop kills ripgrep at the file that filled the cap.
+      if (out.length >= max) break;
+    }
+  }
+
+  const last = out.length >= max ? out[out.length - 1]!.path : undefined;
+  const candidates = all
+    .filter((p) => ownedBy(p, readerOwned) || (!ownedBy(p, notRaw) && !nameable(p)))
     .map(at)
-    .filter((p) => readable.has(p) && (last === undefined || compareSearchPaths(p, last) <= 0));
+    .filter((p) => last === undefined || compareSearchPaths(p, last) <= 0);
+  const readable = await readableFiles(gate, candidates);
   const texts: { path: string; text: string }[] = [];
-  for (const p of listed) {
+  for (const p of candidates) {
+    if (!readable.has(p)) continue;
     await notifyRead(p);
     let found: SearchableText;
     try {

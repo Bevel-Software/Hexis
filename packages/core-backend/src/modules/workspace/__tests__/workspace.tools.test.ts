@@ -1507,6 +1507,15 @@ describe('grep runs ripgrep', () => {
     ]);
   });
 
+  it('searches a file whose name holds a line break, and only when the caller may read it', async () => {
+    const base = await start('read', denyReads(new Set(['locked\nnote.md'])));
+    await writeFile(join(tempDir, KB_DIR, 'two\nlines.md'), 'needle in an odd name\n');
+    await writeFile(join(tempDir, KB_DIR, 'locked\nnote.md'), 'needle locked\n');
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(200);
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/two\nlines.md`, line: 1, text: 'needle in an odd name' }]);
+  });
+
   it('answers the first max_results by path then line, whatever reads them, and marks the answer truncated', async () => {
     const docx = (text: string): Buffer => {
       const zip = new AdmZip();
