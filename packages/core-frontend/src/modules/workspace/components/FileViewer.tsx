@@ -992,6 +992,7 @@ export function FileViewer() {
   // filled view covers. The view gives way so they are seen, rather than
   // leave the reader pressing Save at a surface that answers nothing.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a response to state that arrived from a save's refusal or an agent's update, not a derivation of it; it settles in one extra render
     if (filling && (saveError || isReviewingPending || waitingOnAgentUpdate)) leaveFullScreen();
   }, [filling, saveError, isReviewingPending, waitingOnAgentUpdate, leaveFullScreen]);
 
