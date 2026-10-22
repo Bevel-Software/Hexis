@@ -3,6 +3,17 @@ import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
 export type { JsonSchema, UtcpTool };
 
 /**
+ * Whether a tool declares that it writes: the `write` tag `toolDef` puts on
+ * every tool declared `write: true`. The one test of that declaration — it
+ * decides both a tool's built-in read-only hint and whether a read-scoped
+ * caller is shown the tool, so a tool cannot be a reader in one and a writer
+ * in the other.
+ */
+export function declaresWrite(tool: Pick<UtcpTool, 'tags'>): boolean {
+  return (tool.tags ?? []).includes('write');
+}
+
+/**
  * Per-request context handed to a `ToolProvider` when the manual is built, so a
  * provider can tailor its def to the caller (e.g. the skill tools name only the
  * skills THIS user may read).

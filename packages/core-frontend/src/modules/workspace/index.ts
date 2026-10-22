@@ -21,6 +21,9 @@
  *    of such a mount has to name; `kbFilePageUrl`, the file page's address
  *    even for a file a skill's page would otherwise claim, and
  *    `asksForFilePage`, whether a location's query makes that ask.
+ *  - `PageToolsContext`: the page-tool bridge, for a mount that is the
+ *    platform itself (the skill page) — see `htmlToolBridge.ts` for the
+ *    hosts that provide it and the ones that must not.
  *  - `OpenPageInPlatformContext`: how an HTML page mounted there is taken
  *    to the file page when it needs tools and the viewer picks Open in the
  *    platform (a skill page provides it; without it the renderer opens the

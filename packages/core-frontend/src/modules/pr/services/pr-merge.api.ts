@@ -1,6 +1,6 @@
 import type { ChangeRequestUpdateResult } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 
 /** The 202 ack the merge endpoint returns — the merge then runs in the background. */
 export interface MergeAccepted {

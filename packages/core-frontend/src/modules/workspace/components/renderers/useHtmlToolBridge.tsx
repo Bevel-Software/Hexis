@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useFileNav } from '../../routing/kb-routes';
 import { useRendererSurface } from './rendererSurface';
 import { Button, Dialog } from '../../../../shared/components';
@@ -56,8 +56,9 @@ export interface HtmlToolBridgeResult {
 export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBridgeOptions): HtmlToolBridgeResult {
   const { openFilePage } = useFileNav();
   const surface = useRendererSurface();
-  // The viewer's tools, for a page on the app's file page — the one place
-  // that provides them. Everywhere else the page gets `bevel.tools = null`.
+  // The viewer's tools, for a page on a host that provides them (the file
+  // page, the skill page — `PageToolsContext` lists them) and never on a
+  // surface. Everywhere else the page gets `bevel.tools = null`.
   const pageTools = usePageTools();
   const openPageInPlatform = useOpenPageInPlatform();
   const toolPagePath = surface === null && pageTools ? pageTools.pagePath : null;
@@ -71,9 +72,12 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
   // remembers the generation it was made in, and its reply is posted only
   // while that is still the current one. The window is not enough — a
   // document rebuilt in the same frame element keeps the frame's window.
-  // Read and written at event time only, never during a render.
+  // Read and written at event time only, never during a render — and
+  // advanced in the SAME commit that puts the new document in the frame
+  // (a layout effect), so no call decided in the gap before passive
+  // effects run finds the old generation still current.
   const generationRef = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     generationRef.current += 1;
   }, [viewKey]);
 
@@ -107,8 +111,10 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
   // When the page's view ends its consent is closed — a call the old view
   // made that is still deciding (the manual lookup in flight) or waiting is
   // answered `closed` and runs nothing — and a card left open answers no:
-  // nothing the old view asked for runs in, or asks from, the new one.
-  useEffect(
+  // nothing the old view asked for runs in, or asks from, the new one. A
+  // layout effect, like the generation above: the old view's consent is
+  // closed in the commit that ends it, not after the paint that follows.
+  useLayoutEffect(
     () => () => {
       consentRef.current?.close();
       consentRef.current = null;

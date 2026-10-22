@@ -105,6 +105,7 @@ function LocationProbe() {
     <>
       <div aria-label="pathname">{location.pathname}</div>
       <div aria-label="location-state">{JSON.stringify(location.state)}</div>
+      <div aria-label="search">{location.search}</div>
     </>
   );
 }
@@ -265,6 +266,16 @@ describe('FileRoute: the canonical id URL', () => {
       expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
     );
     expect(screen.getByLabelText('location-state')).toHaveTextContent('{"rawFile":true}');
+  });
+
+  it('keeps the query across the swap, so a link that asked for full screen still has it on the id URL', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    renderAt(`/workspace/main/${PATH}?fullscreen=1`, openOn());
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
+    );
+    expect(screen.getByLabelText('search')).toHaveTextContent('?fullscreen=1');
+    expect(screen.getByTestId('exit-full-screen')).toBeInTheDocument();
   });
 
   it('keeps the path URL when canonicalising is off — the Library frame renders it there, and an id URL is no library location', async () => {
