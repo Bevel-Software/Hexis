@@ -458,9 +458,10 @@ describe('no code path outside the normaliser resolves a workspace path', () => 
 
   it('every write route passes its path through the normaliser before anything else', async () => {
     const text = await fs.readFile(path.join(here, '..', 'workspace.routes.ts'), 'utf-8');
-    // One helper, and it is the normaliser's: a route that grew its own
+    // One helper, and it is the normaliser's — reached through kb-fs's public
+    // entry, as every module reaches another: a route that grew its own
     // strip-if-present reading of the prefix is what this forbids.
-    expect(text).toContain("import { normalizeWorkspacePath } from '../kb-fs/repo-path.js'");
+    expect(text).toMatch(/import \{[^}]*\bnormalizeWorkspacePath\b[^}]*\} from '\.\.\/kb-fs\/index\.js'/);
     expect(text.match(/normalizeWorkspacePath\(/g)).toHaveLength(1);
     // The old reading, spelled out so it cannot come back unnoticed.
     expect(text).not.toMatch(/startsWith\(`\$\{kbDirName\}\/`\)\s*\n?\s*\?/);

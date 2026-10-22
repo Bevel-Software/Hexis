@@ -5,10 +5,10 @@ const log = logger('tool-manuals');
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import type { IPluginIndexService } from '../plugins/index.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
@@ -17,7 +17,7 @@ import { McpServerEditError, type McpServerEditService, type McpServerWrite } fr
 import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
-import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 

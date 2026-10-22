@@ -1,12 +1,11 @@
-import type { KbLayout } from '@bevel-software/platform-shared';
-import { type WorkspaceService } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { KbLayout, IWorkflowService } from '@bevel-software/platform-shared';
+import { type WorkspaceService } from '../workspace/index.js';
+import type { IAccessControl } from '../access/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';
 import { visibleProposedFiles } from '../../shared/pending-proposals.js';
 import { isSafeSkillName, parseSkillFrontmatter } from './skills.service.js';
 import type { IPendingSkillService, ISkillService, PendingSkill } from './skills.contract.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
 
 const SKILL_DOC = 'SKILL.md';
 

@@ -10,7 +10,7 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { logger } from '../../../shared/logging.js';
-import { credentialHelperValue } from '../../kb-fs/clone-config.js';
+import { credentialHelperValue } from '../../kb-fs/index.js';
 
 const log = logger('git-runner');
 

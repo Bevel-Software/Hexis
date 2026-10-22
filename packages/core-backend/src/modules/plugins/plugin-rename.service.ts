@@ -10,14 +10,14 @@ import {
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import {
   PLUGIN_TOKEN_PREFIX,
   canonicalPluginToken,
   hasAccessFrontmatterExtension,
   parsePluginPrincipalKey,
 } from '../access-model/index.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { PluginSource } from './discovery/plugin-source.js';
 

@@ -1,6 +1,6 @@
 import path from 'node:path';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { ISkillService } from '../../skills/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import type { PluginLinkIndex } from '../plugin-links.js';

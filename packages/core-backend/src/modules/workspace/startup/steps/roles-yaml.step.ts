@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { IFsProbe } from '../../../../shared/fs.contract.js';
-import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
+import { renderRolesYaml } from '../../../access-model/index.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**

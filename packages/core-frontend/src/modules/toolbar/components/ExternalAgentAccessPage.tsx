@@ -22,7 +22,7 @@ import { CODEX_LOGIN_NOTE, GITHUB_LINK_KIND, marketplaceCommands, marketplaceGit
 import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
-import { useAdmin } from '../../admin/state/admin.context';
+import { useAdmin } from '../../admin';
 import { ConnectAsChoice, canConnectAs, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
 import {
   type ExternalApiKeySummary,

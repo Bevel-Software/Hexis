@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { atlassianAccountLinks } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { atlassianAccountLinks } from '../database/index.js';
 
 /**
  * Maps an outside system's account id — today an Atlassian (Forge) account —

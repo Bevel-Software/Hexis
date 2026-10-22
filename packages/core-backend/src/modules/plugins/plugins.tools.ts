@@ -1,6 +1,6 @@
 import { resolveKbLayout, type KbLayout } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
+import type { IToolRegistry, UtcpTool } from '../tool-registry/index.js';
 import { toolDef } from '../tool-helpers/index.js';
 
 /**

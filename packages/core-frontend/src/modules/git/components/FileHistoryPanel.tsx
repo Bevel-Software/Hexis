@@ -6,8 +6,8 @@ import { formatRelativeTime } from '../../../lib/utils';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { HistoryVersionPreview } from './HistoryVersionPreview';
 import { friendlyGitError } from '../services/error-messages';
-import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useEventBus, canonicalizeWorkspaceId } from '../../workflow';
+import { useWorkspace } from '../../workspace';
 
 function shortSha(sha: string): string {
   return sha.slice(0, 7);

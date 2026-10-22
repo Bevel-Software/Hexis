@@ -4,8 +4,8 @@ import { logger } from '../../shared/logging.js';
 const log = logger('external-api-key');
 import { and, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { AgentConnectedEvent, AuthUser } from '@bevel-software/platform-shared';
-import type { Database } from '../database/connection.js';
-import { externalApiKeys, users } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { externalApiKeys, users } from '../database/index.js';
 import {
   InvalidTokenLabelError,
   TokenNotFoundError,

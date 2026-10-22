@@ -1,24 +1,22 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { LocalFilesystem } from '@mastra/core/workspace';
+import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { LockingFilesystem, ReadOnlyFilesystem } from '../kb-fs/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
-import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
 import {
   makeAgentRolesYamlWriteValidator,
   ROLES_YAML_BASENAME,
-} from '../access-model/roles-yaml-guard.js';
-import type { ICreatorAccess } from '../access-model/creator.js';
-import type { GroupsIndex } from '../access-model/group-files.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+} from '../access-model/index.js';
+import type { ICreatorAccess, GroupsIndex } from '../access-model/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { assertBranchProvided } from '../../shared/domain-errors.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import type { AuthService } from '../auth/auth.service.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
+import type { AuthService } from '../auth/index.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
-import type { ToolAuth } from '../tool-auth/tool-auth.middleware.js';
+import type { ToolAuth } from '../tool-auth/index.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 
 export interface ToolContextDeps {

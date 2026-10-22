@@ -8,7 +8,7 @@ import {
   pluginOfPath,
   type KbLayout,
 } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ISkillService } from '../skills/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';

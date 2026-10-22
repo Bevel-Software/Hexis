@@ -21,8 +21,8 @@ import type {
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { AgentConnectedEvent } from '@bevel-software/platform-shared';
-import type { Database } from '../../database/connection.js';
-import { agentConnections, oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/schema.js';
+import type { Database } from '../../database/index.js';
+import { agentConnections, oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/index.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
 import { signAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 

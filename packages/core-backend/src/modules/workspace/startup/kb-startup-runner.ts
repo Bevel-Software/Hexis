@@ -19,12 +19,11 @@ import {
   type GitFailureKind,
 } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
-import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
+import { normalizeRepositoryAddress, sameRepository, assertValidBranchName } from '../../kb-fs/index.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
 import { workingCopyShape, type WorkingCopyShape } from '../kb-repository.js';
 import type { FetchOptions, IKbRepository } from '../kb-repository.contract.js';
 import { fetchInstant } from '../fetch-instant.js';
-import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in

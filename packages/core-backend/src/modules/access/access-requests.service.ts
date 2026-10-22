@@ -10,8 +10,8 @@ import {
 } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { spliceGrant } from '../access-model/access-splice.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { spliceGrant } from '../access-model/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { logger } from '../../shared/logging.js';
 import { AccessMutationError } from './access-mutation.service.js';
 import {
@@ -370,3 +370,9 @@ export class AccessRequestsService {
     return lines.join('\n');
   }
 }
+
+/**
+ * What another module needs of the access-request service: to open one.
+ * Injected by the composition root, which owns the implementation.
+ */
+export type IAccessRequests = Pick<AccessRequestsService, 'open'>;

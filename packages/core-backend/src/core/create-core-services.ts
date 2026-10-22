@@ -81,6 +81,7 @@ import { AccountErasureService } from '../modules/auth/account-erasure.service.j
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
@@ -1068,6 +1069,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    new AccessMutationService(workspaceService, accessControl, kb.kbDirName),
     skillService,
     pluginLinkIndex,
     kb,
