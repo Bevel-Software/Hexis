@@ -276,6 +276,63 @@ describe('PendingCommitsWorker.drainOnce', () => {
     }
   });
 
+  it('a failed hand-back to pending is retried on the next pass, without a restart', async () => {
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: conflict'));
+    recoveryAgent.run.mockResolvedValueOnce(undefined);
+    vi.mocked(service.markRecoveryFinished).mockRejectedValueOnce(new Error('connection terminated'));
+
+    // The refusal ends neither the pass nor the row.
+    await expect(worker.drainOnce()).resolves.toBeUndefined();
+    expect(service.markRecoveryFinished).toHaveBeenCalledTimes(1);
+
+    // The next pass hands it back before it claims anything…
+    await worker.drainOnce();
+    expect(service.markRecoveryFinished).toHaveBeenCalledTimes(2);
+    expect(service.markRecoveryFinished).toHaveBeenLastCalledWith('row-1');
+    expect(vi.mocked(service.markRecoveryFinished).mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(service.claimNext).mock.invocationCallOrder.at(-1)!,
+    );
+
+    // …and once it has landed, no later pass asks again.
+    await worker.drainOnce();
+    expect(service.markRecoveryFinished).toHaveBeenCalledTimes(2);
+  });
+
+  it('stop() waits for a drainOnce pass on a worker whose loop never started', async () => {
+    const row = makeRow();
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    let release!: () => void;
+    const committing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    workflow.runPendingCommit.mockImplementationOnce(async () => {
+      entered();
+      await committing;
+    });
+
+    const pass = worker.drainOnce();
+    await started;
+    let stopped = false;
+    const stopping = worker.stop().then(() => {
+      stopped = true;
+    });
+    // Several turns of the event loop: stop() must still be waiting on the commit.
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(service.markSucceeded).toHaveBeenCalledWith('row-1');
+    await pass;
+  });
+
   it('exhausting both budgets marks needs_attention and emits a system feedback notice', async () => {
     // attempts at the transient ceiling AND recovery already ran N_RECOVERY
     // times: nothing left to try. Escalate.
