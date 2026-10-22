@@ -21,10 +21,10 @@ import {
 import { findUnservedGoogleServiceAccountAuth, holdsLiteralGoogleServiceAccountKey } from '@bevel-software/platform-mcp-core';
 import { descriptorsFromMcpJson, mcpServerSourceText } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/index.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { redactSecret } from '../../shared/redact-secret.js';
 import { printable } from '../../shared/printable.js';

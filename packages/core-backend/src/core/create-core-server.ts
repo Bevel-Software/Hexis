@@ -16,6 +16,7 @@ import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/workflow/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
+import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -739,7 +740,12 @@ export async function createCoreServer(
       skillService: core.skillService,
       accessControl: core.accessControl,
       workflow: core.workflowService,
-      workspaceService: core.workspaceService,
+      requests: new AccessRequestsService({
+        workflow: core.workflowService,
+        workspaceService: core.workspaceService,
+        lifecycle: core.joinRequestsService,
+        kb: core.kb,
+      }),
       joinRequests: core.joinRequestsService,
       kb: core.kb,
       resolveUser: async (req) =>

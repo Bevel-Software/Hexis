@@ -30,3 +30,5 @@ export {
   DbSkippedToolsService,
   type ISkippedToolsService,
 } from './skipped-tools.service.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { scopesCovered } from './secrets-vault.contract.js';

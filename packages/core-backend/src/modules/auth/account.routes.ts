@@ -10,8 +10,8 @@ import type { IAccountHooks } from './account-hooks.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/index.js';
-import type { UserAccessRemovalService } from '../access/user-access-removal.service.js';
-import { sendError } from '../access/admin-route-helpers.js';
+import type { UserAccessRemovalService } from '../access/index.js';
+import { sendError } from '../access/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import './auth.middleware.js'; // Express Request augmentation

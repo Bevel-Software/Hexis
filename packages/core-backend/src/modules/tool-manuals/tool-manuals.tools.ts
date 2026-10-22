@@ -1,11 +1,9 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
+import type { IToolRegistry, UtcpTool } from '../tool-registry/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ToolContext } from '../tool-helpers/index.js';
-import { toolDef } from '../tool-helpers/index.js';
-import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { ToolContext, ToolHandlerFactory } from '../tool-helpers/index.js';
+import { toolDef, declareRouteTool } from '../tool-helpers/index.js';
+import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';

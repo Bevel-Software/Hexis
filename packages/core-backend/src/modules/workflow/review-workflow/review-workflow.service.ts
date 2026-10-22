@@ -11,10 +11,10 @@ import type {
   PullRequestFile,
   PullRequestState,
 } from '@bevel-software/platform-shared';
-import type { Database } from '../../database/connection.js';
-import { changeRequests, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
+import type { Database } from '../../database/index.js';
+import { changeRequests, prFileApprovals, prMergeLog, users } from '../../database/index.js';
 import { AccessUnreadableError } from '../../access-model/index.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { GitService } from '../git/git.service.js';
 import { mergeCommitSubject } from '../git/merge-commit.js';
 import { redactSecret } from '../../../shared/redact-secret.js';
@@ -23,7 +23,7 @@ import {
   WorkflowDomainError,
   WorkflowValidationError,
 } from '../../../shared/domain-errors.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import type {
   IReviewWorkflowService,

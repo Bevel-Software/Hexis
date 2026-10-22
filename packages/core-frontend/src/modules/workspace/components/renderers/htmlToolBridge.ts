@@ -388,9 +388,15 @@ function toPageResult(result: CallToolResult | undefined): unknown {
  * call asks again. Calls that arrive while the card is open wait on that same
  * card, so a page that fires ten writes at once sees one card, and every one
  * of the ten gets the answer.
+ *
+ * When the view ends the renderer {@link PageConsent.close}s it: from then on
+ * nothing asks and nothing is allowed, so a call the old view made that is
+ * still being decided when it ends is answered `closed` instead of opening a
+ * card in the next view, or running on an Allow the old view gave.
  */
 export class PageConsent {
   private allowed = false;
+  private ended = false;
   private asking: Promise<boolean | null> | null = null;
   private readonly ask: () => Promise<boolean | null>;
 
@@ -404,12 +410,24 @@ export class PageConsent {
     return this.asking;
   }
 
-  /** Whether the viewer allows this page to write, asking them if no answer holds; null when nobody answered. */
+  /** Whether the view this consent belongs to has ended. */
+  get closed(): boolean {
+    return this.ended;
+  }
+
+  /** The view ended: every request from now on answers null and asks nobody. */
+  close(): void {
+    this.ended = true;
+  }
+
+  /** Whether the viewer allows this page to write, asking them if no answer holds; null when nobody answered or the view ended. */
   request(): Promise<boolean | null> {
+    if (this.ended) return Promise.resolve(null);
     if (this.allowed) return Promise.resolve(true);
     this.asking ??= this.ask().then(
       (ok) => {
         this.asking = null;
+        if (this.ended) return null;
         if (ok) this.allowed = true;
         return ok;
       },
@@ -426,6 +444,8 @@ export class PageConsent {
 export interface ToolCallMessage {
   type: 'bevel.tool.call';
   requestId: string;
+  /** The identity the app minted for the document that posted this (see `htmlSandbox.ts`), when it was given one. */
+  documentId?: string;
   fn: PageToolFunction;
   args: unknown[];
 }
@@ -441,13 +461,22 @@ export function asToolCall(data: unknown): ToolCallMessage | null {
   const msg = data as Partial<ToolCallMessage>;
   if (msg.type !== 'bevel.tool.call' || typeof msg.requestId !== 'string') return null;
   if (typeof msg.fn !== 'string' || !PAGE_TOOL_FUNCTIONS.has(msg.fn)) return null;
-  return { type: 'bevel.tool.call', requestId: msg.requestId, fn: msg.fn, args: Array.isArray(msg.args) ? msg.args : [] };
+  return {
+    type: 'bevel.tool.call',
+    requestId: msg.requestId,
+    ...(typeof msg.documentId === 'string' ? { documentId: msg.documentId } : {}),
+    fn: msg.fn,
+    args: Array.isArray(msg.args) ? msg.args : [],
+  };
 }
+
+const CLOSED_MESSAGE = 'The page was closed before the viewer answered.';
 
 /**
  * Answer one of a page's tool calls: wait out an open card, ask for consent
- * when the call may write, run it, and say how it went. Never throws — every
- * outcome is a response for the frame.
+ * when the call may write, run it, and say how it went. A call whose view
+ * ended (its `consent` closed) before it was decided runs nothing and is
+ * answered `closed`. Never throws — every outcome is a response for the frame.
  */
 export async function answerToolCall(
   msg: ToolCallMessage,
@@ -466,7 +495,7 @@ export async function answerToolCall(
       // A write that arrives while the card is open joins it, and gets its answer.
       const allowed = await consent.request();
       // The view ended before the viewer chose: nothing ran, and nobody refused.
-      if (allowed === null) return fail('The page was closed before the viewer answered.', 'closed');
+      if (allowed === null) return fail(CLOSED_MESSAGE, 'closed');
       if (!allowed) {
         const { name, args } = refusedCall(msg);
         void client.recordRefusal(name, args);
@@ -476,6 +505,8 @@ export async function answerToolCall(
       // Nothing of the page runs while the viewer is being asked about it.
       while (consent.open) await consent.open;
     }
+    // The view ended while the call was being decided: it is no longer the view's to run.
+    if (consent.closed) return fail(CLOSED_MESSAGE, 'closed');
     const [a, b] = msg.args;
     const result =
       msg.fn === 'searchTools'

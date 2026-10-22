@@ -26,7 +26,7 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
@@ -36,9 +36,8 @@ import {
   hasAccessFrontmatterExtension,
 } from '../access-model/index.js';
 import { loadActiveGroups, type GroupsHealth } from './access-control.service.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile, makeRolesYamlWriteValidator } from '../access-model/index.js';
 import { parseRolesModel, removeGroupRefsEverywhere, renameGroupRefs, isGroupRefMember } from './roles-edit.js';
-import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
 import {
   GroupsEditError,
   parseGroupsModel,

@@ -1,4 +1,4 @@
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import type { ToolContext } from './tool.contract.js';
 
 /**

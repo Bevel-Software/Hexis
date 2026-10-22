@@ -1,5 +1,5 @@
 import { logger } from '../../shared/logging.js';
-import type { JsonSchema } from '../tool-registry/tool.contract.js';
+import type { JsonSchema } from '../tool-registry/index.js';
 
 const log = logger('tools');
 

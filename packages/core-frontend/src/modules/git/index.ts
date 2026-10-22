@@ -23,3 +23,7 @@ export { GitContext, useGit, type GitContextValue } from './state/git.context';
  * into a thrown `GitApiError` carrying the server's words and status.
  */
 export { GitApiError, handleApiResponse } from './services/git.api';
+// Reached by other modules; exported here so they stop importing the files.
+export { friendlyGitError, friendlyGitMessage } from './services/error-messages';
+export { createBranch, deleteBranch } from './services/git.api';
+export { getPullRequest } from './services/pr.api';

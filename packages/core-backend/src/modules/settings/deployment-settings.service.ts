@@ -2,8 +2,8 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('settings');
-import type { Database } from '../database/connection.js';
-import { deploymentSettings } from '../database/core-schema.js';
+import type { Database } from '../database/index.js';
+import { deploymentSettings } from '../database/index.js';
 import {
   DEFAULT_KB_LAYOUT,
   type KbLayout,
@@ -13,7 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
-import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/repo-path.js';
+import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/index.js';
 import { parseRetentionWindow } from '../audit/index.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 import { GIT_MODES, isGitMode } from './repository-source.js';

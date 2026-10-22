@@ -7,7 +7,7 @@ import AdmZip from 'adm-zip';
 import * as XLSX from 'xlsx';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { extractDocx } from '../extract-docx.js';
-import { extractPptx } from '../extract-pptx.js';
+import { extractPptx, notesTargetFromRels } from '../extract-pptx.js';
 import { extractXlsx } from '../extract-xlsx.js';
 import { extractPdf } from '../extract-pdf.js';
 import { extractOdt } from '../extract-odt.js';
@@ -19,7 +19,6 @@ import { DocExtractionCache, gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
 import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
 import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
-import { notesTargetFromRels } from '../extract-pptx.js';
 
 /**
  * REAL fixtures, no mocks: docx/pptx are handcrafted OOXML zips built with

@@ -6,7 +6,7 @@ import {
   type ParsedEntry,
   type Verb,
 } from '../access-model/index.js';
-import type { TargetKind } from '../access/access-mutation.service.js';
+import type { TargetKind } from '../access/index.js';
 
 /**
  * What a join branch is PROPOSING, relative to the default branch.
