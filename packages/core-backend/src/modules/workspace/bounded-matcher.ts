@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import { exchange, MAX_TIMER_MS, sizingOption, WorkerPool } from './worker-pool.js';
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 import {
   type IPatternMatcher,
   type IPatternSearch,

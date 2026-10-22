@@ -4,8 +4,8 @@ import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
-import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
-import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
+import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/index.js';
+import { BRANCH_INPUT, toolDef } from '../tool-helpers/index.js';
 import {
   notifyAgentRead,
   assertAgentWriteAllowed,
@@ -59,21 +59,21 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessDeniedError } from '../access-model/access-errors.js';
+import { AccessDeniedError } from '../access-model/index.js';
 import {
   AGENT_GUIDE_FILE,
   isAgentGuidePath,
   isManagedGuide,
   withPlatformGuideAppended,
   type AgentGuideReader,
-} from '../agent-guide/agent-guide.js';
+} from '../agent-guide/index.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { endsTheSearch, type IPatternMatcher, type IPatternSearch } from './pattern-matcher.contract.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
+import type { IChangeReadGate } from '../access-model/index.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';

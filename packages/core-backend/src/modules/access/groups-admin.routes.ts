@@ -1,10 +1,10 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
-import { canonicalRoleName } from '../access-model/access-grammar.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import { canonicalRoleName } from '../access-model/index.js';
 import { sendError as sharedSendError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import type { GroupsAdminService } from './groups-admin.service.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * Admin surface for GROUPS — the "who you are" half of the roles/groups

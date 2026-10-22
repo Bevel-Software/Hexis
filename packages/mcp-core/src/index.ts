@@ -28,6 +28,8 @@
 
 export {
   type ProxiedTool,
+  READ_ONLY_TAG,
+  withReadOnlyOverride,
   toListedTool,
   sanitizeInputSchema,
   flattenManualTool,
@@ -75,6 +77,7 @@ export {
   codeModeMetaTools,
   chainNamespaceExample,
   META_TOOL_NAMES,
+  META_TOOL_READ_ONLY,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
   CALL_TOOL_CHAIN_NAME,
   CHAIN_FAILURES_RULE,

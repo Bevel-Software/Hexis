@@ -148,15 +148,18 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain('A distribution may add data members of its own to `window.bevel`');
   });
 
-  it('names the four functions of window.bevel.tools the runtime defines, where it is null, and requireTools with its card', async () => {
+  it('names the five functions of window.bevel.tools the runtime defines, where it is null, and requireTools with its card', async () => {
     const named = [...new Set([...guide.matchAll(/window\.bevel\.tools\.(\w+)\(/g)].map((m) => m[1]!))].sort();
     const onFilePage = runBridge({}, { toolBridge: true });
     expect(named).toEqual(Object.keys(onFilePage.bevel.tools as object).sort());
-    expect(named).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo']);
+    expect(named).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo', 'uploadFile']);
 
     // Null everywhere else, and the guide tells a page to check before every use.
     expect(runBridge().bevel.tools).toBeNull();
-    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed, on a skill page and in any preview that is not the app\'s file page.');
+    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed (a page shown on another site, or in a chat\'s MCP App pane), and in a change request\'s or a file history\'s preview of a page.');
+    // Where it is answered: the hosts htmlToolBridge.ts lists, the skill page beside the file page.
+    expect(flat).toContain('On the app\'s file page, and on a skill\'s page in the Library');
+    expect(flat).toContain('resolves `true` at once, with nothing shown, on the app\'s file page and on a skill\'s page.');
     expect(flat).toContain('Check it before every use, and render the page without tools when it is `null`');
 
     // The consent rule and the two cards, in the app's words.
@@ -164,6 +167,14 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain('"<page name> wants to write to the knowledge base", with the page\'s path under it and Allow while open and Deny.');
     expect(flat).toContain('Deny runs nothing and rejects the call with `denied`');
     expect(flat).toContain('"<page name> uses tools that are only available in the platform", with Continue without tools and Open in the platform');
+
+    // uploadFile: its arguments, the promise, the consent rule and the size limit.
+    expect(flat).toContain('`uploadFile(file, { branch, destination, mode })`. `file` is a `File` (from an `<input type="file">` or a drop) or a `Blob` with a `name` option');
+    expect(flat).toContain("`mode` is `create` (the default), `overwrite` or `update`");
+    expect(flat).toContain("The promise resolves with `apply_file_upload`'s answer, `{ destination, count, total, files }`");
+    expect(flat).toContain("a file over the deployment's upload limit (the message names it)");
+    expect(flat).toContain('An upload is a writing call: the first one shows the card above, and Allow while open covers it and every later upload and writing call of the page view.');
+    expect(flat).toContain("The upload's token stays in the app; the page never sees it.");
 
     // requireTools exists on both, asks the app, and resolves with its answer.
     for (const [bridge, answer] of [[runBridge(), false], [onFilePage, true]] as const) {

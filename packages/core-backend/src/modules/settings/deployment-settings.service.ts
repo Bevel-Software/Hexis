@@ -14,7 +14,7 @@ import {
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/repo-path.js';
-import { parseRetentionWindow } from '../audit/audit.contract.js';
+import { parseRetentionWindow } from '../audit/index.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 import { GIT_MODES, isGitMode } from './repository-source.js';
 
@@ -117,6 +117,29 @@ export const validateHttpsRemote = (value: string): string | null => {
  */
 export function retireMergedBranchesOn(raw: string): boolean {
   return !/^(false|0|off|no)$/i.test(raw.trim());
+}
+
+/**
+ * The `toolReadOnlyOverrides` setting read as a map, or null when it is not
+ * one: a JSON object whose keys are tool names (MCP's name grammar) and whose
+ * values are booleans. Blank is no override at all.
+ */
+export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean> | null {
+  if (!raw.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  for (const [name, value] of entries) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(name) || typeof value !== 'boolean') return null;
+  }
+  // Built with `fromEntries`, which defines own properties: assigning into a
+  // plain object would send a valid name like `__proto__` to its prototype.
+  return Object.fromEntries(entries) as Record<string, boolean>;
 }
 
 export const CORE_SETTINGS: SettingDef[] = [
@@ -398,6 +421,23 @@ export const CORE_SETTINGS: SettingDef[] = [
     blankMeansDefault: true,
     validate: (v) =>
       parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
+  },
+
+  {
+    /**
+     * The read-only hints an admin set on the Tools page, overriding a
+     * platform tool's or a code-mode meta-tool's built-in one: a JSON map from
+     * tool name to `true`/`false`. Written by the Tools page's admin route
+     * alone (see `modules/tool-registry/read-only-hints.ts`), which also judges
+     * the NAMES against the catalog; here only the shape is. Internal: not a
+     * field of the setup screen. A blank clears it, which is every tool back
+     * on its built-in value.
+     */
+    key: 'toolReadOnlyOverrides',
+    section: 'knowledge-base',
+    internal: true,
+    blankMeansDefault: true,
+    validate: (v) => (parseToolReadOnlyOverrides(v) === null ? 'A map from tool name to true or false.' : null),
   },
 
   {

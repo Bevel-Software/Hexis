@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { GitContext } from '../../git/state/git.context';
+import { GitContext } from '../../git';
 import { WorkspaceContext } from '../state/workspace.context';
 import { useRendererSurface } from '../components/renderers/rendererSurface';
 import { authFetch } from '../../../lib/api';

@@ -46,7 +46,7 @@ import {
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
   accessFrontmatterExtensionList,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import {
   spliceRevoke,
   spliceGrant,

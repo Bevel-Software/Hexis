@@ -245,6 +245,16 @@ export interface ChangeRequestRejectedEvent {
 }
 
 /**
+ * A request's title or description was edited. Carries no text: every
+ * viewer re-reads the request through the list and detail endpoints it
+ * already uses, which apply its own read rules.
+ */
+export interface ChangeRequestEditedEvent {
+  kind: 'change-request-edited';
+  number: number;
+}
+
+/**
  * An apply did NOT land, announced to EVERY session — the counterpart of the
  * user-scoped `change-request-merge-failed` below, which only the clicker gets.
  *
@@ -380,6 +390,7 @@ export type WorkflowEventPayload =
   | ChangeRequestOpenedEvent
   | ChangeRequestMergedEvent
   | ChangeRequestRejectedEvent
+  | ChangeRequestEditedEvent
   | ChangeRequestMergeFailedEvent
   | ChangeRequestApplyFailedEvent
   | ApprovalChangedEvent
