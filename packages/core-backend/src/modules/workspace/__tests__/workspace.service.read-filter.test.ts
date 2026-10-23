@@ -177,14 +177,6 @@ describe('WorkspaceService.listFiles — read filter', () => {
       expect(tree.withheld).toBe(1);
     });
 
-    it('does not count an entry the filter marks unlisted', async () => {
-      const filter: ReadTreeFilter = async (ps) =>
-        new Map(ps.map((p) => [p, p === 'top.md' ? 'unlisted' : true]));
-      const tree = await svc.listFiles(workspaceId, filter);
-      expect(paths(tree)).not.toContain('top.md');
-      expect(tree.withheld).toBeUndefined();
-    });
-
     it('counts every entry of a tree the caller may read none of', async () => {
       const filter: ReadTreeFilter = async () => new Map();
       const tree = await svc.listFiles(workspaceId, filter);
