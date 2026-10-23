@@ -1,3 +1,4 @@
+import { constants as fsConstants, type Stats } from 'node:fs';
 import nodeFs from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -732,7 +733,8 @@ async function searchableText(fs: LocalFilesystem, path: string, docs: DocGrepSt
  * its lines pushed onto `out`, when it is a regular file; `null`, with
  * nothing searched, for anything else (a link, one that loops, a file gone
  * since), which is read as read_file reads it instead. A file that answers no
- * line has no text when ripgrep finds it binary: it holds a NUL.
+ * line has no text when ripgrep finds it binary: it holds a NUL, which
+ * {@link holdsNul} looks for in the very file that was judged.
  */
 async function grepTextFile(
   fs: LocalFilesystem,
@@ -745,14 +747,57 @@ async function grepTextFile(
   const scope = await treeScope(fs, slash < 0 ? '' : path.slice(0, slash));
   const name = path.slice(slash + 1);
   const absolute = join(scope.cwd, scope.root, name);
-  if (!(await nodeFs.lstat(absolute).then((st) => st.isFile(), () => false))) return null;
+  const judged = await nodeFs.lstat(absolute).catch(() => null);
+  if (judged === null || !judged.isFile()) return null;
   const from = out.length;
   for await (const file of search.files(scope, { only: [name], maxLinesPerFile: max })) {
     for (const l of file.lines) out.push({ path, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
   }
   if (out.length > from) return { kind: 'searched' };
-  const bytes = await orNotFound(path, () => nodeFs.readFile(absolute), 'Nothing to search');
-  return bytes.includes(0) ? { kind: 'no-text' } : { kind: 'searched' };
+  const binary = await orNotFound(path, () => holdsNul(absolute, judged, search), 'Nothing to search');
+  return binary ? { kind: 'no-text' } : { kind: 'searched' };
+}
+
+/** How much of a file {@link holdsNul} holds in memory at once. */
+const NUL_SCAN_CHUNK = 64 * 1024;
+
+/**
+ * Whether the file at `absolute` holds a NUL, read a chunk at a time and
+ * stopped at the first, under the search's budget: a check that outlives it
+ * is answered as the search is, and reads no further. The file is opened
+ * without following a link, and only the file that was judged (`judged`, its
+ * device and inode) is read: a link or another file swapped in since, here or
+ * in a folder above it, is not, and holds nothing.
+ */
+export async function holdsNul(absolute: string, judged: Stats, search: IPatternSearch): Promise<boolean> {
+  let stopped = false;
+  try {
+    return await search.charged(async () => {
+      let handle: nodeFs.FileHandle;
+      try {
+        handle = await nodeFs.open(absolute, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      } catch (err) {
+        // ELOOP: the name is a link now. Anything else is the caller's to answer.
+        if ((err as { code?: unknown } | null)?.code === 'ELOOP') return false;
+        throw err;
+      }
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile() || opened.dev !== judged.dev || opened.ino !== judged.ino) return false;
+        const chunk = Buffer.alloc(NUL_SCAN_CHUNK);
+        while (!stopped) {
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+          if (bytesRead === 0) return false;
+          if (chunk.subarray(0, bytesRead).includes(0)) return true;
+        }
+        return false;
+      } finally {
+        await handle.close();
+      }
+    });
+  } finally {
+    stopped = true;
+  }
 }
 
 /** Append the lines `hits` names (0-based indices into `text`'s lines) to `out`, as matches in `path`. */

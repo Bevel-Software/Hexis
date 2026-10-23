@@ -182,6 +182,7 @@ class RipgrepSearch implements IPatternSearch {
     const under = scope.root === '.' ? '' : `${scope.root}/`;
     const only = opts.only.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
     const roots = await realFolders(scope, walkRoots(opts.only));
+    if (roots.length === 0) return;
     const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...roots];
     let current: FileMatches | null = null;
     for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
@@ -211,6 +212,7 @@ class RipgrepSearch implements IPatternSearch {
   }
 
   async list(scope: TreeScope): Promise<string[]> {
+    if (await rootMoved(scope)) return [];
     const args = [...BASE_ARGS, '--files', '--null', ...WALK_ARGS, ...NO_GIT, '--', scope.root];
     const out: string[] = [];
     for await (const record of this.run(args, scope.cwd, undefined, '\0')) {
@@ -481,19 +483,33 @@ function walkRoots(paths: readonly string[]): string[] {
  * `folders` (relative to the scope's root) as ripgrep is given them — when
  * each is still the real folder the walk listed. ripgrep follows a link it
  * is GIVEN, so a folder that has become a link since (or is gone) sends the
- * walk back to the root, whose `--no-follow` never enters it. The root itself
- * was checked the same way where the scope was made.
+ * walk back to the root, whose `--no-follow` never enters it. The root is
+ * checked again here, as where the scope was made: one that has become a
+ * link since is given to ripgrep not at all, and nothing is walked.
  */
 async function realFolders(scope: TreeScope, folders: readonly string[]): Promise<string[]> {
+  if (await rootMoved(scope)) return [];
   const real = await Promise.all(
-    folders.map(async (folder) => {
-      if (folder === '') return true;
-      const absolute = join(scope.cwd, scope.root, folder);
-      return (await realpath(absolute).catch(() => null)) === absolute;
-    }),
+    folders.map((folder) => folder === '' || isRealFolder(scope.cwd, `${scope.root}/${folder}`)),
   );
   if (folders.length === 0 || !real.every(Boolean)) return [scope.root];
   return folders.map((folder) => (folder === '' ? scope.root : `${scope.root}/${folder}`));
+}
+
+/**
+ * Whether the scope's root now resolves elsewhere: it, or a folder above it,
+ * has become a link since the scope was made. A root that is gone holds
+ * nothing for ripgrep to find, so it is walked as it is.
+ */
+async function rootMoved(scope: TreeScope): Promise<boolean> {
+  const absolute = join(scope.cwd, scope.root);
+  return (await realpath(absolute).catch(() => absolute)) !== absolute;
+}
+
+/** Whether `folder` (relative to `cwd`) is still itself: no link on the way to it, and there. */
+async function isRealFolder(cwd: string, folder: string): Promise<boolean> {
+  const absolute = join(cwd, folder);
+  return (await realpath(absolute).catch(() => null)) === absolute;
 }
 
 function countLines(text: string): number {

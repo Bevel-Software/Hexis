@@ -241,6 +241,22 @@ describe('RipgrepPatternMatcher', () => {
     }
   });
 
+  it('walks nothing when the root itself has become a link since the scope was made', async () => {
+    await put('kb/T/1.md', 'needle\n');
+    await put('outside/T/1.md', 'needle outside\n');
+    const s = await search('needle');
+    const scope = { cwd: dir, root: 'kb/T' };
+    const only = await s.list(scope);
+    expect(only).toEqual(['1.md']);
+    // The scope's root, checked when it was made, swapped for a link out.
+    await rm(join(dir, 'kb/T'), { recursive: true });
+    await symlink(join(dir, 'outside/T'), join(dir, 'kb/T'));
+    const paths: string[] = [];
+    for await (const f of s.files(scope, { only, maxLinesPerFile: 10 })) paths.push(f.path);
+    expect(paths).toEqual([]);
+    expect(await s.list(scope)).toEqual([]);
+  });
+
   it('places each matching line in the text it came from', async () => {
     const s = await search('^n');
     expect(await s.matchingLines(['no\nyes\nnah', '', 'x\n', 'n'])).toEqual([[0, 2], [], [], [0]]);
