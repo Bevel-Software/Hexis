@@ -5,6 +5,7 @@ import { createShutdown, stopCore, withStartupTask, type LeasedWorker } from '..
 import { holdCommitWorkerLease, holdable } from '../lifecycle.js';
 import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
+import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { RipgrepPatternMatcher } from '../../modules/workspace/index.js';
 import { slowRipgrep } from '../../__tests__/slow-ripgrep.js';
@@ -547,8 +548,11 @@ describe('stopCore', () => {
     try {
       // A tree search that would hold its ripgrep for the whole 5 s budget when the graph is stopped.
       const search = await patternMatcher.search('needle', { ignoreCase: false });
+      // A scope's cwd is canonical: where the temp folder is a link (macOS),
+      // the raw spelling would read as a root that has moved, and walk nothing.
+      const cwd = await realpath(tmpdir());
       const running = (async () => {
-        for await (const file of search.files({ cwd: tmpdir(), root: '.' }, { only: ['hit.md'], maxLinesPerFile: 1 })) void file;
+        for await (const file of search.files({ cwd, root: '.' }, { only: ['hit.md'], maxLinesPerFile: 1 })) void file;
       })();
       while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
       const started = Date.now();
