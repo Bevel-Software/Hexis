@@ -44,7 +44,8 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { CopyAnchorButton } from './CopyAnchorButton';
 import { KbImage, type KbImageResolver } from './KbImage';
-import { normalizeHref } from '../../../../shared/markdown/hrefs';
+import { isExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
+import { KbAppLink, type KbLinkTarget } from './KbAppLink';
 
 export type { KbImageResolver, KbImageSource } from './KbImage';
 
@@ -107,6 +108,14 @@ export interface KbMarkdownComponentOptions {
    */
   onOpenNodeId?: (id: string) => void;
   /**
+   * Where an internal `.md` link leads, so its anchor can say so (see
+   * {@link KbAppLink}); `onOpenFile` still follows the click. Omitted (the
+   * diff, the skill page, the embed) → the anchor carries the href as written.
+   */
+  fileLinkTarget?: (href: string) => KbLinkTarget | null;
+  /** The same for an id-link, beside {@link onOpenNodeId}. */
+  nodeIdLinkTarget?: (id: string) => KbLinkTarget | null;
+  /**
    * When provided, each heading gets a hover-revealed button copying
    * `headingLink(slug)`. Requires {@link KB_REHYPE_PLUGINS} (slug ids); pass it
    * only from document views, never from a diff.
@@ -137,7 +146,8 @@ export interface KbMarkdownComponentOptions {
    * WHICH links this surface wants handed to `onOpenFile`, rather than left
    * to the browser.
    *
-   * - `'browser'` (default, the app): the internal `.md` path links only.
+   * - `'browser'` (default, the app): the internal `.md` path links, and
+   *   with a {@link fileLinkTarget} every workspace destination it resolves.
    *   An `http(s)` destination becomes a plain `target="_blank"` anchor,
    *   because in a tab that is exactly right — the browser opens a new tab
    *   and nothing needs intercepting.
@@ -165,6 +175,8 @@ export interface KbMarkdownComponentOptions {
 export function useKbMarkdownComponents({
   onOpenFile,
   onOpenNodeId,
+  fileLinkTarget,
+  nodeIdLinkTarget,
   headingLink,
   onMermaidError = 'error',
   resolveImage,
@@ -213,39 +225,34 @@ export function useKbMarkdownComponents({
           // anchor, so a bare id can't fall through as a relative-URL link.
           if (!onOpenNodeId) return <span {...props}>{children}</span>;
           return (
-            <a
+            <KbAppLink
               {...props}
               href={href}
-              onClick={(e) => {
-                e.preventDefault();
-                onOpenNodeId(href);
-              }}
-              className="cursor-pointer"
+              target={nodeIdLinkTarget?.(href) ?? null}
+              onOpen={() => onOpenNodeId(href)}
             >
               {children}
-            </a>
+            </KbAppLink>
           );
         }
         // Legacy/internal path link: a `.md` destination, optionally with a
         // heading anchor (`Node.md#goal`) — still used by frontmatter `nodeType`.
-        // External (`http…`) and same-page (`#…`) links fall through to <a>.
-        if (
-          onOpenFile &&
-          href && !href.startsWith('http') && !href.startsWith('#') && /\.md(#|$)/.test(href)
-        ) {
-          return (
-            <a
-              {...props}
-              href={href}
-              onClick={(e) => {
-                e.preventDefault();
-                onOpenFile(href);
-              }}
-              className="cursor-pointer"
-            >
-              {children}
-            </a>
-          );
+        // External (any scheme, as `resolveKbHref` reads one — not a name
+        // that merely starts `http`, like `http-notes.md`) and same-page
+        // (`#…`) links fall through to <a>.
+        // Where the caller resolves link targets (the app's file page) every
+        // other workspace destination is taken too — a page, an image, a PDF —
+        // so none of them is left to the browser as a relative URL that
+        // replaces the page being read.
+        if (onOpenFile && href && !isExternalHref(href) && !normalizeHref(href).startsWith('#')) {
+          const target = fileLinkTarget?.(href) ?? null;
+          if (target || /\.md(#|$)/.test(href)) {
+            return (
+              <KbAppLink {...props} href={href} target={target} onOpen={() => onOpenFile(href)}>
+                {children}
+              </KbAppLink>
+            );
+          }
         }
         // A surface that owns every outgoing link takes the rest: an
         // `http(s)` address, and a workspace path the `.md` rule above did
@@ -308,5 +315,5 @@ export function useKbMarkdownComponents({
         return <pre {...props}>{children}</pre>;
       },
     };
-  }, [onOpenFile, onOpenNodeId, headingLink, onMermaidError, resolveImage, linkPolicy]);
+  }, [onOpenFile, onOpenNodeId, fileLinkTarget, nodeIdLinkTarget, headingLink, onMermaidError, resolveImage, linkPolicy]);
 }
