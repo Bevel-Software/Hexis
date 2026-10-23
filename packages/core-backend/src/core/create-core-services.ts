@@ -105,7 +105,8 @@ import {
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
-import { AgentScopeService, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { AgentScopeService } from '../modules/agent-scope/agent-scope.service.js';
+import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   GitHubFacadeCredentialsService,

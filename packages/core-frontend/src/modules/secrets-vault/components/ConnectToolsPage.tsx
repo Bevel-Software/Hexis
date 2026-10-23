@@ -8,7 +8,8 @@ import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '..
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
-import { ConnectAsChoice, canConnectAs, type AgentChoice } from '../../agents';
+import { canConnectAs, type AgentChoice } from '../../agents';
+import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   getConnectPending,
   startToolOAuth,

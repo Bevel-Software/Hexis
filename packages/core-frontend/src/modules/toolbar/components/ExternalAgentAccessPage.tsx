@@ -23,7 +23,8 @@ import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin';
-import { ConnectAsChoice, canConnectAs, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
+import { canConnectAs, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
+import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,

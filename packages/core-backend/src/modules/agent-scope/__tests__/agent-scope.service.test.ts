@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { AgentScopeService, ConnectionScope, connectionRefusal, parseAgentFile } from '../index.js';
+import { AgentScopeService } from '../agent-scope.service.js';
+import { ConnectionScope, connectionRefusal, parseAgentFile } from '../index.js';
 import { agentFile, agentScopeOver, inMemoryKb } from './in-memory-kb.js';
 
 /**

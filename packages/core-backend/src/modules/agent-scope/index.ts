@@ -1,4 +1,4 @@
-export { AgentScopeService, type PluginFoldersPort } from './agent-scope.service.js';
+export type { AgentScopeService, PluginFoldersPort } from './agent-scope.service.js';
 export { resolveConnectionScope, type AgentChoice, type IAgentScopeResolver } from './agent-scope.contract.js';
 export {
   ConnectionScope,

@@ -1,4 +1,4 @@
-import { AgentScopeService } from '../index.js';
+import { AgentScopeService } from '../agent-scope.service.js';
 
 /**
  * A knowledge base held in memory, for driving the REAL `AgentScopeService`
