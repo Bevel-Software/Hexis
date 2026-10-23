@@ -26,12 +26,25 @@
  *                                markTransientFailure       markRecoveryStarted
  *                                (status='pending';          (recoveryAgentRuns++;
  *                                 backoff via                 attempts=0;
- *                                 last_attempted_at)          status='pending')
+ *                                 last_attempted_at)          status='recovering')
+ *                                                              │ the agent runs
+ *                                                              ▼
+ *                                                             markRecoveryFinished
+ *                                                             (status='pending')
  *                                                              │
  *                                                              ▼
  *                                                  if recoveryAgentRuns ≥ N_RECOVERY:
  *                                                    markNeedsAttention
  *                                                    (status='needs_attention')
+ *
+ * `recovering` is the row the recovery agent was spawned for, for as long as
+ * the agent runs: no pass claims it, and the wait a merge INTO its branch's
+ * workspace makes for commits still being committed (`queuedOnBranch`) does
+ * not count it — the agent is there to merge the shared branch in FOR that
+ * row, and waiting on it would refuse the agent's own merge. A merge OUT of
+ * the branch still waits for it. It is still a commit that has not landed, so
+ * everything else that asks "is there work left to land?" counts it (see
+ * {@link LIVE_STATUSES}).
  */
 
 import { and, asc, eq, inArray, isNull, min, or, sql, type SQL } from 'drizzle-orm';
@@ -81,6 +94,14 @@ export const N_RECOVERY = 3;
  */
 export const BACKOFF_MS = [1_000, 5_000, 30_000];
 
+/**
+ * The statuses of a row whose commit has not landed and that the worker will
+ * still drive: waiting (`pending`), in its hands (`running`), or handed to
+ * the recovery agent and back to `pending` when the agent returns
+ * (`recovering`). Only `needs_attention` is out of the worker's reach.
+ */
+const LIVE_STATUSES = ['pending', 'running', 'recovering'] as const;
+
 // Lives in `shared/workspace-id.ts`, beside the encoding it canonicalises to;
 // re-exported for this module's existing importers.
 export { canonicalWorkspaceId };
@@ -93,7 +114,7 @@ export interface PendingCommit {
   authorEmail: string;
   authorName: string;
   queuedAt: Date;
-  status: 'pending' | 'running' | 'needs_attention';
+  status: 'pending' | 'running' | 'recovering' | 'needs_attention';
   attempts: number;
   recoveryAgentRuns: number;
   lastAttemptedAt: Date | null;
@@ -153,8 +174,9 @@ export class PendingCommitsService {
    * prior row is still pending bumps `queued_at` so the latest save's bytes
    * win when the row is eventually claimed (commitFile commits whatever's
    * on disk, not "the version that triggered this row"). A row that's
-   * `running` or `needs_attention` is left alone — both states represent
-   * in-flight or terminal work the caller shouldn't disturb.
+   * `running`, `recovering` or `needs_attention` is left alone — each
+   * represents in-flight or terminal work the caller shouldn't disturb, and
+   * the save gets a `pending` row of its own.
    */
   async enqueue(input: EnqueueInput): Promise<void> {
     const email = canonicalEmail(input.authorEmail);
@@ -337,19 +359,39 @@ export class PendingCommitsService {
   /**
    * About to spawn a recovery agent. Bump `recovery_agent_runs`, reset
    * `attempts` to 0 so the post-recovery commits get a fresh transient
-   * budget, flip back to `'pending'` so the next worker pass picks the
-   * row up again (post-recovery the underlying error is usually fixed).
+   * budget, and hold the row in `'recovering'` while the agent runs: no pass
+   * claims it, and the merge the agent makes to rescue it does not wait for
+   * it (see `queuedOnBranch`).
+   *
+   * Only from `'running'`, the status the worker holds the row in: a row
+   * escalated since the worker claimed it (its repository replaced) stays
+   * escalated, and the answer is false — the caller must not spawn the agent.
    */
-  async markRecoveryStarted(id: string): Promise<void> {
-    await this.db
+  async markRecoveryStarted(id: string): Promise<boolean> {
+    const started = await this.db
       .update(pendingCommits)
       .set({
-        status: 'pending',
+        status: 'recovering',
         attempts: 0,
         recoveryAgentRuns: sql`${pendingCommits.recoveryAgentRuns} + 1`,
         lastAttemptedAt: new Date(),
       })
-      .where(eq(pendingCommits.id, id));
+      .where(and(eq(pendingCommits.id, id), eq(pendingCommits.status, 'running')))
+      .returning({ id: pendingCommits.id });
+    return started.length > 0;
+  }
+
+  /**
+   * The recovery agent returned — finished, gave up, or threw. Back to
+   * `'pending'` so the next pass retries the row (post-recovery the
+   * underlying error is usually fixed). Only from `'recovering'`: a row
+   * escalated while the agent ran (its repository replaced) stays escalated.
+   */
+  async markRecoveryFinished(id: string): Promise<void> {
+    await this.db
+      .update(pendingCommits)
+      .set({ status: 'pending', lastAttemptedAt: new Date() })
+      .where(and(eq(pendingCommits.id, id), eq(pendingCommits.status, 'recovering')));
   }
 
   /**
@@ -384,9 +426,9 @@ export class PendingCommitsService {
    * `needs_attention`, not deleted — the same rule as everything else about a
    * replacement. The bytes are still in the row, the reason is on it, and they
    * show up on the pending-commit admin surface for a person to decide about.
-   * `running` rows go too: the worker checks the row back in when it finishes,
-   * and a row it is mid-flight with is exactly one whose destination just
-   * changed under it.
+   * `running` and `recovering` rows go too: the worker checks the row back in
+   * when it finishes, and a row it is mid-flight with is exactly one whose
+   * destination just changed under it.
    */
   async markNeedsAttentionOnBranch(branch: string, error: string): Promise<number> {
     return this.escalateQueued(eq(pendingCommits.branch, branch), error);
@@ -401,7 +443,7 @@ export class PendingCommitsService {
         lastError: error,
         lastAttemptedAt: new Date(),
       })
-      .where(and(which, inArray(pendingCommits.status, ['pending', 'running'])))
+      .where(and(which, inArray(pendingCommits.status, [...LIVE_STATUSES])))
       .returning({ id: pendingCommits.id });
     return moved.length;
   }
@@ -429,9 +471,9 @@ export class PendingCommitsService {
 
   /**
    * When the oldest commit still waiting to land was queued, or null when
-   * nothing waits — the readiness answer's one number. `pending` and
-   * `running` both count: a row the worker holds is still not in git, and a
-   * row it holds for too long is exactly the stall this measures.
+   * nothing waits — the readiness answer's one number. Every live status
+   * counts: a row the worker or the recovery agent holds is still not in
+   * git, and a row held for too long is exactly the stall this measures.
    * `needs_attention` does not: that row has already been escalated through
    * the notice sink and sits on the admin surface, and counting it here would
    * keep the deployment "degraded" until triage rather than saying whether
@@ -441,7 +483,7 @@ export class PendingCommitsService {
     const [row] = await this.db
       .select({ oldest: min(pendingCommits.queuedAt) })
       .from(pendingCommits)
-      .where(inArray(pendingCommits.status, ['pending', 'running']));
+      .where(inArray(pendingCommits.status, [...LIVE_STATUSES]));
     return row?.oldest ?? null;
   }
 
@@ -459,8 +501,8 @@ export class PendingCommitsService {
 
   /**
    * Test / admin helper — how many `pending` rows for this workspace?
-   * `running` and `needs_attention` are excluded; both represent work the
-   * worker is NOT going to pick up on its next sweep.
+   * `running`, `recovering` and `needs_attention` are excluded; each
+   * represents work the worker is NOT going to pick up on its next sweep.
    */
   async countPending(rawWorkspaceId: string): Promise<number> {
     const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
@@ -482,12 +524,23 @@ export class PendingCommitsService {
    * pushed yet either), how many were escalated to `needs_attention`, and the
    * message of the oldest of those, or null when none was.
    *
+   * A `recovering` row is queued for a merge OUT of the branch (`mergeBranch`,
+   * or `updateBranch` reading it as `from`): that merge takes what the remote
+   * holds, and the row's save is not there yet. For a merge INTO the branch's
+   * own workspace (`into`) it is not counted: it is the commit the recovery
+   * agent was spawned to rescue, and the agent rescues it by merging the
+   * shared branch in and publishing (`update_branch`) — counted, it would
+   * refuse that merge on account of the commit the merge is for. Every other
+   * row on the branch, a save made during the recovery run included, counts
+   * either way.
+   *
    * Keyed on the branch the row was written for, not a workspace id: the
    * question is asked by `mergeBranch`, which merges what the REMOTE holds of
    * that branch, whichever clone the bytes are waiting in.
    */
   async queuedOnBranch(
     branch: string,
+    opts: { into?: boolean } = {},
   ): Promise<{ queued: number; stuck: number; needsAttention: string | null }> {
     const rows = await this.db
       .select({ status: pendingCommits.status, lastError: pendingCommits.lastError })
@@ -497,7 +550,9 @@ export class PendingCommitsService {
       .orderBy(asc(pendingCommits.queuedAt), asc(pendingCommits.id));
     const stuck = rows.filter((r) => r.status === 'needs_attention');
     return {
-      queued: rows.filter((r) => r.status === 'pending' || r.status === 'running').length,
+      queued: rows.filter(
+        (r) => r.status === 'pending' || r.status === 'running' || (r.status === 'recovering' && !opts.into),
+      ).length,
       stuck: stuck.length,
       needsAttention:
         stuck.length === 0 ? null : (stuck[0]?.lastError || 'A queued commit on this branch failed and needs a person.'),
@@ -505,8 +560,8 @@ export class PendingCommitsService {
   }
 
   /**
-   * Is a LIVE row — `pending` or `running`, the statuses the worker will
-   * still drive — queued for `(workspaceId, branch, path)`? A
+   * Is a LIVE row — one of {@link LIVE_STATUSES}, the statuses the worker
+   * will still drive — queued for `(workspaceId, branch, path)`? A
    * `needs_attention` row deliberately does NOT count: its ladder has
    * escalated to a human and nothing will retry it, so a caller asking
    * "is my landed-but-unpushed commit going to be published?" must hear no.
@@ -523,7 +578,7 @@ export class PendingCommitsService {
           eq(pendingCommits.workspaceId, workspaceId),
           eq(pendingCommits.branch, branch),
           eq(pendingCommits.path, path),
-          inArray(pendingCommits.status, ['pending', 'running']),
+          inArray(pendingCommits.status, [...LIVE_STATUSES]),
         ),
       )
       .limit(1);
@@ -549,9 +604,10 @@ export class PendingCommitsService {
   /**
    * Process startup recovery. Two jobs:
    *
-   *   1. Reset any `status='running'` rows back to `'pending'`. The
-   *      previous process crashed mid-commit; the new worker should pick
-   *      these up just like any other pending row.
+   *   1. Reset any `status='running'` or `'recovering'` rows back to
+   *      `'pending'`. The previous process died mid-commit or mid-recovery
+   *      (before the worker's own reset after the agent could run); the new
+   *      worker should pick these up just like any other pending row.
    *   2. For each known workspace, walk the working tree (via the injected
    *      scanner) and enqueue any dirty path that isn't already
    *      represented in the queue. This is what cleans up disk-only
@@ -589,7 +645,7 @@ export class PendingCommitsService {
     await this.db
       .update(pendingCommits)
       .set({ status: 'pending', lastAttemptedAt: new Date() })
-      .where(eq(pendingCommits.status, 'running'));
+      .where(inArray(pendingCommits.status, ['running', 'recovering']));
 
     for (const workspace of workspaces) {
       let dirty: Array<{ path: string }>;

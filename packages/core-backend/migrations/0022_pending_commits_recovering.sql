@@ -1,0 +1,2 @@
+ALTER TABLE "pending_commits" DROP CONSTRAINT "pending_commits_status";--> statement-breakpoint
+ALTER TABLE "pending_commits" ADD CONSTRAINT "pending_commits_status" CHECK ("pending_commits"."status" IN ('pending', 'running', 'recovering', 'needs_attention'));

@@ -188,6 +188,27 @@ export class PendingCommitsWorker {
     recoveryBot: PendingCommitsWorkerDeps['recoveryBot'];
   };
   private running = false;
+  /**
+   * `stop()` was asked for and no `start()` since: a pass in flight gives
+   * up between rows and between workspaces. Separate from `running` (the
+   * loop is up) so a single `drainOnce` on a worker whose loop was never
+   * started still runs, and `stop()` still ends it.
+   */
+  private stopped = false;
+  /**
+   * Every drain pass in flight, the loop's and any a caller started with
+   * `drainOnce` alike: `stop()` resolves only once all of them have ended.
+   */
+  private readonly passes = new Set<Promise<void>>();
+  /**
+   * Rows whose recovery run has ended and that are not back in `pending`
+   * yet (`markRecoveryFinished` has not succeeded for them). A row stays
+   * listed after a failed hand-back and is retried at the start of every pass, so
+   * a database that refused the update once does not leave the row
+   * `recovering` — unclaimable, and skipped by its branch's merge wait —
+   * until the next restart.
+   */
+  private readonly recoveriesToFinish = new Set<string>();
   private loopPromise: Promise<void> | null = null;
   private stopSignal: ((value: void) => void) | null = null;
 
@@ -206,6 +227,7 @@ export class PendingCommitsWorker {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.stopped = false;
     this.loopPromise = this.runLoop();
   }
 
@@ -215,22 +237,30 @@ export class PendingCommitsWorker {
    * Idempotent.
    */
   async stop(): Promise<void> {
-    if (!this.running) return;
-    this.running = false;
-    // Unblock the sleep early so shutdown isn't gated on POLL_INTERVAL_MS.
-    if (this.stopSignal) {
-      const signal = this.stopSignal;
-      this.stopSignal = null;
-      signal();
+    this.stopped = true;
+    if (this.running) {
+      this.running = false;
+      // Unblock the sleep early so shutdown isn't gated on POLL_INTERVAL_MS.
+      if (this.stopSignal) {
+        const signal = this.stopSignal;
+        this.stopSignal = null;
+        signal();
+      }
+      await this.loopPromise;
+      this.loopPromise = null;
     }
-    await this.loopPromise;
-    this.loopPromise = null;
+    // A pass started with `drainOnce` on a worker whose loop never ran is
+    // still in flight: its commit or recovery run finishes before stop()
+    // answers, as the loop's does.
+    // Settled, not all: a pass that failed already answered its own caller.
+    await Promise.allSettled([...this.passes]);
   }
 
   /**
    * Run one drain pass: rotate through known workspaces, draining each
    * one's ready rows before moving on. Exposed publicly so tests can step
-   * the loop deterministically without driving `setTimeout`.
+   * the loop deterministically without driving `setTimeout`: it runs on a
+   * worker whose loop was never started, and `stop()` ends it.
    *
    * Draining a BURST rather than a single row per sweep is what keeps a
    * bulk change honest. One row per sweep, with a `POLL_INTERVAL_MS` sleep
@@ -244,6 +274,17 @@ export class PendingCommitsWorker {
    * hand the same row back within the same sweep.
    */
   async drainOnce(): Promise<void> {
+    const pass = this.drainPass();
+    this.passes.add(pass);
+    try {
+      await pass;
+    } finally {
+      this.passes.delete(pass);
+    }
+  }
+
+  private async drainPass(): Promise<void> {
+    await this.finishRecoveries();
     // Distinct CLONES, under one spelling each. `knownWorkspaces()` reports
     // encoded ids and the queue stores the canonical form, but the invariant
     // the whole worker rests on — one clone is never worked by two drains at
@@ -258,7 +299,7 @@ export class PendingCommitsWorker {
       Array.from({ length: slots }, async () => {
         // Bail between workspaces if stop() fired — the in-flight workspace
         // gets to finish but no new one is started.
-        while (this.running) {
+        while (!this.stopped) {
           const id = queue.shift();
           if (id === undefined) return;
           // Contained here, in the slot: a rejection that escaped would settle
@@ -276,10 +317,29 @@ export class PendingCommitsWorker {
     );
   }
 
+  /**
+   * Hand every row whose recovery run has ended back to `pending`. A failure
+   * keeps the row listed for the next pass — logged, never thrown, so a
+   * database refusing one row's hand-back neither aborts the pass nor loses
+   * the row.
+   */
+  private async finishRecoveries(): Promise<void> {
+    for (const id of [...this.recoveriesToFinish]) {
+      try {
+        await this.deps.service.markRecoveryFinished(id);
+        this.recoveriesToFinish.delete(id);
+      } catch (err) {
+        log.error(`could not return row=${id} from recovery to pending; retrying on the next pass:`, {
+          detail: sanitizeError(err),
+        });
+      }
+    }
+  }
+
   /** Drain one workspace's ready rows, in order, up to the burst ceiling. */
   private async drainWorkspace(workspaceId: string): Promise<void> {
     for (let drained = 0; drained < MAX_BURST_PER_WORKSPACE; drained += 1) {
-      if (!this.running) return;
+      if (this.stopped) return;
       const row = await this.deps.service.claimNext(workspaceId, this.deps.now());
       if (!row) break;
       // Is this the last commit of the burst? Everything before it can skip
@@ -401,8 +461,18 @@ export class PendingCommitsWorker {
       if (row.recoveryAgentRuns < N_RECOVERY) {
         // Transient budget exhausted — hand off to the recovery agent.
         // markRecoveryStarted resets `attempts` so the post-recovery
-        // commits get a fresh transient budget.
-        await this.deps.service.markRecoveryStarted(row.id);
+        // commits get a fresh transient budget, and holds the row
+        // `recovering` while the agent runs, so the merge the agent makes
+        // for it (`update_branch`) does not wait on it.
+        if (!(await this.deps.service.markRecoveryStarted(row.id))) {
+          // Escalated to a person since this pass claimed it (its repository
+          // replaced): the escalation stands, and no agent runs for it.
+          log.warn(`recovery not started for ws=${row.workspaceId} path=${row.path}: the row was escalated meanwhile`);
+          return;
+        }
+        // A hand-back that reported failure but landed left the row listed:
+        // it must not end THIS run early.
+        this.recoveriesToFinish.delete(row.id);
         log.warn(
           `transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
         );
@@ -418,11 +488,20 @@ export class PendingCommitsWorker {
           // The recovery agent itself crashed (rare — would mean broken
           // codemode wiring, missing deps, etc.). Treat it the same as
           // the agent finishing without resolving the issue — the row
-          // stays `pending` and the next worker pass will hit the same
-          // underlying error or escalate after another recovery cycle.
+          // goes back to `pending` below and the next worker pass will hit
+          // the same underlying error or escalate after another recovery
+          // cycle.
           log.error(`recovery agent threw for ws=${row.workspaceId} path=${row.path}:`, {
             detail: sanitizeError(agentErr),
           });
+        } finally {
+          // However the run ended, the row is retried on the next pass. A
+          // database that refuses this update leaves it to the next pass's
+          // `finishRecoveries`; a process that dies before this line leaves
+          // it `recovering` until the boot-time reset (`startupReconcile`)
+          // returns it to `pending`.
+          this.recoveriesToFinish.add(row.id);
+          await this.finishRecoveries();
         }
         return;
       }

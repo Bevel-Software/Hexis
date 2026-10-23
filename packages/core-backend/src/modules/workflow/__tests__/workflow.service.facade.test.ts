@@ -131,7 +131,7 @@ function makePendingCommits(): PendingCommitsService {
     claimNext: vi.fn().mockResolvedValue(null),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),
@@ -511,6 +511,16 @@ describe('WorkflowService.updateBranch', () => {
     const outcome = await svc.updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
     expect(outcome).toMatchObject({ kind: 'pending-commits', branch: 'target-company-state', pending: 2 });
     expect((git as unknown as { mergeIntoBranch: ReturnType<typeof vi.fn> }).mergeIntoBranch).not.toHaveBeenCalled();
+  });
+
+  it('waits on the source as a merge out of it, and on the draft as a merge into it', async () => {
+    // A commit under recovery on the draft is the one the update is made to
+    // rescue; one on the source is a save its remote does not hold yet.
+    const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
+    const pending = makePendingCommits();
+    await build(git, pending).updateBranch('ada%2Fdraft', user, { from: 'target-company-state' });
+    expect(pending.queuedOnBranch).toHaveBeenCalledWith('target-company-state', { into: false });
+    expect(pending.queuedOnBranch).toHaveBeenCalledWith('ada/draft', { into: true });
   });
 
   it('refuses a source the shared repository does not have', async () => {
@@ -1992,8 +2002,9 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
   /**
    * An in-memory `pending_commits` table with the methods the worker and
    * `mergeBranch` use — the same rules as the SQL: `markSucceeded` deletes the
-   * row, `queuedOnBranch` counts `pending` + `running` and reports the first
-   * `needs_attention` row's message.
+   * row, `queuedOnBranch` counts `pending` + `running` (+ `recovering`, but
+   * for a merge `into` the branch) and reports the first `needs_attention`
+   * row's message.
    */
   function memoryQueue(rows: PendingCommit[] = []) {
     const table = [...rows];
@@ -2011,13 +2022,15 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
         table.splice(table.findIndex((r) => r.id === id), 1);
       }),
       markTransientFailure: vi.fn(async () => undefined),
-      markRecoveryStarted: vi.fn(async () => undefined),
+      markRecoveryStarted: vi.fn(async () => true),
       markNeedsAttention: vi.fn(async () => undefined),
-      queuedOnBranch: vi.fn(async (branch: string) => {
+      queuedOnBranch: vi.fn(async (branch: string, opts: { into?: boolean } = {}) => {
         const mine = table.filter((r) => r.branch === branch);
         const stuck = mine.filter((r) => r.status === 'needs_attention');
         return {
-          queued: mine.filter((r) => r.status === 'pending' || r.status === 'running').length,
+          queued: mine.filter(
+            (r) => r.status === 'pending' || r.status === 'running' || (r.status === 'recovering' && !opts.into),
+          ).length,
           stuck: stuck.length,
           needsAttention: stuck[0] ? stuck[0].lastError : null,
         };
@@ -2123,6 +2136,15 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
     expect(forwarding).toBe(30_000);
     expect(svc.mergeWaitForPendingCommits.timeoutMs).toBe(20_000);
     expect(forwarding - svc.mergeWaitForPendingCommits.timeoutMs).toBeGreaterThanOrEqual(10_000);
+  });
+
+  it('holds a merge out of a branch whose commit is under recovery: that save is not on the remote yet', async () => {
+    const { service } = memoryQueue([row({ status: 'recovering', lastError: 'push rejected: conflict' })]);
+    const { svc, merge } = harness(service, { timeoutMs: 60, pollMs: 20 });
+    const outcome = await svc.mergeBranch(makeUser(), SOURCE, TARGET);
+    expect(outcome).toMatchObject({ kind: 'pending-commits', branch: SOURCE, pending: 1 });
+    expect(service.queuedOnBranch).toHaveBeenCalledWith(SOURCE, {});
+    expect(merge).not.toHaveBeenCalled();
   });
 
   it('answers pending-commits at once, with the worker\'s message, when a queued commit needs attention', async () => {
