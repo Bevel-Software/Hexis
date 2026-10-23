@@ -32,11 +32,27 @@ type SyncError =
  * Every id → path this app has learned, keyed by branch and id. A deleted
  * file's id no longer resolves, so returning to its id URL (Back, or a switch
  * to its tab) loaded the id token as a path and said "File not found" over a
- * tab that holds the deleted notice. The path it last had finds that tab —
- * and, with no tab, still fails as missing, by name. Module-level so it
- * outlives a remount of the page (Knowledge home and back).
+ * tab that holds the deleted notice. The path it last had finds that tab, and
+ * ONLY that tab: an open tab at that path marked deleted (`pathFromUrl`).
+ * Anything else at the path — the same file under a new id, or a new file
+ * written there — is not what the old id named, so an id that no longer
+ * resolves and has no such tab is forgotten and says "File not found".
+ * Module-level so it outlives a remount of the page (Knowledge home and back).
  */
 const knownIdPaths = new Map<string, string>();
+
+/** `id` names `path` on `branch` now: no other id there names it any more. */
+function rememberIdPath(branch: string, id: string, path: string) {
+  const prefix = `${branch}/`;
+  for (const [key, known] of knownIdPaths) {
+    // An id has no slash, so a key of a branch nested under this one
+    // (`a/b/<id>` for branch `a`) is not this branch's.
+    if (known === path && key.startsWith(prefix) && !key.slice(prefix.length).includes('/')) {
+      knownIdPaths.delete(key);
+    }
+  }
+  knownIdPaths.set(`${prefix}${id}`, path);
+}
 
 /**
  * `canonicalize` (default on): replace a path URL with the node's id URL once
@@ -80,8 +96,10 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // ignored; `path: null` means the id resolved to no readable node (a dangling
   // id, or a bare token that's actually a plain file — we then fall back to
   // loading the segment as a literal path).
+  // `lastKnown`: the path an id that no longer resolves had when it last did,
+  // kept only while a deleted tab at that path is open (`knownIdPaths`).
   const [idResolved, setIdResolved] = useState<
-    { seg: string; branch: string; path: string | null } | null
+    { seg: string; branch: string; path: string | null; lastKnown: string | null } | null
   >(null);
 
   const currentBranch = git.status?.branch ?? null;
@@ -113,11 +131,17 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // while the async resolve is in flight (so we don't briefly load the id token
   // as a path), falling back to the literal segment if the id resolved to no
   // node (the bare-token-is-really-a-file case).
+  const retainedDeletedPath =
+    idResolved?.lastKnown &&
+    workspace.openTabs.some((t) => t.path === idResolved.lastKnown && t.deletedBy)
+      ? idResolved.lastKnown
+      : null;
   const pathFromUrl = segmentIsId
     ? idResolved && idResolved.seg === segment && idResolved.branch === branchFromUrl
-      ? idResolved.path ?? segment
+      ? idResolved.path ?? retainedDeletedPath ?? segment
       : ''
     : segment;
+  const openTabsRef = useLatestRef(workspace.openTabs);
 
   // ── Resolve an id segment → its file path ────────────────────────────────
   useEffect(() => {
@@ -129,15 +153,22 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     let cancelled = false;
     (async () => {
       const resolved = await fetchNodeWorkspacePath(branchFromUrl, segment);
+      if (cancelled) return;
       const key = `${branchFromUrl}/${segment}`;
-      if (resolved) knownIdPaths.set(key, resolved);
-      const path = resolved ?? knownIdPaths.get(key) ?? null;
-      if (!cancelled) setIdResolved({ seg: segment, branch: branchFromUrl, path });
+      let lastKnown: string | null = null;
+      if (resolved) {
+        rememberIdPath(branchFromUrl, segment, resolved);
+      } else {
+        const known = knownIdPaths.get(key) ?? null;
+        if (known && openTabsRef.current.some((t) => t.path === known && t.deletedBy)) lastKnown = known;
+        else knownIdPaths.delete(key);
+      }
+      setIdResolved({ seg: segment, branch: branchFromUrl, path: resolved, lastKnown });
     })();
     return () => {
       cancelled = true;
     };
-  }, [segmentIsId, segment, branchFromUrl]);
+  }, [segmentIsId, segment, branchFromUrl, openTabsRef]);
 
   // ── Canonicalize a path URL → the node's id URL ──────────────────────────
   // Once the file is the active tab, look up its node id and replace the path
@@ -161,7 +192,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     let cancelled = false;
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
-      if (nodeId) knownIdPaths.set(`${branchFromUrl}/${nodeId}`, segment);
+      if (nodeId) rememberIdPath(branchFromUrl, nodeId, segment);
       if (!cancelled && nodeId) {
         navigate(kbNodeUrl(branchFromUrl, nodeId) + searchRef.current + location.hash, {
           replace: true,

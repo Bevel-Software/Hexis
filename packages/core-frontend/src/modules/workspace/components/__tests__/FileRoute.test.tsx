@@ -1351,4 +1351,87 @@ describe('FileRoute: a file deleted by someone else', () => {
     expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
     expect(screen.queryByText('File not found')).not.toBeInTheDocument();
   });
+
+  /** The id URL resolved to PATH once, while the file had that id. */
+  async function learnIdPath(id: string) {
+    routesMock.fetchNodeWorkspacePath.mockResolvedValueOnce(PATH);
+    const live = makeTab({ path: PATH, content: '# Draft' });
+    renderAt(`/workspace/main/${id}`, {
+      workspace: makeWorkspace({
+        openTabs: [live],
+        activeTab: live,
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+      }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+    await settle();
+    cleanup();
+  }
+
+  /**
+   * The branch now: PATH exists (moved id, or a new file there); nothing else
+   * does, so the id token read as a path is a 404, by hydration or by open.
+   */
+  const onlyPathExists = (): Partial<WorkspaceContextValue> => ({
+    hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async (paths) =>
+      makeHydrateResult({ surviving: paths.filter((p) => p === PATH), dropped: paths.filter((p) => p !== PATH) })),
+    addTab: vi.fn<WorkspaceContextValue['addTab']>(async (path) => {
+      if (path !== PATH) throw new WorkspaceApiError(404);
+      return true;
+    }),
+  });
+
+  it('an old id whose file now has another id says "File not found", not the file it used to name', async () => {
+    await learnIdPath('renamed_draft');
+    // The file is still at PATH, still open, under its new id.
+    const live = makeTab({ path: PATH, content: '# Draft under its new id' });
+    renderAt('/workspace/main/renamed_draft', {
+      workspace: makeWorkspace({ openTabs: [live], activeTab: live, ...onlyPathExists() }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+
+    expect(await screen.findByText('File not found')).toBeInTheDocument();
+    expect(screen.queryByText('# Draft under its new id')).not.toBeInTheDocument();
+  });
+
+  it("an old id whose deleted file's tab was closed says \"File not found\", not a new file at its path", async () => {
+    await learnIdPath('replaced_draft');
+    // Deleted, its tab closed, and a new file written at the same path.
+    const exists = onlyPathExists();
+    renderAt('/workspace/main/replaced_draft', {
+      workspace: makeWorkspace(exists),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+
+    expect(await screen.findByText('File not found')).toBeInTheDocument();
+    expect(vi.mocked(exists.addTab!).mock.calls.map(([path]) => path)).not.toContain(PATH);
+    expect(vi.mocked(exists.hydrateTabs!).mock.calls.flatMap(([paths]) => paths)).not.toContain(PATH);
+  });
+
+  it("an old id does not name a new file at its path once that file is deleted too", async () => {
+    await learnIdPath('reused_draft');
+    // A new file at PATH, opened, and canonicalised to its own id.
+    routesMock.fetchNodeId.mockResolvedValueOnce('new_draft');
+    const fresh = makeTab({ path: PATH, content: '# A new draft' });
+    renderAt(`/workspace/main/${PATH}`, {
+      workspace: makeWorkspace({
+        openTabs: [fresh],
+        activeTab: fresh,
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+      }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+    await waitFor(() => expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/new_draft'));
+    cleanup();
+
+    // Someone else deletes the new file; its tab holds the notice. The old id
+    // is not that file.
+    renderAt('/workspace/main/reused_draft', {
+      workspace: makeWorkspace({ openTabs: [deletedTab()], activeTab: deletedTab(), ...onlyPathExists() }),
+      git: makeGit({ status: makeStatus('main') }),
+    });
+
+    expect(await screen.findByText('File not found')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'This file was deleted' })).not.toBeInTheDocument();
+  });
 });
