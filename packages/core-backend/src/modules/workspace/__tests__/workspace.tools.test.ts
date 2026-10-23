@@ -1497,6 +1497,20 @@ describe('grep runs ripgrep', () => {
     expect(res.body.truncated).toBe(true);
   }, 20_000);
 
+  it('reads a file of millions of matching lines only as far as max_results, in a tree and named alone', async () => {
+    matcherOptions = { budgetMs: 1_500 };
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a/huge.md`, huge);
+    await fs.writeFile(`${KB_DIR}/b.md`, 'needle b\n');
+    const expected = Array.from({ length: 200 }, (_, i) => ({ path: `${KB_DIR}/a/huge.md`, line: i + 1, text: 'needle' }));
+    for (const path of [KB_DIR, `${KB_DIR}/a/huge.md`]) {
+      const res = await grep(base, { pattern: 'needle', path });
+      expect(res.status).toBe(200);
+      expect(res.body.matches).toEqual(expected);
+      expect(res.body.truncated).toBe(true);
+    }
+  }, 20_000);
+
   it('stops the search when its caller goes away, leaving no ripgrep running', async () => {
     const slow = await slowRipgrep();
     try {

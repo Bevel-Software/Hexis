@@ -5,6 +5,7 @@ import { MAX_TIMER_MS, sizingOption } from './worker-pool.js';
 import { ToolError } from '../tool-helpers/index.js';
 import { logger } from '../../shared/logging.js';
 import {
+  compareSearchPaths,
   type FileMatches,
   type IPatternMatcher,
   type IPatternSearch,
@@ -56,9 +57,6 @@ const WALK_ARGS = ['--hidden', '--no-ignore', '--no-follow', '--no-messages', '-
 
 /** Last among a walk's globs, so no extension a caller lets through can bring a `.git` folder back. */
 const NO_GIT = ['--iglob', '!.git'];
-
-/** How every `--json` match record begins: ripgrep writes `type` first. */
-const MATCH_RECORD = '{"type":"match"';
 
 /** How much of a refused run's stderr is kept. */
 const STDERR_CAP = 4_096;
@@ -183,15 +181,32 @@ class RipgrepSearch implements IPatternSearch {
     const under = scope.root === '.' ? '' : `${scope.root}/`;
     // Every name is checked before the first run, so none is half-searched.
     for (const p of opts.only) exactGlob(`${under}${p}`);
-    for (const walk of await realWalks(scope, walkPlan(opts.only))) {
-      const only = walk.paths.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
+    let only = opts.only;
+    while (only.length > 0) {
+      const capped = yield* this.walkFiles(scope, under, only, opts.maxLinesPerFile);
+      if (capped === null) return;
+      // ripgrep stopped reading the file at its cap, so a NUL past it went
+      // unseen: the file is read on for one, by a run of its own once the
+      // walk's has ended, and the walk goes on with the files after it.
+      if (!(await this.holdsNul(scope, under, capped.path))) yield capped;
+      only = only.filter((p) => compareSearchPaths(p, capped.path) > 0);
+    }
+  }
+
+  /**
+   * The walks of `only`, each file answered at its `end`, until one reaches
+   * `maxLinesPerFile` lines: the walk ends there, and that file is returned
+   * unanswered. `null` once every walk has finished.
+   */
+  private async *walkFiles(scope: TreeScope, under: string, only: readonly string[], maxLinesPerFile: number): AsyncGenerator<FileMatches, FileMatches | null> {
+    // `--max-count`: a file is read no further than the lines it may answer.
+    const cap = ['--max-count', String(maxLinesPerFile)];
+    for (const walk of await realWalks(scope, walkPlan(only))) {
+      const globs = walk.paths.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
       const depth = walk.ownFilesOnly ? ['--max-depth', '1'] : [];
-      const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...depth, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...walk.folders];
+      const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...depth, ...cap, ...globs, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...walk.folders];
       let current: FileMatches | null = null;
       for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
-        // A file that has given all the lines it may answer: the rest of its
-        // matches are only waited through, never parsed, until its `end`.
-        if (current !== null && current.lines.length >= opts.maxLinesPerFile && record.startsWith(MATCH_RECORD)) continue;
         const event = parseEvent(record);
         if (event === null) continue;
         if (event.type === 'begin') {
@@ -200,7 +215,7 @@ class RipgrepSearch implements IPatternSearch {
         } else if (event.type === 'match' && current !== null) {
           const text = textOf(event.data?.lines);
           const line = event.data?.line_number;
-          if (text !== null && typeof line === 'number' && current.lines.length < opts.maxLinesPerFile) {
+          if (text !== null && typeof line === 'number' && current.lines.length < maxLinesPerFile) {
             current.lines.push({ line, text: withoutNewline(text) });
           }
         } else if (event.type === 'end' && current !== null) {
@@ -208,11 +223,27 @@ class RipgrepSearch implements IPatternSearch {
           // it matched before the NUL is dropped with the rest. That is known
           // only here, so a file is answered at its end and not before.
           const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
+          if (!binary && current.lines.length >= maxLinesPerFile) return current;
           if (!binary && current.lines.length > 0) yield current;
           current = null;
         }
       }
     }
+    return null;
+  }
+
+  /**
+   * Whether `path` (relative to the root) holds a NUL anywhere, read by a walk
+   * of its own, which follows no link and stops at the first NUL.
+   */
+  private async holdsNul(scope: TreeScope, under: string, path: string): Promise<boolean> {
+    for (const walk of await realWalks(scope, walkPlan([path]))) {
+      const depth = walk.ownFilesOnly ? ['--max-depth', '1'] : [];
+      const glob = ['--glob', exactGlob(`${under}${path}`)];
+      const args = [...BASE_ARGS, '--files-with-matches', ...WALK_ARGS, ...depth, ...glob, ...NO_GIT, '--text', '-e', '\\x00', '--', ...walk.folders];
+      for await (const record of this.run(args, scope.cwd, undefined, '\n')) if (record.length > 0) return true;
+    }
+    return false;
   }
 
   async list(scope: TreeScope): Promise<string[]> {

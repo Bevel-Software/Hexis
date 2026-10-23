@@ -45,7 +45,11 @@ export interface TreeSearchOptions {
    * holding a line break cannot be named to ripgrep exactly and is refused.
    */
   only: readonly string[];
-  /** The most lines one file answers; the lines past it are neither kept nor parsed. */
+  /**
+   * The most lines one file answers: matching stops at it, so a file of
+   * millions of matching lines costs its first few and one look for a NUL
+   * in the rest, not a record for every line.
+   */
   maxLinesPerFile: number;
 }
 

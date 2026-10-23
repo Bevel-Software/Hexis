@@ -200,6 +200,19 @@ describe('RipgrepPatternMatcher', () => {
     ]);
   });
 
+  it('reads a file no further than its cap, yet drops it when a NUL lies past the cap', async () => {
+    // Past ripgrep's first buffer, so the walk that stops at the cap never reaches the NUL.
+    const lines = 'needle\n'.repeat(500_000);
+    await put('kb/a.md', Buffer.concat([Buffer.from(lines), Buffer.from([0]), Buffer.from('needle\n')]));
+    await put('kb/b.md', lines);
+    await put('kb/c.md', 'x\nneedle c\n');
+    const files = await all(await search('needle'), [], { maxLinesPerFile: 2 });
+    expect(files).toEqual([
+      { path: 'b.md', lines: [1, 2].map((line) => ({ line, text: 'needle' })) },
+      { path: 'c.md', lines: [{ line: 2, text: 'needle c' }] },
+    ]);
+  });
+
   it('walks only the folders holding the files it is given, a folder\'s own files without its subfolders, in the order one walk of the root would', async () => {
     for (const p of ['A/x/1.md', 'A/y/0.md', 'B/2.md', 'C/y/3.md', 'C/z/9.md', 'T/a/1.md', 'T/a/2.md', 'T/b/3.md', 'top.md', 'U/u.md']) {
       await put(`kb/${p}`, 'needle\n');
