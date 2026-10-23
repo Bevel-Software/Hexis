@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   LIBRARY_ROOT,
+  deleteTookLibraryItem,
   libraryFilterForPath,
   libraryHomeForItemPath,
   pathForLibraryFilter,
@@ -71,5 +73,29 @@ describe('libraryHomeForItemPath', () => {
 
   it('sends a shared skill to the root, which is Everything', () => {
     expect(libraryHomeForItemPath('Skills/Eng/deploy', null)).toEqual({ label: 'Everything', path: LIBRARY_ROOT });
+  });
+});
+
+describe('deleteTookLibraryItem', () => {
+  const ITEM_PAGE = `/workspace/${DEFAULT_BRANCH}/Knowledge/Plugins/GTM/web-search.tool`;
+  const SKILL = 'Knowledge/Skills/Sales/discovery-call';
+  const page = (path: string) => `/workspace/${DEFAULT_BRANCH}/${path}`;
+
+  it("is true for the skill's folder, and for the file on screen itself", () => {
+    expect(deleteTookLibraryItem(page(`${SKILL}/SKILL.md`), 'Knowledge', SKILL)).toBe(true);
+    expect(deleteTookLibraryItem(page(`${SKILL}/SKILL.md`), 'Knowledge', `${SKILL}/SKILL.md`)).toBe(true);
+    expect(deleteTookLibraryItem(ITEM_PAGE, 'Knowledge', 'Knowledge/Plugins/GTM')).toBe(true);
+  });
+
+  it("is true for the skill's SKILL.md while one of its other files is on screen", () => {
+    expect(deleteTookLibraryItem(page(`${SKILL}/checklist.md`), 'Knowledge', `${SKILL}/SKILL.md`)).toBe(true);
+  });
+
+  it('is false for another item, a sibling sharing a prefix, or a page outside the Library', () => {
+    expect(deleteTookLibraryItem(page(`${SKILL}/SKILL.md`), 'Knowledge', 'Knowledge/Skills/Sales/other')).toBe(false);
+    expect(deleteTookLibraryItem(page(`${SKILL}-v2/SKILL.md`), 'Knowledge', SKILL)).toBe(false);
+    expect(deleteTookLibraryItem(page(`${SKILL}/checklist.md`), 'Knowledge', `${SKILL}/checklist.md.bak`)).toBe(false);
+    expect(deleteTookLibraryItem('/workspace/feature/Knowledge/Draft.md', 'Knowledge', 'Knowledge/Draft.md')).toBe(false);
+    expect(deleteTookLibraryItem('/skills-and-tools', 'Knowledge', SKILL)).toBe(false);
   });
 });

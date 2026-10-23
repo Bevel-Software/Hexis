@@ -15,6 +15,7 @@ import {
 } from '../../change-requests';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
+  DeleteEntryResult,
   HydrateResult,
   OpenTab,
   PendingEntry,
@@ -40,6 +41,7 @@ import {
   WorkspaceApiError,
 } from '../services/workspace.api';
 import { contentChanged } from '../utils/diff';
+import { threeWayMerge } from '../utils/three-way-merge';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
 import { traceFiles } from '../utils/file-trace';
@@ -52,6 +54,12 @@ const PERSIST_DEBOUNCE_MS = 200;
 // balance: responsive without monopolizing the browser's HTTP/1.1 connection
 // budget or stressing the lock service.
 const UPLOAD_CONCURRENCY = 4;
+// How long a tree refresh trusts a read that found an open tab's file,
+// missing from the tree, still there — see `treeAbsentCheckedAtRef`.
+const TREE_ABSENT_RECHECK_MS = 30_000;
+// How long a path this session deleted still counts as its own delete — see
+// `isOwnDelete`: the change events a delete causes can trail its answer.
+const OWN_DELETE_WINDOW_MS = 60_000;
 const UNSAVED_TAB_WARNING = (filename: string) =>
   `You have unsaved changes in ${filename}. Close anyway?`;
 const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
@@ -70,6 +78,43 @@ function basename(path: string): string {
  * id, and the pair can never come apart mid-switch. `requested` is only the
  * fallback for a malformed id.
  */
+/** A file in one workspace: the same path on another branch is another file. */
+function existenceKey(workspaceId: string, path: string): string {
+  return `${workspaceId}\u0000${path}`;
+}
+
+/**
+ * What the existence reads in flight for a file answered: the number of the
+ * newest that found it gone, and the newest that found it, with its bytes.
+ */
+interface ExistenceAnswer {
+  goneAt: number | null;
+  found: { seq: number; bytes: string } | null;
+}
+
+/**
+ * A tab whose edits a commit pulled from the git host replaced: it shows the
+ * pulled bytes, clean, and says whether the edits were discarded (or held by
+ * the pull already, `null`). The editor reloads its buffer.
+ */
+function takePulledOverEdits(tab: OpenTab, pulled: string, changedOnBranch: 'discarded' | null): OpenTab {
+  return {
+    ...tab,
+    content: pulled,
+    savedContent: pulled,
+    isDirty: false,
+    changedOnBranch,
+    remoteRevision: (tab.remoteRevision ?? 0) + 1,
+  };
+}
+
+/** The newer of two optional answers, by read number. */
+function newestOf<T>(a: T | null, b: T | null, seqOf: (x: T) => number): T | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return seqOf(a) >= seqOf(b) ? a : b;
+}
+
 function workspaceBranchOf(workspaceId: string, requested: string | undefined): string {
   try {
     return decodeURIComponent(workspaceId);
@@ -266,6 +311,121 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * optimistic state stays stable until the delete finishes.
    */
   const pendingDeletePathsRef = useRef<Set<string>>(new Set());
+  /**
+   * Paths this session deleted, with when the server confirmed it — see
+   * `isOwnDelete`. Kept OWN_DELETE_WINDOW_MS, long enough for the change
+   * events the delete caused to arrive after the request answered.
+   */
+  const ownDeletesRef = useRef<Map<string, number>>(new Map());
+  /**
+   * Open tabs whose file someone else deleted (`OpenTab.deletedBy`), as a
+   * ref so `saveFile` can refuse a write-back synchronously — the state that
+   * marks the tab lands a render after the editor's unmount cleanup reads it.
+   * A path leaves the set when its tab closes or the file is read again.
+   */
+  const deletedPathsRef = useRef<Set<string>>(new Set());
+  /**
+   * Reads in flight that decide whether an open tab's file still exists (a
+   * `file-changed` refetch, a tree refresh's check), by workspace and path
+   * (`existenceKey`), each settling
+   * to an `ExistenceAnswer`: the number of the latest read that found the
+   * file gone (a 404), and the bytes the latest read that found it read.
+   * The tab is marked deleted only when
+   * the read settles; `saveFile` waits on it first, so an editor unmounting
+   * meanwhile (a tab switch, the tab closing) cannot write the file back in
+   * the window between the delete and the read that learns of it.
+   */
+  const existenceChecksRef = useRef<Map<string, Promise<ExistenceAnswer>>>(new Map());
+  /**
+   * When a tree refresh last read an open tab's file, missing from the tree,
+   * and found it there after all (a file the tree leaves out: access-pruned,
+   * `.bevelignore`d), by workspace and path (`existenceKey`). Refreshes run on every change event; within
+   * `TREE_ABSENT_RECHECK_MS` of that read they do not read it again.
+   */
+  const treeAbsentCheckedAtRef = useRef<Map<string, number>>(new Map());
+  /**
+   * Tracked reads are numbered in the order they were issued. By workspace
+   * and path, the number of the latest-issued read that answered 404 — a
+   * 404 from the branch just left says nothing about this one's file: a read issued before
+   * it that finds the file answers late, about a file since deleted, and
+   * must not undo the delete (see `isStaleFind`).
+   */
+  const existenceReadSeqRef = useRef(0);
+  const goneAtSeqRef = useRef<Map<string, number>>(new Map());
+  /**
+   * By workspace and path, the number of the latest-issued read whose bytes
+   * became the open tab's saved content (`applyReadBytes`, the
+   * `file-changed` handler, the reads of `addTab` and `hydrateTabs` that
+   * opened it), or of a write that completed (`markWritten`: a save of ours,
+   * a reverted or an accepted agent change). A read issued before it answers
+   * late with older bytes, and must not replace what that newer read or write
+   * brought; nor does its 404 mark the tab deleted (`applyReadGone`). A read
+   * that left the tab alone (unsaved edits, a pending preview) does not count:
+   * the `file-changed` read after it still has to merge its bytes into the
+   * edits.
+   */
+  const landedAtSeqRef = useRef<Map<string, number>>(new Map());
+  const isStaleLanding = useCallback(
+    (readFrom: string, path: string, seq: number) =>
+      (landedAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
+    [],
+  );
+  const markLanded = useCallback((readFrom: string, path: string, seq: number) => {
+    const key = existenceKey(readFrom, path);
+    if ((landedAtSeqRef.current.get(key) ?? -1) < seq) landedAtSeqRef.current.set(key, seq);
+  }, []);
+  /**
+   * A write of this tab's completed: its bytes are now the saved content, and
+   * every read issued before it may hold what the disk had before the write.
+   * Numbered as if it were a read issued now, so those reads land on nothing.
+   */
+  const markWritten = useCallback((readFrom: string, path: string) => {
+    markLanded(readFrom, path, ++existenceReadSeqRef.current);
+  }, [markLanded]);
+  const isStaleFind = useCallback(
+    (readFrom: string, path: string, seq: number) =>
+      (goneAtSeqRef.current.get(existenceKey(readFrom, path)) ?? -1) > seq,
+    [],
+  );
+  const trackExistenceCheck = useCallback((readFrom: string, path: string, read: Promise<string>): number => {
+    const seq = ++existenceReadSeqRef.current;
+    const key = existenceKey(readFrom, path);
+    const thisAnswer = read.then(
+      (bytes): ExistenceAnswer => ({ goneAt: null, found: { seq, bytes } }),
+      (err: unknown): ExistenceAnswer => {
+        // A 404 older than bytes or a write that landed since is about a
+        // file since re-created: it refuses no save (see `applyReadGone`).
+        const isGone = err instanceof WorkspaceApiError && err.status === 404
+          && !isStaleLanding(readFrom, path, seq);
+        if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
+        return { goneAt: isGone ? seq : null, found: null };
+      },
+    );
+    // A read already in flight for the path still counts: the check answers
+    // "gone" if ANY of them finds the file gone, so a later read that finds
+    // it cannot let a save through past an earlier one's 404. It answers with
+    // that 404's read number rather than a verdict, so bytes or a write that
+    // land while a later read is still out retire it (`isCheckGone`); and
+    // with the bytes the newest read found, which a waiting save merges onto.
+    const earlier = existenceChecksRef.current.get(key);
+    const answer = earlier
+      ? Promise.all([earlier, thisAnswer]).then(([a, b]): ExistenceAnswer => ({
+        goneAt: newestOf(a.goneAt, b.goneAt, (n) => n),
+        found: newestOf(a.found, b.found, (f) => f.seq),
+      }))
+      : thisAnswer;
+    existenceChecksRef.current.set(key, answer);
+    void answer.then(() => {
+      if (existenceChecksRef.current.get(key) === answer) existenceChecksRef.current.delete(key);
+    });
+    return seq;
+  }, [isStaleLanding]);
+  /** An existence check's answer (`trackExistenceCheck`) still says gone: no bytes or write landed after its 404. */
+  const isCheckGone = useCallback(
+    (readFrom: string, path: string, answer: ExistenceAnswer) =>
+      answer.goneAt !== null && !isStaleLanding(readFrom, path, answer.goneAt),
+    [isStaleLanding],
+  );
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
@@ -276,12 +436,48 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * workspaceId it was started with against this before touching state.
    */
   const workspaceIdRef = useRef<string | null>(workspaceId);
+  /**
+   * Put the bytes of a refresh read (`activateTab`, `reloadTabFromDisk`, the
+   * eager refetch, `lock-released`) into the open tab, under the one policy
+   * they share. Nothing lands when the workspace moved on, when a read issued
+   * after this one (`seq`, from `trackExistenceCheck`) found the file gone
+   * or already landed its bytes (they are newer than these), or when the tab,
+   * as it is NOW, was marked deleted, holds unsaved edits or a pending agent
+   * preview: newer state always wins over a late answer.
+   * `stillApplies` adds a caller's own check on the tab as it is now.
+   */
+  const applyReadBytes = useCallback((
+    readFrom: string,
+    path: string,
+    seq: number,
+    content: string,
+    stillApplies?: (tab: OpenTab) => boolean,
+  ) => {
+    if (workspaceIdRef.current !== readFrom) return;
+    if (isStaleFind(readFrom, path, seq)) return;
+    setOpenTabs((tabs) => tabs.map((t) => {
+      if (t.path !== path) return t;
+      if (isStaleLanding(readFrom, path, seq)) return t;
+      if (t.deletedBy || t.isDirty || t.pendingFileContent !== null) return t;
+      if (stillApplies && !stillApplies(t)) return t;
+      markLanded(readFrom, path, seq);
+      // Same bytes: skip a re-render that would briefly unmount the renderer.
+      if (content === t.content && content === t.savedContent) return t;
+      return { ...t, content, savedContent: content, isDirty: false, pendingFileContent: null };
+    }));
+  }, [isStaleFind, isStaleLanding, markLanded]);
   // Unsaved-work questions are asked in the app's own dialog and awaited.
   const confirm = useConfirm();
   // Paths whose close is waiting on that question: a second close of the same
   // tab while it is asked must not queue the same question twice.
   const askingClosePathsRef = useRef(new Set<string>());
-  useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+    // A closed tab's file is nobody's to guard any more.
+    for (const path of deletedPathsRef.current) {
+      if (!openTabs.some((t) => t.path === path)) deletedPathsRef.current.delete(path);
+    }
+  }, [openTabs]);
   useEffect(() => { activeTabPathRef.current = activeTabPath; }, [activeTabPath]);
   useEffect(() => { fileTreeRef.current = fileTree; }, [fileTree]);
   useEffect(() => { persistenceBranchRef.current = persistenceBranch; }, [persistenceBranch]);
@@ -383,6 +579,90 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setBootstrapAttempt((n) => n + 1);
   }, []);
 
+  /**
+   * A path this session is deleting right now — itself, or under a folder
+   * being deleted. Its tab is closed by `deleteEntry` once the server
+   * confirms, so nothing else may read its 404 as someone else's delete.
+   */
+  const isPendingDelete = useCallback((path: string) => {
+    for (const pending of pendingDeletePathsRef.current) {
+      if (path === pending || path.startsWith(pending + '/')) return true;
+    }
+    return false;
+  }, []);
+
+  /** In flight, or deleted by this session a moment ago — see the context's `isOwnDelete`. */
+  const isOwnDelete = useCallback((path: string) => {
+    if (isPendingDelete(path)) return true;
+    const now = Date.now();
+    for (const [deleted, at] of ownDeletesRef.current) {
+      if (now - at > OWN_DELETE_WINDOW_MS) {
+        ownDeletesRef.current.delete(deleted);
+        continue;
+      }
+      if (path === deleted || path.startsWith(deleted + '/')) return true;
+    }
+    return false;
+  }, [isPendingDelete]);
+
+  /**
+   * `path` was read back: it exists again, so a marker covering it no longer
+   * describes the branch — a later 404 on it is a new delete, not ours.
+   * `readIssuedAt`: when the read that found it was sent. A read sent before
+   * the delete answered found the file as it was before it; that marker stays,
+   * or a save still waiting would re-create the file (`awaitStillOnBranch`).
+   */
+  const forgetOwnDelete = useCallback((path: string, readIssuedAt?: number) => {
+    for (const [deleted, at] of ownDeletesRef.current) {
+      if (readIssuedAt !== undefined && at >= readIssuedAt) continue;
+      if (path === deleted || path.startsWith(deleted + '/')) ownDeletesRef.current.delete(deleted);
+    }
+  }, []);
+
+  /**
+   * Someone else deleted the file of the open tab at `path`. The tab stays,
+   * with its content and unsaved edits, and the file page shows the deleted
+   * notice for it. A name already learned is kept: later signals (a tree
+   * refresh, a re-read, another event) never replace it.
+   */
+  const markTabDeleted = useCallback((path: string, name: string | null) => {
+    if (isPendingDelete(path)) return;
+    // Synchronously, before the state that unmounts the editor: its lock
+    // cleanup writes the buffer back, and that write must find the file
+    // already known to be gone (see `saveFile`).
+    if (openTabsRef.current.some((t) => t.path === path)) deletedPathsRef.current.add(path);
+    setOpenTabs((prev) => {
+      const idx = prev.findIndex((t) => t.path === path);
+      if (idx < 0) return prev;
+      const tab = prev[idx];
+      // The first event to name someone is the delete; later ones (an echo of a
+      // lock release, a re-read) do not rename who did it.
+      const nextName = tab.deletedBy?.name ?? name;
+      if (tab.deletedBy && tab.deletedBy.name === nextName) return prev;
+      const next = prev.slice();
+      // An agent version awaiting review stays on the tab with the unsaved
+      // edits: the notice offers to copy it, as the file it was for is gone.
+      next[idx] = { ...tab, deletedBy: { name: nextName, at: tab.deletedBy?.at ?? Date.now() } };
+      return next;
+    });
+  }, [isPendingDelete]);
+  /**
+   * A tracked read (`seq`, from `trackExistenceCheck`) answered 404 for an
+   * open tab: mark it deleted, under the one policy every such read shares,
+   * the counterpart of `applyReadBytes` for the answer "gone". Nothing is
+   * marked when the workspace moved on, or when bytes or a write landed after
+   * this read was issued (the tab closed and opened again, restored,
+   * reloaded, saved; `isStaleLanding`): the file is there, and this 404 is
+   * about a file since re-created. A newer read that only FOUND the file,
+   * leaving a dirty tab alone, does not outrank it: the server may have
+   * answered that one before the delete and this one after.
+   */
+  const applyReadGone = useCallback((readFrom: string, path: string, seq: number, name: string | null) => {
+    if (workspaceIdRef.current !== readFrom) return;
+    if (isStaleLanding(readFrom, path, seq)) return;
+    markTabDeleted(path, name);
+  }, [isStaleLanding, markTabDeleted]);
+
   const refreshFileTree = useCallback(async () => {
     if (!workspaceId) return null;
     try {
@@ -394,12 +674,36 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         if (pruned) tree = pruned;
       }
       setFileTree(tree);
+      // An open tab whose file the tree no longer holds may have been
+      // deleted by someone else without a `file-changed` naming it (a folder
+      // delete past the event cap, a pull from the git host). The tree is not
+      // proof — a read is: only a 404 marks the tab.
+      if (workspaceIdRef.current === workspaceId) {
+        const present = collectPaths(tree);
+        for (const tab of openTabsRef.current) {
+          if (present.has(tab.path) || tab.deletedBy || isPendingDelete(tab.path)) continue;
+          if (existenceChecksRef.current.has(existenceKey(workspaceId, tab.path))) continue;
+          const absentKey = existenceKey(workspaceId, tab.path);
+          const checkedAt = treeAbsentCheckedAtRef.current.get(absentKey);
+          if (checkedAt !== undefined && Date.now() - checkedAt < TREE_ABSENT_RECHECK_MS) continue;
+          const readFrom = workspaceId;
+          const read = readFile(readFrom, tab.path);
+          const seq = trackExistenceCheck(readFrom, tab.path, read);
+          read.then(
+            () => treeAbsentCheckedAtRef.current.set(absentKey, Date.now()),
+            () => treeAbsentCheckedAtRef.current.delete(absentKey),
+          );
+          read.catch((err) => {
+            if (err instanceof WorkspaceApiError && err.status === 404) applyReadGone(readFrom, tab.path, seq, null);
+          });
+        }
+      }
       return tree;
     } catch (err) {
       console.error('Failed to refresh file tree:', err);
       return null;
     }
-  }, [workspaceId]);
+  }, [workspaceId, isPendingDelete, applyReadGone, trackExistenceCheck]);
 
   // ── Tab CRUD ──────────────────────────────────────────────────────────────
 
@@ -422,7 +726,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // If the tab's content was invalidated (fsRevision bump), refetch in the
     // background so the renderer shows fresh bytes. The renderer's existing
     // null-content guard renders an empty/loading state until content arrives.
-    if (tab.content === null && workspaceId) {
+    // A tab already known to be deleted has nothing to read.
+    if (tab.content === null && workspaceId && !tab.deletedBy) {
       const path = tab.path;
       // The same guard the eager refetch and `addTab` carry: a switch while
       // this read is in flight clears the strip, and a tab of the SAME path
@@ -430,25 +735,33 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // 403 — is about the branch that was left, so it must neither overwrite
       // that tab nor close it.
       const readFrom = workspaceId;
-      readFile(readFrom, path).then((content) => {
-        if (workspaceIdRef.current !== readFrom) return;
-        setOpenTabs((prev) => prev.map((t) => (
-          t.path === path ? { ...t, content, savedContent: content } : t
-        )));
+      const read = readFile(readFrom, path);
+      // A save of this path while the read is in flight (the editor writing
+      // back as it unmounts) waits on its answer, as for every read here
+      // that can learn the file is gone.
+      const seq = trackExistenceCheck(readFrom, path, read);
+      // A newer read may have loaded the tab, the person typed, and a later
+      // read found the file gone, all before this one answers: its bytes
+      // must not replace the edits the notice keeps.
+      read.then((content) => {
+        applyReadBytes(readFrom, path, seq, content);
       }).catch((err) => {
         if (workspaceIdRef.current !== readFrom) return;
-        if (
-          err instanceof WorkspaceApiError &&
-          (err.status === 404 || err.status === 403)
-        ) {
-          // File vanished (404) or read access was revoked (403) — auto-close.
+        if (err instanceof WorkspaceApiError && err.status === 404) {
+          // The file vanished while this tab sat in the background. Closing
+          // it here would move the active tab under an address that still
+          // names this file — the page would wait on it for good. Say what
+          // happened instead; Close is the person's.
+          applyReadGone(readFrom, path, seq, null);
+        } else if (err instanceof WorkspaceApiError && err.status === 403) {
+          // Read access was revoked — auto-close.
           dropTabByPath(path);
         } else {
           console.error('Failed to refetch tab content:', err);
         }
       });
     }
-  }, [workspaceId, dropTabByPath]);
+  }, [workspaceId, dropTabByPath, applyReadGone, trackExistenceCheck, applyReadBytes]);
 
   const addTab = useCallback(async (relativePath: string): Promise<boolean> => {
     if (!workspaceId) return false;
@@ -467,6 +780,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return true;
     }
     const requestId = ++addRequestIdRef.current;
+    // Numbered like a refresh read: once its bytes open the tab, a refresh
+    // read issued before it (for a tab since closed) lands on nothing.
+    const seq = ++existenceReadSeqRef.current;
+    const issuedAt = Date.now();
     try {
       const content = await readFile(workspaceId, relativePath);
       // A read that outlived its workspace belongs to another branch's tab
@@ -475,6 +792,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         traceFiles('add-tab:stale-workspace', { path: relativePath, readFrom: workspaceId, now: workspaceIdRef.current });
         return false;
       }
+      // The file is there (restored since our delete): saving it is not
+      // re-creating it. A read sent before the delete answered keeps it.
+      forgetOwnDelete(relativePath, issuedAt);
       const isLatest = requestId === addRequestIdRef.current;
       // Re-check dedup in case of races during the await.
       const stillExisting = openTabsRef.current.find((t) => t.path === relativePath);
@@ -493,9 +813,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       };
       // Race-safe append: a parallel addTab for the same path may have inserted
       // the tab between the dedup check above and this setter.
-      setOpenTabs((prev) => (
-        prev.some((t) => t.path === relativePath) ? prev : [...prev, newTab]
-      ));
+      setOpenTabs((prev) => {
+        if (prev.some((t) => t.path === relativePath)) return prev;
+        markLanded(workspaceId, relativePath, seq);
+        return [...prev, newTab];
+      });
       if (isLatest) setActiveTabPath(relativePath);
       return true;
     } catch (err) {
@@ -511,7 +833,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       console.error('Failed to read file:', err);
       throw err;
     }
-  }, [workspaceId, activateTab]);
+  }, [workspaceId, activateTab, markLanded, forgetOwnDelete]);
 
   const closeTab = useCallback(async (
     tab: OpenTab,
@@ -601,7 +923,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const requestId = ++addRequestIdRef.current;
     const hydrateId = ++hydrateRequestIdRef.current;
 
-    if (uniqPaths.length === 0) {
+    // The strip already holds this key's tabs: the route remounted (Knowledge
+    // left for another page and back), it did not open the branch. A tab whose
+    // file someone else deleted, with unsaved edits or with an agent's change
+    // awaiting review, is the only copy of what it holds — the deleted notice,
+    // Copy edits and Copy agent's version read it until Close —
+    // so it stays as it is, whatever its read answered, unless the read is a
+    // 403: a file this person may no longer read closes like any other.
+    const openTabsNow = () =>
+      hydratedKey !== null && hydratedKeyRef.current === hydratedKey
+        ? new Map(openTabsRef.current.map((t) => [t.path, t]))
+        : new Map<string, OpenTab>();
+    const liveTabsNow = () =>
+      new Map([...openTabsNow()].filter(([, t]) => t.deletedBy || t.isDirty || t.pendingFileContent !== null));
+    // Read them too, even when the persisted list has not caught up with them
+    // (or is empty), so the 403 rule below holds for every tab kept.
+    const readPaths = [...uniqPaths, ...[...liveTabsNow().keys()].filter((p) => !uniqPaths.includes(p))];
+
+    if (readPaths.length === 0) {
       setOpenTabs([]);
       setActiveTabPath(null);
       hydratedKeyRef.current = hydratedKey;
@@ -609,82 +948,155 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
 
     // Fetch every path in parallel. 404s are silently dropped (file no longer
-    // on this branch); 403s are dropped too — a persisted tab the user can no
+    // on this branch) — except on a remount for a tab still open, which stays
+    // and shows the deleted notice, as every other read of an open tab that
+    // finds it gone does (`applyReadGone`); 403s are dropped too — a persisted tab the user can no
     // longer read auto-closes rather than erroring the whole hydrate into a
     // retry loop — but reported separately so a denied DEEPLINK can surface an
     // access message instead of "file not found". Other errors throw so the
     // caller can show "file-load-failed".
-    const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
-    // The strip is no longer this hydration's to write: the workspace moved to
-    // another branch, or a newer restore started while these reads were in
-    // flight. Report what we read so the caller can still classify its
-    // deeplink, but touch nothing — and tell the caller, so it doesn't record
-    // a hydration that never landed.
-    const superseded =
-      workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
-    // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
-    // strip: its file still has to sit alongside the restored ones.
-    const outranked = requestId !== addRequestIdRef.current;
-    const survivors: OpenTab[] = [];
-    const surviving: string[] = [];
-    const dropped: string[] = [];
-    const denied: string[] = [];
-    for (let i = 0; i < uniqPaths.length; i++) {
-      const path = uniqPaths[i];
-      const res = results[i];
-      if (res.status === 'fulfilled') {
-        survivors.push({
-          path,
-          content: res.value,
-          savedContent: res.value,
-          isDirty: false,
-          pendingFileContent: null,
-        });
-        surviving.push(path);
-      } else {
-        const err = res.reason;
-        if (err instanceof WorkspaceApiError && err.status === 404) {
-          dropped.push(path);
-        } else if (err instanceof WorkspaceApiError && err.status === 403) {
+    // Numbered like refresh reads, so one issued before them lands on nothing
+    // once these bytes open the tabs. A read of a tab already open is an
+    // existence check like any other (`trackExistenceCheck`): a save or a
+    // Reject waits on it, so it cannot re-create a file its 404 is about to
+    // report gone. Each check answers only once this hydration has applied
+    // every read, not when its own read settles: the tabs are marked deleted
+    // after the slowest read, and a save starting in between would find no
+    // check to wait on and nothing marked yet.
+    const issuedAt = Date.now();
+    const openAtStart = new Set(openTabsRef.current.map((t) => t.path));
+    const reads = readPaths.map((p) => readFile(workspaceId, p));
+    let releaseChecks!: () => void;
+    const applied = new Promise<void>((resolve) => { releaseChecks = resolve; });
+    const seqs = readPaths.map((p, i) => (openAtStart.has(p)
+      ? trackExistenceCheck(workspaceId, p, applied.then(() => reads[i]))
+      : ++existenceReadSeqRef.current));
+    try {
+      const results = await Promise.allSettled(reads);
+      // The strip is no longer this hydration's to write: the workspace moved to
+      // another branch, or a newer restore started while these reads were in
+      // flight. Report what we read so the caller can still classify its
+      // deeplink, but touch nothing — and tell the caller, so it doesn't record
+      // a hydration that never landed.
+      const superseded =
+        workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
+      // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
+      // strip: its file still has to sit alongside the restored ones.
+      const outranked = requestId !== addRequestIdRef.current;
+      // As they are now: a tab may have been edited or marked while reads ran.
+      const liveTabs = liveTabsNow();
+      // On a remount, the other tabs still open: clean ones. Their reads land
+      // under the same order every refresh read obeys (`applyReadBytes`): bytes
+      // or a write that landed after this read was issued are newer than its
+      // answer, and a read issued after it that found the file gone outranks
+      // its find. Such a tab is kept as it is now.
+      const openNow = openTabsNow();
+      const survivors: OpenTab[] = [];
+      const surviving: string[] = [];
+      const landed: { path: string; seq: number }[] = [];
+      const dropped: string[] = [];
+      const denied: string[] = [];
+      // Open tabs kept whose read found the file gone: marked deleted below.
+      const goneLive: { path: string; seq: number }[] = [];
+      for (let i = 0; i < readPaths.length; i++) {
+        const path = readPaths[i];
+        const res = results[i];
+        const live = liveTabs.get(path);
+        if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 403) {
+          // Denied first: no longer readable, so nothing of it is kept.
+          liveTabs.delete(path);
           denied.push(path);
+        } else if (live) {
+          liveTabs.delete(path);
+          survivors.push(live);
+          surviving.push(path);
+          if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 404) {
+            goneLive.push({ path, seq: seqs[i] });
+          }
+        } else if (res.status === 'fulfilled' && openNow.has(path)
+          && (isStaleLanding(workspaceId, path, seqs[i]) || isStaleFind(workspaceId, path, seqs[i]))) {
+          survivors.push(openNow.get(path)!);
+          surviving.push(path);
+        } else if (res.status === 'fulfilled') {
+          survivors.push({
+            path,
+            content: res.value,
+            savedContent: res.value,
+            isDirty: false,
+            pendingFileContent: null,
+          });
+          surviving.push(path);
+          landed.push({ path, seq: seqs[i] });
+          // Found on this branch: an own delete it outlived is over, as in addTab.
+          if (workspaceIdRef.current === workspaceId) forgetOwnDelete(path, issuedAt);
         } else {
-          // Surface the first unexpected failure so the route can show
-          // "file-load-failed" rather than misleading "file-missing".
-          throw err;
+          const err = res.reason;
+          if (err instanceof WorkspaceApiError && err.status === 404 && openNow.has(path)) {
+            // Open and clean: deleted while the route was away. The notice says
+            // so; dropping the tab would show "File not found" instead.
+            survivors.push(openNow.get(path)!);
+            surviving.push(path);
+            goneLive.push({ path, seq: seqs[i] });
+          } else if (err instanceof WorkspaceApiError && err.status === 404) {
+            dropped.push(path);
+          } else if (err instanceof WorkspaceApiError && err.status === 403) {
+            denied.push(path);
+          } else {
+            // Surface the first unexpected failure so the route can show
+            // "file-load-failed" rather than misleading "file-missing".
+            throw err;
+          }
         }
       }
-    }
 
-    if (superseded) {
-      traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
-      return { surviving, dropped, denied, superseded: true };
-    }
+      if (superseded) {
+        traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
+        return { surviving, dropped, denied, superseded: true };
+      }
 
-    if (outranked) {
-      // Merge instead of replace: the newer open's tab stays (it may not even
-      // be in `prev` yet — `addTab` appends with its own race-safe setter, so
-      // it lands on top of this list), and the restored tabs join it in their
-      // persisted order. Activation is left alone; the newer open is the
-      // user's latest intent and has already claimed it.
-      traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
-      const restored = new Set(surviving);
-      setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path))]);
-      // Still a completed restore for this key: the strip now holds this
-      // branch's tabs, so persistence may resume. Leaving the marker unset was
-      // what stopped this branch's tabs from ever being written again.
+      // Live tabs that became so while the reads ran stay too.
+      for (const [path, live] of liveTabs) {
+        survivors.push(live);
+        surviving.push(path);
+      }
+      landed.forEach(({ path, seq }) => markLanded(workspaceId, path, seq));
+
+      if (outranked) {
+        // Merge instead of replace: the newer open's tab stays (it may not even
+        // be in `prev` yet — `addTab` appends with its own race-safe setter, so
+        // it lands on top of this list), and the restored tabs join it in their
+        // persisted order. Activation is left alone; the newer open is the
+        // user's latest intent and has already claimed it.
+        traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
+        const restored = new Set(surviving);
+        // A denied tab leaves `prev` too: the open that outranked this restore
+        // only activated it, and its content may no longer be shown.
+        const gone = new Set(denied);
+        setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path) && !gone.has(t.path))]);
+        if (activeTabPathRef.current !== null && gone.has(activeTabPathRef.current)) {
+          setActiveTabPath(survivors[survivors.length - 1]?.path ?? null);
+        }
+        goneLive.forEach(({ path, seq }) => applyReadGone(workspaceId, path, seq, null));
+        // Still a completed restore for this key: the strip now holds this
+        // branch's tabs, so persistence may resume. Leaving the marker unset was
+        // what stopped this branch's tabs from ever being written again.
+        hydratedKeyRef.current = hydratedKey;
+        return { surviving, dropped, denied, superseded: false };
+      }
+
+      setOpenTabs(survivors);
+      goneLive.forEach(({ path, seq }) => applyReadGone(workspaceId, path, seq, null));
+      // Activate `activePath` if it survived; else last surviving path; else null.
+      const requested = activePath && survivors.some((t) => t.path === activePath)
+        ? activePath
+        : (survivors[survivors.length - 1]?.path ?? null);
+      setActiveTabPath(requested);
       hydratedKeyRef.current = hydratedKey;
       return { surviving, dropped, denied, superseded: false };
+    } finally {
+      releaseChecks();
     }
-
-    setOpenTabs(survivors);
-    // Activate `activePath` if it survived; else last surviving path; else null.
-    const requested = activePath && survivors.some((t) => t.path === activePath)
-      ? activePath
-      : (survivors[survivors.length - 1]?.path ?? null);
-    setActiveTabPath(requested);
-    hydratedKeyRef.current = hydratedKey;
-    return { surviving, dropped, denied, superseded: false };
-  }, [workspaceId, workspaceBranch]);
+  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 
@@ -713,6 +1125,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const idx = prev.findIndex((t) => t.path === path);
       if (idx < 0) return prev;
       if (prev[idx].isDirty === dirty) return prev;
+      // A tab someone else deleted keeps its unsaved edits until Close: the
+      // viewer that held them unmounts when the notice replaces it, and its
+      // cleanup reports "not dirty" — which hid the edits and Copy edits.
+      if (!dirty && (prev[idx].deletedBy || deletedPathsRef.current.has(path))) return prev;
       const next = prev.slice();
       next[idx] = { ...next[idx], isDirty: dirty };
       return next;
@@ -724,9 +1140,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const createFile = useCallback(async (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => {
     if (!workspaceId) return;
     await writeFile(workspaceId, relativePath, content ?? '', options);
+    // A file created where this session deleted one is not the deleted file:
+    // saving it is not re-creating that one (`awaitStillOnBranch`).
+    if (workspaceIdRef.current === workspaceId) forgetOwnDelete(relativePath);
     await refreshFileTree();
     bumpFs();
-  }, [workspaceId, refreshFileTree, bumpFs]);
+  }, [workspaceId, refreshFileTree, bumpFs, forgetOwnDelete]);
 
   const createDirectory = useCallback(async (relativePath: string) => {
     if (!workspaceId) return;
@@ -1295,21 +1714,44 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     if (!isCurrent()) return;
     pendingDeletePathsRef.current.delete(relativePath);
+    ownDeletesRef.current.set(relativePath, Date.now());
+    // Before the tabs go: closing them unmounts the editor, whose lock
+    // cleanup writes its buffer back through `saveFile` — which, unguarded,
+    // re-created the file this delete just removed. The set drops each path
+    // once its tab has closed.
+    for (const t of openTabsRef.current) {
+      if (t.path === relativePath || t.path.startsWith(prefix)) deletedPathsRef.current.add(t.path);
+    }
     // Close tabs only after the server confirmed — keeps tab content +
-    // cursor position intact on the rollback path.
-    if (toClose.length > 0) {
-      const survivingTabs = openTabsRef.current.filter(
-        (t) => !(t.path === relativePath || t.path.startsWith(prefix)),
-      );
+    // cursor position intact on the rollback path. Read the strip as it is
+    // NOW: tabs may have opened or closed while the delete ran.
+    const isDeleted = (path: string) => path === relativePath || path.startsWith(prefix);
+    const tabsNow = openTabsRef.current;
+    const activePath = activeTabPathRef.current;
+    const closedActive = activePath !== null && isDeleted(activePath);
+    let newActivePath = activePath;
+    if (tabsNow.some((t) => isDeleted(t.path))) {
+      const survivingTabs = tabsNow.filter((t) => !isDeleted(t.path));
       setOpenTabs(survivingTabs);
-      if (activeTabPathRef.current && toClose.some((t) => t.path === activeTabPathRef.current)) {
-        setActiveTabPath(survivingTabs[survivingTabs.length - 1]?.path ?? null);
+      if (closedActive) {
+        // The tab that is left, as closing a tab picks it: the nearest
+        // survivor to the left of the closed one, else to its right.
+        const idx = tabsNow.findIndex((t) => t.path === activePath);
+        const left = tabsNow.slice(0, Math.max(idx, 0)).reverse().find((t) => !isDeleted(t.path));
+        const right = tabsNow.slice(idx + 1).find((t) => !isDeleted(t.path));
+        newActivePath = (left ?? right)?.path ?? null;
+        setActiveTabPath(newActivePath);
       }
     }
     // No final refreshFileTree() — the optimistic prune already matches
     // server state. The backend's end-of-batch `fs-tree-changed` SSE
     // event triggers a refresh anyway as belt-and-suspenders. No second
     // `bumpFs()` either — the optimistic bump above already counted.
+    //
+    // The address is the caller's to move (the file page trusts only the
+    // URL), so say whether the file on screen went and what is on screen now.
+    const result: DeleteEntryResult = { closedActive, newActivePath };
+    return result;
   }, [workspaceId, kbDirName, refreshFileTree, bumpFs, confirm]);
 
   const reloadTabFromDisk = useCallback(async (relativePath: string) => {
@@ -1321,61 +1763,151 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // branches (workspaceIdRef.current changes). Applying old-branch bytes
     // to a new-branch tab would silently corrupt the buffer.
     const expectedWorkspaceId = workspaceId;
+    const read = readFile(expectedWorkspaceId, relativePath);
+    // Until this read answers, `saveFile` waits on it: a 404 marks the tab
+    // deleted, and an editor unmounting meanwhile must not write it back.
+    const seq = trackExistenceCheck(expectedWorkspaceId, relativePath, read);
     try {
-      const fresh = await readFile(expectedWorkspaceId, relativePath);
-      if (workspaceIdRef.current !== expectedWorkspaceId) return;
-      setOpenTabs((prev) => prev.map((t) => {
-        if (t.path !== relativePath) return t;
-        // Don't clobber in-flight local edits or a pending agent preview
-        // that landed during the readFile. The caller (e.g. Edit-click)
-        // assumes the tab was clean when it asked us to reload — if it
-        // isn't anymore, the user's newer state wins.
-        if (t.isDirty || t.pendingFileContent !== null) return t;
-        // Skip if bytes are already in sync — avoids a useless re-render that
-        // would briefly unmount the renderer.
-        if (fresh === t.content && fresh === t.savedContent) return t;
-        return {
-          ...t,
-          content: fresh,
-          savedContent: fresh,
-          isDirty: false,
-          pendingFileContent: null,
-        };
-      }));
+      const fresh = await read;
+      // The caller (e.g. Edit-click) assumes the tab was clean when it asked
+      // us to reload — if it isn't anymore, the user's newer state wins.
+      applyReadBytes(expectedWorkspaceId, relativePath, seq, fresh);
     } catch (err) {
       if (workspaceIdRef.current !== expectedWorkspaceId) return;
       if (err instanceof WorkspaceApiError && err.status === 404) {
-        // File vanished between Edit click and reload — drop the tab.
-        setOpenTabs((prev) => prev.filter((t) => t.path !== relativePath));
-        if (activeTabPathRef.current === relativePath) {
-          const surviving = openTabsRef.current.filter((t) => t.path !== relativePath);
-          setActiveTabPath(surviving[surviving.length - 1]?.path ?? null);
-        }
+        // The file vanished before the reload answered (an Edit click, a sent
+        // proposal). Dropping the tab here moved the active tab under an
+        // address that still named this file, and the page waited on it for
+        // good. Say what happened instead, keeping any unsaved edits; Close
+        // is the person's.
+        applyReadGone(expectedWorkspaceId, relativePath, seq, null);
         return;
       }
       console.warn(`[workspace] reloadTabFromDisk failed for "${relativePath}":`, err);
       throw err;
     }
-  }, [workspaceId]);
+  }, [workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes]);
+
+  /**
+   * The guard before every write to a file an open tab holds (`saveFile`,
+   * `rejectPendingContent`): throws when someone else deleted it, and
+   * otherwise answers with the newest bytes a read waited on found.
+   *
+   * Someone else deleted this file: the editor that held its unsaved edits
+   * unmounts when the notice replaces it, and its lock cleanup (and the
+   * autosave / idle-release timers) persist the buffer — which re-created the
+   * deleted file and wiped the notice. A rejected agent change wrote its
+   * baseline back the same way. The edits and the agent's version stay on the
+   * tab, offered to copy; nothing writes them back unasked.
+   *
+   * This session's own delete refuses it too: a save waiting here (autosave,
+   * idle release, unmount cleanup) can outlive the closed tab, whose
+   * `deletedPathsRef` entry goes with it, and would re-create the file.
+   */
+  const awaitStillOnBranch = useCallback(async (readFrom: string, relativePath: string) => {
+    const refuse = () => new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
+    const deleted = () => deletedPathsRef.current.has(relativePath)
+      || (workspaceIdRef.current === readFrom && isOwnDelete(relativePath));
+    if (deleted()) throw refuse();
+    // A read deciding whether the file still exists is in flight: its answer
+    // first, so a 404 it is about to deliver refuses this write too.
+    // Its own answer, not the guard set: the tab may have closed meanwhile.
+    // The newest check answers for every read in flight before it; one that
+    // started while this write waited is waited on too.
+    const checkKey = existenceKey(readFrom, relativePath);
+    let existenceCheck = existenceChecksRef.current.get(checkKey);
+    let found: ExistenceAnswer['found'] = null;
+    while (existenceCheck) {
+      const answer = await existenceCheck;
+      if (isCheckGone(readFrom, relativePath, answer)) throw refuse();
+      found = newestOf(found, answer.found, (f) => f.seq);
+      const newer = existenceChecksRef.current.get(checkKey);
+      existenceCheck = newer !== existenceCheck ? newer : undefined;
+    }
+    if (deleted()) throw refuse();
+    return found;
+  }, [isCheckGone, isOwnDelete]);
 
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;
-    await writeFile(workspaceId, relativePath, content);
+    // The bytes `content` was edited from, to tell whether a read waited on
+    // below found newer ones.
+    const editedFrom = openTabsRef.current.find((t) => t.path === relativePath)?.savedContent ?? null;
+    const found = await awaitStillOnBranch(workspaceId, relativePath);
+    // The tabs are another branch's once the person switched while this
+    // waited: one at the same path holds that branch's file, not this one.
+    const stillHere = () => workspaceIdRef.current === workspaceId;
+    // A read waited on found other bytes on disk than `content` was edited
+    // from: a commit pulled from the git host, which the `file-changed` read
+    // merges the tab's edits onto. Writing `content` as it was would overwrite
+    // that commit, so the edits are merged onto it here too; when they collide
+    // the tab has given them up, and nothing is written. Bytes from a read
+    // older than a write or bytes landed since are not what the disk holds.
+    let toWrite = content;
+    let mergedOntoPull = false;
+    if (found && editedFrom !== null && found.bytes !== editedFrom
+      && !isStaleLanding(workspaceId, relativePath, found.seq)) {
+      const merged = threeWayMerge(editedFrom, content, found.bytes);
+      if (merged === null || merged === found.bytes) {
+        // The tab shows the pulled bytes and says what became of the edits.
+        // The `file-changed` read cannot always say it: Done marks the tab
+        // clean as the editor closes, so that read took the bytes as onto a
+        // clean tab, silently.
+        const pulled = found.bytes;
+        if (!stillHere()) return;
+        setOpenTabs((prev) => {
+          const idx = prev.findIndex((t) => t.path === relativePath);
+          if (idx < 0) return prev;
+          const t = prev[idx];
+          // Edits made since (Edit again, typing) are the person's newest.
+          if (t.isDirty || (t.savedContent !== editedFrom && t.savedContent !== pulled)) return prev;
+          const next = prev.slice();
+          next[idx] = takePulledOverEdits(t, pulled, merged === null ? 'discarded' : null);
+          return next;
+        });
+        return;
+      }
+      toWrite = merged;
+      mergedOntoPull = true;
+    }
+    await writeFile(workspaceId, relativePath, toWrite);
+    markWritten(workspaceId, relativePath);
+    if (!stillHere()) return;
     // Update the matching tab — both the cached current value and the on-disk
-    // baseline now equal `content`; clear dirty.
+    // baseline now equal what was written; clear dirty. A save that merged
+    // onto a pulled commit keeps the banner: the person has not seen it yet.
     setOpenTabs((prev) => {
       const idx = prev.findIndex((t) => t.path === relativePath);
       if (idx < 0) return prev;
       const next = prev.slice();
-      next[idx] = { ...next[idx], content, savedContent: content, isDirty: false };
+      next[idx] = {
+        ...next[idx],
+        content: toWrite,
+        savedContent: toWrite,
+        isDirty: false,
+        changedOnBranch: mergedOntoPull ? 'merged' : null,
+      };
       return next;
     });
     bumpFs();
-  }, [workspaceId, bumpFs]);
+  }, [workspaceId, bumpFs, markWritten, awaitStillOnBranch, isStaleLanding]);
+
+  const clearChangedOnBranch = useCallback((relativePath: string) => {
+    setOpenTabs((prev) => {
+      const idx = prev.findIndex((t) => t.path === relativePath);
+      if (idx < 0 || !prev[idx].changedOnBranch) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], changedOnBranch: null };
+      return next;
+    });
+  }, []);
 
   const moveEntry = useCallback(async (oldPath: string, newPath: string) => {
     if (!workspaceId) return;
     await moveEntryApi(workspaceId, oldPath, newPath);
+    // Switched branch meanwhile: the tabs at these paths are the other branch's.
+    if (workspaceIdRef.current !== workspaceId) return;
+    forgetOwnDelete(newPath);
     // Rewrite all matching tab paths in place — exact match OR directory prefix.
     const oldPrefix = oldPath + '/';
     setOpenTabs((prev) => prev.map((t) => {
@@ -1390,7 +1922,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     await refreshFileTree();
     bumpFs();
-  }, [workspaceId, refreshFileTree, bumpFs]);
+  }, [workspaceId, refreshFileTree, bumpFs, forgetOwnDelete]);
 
   // ── Pending-content (agent edits) — routed to active tab ──────────────────
 
@@ -1408,6 +1940,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, []);
 
   const acceptPendingContent = useCallback(async () => {
+    if (!workspaceId) return;
     const path = activeTabPathRef.current;
     if (!path) return;
     const active = openTabsRef.current.find((t) => t.path === path);
@@ -1415,12 +1948,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const content = active.pendingFileContent;
     // The agent's bytes were already flushed to disk by its tool call, so
     // accepting means: align both `content` and `savedContent` with that.
+    // A read issued before the agent wrote may still answer with the bytes
+    // from before; the accepted write orders it out like a save of ours.
+    markWritten(workspaceId, path);
     setOpenTabs((prev) => prev.map((t) => (
       t.path === path
         ? { ...t, content, savedContent: content, pendingFileContent: null, isDirty: false }
         : t
     )));
-  }, []);
+  }, [workspaceId, markWritten]);
 
   const rejectPendingContent = useCallback(async () => {
     if (!workspaceId) return;
@@ -1431,14 +1967,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // savedContent holds that baseline; if it's null, fall back to content.
     const baseline = active?.savedContent ?? active?.content ?? null;
     if (!active || baseline === null) return;
+    await awaitStillOnBranch(workspaceId, path);
     await writeFile(workspaceId, path, baseline);
+    markWritten(workspaceId, path);
+    // Switched branch meanwhile: a tab at `path` now is the other branch's.
+    if (workspaceIdRef.current !== workspaceId) return;
     setOpenTabs((prev) => prev.map((t) => (
       t.path === path
         ? { ...t, content: baseline, savedContent: baseline, pendingFileContent: null, isDirty: false }
         : t
     )));
     bumpFs();
-  }, [workspaceId, bumpFs]);
+  }, [workspaceId, bumpFs, markWritten, awaitStillOnBranch]);
 
   // ── fsRevision invalidation ───────────────────────────────────────────────
 
@@ -1463,17 +2003,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const activePath = activeTabPathRef.current;
     const activeBeforeInvalidation = openTabsRef.current.find((t) => t.path === activePath);
     const activeIsDirty = activeBeforeInvalidation?.isDirty ?? false;
+    const activeIsDeleted = !!activeBeforeInvalidation?.deletedBy;
 
     // Null inactive non-dirty tabs so re-activating them triggers a refetch.
     // The active tab keeps its current content — the eager refetch below
-    // swaps it only if the bytes actually changed.
+    // swaps it only if the bytes actually changed. A deleted tab keeps what
+    // it has: there is nothing left to refetch.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpenTabs((prev) => prev.map((t) => {
-      if (t.isDirty || t.path === activePath) return t;
+      if (t.isDirty || t.deletedBy || t.path === activePath) return t;
       return { ...t, content: null, savedContent: null };
     }));
 
-    if (activePath && workspaceId && !activeIsDirty) {
+    if (activePath && workspaceId && !activeIsDirty && !activeIsDeleted) {
       // Snapshot the workspace and the tab's content fingerprint at issue
       // time. `readFile` yields to the event loop — while it's in flight
       // the user can switch branches, switch active tabs, or start typing,
@@ -1482,38 +2024,33 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const expectedWorkspaceId = workspaceId;
       const baselineContent = activeBeforeInvalidation?.content ?? null;
       const baselineSavedContent = activeBeforeInvalidation?.savedContent ?? null;
-      readFile(expectedWorkspaceId, activePath).then((content) => {
-        if (workspaceIdRef.current !== expectedWorkspaceId) return;
+      const read = readFile(expectedWorkspaceId, activePath);
+      // The editor's write-back waits on this read too: a 404 it is about
+      // to deliver refuses the write instead of re-creating the file.
+      const seq = trackExistenceCheck(expectedWorkspaceId, activePath, read);
+      read.then((content) => {
         if (activeTabPathRef.current !== activePath) return;
-        setOpenTabs((prev) => prev.map((t) => {
-          if (t.path !== activePath) return t;
-          // Tab now dirty / has pending agent content / its baseline
-          // moved out from under us (e.g. saveFile already updated it
-          // synchronously). Anything other than "still the buffer we
-          // issued the read against" means newer state wins.
-          if (t.isDirty || t.pendingFileContent !== null) return t;
-          if (t.content !== baselineContent || t.savedContent !== baselineSavedContent) return t;
-          // Same-bytes short-circuit: a save-triggered bump where the tab
-          // was already updated synchronously by saveFile() will land here
-          // with identical content, so we avoid a needless re-render.
-          if (content === t.content && content === t.savedContent) return t;
-          return { ...t, content, savedContent: content };
-        }));
+        // Beyond the shared guards: the baseline moved out from under us
+        // (e.g. saveFile already updated it synchronously). Anything other
+        // than "still the buffer we issued the read against" means newer
+        // state wins.
+        applyReadBytes(expectedWorkspaceId, activePath, seq, content, (t) => (
+          t.content === baselineContent && t.savedContent === baselineSavedContent
+        ));
       }).catch((err) => {
         if (workspaceIdRef.current !== expectedWorkspaceId) return;
         if (err instanceof WorkspaceApiError && err.status === 404) {
-          setOpenTabs((prev) => prev.filter((t) => t.path !== activePath));
-          setActiveTabPath((cur) => {
-            if (cur !== activePath) return cur;
-            const surviving = openTabsRef.current.filter((t) => t.path !== activePath);
-            return surviving[surviving.length - 1]?.path ?? null;
-          });
+          // Closing the tab here moved the active tab while the address kept
+          // naming this file — the page then waited on "Opening …" for good.
+          // A delete of our own closes it (and moves the address) itself;
+          // anyone else's is said on the page (`markTabDeleted` skips ours).
+          applyReadGone(expectedWorkspaceId, activePath, seq, null);
         } else {
           console.error('Failed to refetch active tab content:', err);
         }
       });
     }
-  }, [fsRevision, workspaceId]);
+  }, [fsRevision, workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes]);
 
   // ── Reset hydratedKey when persistenceBranch changes ──────────────────────
 
@@ -1620,6 +2157,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   useEffect(() => {
     pendingUploadsRef.current = new Map();
     pendingDeletePathsRef.current = new Set();
+    ownDeletesRef.current = new Map();
+    deletedPathsRef.current = new Set();
+    existenceChecksRef.current = new Map();
+    treeAbsentCheckedAtRef.current = new Map();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingUploads(new Map());
     // The banners go with them. An upload still routing when the user
@@ -1661,8 +2202,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // freshly-fetched disk bytes (which may include the agent's
       // write) would silently end their review.
       if (matchingTab.pendingFileContent !== null) return;
-      readFile(subscribedWorkspaceId, event.path)
+      const issuedAt = Date.now();
+      const read = readFile(subscribedWorkspaceId, event.path);
+      const seq = trackExistenceCheck(subscribedWorkspaceId, event.path, read);
+      read
         .then((content) => {
+          // A read issued after this one already found the file gone: these
+          // bytes predate the delete. Clearing the delete on them would let
+          // the next save re-create the file; the notice and edits stay.
+          if (isStaleFind(subscribedWorkspaceId, event.path, seq)) return;
+          // A read issued after this one already put its (newer) bytes in
+          // the tab, the same ordering `applyReadBytes` keeps: these would
+          // put older bytes back, or merge them in as a change on the branch.
+          if (isStaleLanding(subscribedWorkspaceId, event.path, seq)) return;
+          if (workspaceIdRef.current === subscribedWorkspaceId) {
+            // The file is there: writing it is no longer re-creating it.
+            deletedPathsRef.current.delete(event.path);
+            forgetOwnDelete(event.path, issuedAt);
+          }
           if (workspaceIdRef.current !== subscribedWorkspaceId) {
             // Workspace switched while the refetch was in flight. The
             // tab list we'd be mutating is for a different branch now
@@ -1676,12 +2233,38 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               // Re-check pending status inside the updater — `setPendingContent`
               // may have landed during the readFile await.
               if (t.pendingFileContent !== null) return t;
-              // Self-save echo: backend emits the event for our own
-              // releaseLock too. Skip the update so the tab doesn't
-              // re-render uselessly.
-              if (content === t.savedContent && content === t.content) return t;
+              if (isStaleLanding(subscribedWorkspaceId, event.path, seq)) return t;
+              markLanded(subscribedWorkspaceId, event.path, seq);
+              // The file is there after all (re-created, or the delete was
+              // undone): the tab is a file again.
+              const base = t.deletedBy ? { ...t, deletedBy: null } : t;
+              // Nothing changed on disk since this tab last read or saved it.
+              // Covers the self-save echo — the backend emits the event for
+              // our own releaseLock too — including one that lands while the
+              // person has typed on past the save: those bytes are newer than
+              // the disk's, not overwritten by it.
+              if (content === t.savedContent) return base;
+              if (t.isDirty && t.content !== null && t.savedContent !== null) {
+                // Content changed underneath unsaved edits. Inside this
+                // deployment the file lock stops every other writer while a
+                // tab is dirty, so this is a commit pulled from the git host.
+                // Merge the edits onto it; only when they collide are they
+                // given up, and the banner says which happened.
+                const merged = threeWayMerge(t.savedContent, t.content, content);
+                if (merged === null) return takePulledOverEdits(base, content, 'discarded');
+                const remoteRevision = (t.remoteRevision ?? 0) + 1;
+                return {
+                  ...base,
+                  content: merged,
+                  savedContent: content,
+                  isDirty: merged !== content,
+                  // Edits the pulled commit already holds leave nothing to save.
+                  changedOnBranch: merged !== content ? 'merged' : null,
+                  remoteRevision,
+                };
+              }
               return {
-                ...t,
+                ...base,
                 content,
                 savedContent: content,
                 isDirty: false,
@@ -1691,11 +2274,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           );
         })
         .catch((err) => {
+          if (workspaceIdRef.current !== subscribedWorkspaceId) return;
           if (err instanceof WorkspaceApiError && err.status === 403) {
             // Read access revoked underneath us — auto-close the tab instead
             // of leaving previously-loaded bytes visible.
-            if (workspaceIdRef.current !== subscribedWorkspaceId) return;
             dropTabByPath(event.path);
+            return;
+          }
+          if (err instanceof WorkspaceApiError && err.status === 404) {
+            // Someone else deleted the open file. Say so where it was, and
+            // who, when the event named a person — a pull from the git host
+            // ("Git sync", the `system` user) names nobody.
+            const name = event.byUserId === 'system' || !event.byUserName ? null : event.byUserName;
+            applyReadGone(subscribedWorkspaceId, event.path, seq, name);
             return;
           }
           console.warn(`[workspace] refetch on file-changed failed for "${event.path}":`, err);
@@ -1717,36 +2308,36 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const offLockReleased = bus.subscribe('lock-released', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
       const matchingTab = openTabsRef.current.find((t) => t.path === event.path);
-      if (!matchingTab) return;
-      // Skip if WE just released the lock — that path is already
-      // handled by `saveFile` updating the tab + the `file-changed`
-      // self-echo. Refetching here would race against that and is
-      // wasted work.
-      if (matchingTab.isDirty) return;
-      // Don't clobber a pending agent preview — see file-changed
-      // handler above for the same guard's rationale.
-      if (matchingTab.pendingFileContent !== null) return;
-      readFile(subscribedWorkspaceId, event.path)
+      if (!matchingTab || matchingTab.deletedBy) return;
+      // A dirty tab's bytes are not taken from this read: if WE just
+      // released the lock, `saveFile` updating the tab + the `file-changed`
+      // self-echo handle it, and a read racing them could land pre-save
+      // bytes. Nor are a pending agent preview's — see file-changed handler
+      // above for the same guard's rationale. Both are still read, only to
+      // learn whether the file is gone: a delete that released the lock
+      // must show the notice over unsaved edits too.
+      const existenceOnly = matchingTab.isDirty || matchingTab.pendingFileContent !== null;
+      const read = readFile(subscribedWorkspaceId, event.path);
+      const seq = trackExistenceCheck(subscribedWorkspaceId, event.path, read);
+      read
         .then((content) => {
-          if (workspaceIdRef.current !== subscribedWorkspaceId) return;
-          setOpenTabs((tabs) => tabs.map((t) => {
-            if (t.path !== event.path) return t;
-            if (t.pendingFileContent !== null) return t;
-            if (content === t.savedContent && content === t.content) return t;
-            return {
-              ...t,
-              content,
-              savedContent: content,
-              isDirty: false,
-              pendingFileContent: null,
-            };
-          }));
+          if (existenceOnly) return;
+          // Re-checked against the tab as it is now, not as it was when the
+          // read was issued: edits typed while it was out, or a delete
+          // learned meanwhile, are never replaced by these bytes.
+          applyReadBytes(subscribedWorkspaceId, event.path, seq, content);
         })
         .catch((err) => {
           if (err instanceof WorkspaceApiError && err.status === 403) {
             // Read access revoked underneath us — auto-close the tab.
             if (workspaceIdRef.current !== subscribedWorkspaceId) return;
             dropTabByPath(event.path);
+            return;
+          }
+          if (err instanceof WorkspaceApiError && err.status === 404) {
+            // The lock was released by a delete: say so on the page, as the
+            // other reads of an open tab do (`markTabDeleted` skips ours).
+            applyReadGone(subscribedWorkspaceId, event.path, seq, null);
             return;
           }
           console.warn(`[workspace] refetch on lock-released failed for "${event.path}":`, err);
@@ -1757,7 +2348,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       offFsTreeChanged();
       offLockReleased();
     };
-  }, [bus, workspaceId, refreshFileTree, dropTabByPath]);
+  }, [bus, workspaceId, refreshFileTree, dropTabByPath, applyReadGone, trackExistenceCheck, isStaleFind, isStaleLanding, markLanded, forgetOwnDelete, applyReadBytes]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 
@@ -1814,9 +2405,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     dispatchUpload,
     clearUploadError,
     deleteEntry,
+    isOwnDelete,
+    forgetOwnDelete,
     moveEntry,
     saveFile,
     reloadTabFromDisk,
+    clearChangedOnBranch,
     setPendingContent,
     acceptPendingContent,
     rejectPendingContent,
@@ -1828,7 +2422,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadErrors, uploadNotices, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
-    deleteEntry, moveEntry, saveFile, reloadTabFromDisk,
+    deleteEntry, isOwnDelete, forgetOwnDelete, moveEntry, saveFile, reloadTabFromDisk, clearChangedOnBranch,
     setPendingContent, acceptPendingContent, rejectPendingContent,
     setPersistenceBranch, deleteWorkspace,
   ]);

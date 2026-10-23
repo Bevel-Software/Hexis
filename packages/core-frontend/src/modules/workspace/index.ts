@@ -1,8 +1,10 @@
 /**
- * Workspace's public surface for other modules: what it takes to mount the
- * app's own renderer for a file somewhere other than the file page. The
- * embed (a page shown inside a chat) does exactly that, and imports these
- * from here rather than reaching into workspace's components.
+ * Workspace's public surface for other modules.
+ *
+ * What it takes to mount the app's own renderer for a file somewhere other
+ * than the file page. The embed (a page shown inside a chat) does exactly
+ * that, and imports these from here rather than reaching into workspace's
+ * components.
  *
  *  - `pickFileRenderer` and `isViewOnlyFile`: the same lookup the file page
  *    runs, registered renderers included, and whether the file has an
@@ -32,6 +34,13 @@
  *    tool bridge a distribution's own HTML renderer calls to answer a page's
  *    `window.bevel.tools` exactly as the app's renderer does, and the
  *    file page's provider its tests mount it under.
+ *
+ * Its routing contract (the Knowledge URL prefix and the segment decode),
+ * where the page lands once the file on screen has closed, the hook that
+ * says when an item on screen was deleted elsewhere, and the workspace
+ * context those pages read the checkout from. The "This file was deleted"
+ * notice itself is a component: other modules compose it from
+ * `components/DeletedFileNotice`, not from here.
  */
 export {
   CanDownloadContext,
@@ -67,3 +76,5 @@ export { displayFileName, fileNameTooltip } from './utils/display-file-name';
 export { checkoutRoot, findEntryByPath, knowledgeFiles, pathExistsInTree } from './utils/fileTree';
 export { labelFor, parseFrontmatter } from './utils/frontmatter';
 export type { FrontmatterData } from './utils/frontmatter';
+export { landingAfterClose } from './routing/landing';
+export { useItemDeletedElsewhere } from './hooks/useItemDeletedElsewhere';
