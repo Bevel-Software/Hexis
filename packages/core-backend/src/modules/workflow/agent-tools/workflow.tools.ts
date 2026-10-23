@@ -977,10 +977,13 @@ export function registerWorkflowTools(
       // and a save or sync landing between two of them is tolerated — the
       // next call reports it. (The one answer that must be exact, what a
       // merge is of, is taken under one reservation by `update_branch`.)
-      const [status, branches, counts, pending, forkBase] = await Promise.all([
+      // The counts alone wait for the listing: its fetch refreshes the
+      // remote-tracking refs they are measured against.
+      const [status, [branches, counts], pending, forkBase] = await Promise.all([
         ctx.workflowService.branchStatus(workspaceId),
-        ctx.workflowService.listBranches(workspaceId),
-        ctx.workflowService.branchCounts(workspaceId),
+        ctx.workflowService
+          .listBranches(workspaceId)
+          .then(async (listed) => [listed, await ctx.workflowService.branchCounts(workspaceId)] as const),
         ctx.workflowService.listPendingChangePaths(workspaceId),
         ctx.workflowService.resolveForkBase(workspaceId, branch),
       ]);

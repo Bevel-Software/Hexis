@@ -104,6 +104,9 @@ const workspaceService = {
 const workflowService = {
   listBranches: async (ws: string) => {
     calls.push(['listBranches', ws]);
+    // A real listing fetches first; mark when that fetch has landed.
+    await new Promise((r) => setTimeout(r, 0));
+    calls.push(['listBranches:fetched', ws]);
     return [{ name: 'main', isProtected: true }];
   },
   commitChange: async (ws: string, user: { id: string }, body: unknown) => {
@@ -1199,6 +1202,10 @@ describe('history and syncing tools', () => {
     });
     expect(calls).toContainEqual(['changedPathsBetweenBranches', DRAFT_WS, 'main', DRAFT]);
     expect(calls).toContainEqual(['branchCounts', DRAFT_WS]);
+    // Counted only once the listing's fetch has refreshed the remote-tracking refs.
+    const fetched = calls.findIndex((c) => c[0] === 'listBranches:fetched' && c[1] === DRAFT_WS);
+    expect(fetched).toBeGreaterThanOrEqual(0);
+    expect(calls.findIndex((c) => c[0] === 'branchCounts')).toBeGreaterThan(fetched);
 
     calls = [];
     const named = await post(tool(base, 'branch_status'), writeTok(), { branch: DRAFT, base: 'release' });
