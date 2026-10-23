@@ -8,6 +8,8 @@ import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '..
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
+import { canConnectAs, type AgentChoice } from '../../agents';
+import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   getConnectPending,
   startToolOAuth,
@@ -31,6 +33,20 @@ import {
  * alive across that round-trip. Cleared on Finish or when the state goes stale.
  */
 const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
+/** The "Connect as" choice made on the way, kept beside the state for the same round-trip. */
+const MCP_OAUTH_AGENT_KEY = 'mcp-oauth-agent';
+
+/**
+ * The choice to start from: the one made earlier in THIS authorization (the
+ * page came back from a tool sign-in, its query stripped), else Everything —
+ * an authorization arriving in the address that is not the remembered one is
+ * a new connection, and starts at Everything.
+ */
+function rememberedConnectAs(): string | null {
+  const fromUrl = new URLSearchParams(window.location.search).get('oauth');
+  if (fromUrl && fromUrl !== sessionStorage.getItem(MCP_OAUTH_STATE_KEY)) return null;
+  return sessionStorage.getItem(MCP_OAUTH_AGENT_KEY);
+}
 
 /**
  * "Connect your tools" — the page a person lands on from the needs-authorization
@@ -99,6 +115,18 @@ export function ConnectToolsPage() {
   // Agent-connect mode: the signed authorization state + who is asking.
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
+  // "Connect as": the agents on offer, and the choice — Everything (null)
+  // unless the person picks one, and kept across a tool sign-in's round-trip.
+  const [agentChoices, setAgentChoices] = useState<AgentChoice[]>([]);
+  const [connectAs, setConnectAs] = useState<string | null>(rememberedConnectAs);
+  // The agents failed to load: Finish then waits for Everything to be confirmed.
+  const [choicesFailed, setChoicesFailed] = useState(false);
+  // The request whose agents have answered. Until the CURRENT one has, Finish
+  // would approve Everything by default, before the person saw the choice.
+  const [choicesSettledFor, setChoicesSettledFor] = useState<string | null>(null);
+  const [everythingConfirmed, setEverythingConfirmed] = useState(false);
+  const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
+  const mayFinish = canConnectAs({ settled: agentState != null && choicesSettledFor === agentState, unavailable });
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -159,6 +187,9 @@ export function ConnectToolsPage() {
   useEffect(() => {
     const fromUrl = new URLSearchParams(window.location.search).get('oauth');
     if (fromUrl) {
+      // A NEW authorization starts at Everything (see `rememberedConnectAs`):
+      // a choice remembered from another one is not this connection's.
+      if (sessionStorage.getItem(MCP_OAUTH_STATE_KEY) !== fromUrl) sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       sessionStorage.setItem(MCP_OAUTH_STATE_KEY, fromUrl);
       // eslint-disable-next-line react-hooks/set-state-in-effect -- the query is read once, on arrival
       setAgentState(fromUrl);
@@ -174,11 +205,19 @@ export function ConnectToolsPage() {
     let cancelled = false;
     getMcpOAuthRequest(agentState)
       .then((r) => {
-        if (!cancelled) setAgentName(r.clientName);
+        if (cancelled) return;
+        setAgentName(r.clientName);
+        const offered = r.agents ?? [];
+        setAgentChoices(offered);
+        setChoicesFailed(r.agentsUnavailable === true);
+        // A remembered choice that is no longer on offer falls back to Everything.
+        setConnectAs((current) => (current && offered.some((a) => a.path === current) ? current : null));
+        setChoicesSettledFor(agentState);
       })
       .catch(() => {
         if (cancelled) return;
         sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
+        sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
         setAgentState(null);
         setAgentName(null);
       });
@@ -220,11 +259,12 @@ export function ConnectToolsPage() {
   };
 
   const onFinish = async () => {
-    if (!agentState) return;
+    if (!agentState || !mayFinish) return;
     setFinishing(true);
     try {
-      const redirectTo = await completeMcpOAuth(agentState);
+      const redirectTo = await completeMcpOAuth(agentState, connectAs);
       sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
+      sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       window.location.href = redirectTo;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -348,11 +388,25 @@ export function ConnectToolsPage() {
                   variant="primary"
                   size="sm"
                   className="shrink-0"
-                  disabled={finishing}
+                  disabled={finishing || !mayFinish}
                   onClick={() => void onFinish()}
                 >
                   {finishing ? 'Finishing…' : 'Finish & return to your agent'}
                 </Button>
+              </div>
+              <div className="mt-4">
+                <ConnectAsChoice
+                  agents={agentChoices}
+                  value={connectAs}
+                  disabled={finishing}
+                  hint="What this connection loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
+                  onChange={(path) => {
+                    setConnectAs(path);
+                    if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
+                    else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
+                  }}
+                  unavailable={unavailable}
+                />
               </div>
             </Surface>
           )}

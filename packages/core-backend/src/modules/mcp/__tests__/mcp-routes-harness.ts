@@ -29,6 +29,12 @@ import type { McpCallerKind } from '../mcp-auth.middleware.js';
  */
 export const fakeAuth: RequestHandler = (req, _res, next) => {
   req.userId = (req.headers['x-test-user'] as string | undefined) ?? 'user-A';
+  // The signed-in person's email, for a suite whose route reads it.
+  const email = req.headers['x-test-email'] as string | undefined;
+  if (email) req.userEmail = email;
+  // The agent the credential connects as, as the real middleware sets it.
+  const agentPath = req.headers['x-test-agent-path'] as string | undefined;
+  if (agentPath) req.mcpAgentPath = agentPath;
   // The credential kind the real middleware would have recognised, when a
   // suite needs one (the page header is a session's alone).
   const kind = req.headers['x-test-kind'] as McpCallerKind | undefined;
@@ -48,6 +54,7 @@ export interface McpRoutesDeps {
   internalTokens?: unknown;
   oauthProvider?: unknown;
   resourceMetadataUrl?: string;
+  agents?: unknown;
 }
 
 /** Servers opened by `mountMcpRoutes`, closed together by `closeMountedRoutes`. */
@@ -73,6 +80,7 @@ export async function mountMcpRoutes(deps: McpRoutesDeps = {}): Promise<string> 
       (deps.internalTokens ?? stub) as never,
       (deps.oauthProvider ?? stub) as never,
       deps.resourceMetadataUrl ?? '',
+      deps.agents as never,
     ),
   );
   const server = await new Promise<HttpServer>((resolve) => {

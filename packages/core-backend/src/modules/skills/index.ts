@@ -14,7 +14,9 @@ export type {
   PendingSkill,
   GetSkillResult,
   GetSkillOptions,
+  ListSkillsOptions,
   SkillHistorySource,
+  SkillScope,
 } from './skills.contract.js';
 // Reached by other modules; exported here so they stop importing the files.
 export type { PluginMembership } from './skills.contract.js';

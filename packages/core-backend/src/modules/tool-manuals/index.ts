@@ -7,6 +7,7 @@ export {
 } from './tool-manuals.routes.js';
 export {
   EXTERNAL_KB_MANUAL_NAME,
+  type ConnectorScope,
   type IPendingToolService,
   type IToolManualService,
   type PendingTool,

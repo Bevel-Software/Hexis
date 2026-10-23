@@ -383,6 +383,7 @@ export async function createCoreServer(
     core.internalTokenService,
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
+    core.agentScopeService,
   ));
 
   // Remote sync — `POST /api/sync`, called by a git host's webhook or a
@@ -552,6 +553,7 @@ export async function createCoreServer(
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
     readOnlyHints,
+    core.agentScopeService,
   ));
   toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
@@ -568,6 +570,7 @@ export async function createCoreServer(
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
+    core.agentScopeService,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -582,6 +585,7 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    agentScope: core.agentScopeService,
     // The views move the revision too: a release that changes a view and no
     // manual would otherwise leave a running local server on the old one.
     mcpApps: core.mcpAppService,
@@ -596,6 +600,7 @@ export async function createCoreServer(
     core.secretsVaultService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    core.agentScopeService,
   ));
   app.use('/api', toolsRouter);
 
@@ -638,6 +643,7 @@ export async function createCoreServer(
     createPluginCreationRoutes(
       core.pluginProvisionService,
       async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+      core.agentScopeService,
     ),
   );
 
@@ -904,6 +910,7 @@ export async function createCoreServer(
       clientNameFor: (st) => core.githubFacade.clientNameFor(st),
       completeConsent: (userId, st) => core.githubFacade.completeConsent(userId, st),
     },
+    agents: core.agentScopeService,
   }));
 
   // What an Owner pastes into Claude's admin settings to register this

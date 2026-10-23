@@ -281,6 +281,40 @@ describe('SkillService', () => {
   });
 
   /**
+   * A connection made as an `.agent` file narrows the skills (`within`) —
+   * AFTER the person's read gate, so it can take a skill away and never give
+   * one: a skill its lists name that the person may not read stays out.
+   */
+  describe('narrowed to a connection’s skills', () => {
+    const denyGuidelines = {
+      canRead: async () => true,
+      canReadBatch: async (_w: string, _e: string, paths: string[]) =>
+        new Map(paths.map((p) => [p, !p.startsWith('Plugins/Development/')])),
+    } as unknown as IAccessControl;
+    const everyPluginSkill = (folder: string) => folder.startsWith('Plugins/');
+
+    test('lists only what is both readable and within, and loads nothing else', async () => {
+      const list = await svc(denyGuidelines).listSkills('user@x.eu', { within: everyPluginSkill });
+      expect(list.map((s) => s.name)).toEqual(['rfi']);
+      expect(await svc().listSkills('user@x.eu', { within: (p) => p === 'Plugins/Development/coding-guidelines' })).toEqual([
+        expect.objectContaining({ name: 'coding-guidelines' }),
+      ]);
+    });
+
+    test('getSkill outside it is not there for the connection; inside it, the read gate still answers', async () => {
+      expect(await svc().getSkill('user@x.eu', 'rfi', undefined, { within: () => false })).toEqual({
+        ok: false,
+        error: 'not_found',
+      });
+      const inside = await svc().getSkill('user@x.eu', 'rfi', undefined, { within: everyPluginSkill });
+      expect(inside.ok).toBe(true);
+      expect(
+        await svc(denyGuidelines).getSkill('user@x.eu', 'coding-guidelines', undefined, { within: everyPluginSkill }),
+      ).toEqual({ ok: false, error: 'forbidden' });
+    });
+  });
+
+  /**
    * The listing and the loader must never disagree about the same skill at the
    * same instant.
    *
