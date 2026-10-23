@@ -177,36 +177,40 @@ class RipgrepSearch implements IPatternSearch {
     // Each file is named by a whitelist glob anchored at `cwd`, where ripgrep
     // runs: the walk stays the walk (no link followed, `.git` left out), and
     // a file not named is never opened. Whitelist globs filter files only, so
-    // the walk starts at the folders holding the named files rather than at
-    // the root, and a batch of a large tree walks about its own stretch of it.
+    // the walks start at the folders holding the named files rather than at
+    // the root, and a folder's own files are walked without its subfolders:
+    // a batch of a large tree walks about its own stretch of it.
     const under = scope.root === '.' ? '' : `${scope.root}/`;
-    const only = opts.only.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
-    const roots = await realFolders(scope, walkRoots(opts.only));
-    if (roots.length === 0) return;
-    const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...roots];
-    let current: FileMatches | null = null;
-    for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
-      // A file that has given all the lines it may answer: the rest of its
-      // matches are only waited through, never parsed, until its `end`.
-      if (current !== null && current.lines.length >= opts.maxLinesPerFile && record.startsWith(MATCH_RECORD)) continue;
-      const event = parseEvent(record);
-      if (event === null) continue;
-      if (event.type === 'begin') {
-        const path = underRoot(scope.root, pathOf(event.data?.path));
-        current = path === null ? null : { path, lines: [] };
-      } else if (event.type === 'match' && current !== null) {
-        const text = textOf(event.data?.lines);
-        const line = event.data?.line_number;
-        if (text !== null && typeof line === 'number' && current.lines.length < opts.maxLinesPerFile) {
-          current.lines.push({ line, text: withoutNewline(text) });
+    // Every name is checked before the first run, so none is half-searched.
+    for (const p of opts.only) exactGlob(`${under}${p}`);
+    for (const walk of await realWalks(scope, walkPlan(opts.only))) {
+      const only = walk.paths.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
+      const depth = walk.ownFilesOnly ? ['--max-depth', '1'] : [];
+      const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...depth, ...only, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...walk.folders];
+      let current: FileMatches | null = null;
+      for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
+        // A file that has given all the lines it may answer: the rest of its
+        // matches are only waited through, never parsed, until its `end`.
+        if (current !== null && current.lines.length >= opts.maxLinesPerFile && record.startsWith(MATCH_RECORD)) continue;
+        const event = parseEvent(record);
+        if (event === null) continue;
+        if (event.type === 'begin') {
+          const path = underRoot(scope.root, pathOf(event.data?.path));
+          current = path === null ? null : { path, lines: [] };
+        } else if (event.type === 'match' && current !== null) {
+          const text = textOf(event.data?.lines);
+          const line = event.data?.line_number;
+          if (text !== null && typeof line === 'number' && current.lines.length < opts.maxLinesPerFile) {
+            current.lines.push({ line, text: withoutNewline(text) });
+          }
+        } else if (event.type === 'end' && current !== null) {
+          // A file ripgrep found binary part-way through is not text: whatever
+          // it matched before the NUL is dropped with the rest. That is known
+          // only here, so a file is answered at its end and not before.
+          const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
+          if (!binary && current.lines.length > 0) yield current;
+          current = null;
         }
-      } else if (event.type === 'end' && current !== null) {
-        // A file ripgrep found binary part-way through is not text: whatever
-        // it matched before the NUL is dropped with the rest. That is known
-        // only here, so a file is answered at its end and not before.
-        const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
-        if (!binary && current.lines.length > 0) yield current;
-        current = null;
       }
     }
   }
@@ -447,20 +451,59 @@ function exactGlob(path: string): string {
   return `/${path.replace(/[\\*?[\]{}!# ]/g, (c) => `\\${c}`)}`;
 }
 
+/** One ripgrep run of a tree search: the folders it walks, in order, the files it answers, and whether it keeps to the folders' own files. */
+interface Walk {
+  /** Relative to the scope's root; `''` is the root. */
+  folders: string[];
+  /** The files of the batch this run answers, relative to the root: no other is opened. */
+  paths: string[];
+  /** Walk each folder's own files, none of its subfolders (`--max-depth 1`). */
+  ownFilesOnly: boolean;
+}
+
 /**
- * The folders a walk of `paths` (in {@link compareSearchPaths} order, relative
- * to the root; `''` is the root) starts at, in that order: the deepest that
- * hold them all, a folder holding one of them directly walked whole. The
- * paths are one stretch of a sorted walk, so only the first and the last
- * folder can hold files outside it and only they are narrowed further; walked
- * one after another, the folders visit the files in the order one walk of the
- * root would.
+ * Runs one search makes at most for one batch of files: a folder whose own
+ * files and subfolders alternate costs a run per alternation, and past this
+ * many the batch is walked in the fewer, wider runs a folder walked whole
+ * gives.
  */
-function walkRoots(paths: readonly string[]): string[] {
-  const roots: string[] = [];
+const MAX_WALKS = 8;
+
+/**
+ * The runs a walk of `paths` (in {@link compareSearchPaths} order, relative
+ * to the root) makes, in order. The paths are one stretch of a sorted walk,
+ * so in each folder only the first and the last child can hold files outside
+ * it: those subfolders are narrowed further, every child between is walked
+ * whole, and a folder's own files are walked by a run that keeps to them —
+ * which a subfolder sorting between two of them splits, so a folder that
+ * alternates costs a run per stretch. Run one after another, the walks visit
+ * the files in the order one walk of the root would. Past {@link MAX_WALKS},
+ * a folder holding any of the paths directly is walked whole instead.
+ */
+function walkPlan(paths: readonly string[]): Walk[] {
+  if (paths.length === 0) return [];
+  const fine = plan(paths, true);
+  return fine.length <= MAX_WALKS ? fine : plan(paths, false);
+}
+
+function plan(paths: readonly string[], ownFiles: boolean): Walk[] {
+  const walks: Walk[] = [];
+  // Consecutive runs of one kind are one run given several folders; a
+  // folder's own files with nothing walked between them are one folder.
+  const push = (folder: string, ownFilesOnly: boolean, group: readonly string[][]): void => {
+    const paths = group.map((segments) => segments.join('/'));
+    const last = walks[walks.length - 1];
+    if (last === undefined || last.ownFilesOnly !== ownFilesOnly) {
+      walks.push({ folders: [folder], paths, ownFilesOnly });
+      return;
+    }
+    if (!(ownFilesOnly && last.folders[last.folders.length - 1] === folder)) last.folders.push(folder);
+    last.paths.push(...paths);
+  };
   const cover = (folder: string, depth: number, group: readonly string[][]): void => {
-    if (group.some((segments) => segments.length === depth + 1)) {
-      roots.push(folder);
+    const holdsFiles = group.some((segments) => segments.length === depth + 1);
+    if (holdsFiles && !ownFiles) {
+      push(folder, false, group);
       return;
     }
     const children: string[][][] = [];
@@ -470,30 +513,36 @@ function walkRoots(paths: readonly string[]): string[] {
       else children.push([segments]);
     }
     children.forEach((child, i) => {
+      if (child[0]!.length === depth + 1) {
+        push(folder, true, child);
+        return;
+      }
       const name = child[0]!.slice(0, depth + 1).join('/');
       if (i === 0 || i === children.length - 1) cover(name, depth + 1, child);
-      else roots.push(name);
+      else push(name, false, child);
     });
   };
-  if (paths.length > 0) cover('', 0, paths.map((p) => p.split('/')));
-  return roots;
+  cover('', 0, paths.map((p) => p.split('/')));
+  return walks;
 }
 
 /**
- * `folders` (relative to the scope's root) as ripgrep is given them — when
- * each is still the real folder the walk listed. ripgrep follows a link it
- * is GIVEN, so a folder that has become a link since (or is gone) sends the
- * walk back to the root, whose `--no-follow` never enters it. The root is
- * checked again here, as where the scope was made: one that has become a
- * link since is given to ripgrep not at all, and nothing is walked.
+ * `walks` as ripgrep is given them — when each folder is still the real
+ * folder the walk listed. ripgrep follows a link it is GIVEN, so a folder
+ * that has become a link since (or is gone) sends the search back to one walk
+ * of the root, whose `--no-follow` never enters it. The root is checked
+ * again here, as where the scope was made: one that has become a link since
+ * is given to ripgrep not at all, and nothing is walked.
  */
-async function realFolders(scope: TreeScope, folders: readonly string[]): Promise<string[]> {
-  if (await rootMoved(scope)) return [];
-  const real = await Promise.all(
-    folders.map((folder) => folder === '' || isRealFolder(scope.cwd, `${scope.root}/${folder}`)),
-  );
-  if (folders.length === 0 || !real.every(Boolean)) return [scope.root];
-  return folders.map((folder) => (folder === '' ? scope.root : `${scope.root}/${folder}`));
+async function realWalks(scope: TreeScope, walks: readonly Walk[]): Promise<Walk[]> {
+  if (walks.length === 0 || (await rootMoved(scope))) return [];
+  const folders = [...new Set(walks.flatMap((w) => w.folders).filter((folder) => folder !== ''))];
+  const real = await Promise.all(folders.map((folder) => isRealFolder(scope.cwd, `${scope.root}/${folder}`)));
+  if (!real.every(Boolean)) return [{ folders: [scope.root], paths: walks.flatMap((w) => w.paths), ownFilesOnly: false }];
+  return walks.map((w) => ({
+    ...w,
+    folders: w.folders.map((folder) => (folder === '' ? scope.root : `${scope.root}/${folder}`)),
+  }));
 }
 
 /**

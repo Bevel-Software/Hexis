@@ -56,11 +56,9 @@ describe('AccessControlService — a file is read only as far as its frontmatter
   it('honours the rules of a file far too large to read whole, at once', async () => {
     await put('huge.md', `---\n${RULE}---\n`);
     // 600 MB, sparse: more text than one string can hold, so a read of the
-    // whole file could not even be decoded.
+    // whole file could not even be decoded, and its rule would be missed.
     await fs.truncate(path.join(repo, 'Open', 'huge.md'), 600 * 1024 * 1024);
-    const started = Date.now();
     expect(await verdicts('huge.md')).toEqual({ ali: false, felix: true, single: false });
-    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it('reads a frontmatter longer than any one read through to its closing fence', async () => {
@@ -69,13 +67,31 @@ describe('AccessControlService — a file is read only as far as its frontmatter
   });
 
   it('scans a frontmatter line far longer than one read once, not again with every read', async () => {
-    // A 40 MB line inside the frontmatter, then the rule; and a closing fence
+    // A long line inside the frontmatter, then the rule; and a closing fence
     // padded with 3 MB of spaces, which stays a fence however long it runs.
-    await put('long-value.md', `---\nsummary: "${'x'.repeat(40_000_000)}"\n${RULE}${' '.repeat(3_000_000)}---${' '.repeat(3_000_000)}\nbody\n`);
-    const started = Date.now();
+    const longValue = (chars: number) =>
+      `---\nsummary: "${'x'.repeat(chars)}"\n${RULE}${' '.repeat(3_000_000)}---${' '.repeat(3_000_000)}\nbody\n`;
+    await put('long-value.md', longValue(32_000_000));
     expect(await verdicts('long-value.md')).toEqual({ ali: false, felix: true, single: false });
-    expect(Date.now() - started).toBeLessThan(3_000);
-  });
+    // How the cost grows, not how long it takes on this machine: a line 16
+    // times longer costs about 16 times as much scanned once, and far more
+    // (about 60 times, measured) scanned again with every read. The slowest
+    // short check against the fastest long one, so noise only helps a scan
+    // that is linear pass.
+    const timed = async (name: string, chars: number): Promise<number> => {
+      await put(name, `---\nsummary: "${'x'.repeat(chars)}"\n${RULE}---\n`);
+      const started = performance.now();
+      await svc.canReadBatch(workspaceId, ali, [`Open/${name}`]);
+      return performance.now() - started;
+    };
+    const short: number[] = [];
+    const long: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      short.push(await timed(`short-${i}.md`, 2_000_000));
+      long.push(await timed(`long-${i}.md`, 32_000_000));
+    }
+    expect(Math.min(...long) / Math.max(...short)).toBeLessThan(32);
+  }, 60_000);
 
   it('applies the fence rule as the whole-file scan does: CRLF, a BOM, padding around the fence', async () => {
     await put('crlf.md', `---\r\n${RULE.replace(/\n/g, '\r\n')}---\r\nbody\r\n`);

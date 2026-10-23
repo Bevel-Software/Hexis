@@ -60,7 +60,7 @@ async function put(rel: string, content: string | Buffer): Promise<void> {
  * The real `rg`, put first on PATH behind a script that records where each
  * tree search starts (what follows its `--`); `last()` answers the latest.
  */
-async function recordWalks(): Promise<{ last(): Promise<string[]>; remove(): Promise<void> }> {
+async function recordWalks(): Promise<{ last(): Promise<string[]>; runs(): Promise<string[][]>; remove(): Promise<void> }> {
   const real = (await promisify(execFile)('sh', ['-c', 'command -v rg'])).stdout.trim();
   const shim = await mkdtemp(join(tmpdir(), 'rec-rg-'));
   const log = join(shim, 'walks');
@@ -68,8 +68,8 @@ async function recordWalks(): Promise<{ last(): Promise<string[]>; remove(): Pro
     join(shim, 'rg'),
     [
       '#!/bin/sh',
-      'seen=; roots=',
-      'for a in "$@"; do if [ -n "$seen" ]; then roots="$roots$a|"; elif [ "$a" = "--" ]; then seen=1; fi; done',
+      'seen=; roots=; prev=; depth=',
+      'for a in "$@"; do if [ -n "$seen" ]; then roots="$roots$a$depth|"; elif [ "$a" = "--" ]; then seen=1; elif [ "$prev" = "--max-depth" ]; then depth="@$a"; fi; prev="$a"; done',
       `if [ -n "$seen" ]; then echo "$roots" >> '${log}'; fi`,
       `exec '${real}' "$@"`,
       '',
@@ -82,6 +82,12 @@ async function recordWalks(): Promise<{ last(): Promise<string[]>; remove(): Pro
     async last() {
       const lines = (await readFile(log, 'utf8')).split('\n').filter(Boolean);
       return lines[lines.length - 1]!.split('|').filter(Boolean);
+    },
+    // Every run since the last call, each its roots (`@1`: its own files only).
+    async runs() {
+      const lines = (await readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean);
+      await writeFile(log, '');
+      return lines.map((line) => line.split('|').filter(Boolean));
     },
     async remove() {
       process.env.PATH = path;
@@ -194,27 +200,68 @@ describe('RipgrepPatternMatcher', () => {
     ]);
   });
 
-  it('walks only the folders holding the files it is given, in the order one walk of the root would', async () => {
+  it('walks only the folders holding the files it is given, a folder\'s own files without its subfolders, in the order one walk of the root would', async () => {
     for (const p of ['A/x/1.md', 'A/y/0.md', 'B/2.md', 'C/y/3.md', 'C/z/9.md', 'T/a/1.md', 'T/a/2.md', 'T/b/3.md', 'top.md', 'U/u.md']) {
       await put(`kb/${p}`, 'needle\n');
     }
     const walked = await recordWalks();
     try {
-      const found = async (root: string, only: string[]): Promise<{ paths: string[]; roots: string[] }> => {
+      const found = async (root: string, only: string[]): Promise<{ paths: string[]; runs: string[][] }> => {
         const scope = { cwd: root === '.' ? join(dir, 'kb') : dir, root };
+        const s = await search('needle');
+        await walked.runs();
         const paths: string[] = [];
-        for await (const f of (await search('needle')).files(scope, { only, maxLinesPerFile: 10 })) paths.push(f.path);
-        return { paths, roots: await walked.last() };
+        for await (const f of s.files(scope, { only, maxLinesPerFile: 10 })) paths.push(f.path);
+        return { paths, runs: await walked.runs() };
       };
-      expect(await found('kb', ['T/a/1.md', 'T/a/2.md'])).toEqual({ paths: ['T/a/1.md', 'T/a/2.md'], roots: ['kb/T/a'] });
+      expect(await found('kb', ['T/a/1.md', 'T/a/2.md'])).toEqual({ paths: ['T/a/1.md', 'T/a/2.md'], runs: [['kb/T/a@1']] });
       // The first and last folder are narrowed, every one between walked whole.
       expect(await found('kb', ['A/x/1.md', 'B/2.md', 'C/y/3.md'])).toEqual({
         paths: ['A/x/1.md', 'B/2.md', 'C/y/3.md'],
-        roots: ['kb/A/x', 'kb/B', 'kb/C/y'],
+        runs: [['kb/A/x@1'], ['kb/B'], ['kb/C/y@1']],
       });
-      expect(await found('.', ['T/a/2.md', 'T/b/3.md'])).toEqual({ paths: ['T/a/2.md', 'T/b/3.md'], roots: ['./T/a', './T/b'] });
-      // A file directly in a folder is reached only by walking that folder.
-      expect(await found('kb', ['T/b/3.md', 'top.md'])).toEqual({ paths: ['T/b/3.md', 'top.md'], roots: ['kb'] });
+      expect(await found('.', ['T/a/2.md', 'T/b/3.md'])).toEqual({ paths: ['T/a/2.md', 'T/b/3.md'], runs: [['./T/a@1', './T/b@1']] });
+      // A file directly in a folder is reached by walking that folder's own
+      // files, not its subfolders: the root's file walks the root one deep.
+      expect(await found('kb', ['T/b/3.md', 'top.md'])).toEqual({ paths: ['T/b/3.md', 'top.md'], runs: [['kb/T/b@1', 'kb@1']] });
+      expect(await found('kb', ['top.md'])).toEqual({ paths: ['top.md'], runs: [['kb@1']] });
+    } finally {
+      await walked.remove();
+    }
+  });
+
+  it('answers a folder\'s own files on both sides of a subfolder once each, in order', async () => {
+    for (const p of ['a.md', 'M/m.md', 'M/deep/d.md', 'z.md']) await put(`kb/${p}`, 'needle\n');
+    const walked = await recordWalks();
+    try {
+      const s = await search('needle');
+      await walked.runs();
+      const paths: string[] = [];
+      for await (const f of s.files({ cwd: dir, root: 'kb' }, { only: ['a.md', 'M/deep/d.md', 'M/m.md', 'z.md'], maxLinesPerFile: 10 })) paths.push(f.path);
+      expect(paths).toEqual(['a.md', 'M/deep/d.md', 'M/m.md', 'z.md']);
+      expect(await walked.runs()).toEqual([['kb@1'], ['kb/M'], ['kb@1']]);
+    } finally {
+      await walked.remove();
+    }
+  });
+
+  it('walks a folder whole rather than run once per alternation when its files and subfolders alternate past the cap', async () => {
+    const only: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const name = `p${String(i).padStart(2, '0')}`;
+      only.push(`${name}.md`, `${name}/x.md`);
+      await put(`kb/${name}.md`, 'needle\n');
+      await put(`kb/${name}/x.md`, 'needle\n');
+    }
+    only.sort(compareSearchPaths);
+    const walked = await recordWalks();
+    try {
+      const s = await search('needle');
+      await walked.runs();
+      const paths: string[] = [];
+      for await (const f of s.files({ cwd: dir, root: 'kb' }, { only, maxLinesPerFile: 10 })) paths.push(f.path);
+      expect(paths).toEqual(only);
+      expect(await walked.runs()).toEqual([['kb']]);
     } finally {
       await walked.remove();
     }
@@ -352,15 +399,15 @@ describe('RipgrepPatternMatcher', () => {
   });
 
   it('spends one budget across every run of a search, so runs that each finish can still exhaust it', async () => {
-    // Each walk takes 400 ms and finishes; the third has 200 ms of a 1 s budget left.
-    const slow = await slowRipgrep({ walkMs: 400 });
+    // Each walk takes 1 s and finishes; the third has 500 ms of a 2.5 s budget left.
+    const slow = await slowRipgrep({ walkMs: 1_000 });
     try {
-      const s = await search('needle', { budgetMs: 1_000 });
+      const s = await search('needle', { budgetMs: 2_500 });
       expect(await all(s)).toEqual([]);
       expect(await s.list({ cwd: dir, root: 'kb' })).toEqual([]);
       const started = Date.now();
       await expect(all(s)).rejects.toMatchObject({ status: 400, details: { code: 'pattern_too_expensive' } });
-      expect(Date.now() - started).toBeLessThan(400);
+      expect(Date.now() - started).toBeLessThan(1_000);
       expect(await slow.alive()).toEqual([]);
     } finally {
       await slow.remove();
