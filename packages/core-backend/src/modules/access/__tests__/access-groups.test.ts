@@ -310,15 +310,15 @@ describe('group files as access principals', () => {
     expect(owners.principals).toContainEqual({ name: 'Sales', kind: 'group' });
   });
 
-  it('a bare-name DENY of a colliding name fails closed: the role AND the same-named group', async () => {
+  it('a bare-name DENY resolves to the role when one exists, never the same-named group', async () => {
     const svc = await makeService({
       'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
       'groups.yaml': GROUPS_YAML_TEXT,
       'access.md': '---\nread:\n  - everyone\n  - deny Engineering\n---\n',
     });
     expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(false);
-    // ada is in the Engineering GROUP only; the bare denial still reaches her.
-    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
+    // ada is in the Engineering GROUP only; a bare denial means the role.
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
   });
 
   it('a group/<Name> naming no group grants nobody', async () => {

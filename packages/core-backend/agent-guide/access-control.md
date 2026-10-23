@@ -56,9 +56,9 @@ Access to any path — reading it as much as writing it — is governed by
   group otherwise. So a group that shares a role's name is reached only as
   `group/<Name>`: a bare `read: Admin` reaches the `Admin` role, never the
   members of a group named `Admin` (unless `roles.yaml` itself lists that
-  group under the role). A bare denial fails closed instead:
-  while a role and a group share the name, `deny Admin` denies BOTH, so
-  write `deny role/Admin` or `deny group/Admin` to deny just one. `role/<Name>` always means the role,
+  group under the role). The same holds for a denial: a bare
+  `deny Admin` denies the role, so denying a same-named group needs
+  `deny group/Admin`. `role/<Name>` always means the role,
   `group/<Name>` always the group.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
