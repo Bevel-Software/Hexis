@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { AccessResponse } from '../api';
@@ -137,5 +137,57 @@ describe('ManageAccessDialog add row: picking several in a row', () => {
     // be a box with nothing in it.
     expect(screen.queryByRole('button', { name: /^GT GTM Team/ })).toBeNull();
     expect(screen.getAllByRole('button', { name: /GTM Team/ })).toHaveLength(1); // the chip's Remove
+  });
+});
+
+/**
+ * A TYPED NAME SHARED BY A ROLE AND A GROUP. A bare name in an access rule
+ * means the role when one exists, so Enter on an exact typed match picks the
+ * role; the group of the same name is still reachable from its own row.
+ */
+describe('ManageAccessDialog add row: Enter on a name shared by a role and a group', () => {
+  async function typeAndShare(name: string): Promise<void> {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    const field = await screen.findByPlaceholderText(FIELD);
+    await user.type(field, name.toLowerCase());
+    // Enter resolves against the loaded suggestions — wait for them.
+    await screen.findAllByRole('button', { name: new RegExp(name) });
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('button', { name: `Remove ${name}` })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^share$/i }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
+  }
+
+  it('picks the ROLE when both a role and a group are named Admin', async () => {
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Admin'],
+      groups: ['Admin'],
+      people: [],
+      peopleWithheld: false,
+    });
+    await typeAndShare('Admin');
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'role', role: 'Admin' } }),
+    );
+    expect(api.grantAccess).not.toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'group', group: 'Admin' } }),
+    );
+  });
+
+  it('picks the GROUP when no role shares its name', async () => {
+    api.suggestPrincipals.mockResolvedValue({
+      roles: [],
+      groups: ['Admin'],
+      people: [],
+      peopleWithheld: false,
+    });
+    await typeAndShare('Admin');
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'group', group: 'Admin' } }),
+    );
   });
 });

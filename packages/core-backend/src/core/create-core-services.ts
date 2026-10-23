@@ -86,7 +86,7 @@ import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
-import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/index.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -1619,6 +1619,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    disk,
     kbDirName,
     () => kb.defaultBranch,
     eventBus,

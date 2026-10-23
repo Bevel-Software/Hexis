@@ -13,6 +13,9 @@
  */
 export * from './access-grammar.js';
 export * from './access-errors.js';
+export * from './group-files.js';
+export * from './access-splice.js';
+export * from './roles-yaml-guard.js';
 export type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from './change-gate.js';
 export { canReadWorkspacePath } from './kb-read-filter.js';
 // Reached by other modules; exported here so they stop importing the files.

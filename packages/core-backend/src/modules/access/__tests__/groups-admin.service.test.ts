@@ -11,6 +11,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
 import { GroupsAdminService, GroupsAdminError } from '../groups-admin.service.js';
 import { createGroup, addGroupMember, GroupsEditError } from '../groups-edit.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 
 const KB = 'knowledge-base';
 const ADMIN: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
@@ -108,6 +109,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -126,7 +128,7 @@ describe('GroupsAdminService', () => {
       'roles.yaml',
       'roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n    - group:gtm team\n',
     );
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('manual');
     expect(roster.groupsHealth).toEqual({ ok: true });
     expect(roster.groups.map((g) => g.displayName).sort()).toEqual(['GTM Team', 'Product']);
@@ -141,7 +143,7 @@ describe('GroupsAdminService', () => {
 
   it('a broken MANUAL groups.yaml answers the roster with 422 + the parse message', async () => {
     await write(repo, 'groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
-    const err = await service.getRoster().catch((e: unknown) => e);
+    const err = await service.getRoster('admin@x.io').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GroupsAdminError);
     expect((err as GroupsAdminError).status).toBe(422);
     expect((err as GroupsAdminError).message).toMatch(/groups.yaml/);
@@ -152,7 +154,7 @@ describe('GroupsAdminService', () => {
 
   it('a broken SYNCED file keeps IdP mode: empty roster + groupsHealth marker (no manual fallback)', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('idp');
     // Falling back to groups.yaml would resurrect retired manual groups.
     expect(roster.groups).toEqual([]);
@@ -218,7 +220,7 @@ describe('GroupsAdminService', () => {
 
   it('IdP mode: mutations refuse with the typed 409; reads still work', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - ada@x.io\n');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('idp');
     // The roster IS the synced file now — not the retired manual list.
     expect(roster.groups.map((g) => g.canonical)).toEqual(['engineering']);
@@ -241,13 +243,18 @@ describe('GroupsAdminService', () => {
   });
 
   it('canonical-changing rename rewrites grant references in ONE commit', async () => {
-    await write(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n---\n');
+    await write(
+      repo,
+      'Knowledge/Sales/access.md',
+      '---\nread:\n  - GTM Team\n  - group/GTM Team\nwrite:\n  - deny GTM Team\n---\n',
+    );
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
 
     expect(await groupsYaml()).toContain('Go To Market:');
     const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
-    expect(rewritten).toContain('- Go To Market');
-    expect(rewritten).toContain('- deny Go To Market');
+    // Rewritten as the explicit group token, whatever the old spelling.
+    expect(rewritten).toContain('- group/Go To Market');
+    expect(rewritten).toContain('- deny group/Go To Market');
     expect(rewritten).not.toContain('GTM Team');
     expect(commits).toHaveLength(1);
     expect(commits[0].summary).toContain('gtm team → Go To Market');
@@ -262,14 +269,15 @@ describe('GroupsAdminService', () => {
       '---\nwrite:\n  - Admin\n---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n',
     );
     // The scan must see the body rule too (delete warnings / referencedBy).
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     const gtm = roster.groups.find((g) => g.canonical === 'gtm team');
     expect(gtm?.referencedBy).toContainEqual({ path: 'Knowledge/Sales/access.md', verb: 'read' });
 
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
     const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
-    expect(rewritten).toContain('- Go To Market');
-    expect(rewritten).toContain('- deny Go To Market');
+    // Rewritten as the explicit group token, whatever the old spelling.
+    expect(rewritten).toContain('- group/Go To Market');
+    expect(rewritten).toContain('- deny group/Go To Market');
     expect(rewritten).not.toContain('GTM Team');
     // The frontmatter self-rule is a rule source too, and Admin is untouched.
     expect(rewritten).toContain('- Admin');
@@ -303,6 +311,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -349,6 +358,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -388,6 +398,7 @@ describe('GroupsAdminService', () => {
       workspace,
       workflow.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
+      new NodeFs(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -421,27 +432,124 @@ describe('groups-edit guardrails', () => {
 });
 
 describe('groups roster referencedBy — the mirror of the roles roster attribution', () => {
-  it('a group shadowed BY a role name still owns its bare-token hits; role/<name> hits are never the group’s', async () => {
+  it('a group sharing a role name owns only its group/ hits; bare and role/ hits are the role’s', async () => {
     const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-shadow-'));
     try {
       const repo2 = path.join(root2, KB);
-      // A group named Reviewer shares the Reviewer role's name. Group-first
-      // precedence gives the GROUP the bare key, so the bare hit is its
-      // reference; the explicit role/ hit belongs to the ROLE roster only.
+      // A group named Reviewer shares the Reviewer role's name. Role-first
+      // precedence gives the ROLE the bare key, so the bare and role/ hits
+      // belong to the ROLE roster; the group's reference is its group/ hit.
+      // The bare hit is reported so an Admin can rewrite it if the group
+      // was meant.
       await write(repo2, 'roles.yaml', ROLES); // declares role Reviewer
-      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
-      await write(repo2, 'team/access.md', '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\n---\n');
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n  Ops:\n    - ops@x.io\n');
+      await write(repo2, 'ops/access.md', '---\nread:\n  - Ops\nwrite:\n  - group/Ops\n---\n');
+      await write(
+        repo2,
+        'team/access.md',
+        '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\nowner:\n  - group/Reviewer\ndownload:\n  - deny Reviewer\n---\n',
+      );
       const workspace = stubWorkspace(root2);
       const svc = new GroupsAdminService(
         workspace,
         stubWorkflow().svc,
         new AccessControlService(workspace as never, KB, new NodeFs()),
+        new NodeFs(),
         KB,
         () => DEFAULT_BRANCH,
       );
-      const roster = await svc.getRoster();
+      // rev@x.io holds the Reviewer role, so it can read team/access.md.
+      const roster = await svc.getRoster('rev@x.io');
       const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
-      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'read' }]);
+      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'owner' }]);
+      // A bare DENIAL changed meaning too (it now denies the role, not the
+      // group), so it is reported alongside the bare grant.
+      expect(reviewer.bareNameResolvesToRole).toEqual([
+        { path: 'team/access.md', verb: 'read' },
+        { path: 'team/access.md', verb: 'download' },
+      ]);
+      // A group no role shares a name with keeps its bare hits, and has nothing
+      // to report. ops@x.io is in Ops, so it can read ops/access.md.
+      const ops = (await svc.getRoster('ops@x.io')).groups.find((g) => g.canonical === 'ops')!;
+      expect(ops.referencedBy).toEqual(
+        expect.arrayContaining([
+          { path: 'ops/access.md', verb: 'read' },
+          { path: 'ops/access.md', verb: 'write' },
+        ]),
+      );
+      expect(ops.referencedBy).toHaveLength(2);
+      expect(ops.bareNameResolvesToRole).toEqual([]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('bareNameResolvesToRole names only the files the viewer can read', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      await write(repo2, 'roles.yaml', ROLES); // Admin: admin@x.io, Reviewer: rev@x.io
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
+      await write(repo2, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+      // Two bare Reviewer rules: one in an open folder, one in a node only
+      // the Reviewer role may read.
+      await write(repo2, 'team/access.md', '---\nwrite:\n  - Reviewer\n---\n');
+      await write(repo2, 'secret/Plan.md', '---\nread:\n  - deny everyone\n  - Reviewer\n---\n# Plan\n');
+      const workspace = stubWorkspace(root2);
+      const access = new AccessControlService(workspace as never, KB, new NodeFs());
+      const svc = new GroupsAdminService(workspace, stubWorkflow().svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      const rowsFor = async (email: string) =>
+        (await svc.getRoster(email)).groups.find((g) => g.canonical === 'reviewer')!.bareNameResolvesToRole;
+
+      expect(await rowsFor('rev@x.io')).toEqual(
+        expect.arrayContaining([
+          { path: 'team/access.md', verb: 'write' },
+          { path: 'secret/Plan.md', verb: 'read' },
+        ]),
+      );
+      // pat@x.io is in the Reviewer GROUP, not the role: the bare grant is the
+      // role's, so the secret file is closed to pat, and so is its path.
+      expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), 'pat@x.io', 'secret/Plan.md')).toBe(false);
+      expect(await rowsFor('pat@x.io')).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('referencedBy names only the files the viewer can read and omits the rest entirely, uncounted', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-refs-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      await write(repo2, 'roles.yaml', ROLES); // Admin: admin@x.io, Reviewer: rev@x.io
+      await write(repo2, 'groups.yaml', 'groups:\n  Ops:\n    - ops@x.io\n');
+      await write(repo2, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+      // Two group/Ops rules: one in an open folder, one in a node only the
+      // Reviewer role may read.
+      await write(repo2, 'team/access.md', '---\nwrite:\n  - group/Ops\n---\n');
+      await write(
+        repo2,
+        'secret/Plan.md',
+        '---\nread:\n  - deny everyone\n  - Reviewer\nowner:\n  - deny group/Ops\n---\n# Plan\n',
+      );
+      const workspace = stubWorkspace(root2);
+      const svc = new GroupsAdminService(
+        workspace,
+        stubWorkflow().svc,
+        new AccessControlService(workspace as never, KB, new NodeFs()),
+        new NodeFs(),
+        KB,
+        () => DEFAULT_BRANCH,
+      );
+      const opsFor = async (email: string) =>
+        (await svc.getRoster(email)).groups.find((g) => g.canonical === 'ops')!;
+
+      const asReviewer = await opsFor('rev@x.io');
+      expect(asReviewer.referencedBy.map((r) => r.path).sort()).toEqual(['secret/Plan.md', 'team/access.md']);
+      // The Admin cannot read secret/Plan.md: its rule is left out entirely —
+      // not named, and not counted either (Admin status does not grant read).
+      const asAdmin = await opsFor('admin@x.io');
+      expect(asAdmin.referencedBy).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+      expect(asAdmin).not.toHaveProperty('referencesHidden');
     } finally {
       await fs.rm(root2, { recursive: true, force: true });
     }

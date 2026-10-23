@@ -3,9 +3,13 @@
  * services (roles + groups) drive for "which access rules name this
  * principal" and "rewrite every reference atomically":
  *
- *   - `findRoleRefsInText` / `rewriteRoleTokensInText`: the config-region
- *     parse that decides what IS a principal reference. One source of truth,
- *     so the delete/rename warning and the rename rewrite can never disagree.
+ *   - `resolverRoleRefs`: what IS a principal reference — the resolver's own
+ *     parse of each file, so the reports name every enforced rule.
+ *   - `findRoleRefsInText` / `rewriteRoleTokensInText`: the line-level walk
+ *     the rename edits text with. It handles block lists and `key: value`
+ *     entries; the rewrite re-checks its result with `resolverRoleRefs` and
+ *     refuses when a reference survives (a quoted or flow-YAML entry), so
+ *     the warning and the rename can never disagree.
  *   - `KbReferenceScanner`: candidate collection (every KB file with an
  *     access-frontmatter extension — `.md` and `.tool`, the resolver's own
  *     set), the advisory reference scan (cached — roster mutations must not
@@ -14,24 +18,35 @@
  *     file's ORIGINAL text too, so rollback snapshots reuse the read the
  *     rewrite already did instead of a second full-KB pass).
  *
- * Tokens here are the ENTRY-GRAMMAR canonical tokens: a bare name (group
- * first, then role) or an explicit `role/<name>`. Callers translate: a ROLE's
- * references are its bare token plus its `role/` token; a GROUP's are its
- * bare token only.
+ * Tokens here are the ENTRY-GRAMMAR canonical tokens: a bare name (the role
+ * when one exists, else the group) or an explicit `role/<name>` /
+ * `group/<name>`. Callers translate: a ROLE's references are its bare token
+ * plus its `role/` token; a GROUP's are its `group/` token, plus the bare
+ * token while no role shares the name.
  */
 
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-import { isFrontmatterFence, type FileTreeEntry, type IWorkspaceService } from '@bevel-software/platform-shared';
+import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/platform-shared';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
+import { logger } from '../../shared/logging.js';
+import { printable, sanitizedPath } from '../../shared/printable.js';
 import {
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
+  accessMdSelfEntries,
+  canonicalRoleName,
   hasAccessFrontmatterExtension,
   isAccessMdPath,
   parseAccessEntry,
+  parseAccessFile,
+  parseOwnAccessEntries,
   stripComment,
 } from '../access-model/index.js';
+import type { ParsedEntry, Verb } from '../access-model/index.js';
+
+const log = logger('access');
 
 /**
  * Resolve the [start, end) line range that role rewrites may touch — the YAML
@@ -237,8 +252,8 @@ function walkRoleRefs(
 
 /**
  * Every genuine role/group reference in `text`'s rule regions, as
- * {role, verb} where `role` is the canonical ENTRY TOKEN (bare name or
- * `role/<name>`). `isAccessMd` marks an `access.md` file, whose BODY is a
+ * {role, verb} where `role` is the canonical ENTRY TOKEN (bare name,
+ * `role/<name>` or `group/<name>`). `isAccessMd` marks an `access.md` file, whose BODY is a
  * rule source in the body-governed format — see {@link ruleLineRanges}.
  */
 export function findRoleRefsInText(
@@ -291,6 +306,34 @@ export function rewriteRoleTokensInText(
   return changed ? lines.join('\n') : text;
 }
 
+/**
+ * The principal references the RESOLVER reads from one candidate file, by
+ * the resolver's own parsers: an `access.md`'s folder rules
+ * (`parseAccessFile`) and its self-rules (`accessMdSelfEntries`), any other
+ * file's own frontmatter (`parseOwnAccessEntries`). Those parsers read
+ * quoted scalars and flow sequences (`read: ["Admin"]`) the line walker
+ * above does not, so the reports built on this name every rule that is
+ * actually enforced — and nothing the resolver ignores (a broken
+ * `access.md` is dropped from the model, so it references nothing).
+ */
+export function resolverRoleRefs(text: string, repoRel: string): { role: string; verb: string }[] {
+  const out: { role: string; verb: string }[] = [];
+  const add = (entries: Record<Verb, ParsedEntry[]> | null): void => {
+    if (!entries) return;
+    for (const verb of KNOWN_VERBS) {
+      for (const e of entries[verb]) if (e.kind === 'role') out.push({ role: e.role, verb });
+    }
+  };
+  if (isAccessMdPath(repoRel)) {
+    const folder = parseAccessFile(text, repoRel);
+    if (folder.ok) add(folder.file.entries);
+    add(accessMdSelfEntries(text));
+  } else {
+    add(parseOwnAccessEntries(text));
+  }
+  return out;
+}
+
 export interface ReferenceHit {
   path: string;
   verb: string;
@@ -302,6 +345,35 @@ export interface ReferenceRewrite {
   repoRelativePath: string;
   content: string;
   original: string;
+}
+
+/**
+ * Which of the given repo-relative paths the person a refusal is for may
+ * read — `canReadBatch` bound to that person. A path is itself a disclosure,
+ * so a refusal names only these and says nothing of the rest.
+ */
+export type PathVisibility = (repoRelPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
+
+/**
+ * The one refusal for a rename blocked by content the renaming person may not
+ * be shown — a folder the walk cannot list, a file it cannot read, or a
+ * reference in a file they cannot read. The same words whatever the cause:
+ * no path, no count, no hint of the YAML form, since Admin status does not
+ * grant read and each of those is a disclosure. The log names the place.
+ */
+export const UNSHOWN_REFERENCE_REFUSAL =
+  'Content this rename cannot show you may reference the old principal in a way it cannot rewrite; rename aborted with no changes. The server log names where.';
+
+/**
+ * The rows of `refs` whose file `readable` allows. The rest are dropped
+ * outright, not counted: Admin status does not grant read, so even a count of
+ * rules in content the viewer cannot read is a disclosure.
+ */
+export function readableReferences(
+  refs: readonly ReferenceHit[],
+  readable: ReadonlyMap<string, boolean>,
+): ReferenceHit[] {
+  return refs.filter((r) => readable.get(r.path) === true);
 }
 
 /** How long a cached reference scan may serve after its load. Backstop only —
@@ -354,6 +426,8 @@ export class KbReferenceScanner {
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
+    /** The resolver's walk (see `collectCandidateFiles`), injected by the composition root. */
+    private readonly disk: ITreeWalker,
     private readonly kbDirName: string,
     eventBus?: ReferenceScanInvalidationBus,
   ) {
@@ -381,37 +455,40 @@ export class KbReferenceScanner {
    * resolver reads access verbs from — the shared
    * `ACCESS_FRONTMATTER_EXTENSIONS` set (`.md` AND `.tool`; a rename that
    * skipped `.tool` would strand a live frontmatter grant there). Sourced
-   * from the workspace file tree (which already skips `.git` and honours
-   * `.bevelignore`), filtered under the KB dir and returned bare
-   * repo-relative. (`roles.yaml` matches no scanned extension, so it's
-   * excluded; callers commit it separately.) Under save=share the working
-   * tree matches the committed set, so this is the same candidate list
-   * git-tracking would give.
+   * from the RESOLVER'S OWN walk (`walkKb`: dot-entries and vendored
+   * dependencies skipped, `.bevelignore` NOT honoured) — the resolver
+   * enforces an `access.md` the explorer hides, so a scan that honoured the
+   * ignore file would leave its rules out of the roster's reports and a
+   * rename would strand them. Paths are relative to the KB dir. (`roles.yaml`
+   * matches no scanned extension, so it's excluded; callers commit it
+   * separately.)
+   *
+   * `holes` names every folder the walk could not list: the candidate set
+   * is INCOMPLETE when it is non-empty, and each caller decides what that
+   * means — the rewrite refuses, the advisory scan says so and does not cache.
    */
-  async collectCandidateFiles(workspaceId: string): Promise<string[]> {
-    const tree = await this.workspaceService.listFiles(workspaceId);
-    const prefix = `${this.kbDirName}/`;
+  async collectCandidateFiles(workspaceId: string): Promise<{ files: string[]; holes: string[] }> {
     const out: string[] = [];
-    const visit = (node: FileTreeEntry): void => {
-      if (node.type === 'file') {
-        if (node.relativePath.startsWith(prefix) && hasAccessFrontmatterExtension(node.relativePath)) {
-          out.push(node.relativePath.slice(prefix.length));
-        }
-        return;
-      }
-      for (const child of node.children ?? []) visit(child);
-    };
-    visit(tree);
-    return out;
+    const { holes } = await this.disk.walkKb(await this.repoDir(workspaceId), [
+      {
+        onFile(dir, name) {
+          const rel = dir ? `${dir}/${name}` : name;
+          if (hasAccessFrontmatterExtension(rel)) out.push(rel);
+        },
+      },
+    ]);
+    return { files: out, holes };
   }
 
   /**
    * Sound scan of EVERY candidate file (folder `access.md` + `.md`/`.tool`
    * node frontmatter) for genuine principal references, indexed by canonical
-   * entry TOKEN. Shares the
-   * candidate set and the config-region parse with the rename rewrite, so the
-   * delete warning and the rewrite see the SAME references. A file we cannot
-   * read is skipped (this is an advisory read, not the atomic write path).
+   * entry TOKEN, read by the resolver's own parse ({@link resolverRoleRefs}).
+   * Shares the candidate set with the rename rewrite, and the rewrite checks
+   * its result against the same parse, so the delete warning and the rewrite
+   * cannot disagree on what references a principal. A file we cannot
+   * read is skipped (this is an advisory read, not the atomic write path),
+   * and the scan that skipped it is not cached.
    * Cached per workspace (see class doc); reads are batched with Promise.all
    * rather than serial per-file awaits.
    */
@@ -428,7 +505,12 @@ export class KbReferenceScanner {
     const startedUnder = flight.gen;
     try {
       const repoDir = await this.repoDir(workspaceId);
-      const candidates = await this.collectCandidateFiles(workspaceId);
+      const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
+      if (holes.length > 0) {
+        log.warn(
+          `reference scan: cannot list ${holes.map((h) => printable(h || '.')).join(', ')} — references there are not reported`,
+        );
+      }
       const texts = await Promise.all(
         candidates.map(async (repoRel) => {
           try {
@@ -442,7 +524,7 @@ export class KbReferenceScanner {
       candidates.forEach((repoRel, i) => {
         const text = texts[i];
         if (text === null) return;
-        for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
+        for (const ref of resolverRoleRefs(text, repoRel)) {
           const list = byToken.get(ref.role);
           if (list) list.push({ path: repoRel, verb: ref.verb });
           else byToken.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
@@ -451,7 +533,10 @@ export class KbReferenceScanner {
       // Cache only when no invalidation landed mid-scan; the caller still gets
       // this snapshot (at worst one write stale — same as the pre-scan world),
       // but a stale snapshot must never STICK for a TTL. The next call re-scans.
-      if (flight.gen === startedUnder) {
+      // An incomplete scan (a folder could not be listed, or a candidate file
+      // could not be read) is never cached either: the next call retries it.
+      const unread = texts.some((t) => t === null);
+      if (flight.gen === startedUnder && holes.length === 0 && !unread) {
         this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
       }
       return byToken;
@@ -462,22 +547,34 @@ export class KbReferenceScanner {
   }
 
   /**
-   * Find every genuine reference to `oldToken` and rewrite it to
-   * `newDisplayName`. FAIL-CLOSED: a candidate we cannot read might reference
+   * Find every genuine reference to `oldToken` (or any of several spellings
+   * of one principal) and rewrite it to `newDisplayName`. FAIL-CLOSED: a candidate we cannot read might reference
    * the old token, and skipping it would commit a partial rewrite (a
    * half-renamed principal still pointed at by stragglers = silent access
    * drop) — so any read failure aborts via `makeError` with nothing written.
    * Returns the writes WITH each file's original text (rollback snapshots).
+   * A refusal names only the paths `visible` says the renaming person may
+   * read; anything else gets `UNSHOWN_REFERENCE_REFUSAL`, never named nor counted.
    */
   async rewriteReferences(
     workspaceId: string,
-    oldToken: string,
+    oldToken: string | readonly string[],
     newDisplayName: string,
     makeError: (message: string, cause?: string) => Error,
+    visible: PathVisibility,
   ): Promise<ReferenceRewrite[]> {
+    const oldTokens = typeof oldToken === 'string' ? [oldToken] : oldToken;
     const repoDir = await this.repoDir(workspaceId);
     const writes: ReferenceRewrite[] = [];
-    const candidates = await this.collectCandidateFiles(workspaceId);
+    const { files: candidates, holes } = await this.collectCandidateFiles(workspaceId);
+    // A folder we cannot list might hold references to the old token — same
+    // fail-closed rule as an unreadable file below, and never named nor
+    // counted, for the same reason: its own access.md may be just as
+    // unreadable, so `visible` could not see the rules that close it.
+    if (holes.length > 0) {
+      log.warn(`reference rewrite: cannot list ${holes.map((h) => printable(h || '.')).join(', ')}`);
+      throw makeError(UNSHOWN_REFERENCE_REFUSAL);
+    }
     const texts = await Promise.all(
       candidates.map(async (repoRel) => {
         try {
@@ -489,20 +586,52 @@ export class KbReferenceScanner {
     );
     for (const t of texts) {
       if (!t.ok) {
-        throw makeError(
-          `Cannot read ${t.repoRel} while rewriting references; rename aborted with no changes`,
-          t.cause,
-        );
+        // Never named, not even to a reader: `visible` decides from the
+        // file's own rules, and a file we cannot read has none it can see —
+        // an inherited grant would then disclose a path its own rules may
+        // close. The fs cause carries the path too, so it stays in the log.
+        log.warn(`reference rewrite: cannot read ${printable(t.repoRel)}`, { cause: t.cause });
+        throw makeError(UNSHOWN_REFERENCE_REFUSAL);
       }
     }
+    // Old tokens the rename must leave no reference to (the new name's own
+    // token is exempt: it IS the rewrite's result).
+    const newToken = canonicalRoleName(newDisplayName);
+    const gone = new Set(oldTokens.filter((t) => t !== newToken));
+    const stranded: string[] = [];
     candidates.forEach((repoRel, i) => {
       const entry = texts[i];
       if (!entry.ok) return; // unreachable — the loop above threw
-      const rewritten = rewriteRoleTokensInText(entry.text, oldToken, newDisplayName, true, isAccessMdPath(repoRel));
+      let rewritten = entry.text;
+      for (const token of oldTokens) {
+        rewritten = rewriteRoleTokensInText(rewritten, token, newDisplayName, true, isAccessMdPath(repoRel));
+      }
+      // The line rewrite edits block-list and `key: value` entries; the
+      // resolver also reads quoted and flow-YAML ones. A reference it still
+      // sees after the rewrite would be stranded by the rename — refuse.
+      if (resolverRoleRefs(rewritten, repoRel).some((r) => gone.has(r.role))) {
+        stranded.push(repoRel);
+        return;
+      }
       if (rewritten !== entry.text) {
         writes.push({ repoRelativePath: repoRel, content: rewritten, original: entry.text });
       }
     });
+    if (stranded.length > 0) {
+      // The readable ones are named with how to fix them. The rest add
+      // nothing to that refusal — it reads the same with or without them —
+      // and alone they get the one refusal that says nothing of them.
+      const verdicts = await visible(stranded);
+      const shown = stranded.filter((p) => verdicts.get(p) === true);
+      const unshown = stranded.filter((p) => verdicts.get(p) !== true);
+      if (unshown.length > 0) {
+        log.warn(`reference rewrite: unrewritable reference in ${unshown.map((p) => printable(p || '.')).join(', ')}`);
+      }
+      if (shown.length === 0) throw makeError(UNSHOWN_REFERENCE_REFUSAL);
+      throw makeError(
+        `${shown.map((p) => sanitizedPath(p || '.')).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
+      );
+    }
     return writes;
   }
 

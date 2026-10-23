@@ -48,7 +48,7 @@ export interface GroupsEditResult {
 
 /** Thin assert wrapper over the SHARED name-safety predicate (`group-files.ts`
  *  `unsafeNameReason`) — one namespace, one set of rules, including the
- *  reserved `role/` prefix. */
+ *  reserved `role/` and `group/` prefixes. */
 export function assertSafeGroupDisplayName(displayName: string): void {
   const reason = unsafeNameReason(displayName);
   if (reason) {

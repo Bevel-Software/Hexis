@@ -50,9 +50,11 @@ export function createGroupsAdminRoutes(deps: {
   // role assignments) + `groupsHealth` (the broken-source banner marker; a
   // broken MANUAL groups.yaml instead answers 422 with the parse message so
   // the operator sees what to fix).
-  router.get('/admin/groups', requireAdmin, async (_req, res) => {
+  router.get('/admin/groups', requireAdmin, async (req, res) => {
     try {
-      res.json(await groupsAdmin.getRoster());
+      // A read needs no commit attribution: the roster is filtered for the
+      // email `requireAdmin` just checked, with no second user lookup to fail.
+      res.json(await groupsAdmin.getRoster(req.userEmail!));
     } catch (err) {
       sendError(res, err);
     }
