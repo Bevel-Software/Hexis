@@ -7,6 +7,7 @@ import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
+import type { SkippedToolSource } from './tool-manuals.routes.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
@@ -49,6 +50,11 @@ export function registerToolManualsTools(
      * `hiddenTools` is then empty everywhere.
      */
     hiddenTools?: HiddenToolSource;
+    /**
+     * What the caller skipped on /connect. Optional like `hiddenTools`: absent,
+     * nothing is reported skipped.
+     */
+    skippedTools?: SkippedToolSource;
   },
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
@@ -151,6 +157,12 @@ export function registerToolManualsTools(
                 type: 'boolean',
                 description: 'You may write this `.tool` FILE, which is what gates setting its shared secrets.',
               },
+              skipped: {
+                type: 'boolean',
+                description:
+                  'The user took this tool out of their agent on /connect: it is not callable until they include ' +
+                  'it again there. Their choice, not missing setup — do not ask them to sign in to it.',
+              },
               hiddenTools: {
                 type: 'array',
                 description:
@@ -191,14 +203,14 @@ export function registerToolManualsTools(
                 },
               },
             },
-            required: ['slug', 'name', 'path', 'type', 'canWrite', 'hiddenTools', 'variables'],
+            required: ['slug', 'name', 'path', 'type', 'canWrite', 'skipped', 'hiddenTools', 'variables'],
           },
         },
         invalid: {
           type: 'array',
           description:
-            '`.tool` files the scan refused — the ONLY tools missing from `tools`; every other tool is listed and ' +
-            'callable. Each names the file and why it was refused, with the line/column or field where the validation ' +
+            '`.tool` files the scan refused — the ONLY tools missing from `tools`. Being listed does not ' +
+            'make a tool callable; a `skipped` one is not. Each names the file and why it was refused, with the line/column or field where the validation ' +
             'failed. Fix the file (or delete it) and the next call lists it as a normal tool, with nothing to restart ' +
             'or reconnect. Never contains a secret value.',
           items: {
@@ -253,6 +265,7 @@ export function registerToolManualsTools(
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
+      const skipped = deps.skippedTools ? await deps.skippedTools.skippedBy(ctx.user.id) : new Set<string>();
       const tools = await Promise.all(
         manuals.map(async (m) => {
           const canWrite = await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path);
@@ -263,6 +276,7 @@ export function registerToolManualsTools(
             type: m.type,
             setup: m.setup ?? null,
             canWrite,
+            skipped: skipped.has(m.name),
             // The marker goes only to the people who manage the server — the
             // same verdict that gates setting its shared secrets. A caller who
             // may only READ the tool is told nothing about it: they cannot fix

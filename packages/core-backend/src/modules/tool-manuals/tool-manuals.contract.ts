@@ -6,9 +6,10 @@ import type { HiddenTool, HiddenToolSource } from '../../shared/hidden-tools.js'
  * branch KB. Each is a UTCP *manual* (a pointer to where tools come from), not a
  * flattened tool list. Access-controlled exactly like Skills (default-deny ACL
  * on the `.tool` file path). The MCP/UTCP endpoint serves every manual a user
- * can read via `GET /api/agent/all-tools`, and the MCP proxy registers them all
- * on its per-session UTCP client — UTCP namespaces tools by manual name, so
- * there's no server-side flattening.
+ * can read via `GET /api/agent/all-tools`, except the ones that user skipped on
+ * the Connect page (until they include them again), and the MCP proxy
+ * registers them all on its per-session UTCP client — UTCP namespaces tools by
+ * manual name, so there's no server-side flattening.
  *
  * A `.tool` file's `type` (its UTCP call-template kind) decides resolution:
  *  - `inline` — tools embedded in the file; Bevel serves them as a tiny http
@@ -293,7 +294,8 @@ export interface ToolManualSummary {
  * A `.tool` file the scan REFUSED — reported instead of silently dropped.
  *
  * One unparseable manual is a finding about that file, never an outage for the
- * catalog: every other manual is listed and callable, and the refused one comes
+ * catalog: every other manual is still listed (callable unless the caller
+ * skipped it, or it still needs setup), and the refused one comes
  * back here so the listing can say which file and why. Nothing is cached about
  * it beyond the scan's own TTL, so fixing (or deleting) the file restores it on
  * the next listing — no reconnect, no restart.
@@ -405,8 +407,12 @@ export interface IToolManualService {
    * catalog is still correct, which a change to a manual's `url` or an inline
    * manual's embedded tools breaks without touching anything a summary shows.
    * Opaque to callers: only equality is ever asked of these lines.
+   *
+   * `except` names manuals (by `name`, the key `/agent/all-tools` leaves them
+   * out by) the caller is not served, so none of their lines is rendered: a
+   * manual outside the served catalog cannot move its fingerprint.
    */
-  catalogFingerprints(userEmail: string): Promise<string[]>;
+  catalogFingerprints(userEmail: string, except?: ReadonlySet<string>): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only

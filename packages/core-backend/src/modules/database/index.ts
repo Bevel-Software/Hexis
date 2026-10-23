@@ -6,4 +6,4 @@
 export type { Database } from './connection.js';
 export { deploymentSettings } from './core-schema.js';
 export { pgErrorCode } from './pg-error.js';
-export { agentConnections, agentEvents, atlassianAccountLinks, changeRequests, externalApiKeys, fileLocks, githubFacadeCodes, githubFacadeIdentity, oauthAuthCodes, oauthClients, oauthTokens, pendingCommits, pluginJoinRequests, prFileApprovals, prMergeLog, secrets, users } from './schema.js';
+export { agentConnections, agentEvents, atlassianAccountLinks, changeRequests, externalApiKeys, fileLocks, githubFacadeCodes, githubFacadeIdentity, oauthAuthCodes, oauthClients, oauthTokens, pendingCommits, pluginJoinRequests, prFileApprovals, prMergeLog, secrets, skippedTools, users } from './schema.js';

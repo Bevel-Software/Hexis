@@ -2,11 +2,9 @@ import type { Server as HttpServer } from 'node:http';
 import { createHmac } from 'node:crypto';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  createSecretsVaultRoutes,
-  createSecretsVaultPublicRoutes,
-  isSafeReturnPath,
-} from '../secrets-vault.routes.js';
+import { createSecretsVaultRoutes, createSecretsVaultPublicRoutes } from '../index.js';
+import { isSafeReturnPath } from '../secrets-vault.routes.js';
+import { FakeSkippedToolsService } from './fake-skipped-tools.js';
 
 /**
  * OAUTH `returnTo`: a sign-in started from a page other than /connect must land
@@ -73,6 +71,7 @@ const connectionProbe = {
 
 const deps = {
   secretsVault,
+  skippedTools: new FakeSkippedToolsService(),
   toolManualService,
   accessControl,
   connectionProbe,

@@ -663,6 +663,20 @@ function serveSecrets(listing: ConnectListing): SecretsServer {
       if ((method === 'PUT' || method === 'DELETE') && /^\/api\/secrets\/tools\/[^/]+\/vars\/[^/]+\/user$/.test(path)) {
         return json({ ok: true });
       }
+      // Skip / include: the server keeps the choice and reports it on every
+      // row of the tool from then on.
+      const skipped = /^\/api\/connect\/skipped\/([^/]+)$/.exec(path);
+      if (skipped && (method === 'PUT' || method === 'DELETE')) {
+        const slug = decodeURIComponent(skipped[1]);
+        const mark = <T extends object>(row: T) =>
+          (row as { slug?: string }).slug === slug ? { ...row, skipped: method === 'PUT' } : row;
+        server.listing = {
+          ...server.listing,
+          tools: server.listing.tools.map(mark),
+          toolOAuth: server.listing.toolOAuth.map(mark),
+        };
+        return new Response(null, { status: 204 });
+      }
       throw new Error(`the test server has no answer for ${method} ${path}`);
     }),
   );

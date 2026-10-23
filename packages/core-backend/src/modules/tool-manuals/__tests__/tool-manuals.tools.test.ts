@@ -1,13 +1,12 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
 import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
 import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
 import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { registerToolManualsTools } from '../tool-manuals.tools.js';
-import type { IToolManualService } from '../tool-manuals.contract.js';
+import { registerToolManualsTools, type IToolManualService, type SkippedToolSource } from '../index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { HiddenTool, HiddenToolSource } from '../../../shared/hidden-tools.js';
 
@@ -106,7 +105,7 @@ const HIDDEN_WEATHER_TOOL: HiddenTool = {
   marker: 'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
 };
 
-async function start(hiddenTools?: HiddenToolSource): Promise<string> {
+async function start(hiddenTools?: HiddenToolSource, skippedTools?: SkippedToolSource): Promise<string> {
   const registry = new ToolRegistry();
   const internalToken = new InternalTokenService({ secret: 'test-secret' });
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
@@ -130,6 +129,7 @@ async function start(hiddenTools?: HiddenToolSource): Promise<string> {
     variableStatus: { statusFor },
     kb: testKbContext(),
     hiddenTools,
+    skippedTools,
   });
   app.use('/api', router);
 
@@ -249,6 +249,18 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     // not by its slug — and the answer came from the source.
     expect(hiddenFor).toHaveBeenCalledWith('Weather Service');
     expect(hiddenFor).not.toHaveBeenCalledWith('weather');
+  });
+
+  it('says which tools the caller skipped on /connect — their choice, not setup they still owe', async () => {
+    // Bob skipped weather; Alice skipped nothing. The flag is the caller's own.
+    const skippedBy = vi.fn(async (userId: string) => new Set(userId === BOB.id ? ['Weather Service'] : []));
+    const base = await start(undefined, { skippedBy });
+
+    type Listing = { tools: { slug: string; skipped: boolean }[] };
+    const bob = (await (await callSetup(base, 'bevel_bob')).json()) as Listing;
+    expect(bob.tools).toEqual([expect.objectContaining({ slug: 'weather', skipped: true })]);
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as Listing;
+    for (const tool of alice.tools) expect(tool.skipped).toBe(false);
   });
 
   it('rejects an unauthenticated call outright', async () => {

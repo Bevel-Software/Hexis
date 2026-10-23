@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending } from '../../services/connect.api';
-import { ConnectToolsPage } from '../ConnectToolsPage';
+import { ConnectToolsPage } from '../..';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
 
 /**
@@ -21,6 +21,7 @@ const connectMock = vi.hoisted(() => ({
   startToolOAuth: vi.fn(),
   getMcpOAuthRequest: vi.fn(),
   completeMcpOAuth: vi.fn(),
+  setToolSkipped: vi.fn(),
 }));
 vi.mock('../../services/connect.api', () => connectMock);
 
@@ -44,6 +45,7 @@ function pending(configured: boolean): ConnectPending {
         path: 'Plugins/GTM/heyreach.tool',
         type: 'inline',
         canWrite: false,
+        skipped: false,
         variables: [
           { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', scope: 'user', configured, ownerOnly: false },
         ],
@@ -85,6 +87,7 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
     heard.mockReset();
     connectMock.getConnectPending.mockReset().mockResolvedValue(pending(false));
     connectMock.getMcpOAuthRequest.mockReset();
+    connectMock.setToolSkipped.mockReset().mockResolvedValue(undefined);
     varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
     varsMock.deleteUserVar.mockReset().mockResolvedValue(undefined);
     // Reset, not clear: a test that forgets to state what its probe answers

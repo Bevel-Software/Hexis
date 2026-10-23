@@ -4,6 +4,7 @@ export { registerToolManualsTools } from './tool-manuals.tools.js';
 export {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
+  type SkippedToolSource,
 } from './tool-manuals.routes.js';
 export {
   EXTERNAL_KB_MANUAL_NAME,

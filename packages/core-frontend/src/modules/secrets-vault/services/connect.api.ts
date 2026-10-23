@@ -44,6 +44,11 @@ export interface ConnectTool {
   type: 'inline' | 'http' | 'mcp';
   /** The caller may set this tool's workspace (owner) values. */
   canWrite: boolean;
+  /**
+   * The caller took this tool out of their agent ("Skipped by you"). Stored on
+   * the server, so it holds across reloads and sessions until they include it.
+   */
+  skipped: boolean;
   variables: ConnectVar[];
 }
 
@@ -76,6 +81,8 @@ export interface ConnectToolOAuth {
   ownerConfigured: boolean;
   /** Waiting on the registration above, and the caller may not write it. */
   ownerOnly: boolean;
+  /** The caller skipped the TOOL this sign-in belongs to — see {@link ConnectTool.skipped}. */
+  skipped: boolean;
 }
 
 export interface ConnectPending {
@@ -101,6 +108,19 @@ export async function getConnectPending(): Promise<ConnectPending> {
   const res = await authFetch('/api/connect/pending');
   if (!res.ok) await fail(res, "Couldn't load your tools.");
   return (await res.json()) as ConnectPending;
+}
+
+/**
+ * Take a tool out of the caller's agent (`skip`) or put it back. The server
+ * keeps the choice: the listing reports it on every load and the agent's
+ * catalog leaves a skipped tool out. Wiping the saved keys is a separate call
+ * (`deleteUserVar`), made by the page.
+ */
+export async function setToolSkipped(slug: string, skip: boolean): Promise<void> {
+  const res = await authFetch(`/api/connect/skipped/${encodeURIComponent(slug)}`, {
+    method: skip ? 'PUT' : 'DELETE',
+  });
+  if (!res.ok) await fail(res, skip ? "Couldn't skip this tool." : "Couldn't include this tool.");
 }
 
 /**
