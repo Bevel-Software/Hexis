@@ -76,6 +76,7 @@
     "@types/pg": "^8.20.0",
     "@types/qs": "^6.15.1",
     "drizzle-kit": "^0.31.10",
+    "js-tiktoken": "^1.0.21",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.6"
