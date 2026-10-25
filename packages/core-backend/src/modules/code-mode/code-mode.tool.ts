@@ -121,7 +121,7 @@ export function createCallToolChainTool(
           truncated: true,
           result_ref: ref,
           result_bytes: bytes,
-          message: `Combined result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON (both \`result\` and \`logs\`) saved to the shared spill store as \`${ref}\` (outside any workspace, uncommitted). Read it back with \`read_file\` — pass that ref as \`path\` (\`branch\` is ignored) plus \`offset\` / \`limit\` for a slice — or, usually better, narrow the next \`call_tool_chain\` call (smaller fields list, tighter date window, lower limit) so the result fits inline.`,
+          message: `Combined result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON (both \`result\` and \`logs\`) saved to the shared spill store as \`${ref}\` (outside any workspace, uncommitted). Read it back with \`read_file\` — pass that ref as \`path\` (any existing branch as \`branch\`; it is not used) plus \`offset\` / \`limit\` for a slice — or, usually better, narrow the next \`call_tool_chain\` call (smaller fields list, tighter date window, lower limit) so the result fits inline.`,
         };
       } catch (err) {
         // The chain itself SUCCEEDED and only its delivery failed, so the logs
