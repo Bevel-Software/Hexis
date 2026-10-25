@@ -3,13 +3,23 @@ import type { IToolRegistry, UtcpTool } from '../tool-registry/index.js';
 import { GET_AGENT_GUIDE_TOOL, TOOL_DESCRIPTION_CAP } from '../tool-registry/index.js';
 import { ToolError, toolDef } from '../tool-helpers/index.js';
 import type { ToolHandlerFactory } from '../tool-helpers/index.js';
-import { AGENT_GUIDE_FILE, joinGuideSections, type AgentGuideSectionsReader } from './agent-guide.js';
+import {
+  AGENT_GUIDE_FILE,
+  START_HERE_SECTION_ID,
+  WHOLE_GUIDE_SECTION,
+  joinGuideSections,
+  type AgentGuideSectionsReader,
+} from './agent-guide.js';
 
 export { GET_AGENT_GUIDE_TOOL };
 
 /**
- * The one tool that returns the guide on its own — whole, or one section by
- * id. It takes nothing else: the guide is the platform's text for this
+ * The one tool that returns the guide on its own: the start section when no
+ * section is named, one section by id, or the whole guide (`all`). Start
+ * section by default because this is the call every tool description tells
+ * an agent, and each sub-agent it starts, to make first: answering it with
+ * the whole guide made the most-read text the platform has also its longest.
+ * It takes nothing else: the guide is the platform's text for this
  * deployment, the same for every caller and every branch, and reading it
  * touches no file — so no `branch`, no `sessionId`, and no access gate. The
  * other way to the same text is a `read_file` of `AGENTS.md` at the
@@ -33,27 +43,30 @@ export function registerAgentGuideTool(
   const build = async (): Promise<UtcpTool> => {
     const list = await sections();
     const describe = (sectionList: string) =>
-      "The platform's guide to this knowledge base: its layout, where a new file goes, the rules every file tool " +
-      'shares, access control, skills and tool manuals. ALWAYS call this first and read the guide before you do ' +
-      'anything else in the platform. Returns `{ guide }` as markdown: the whole guide, or one section when ' +
-      '`section` names one. The same text comes back from `read_file` on `' +
+      "The platform's guide to this knowledge base. ALWAYS call this first, before anything else in the " +
+      'platform. With no `section` it returns the start section: the default branch every file tool takes, the ' +
+      'first-call rules, and which section answers which question. Then fetch only the section a task needs, by ' +
+      '`section`; `"' +
+      WHOLE_GUIDE_SECTION +
+      '"` returns the whole guide, as does `read_file` on `' +
       AGENT_GUIDE_FILE +
-      "` at the KB root, after the knowledge base's own " +
+      "` at the KB root (after the knowledge base's own " +
       AGENT_GUIDE_FILE +
-      ` when it has one. Sections: ${sectionList}.`;
+      ` when it has one). Returns \`{ guide }\` as markdown. Sections: ${sectionList}.`;
     // The description stays under the cap WHATEVER a distribution adds, in
     // three steps: every id with its title; every id alone; as many ids as
     // fit and a count of the rest. An id a client cut off the end would be a
     // section an agent cannot ask for — so nothing is ever cut: the one
-    // complete list of sections is `sections` on the whole-guide response,
-    // which the description names when it cannot carry them all itself.
+    // complete list of sections is `sections` on the answer to a call
+    // without one, which the description names when it cannot carry them
+    // all itself.
     const titled = describe(list.map((s) => `\`${s.id}\` (${s.title})`).join(', '));
     const ids = list.map((s) => `\`${s.id}\``);
     const counted = (shown: number) =>
       describe(
         shown === 0
-          ? `${ids.length}, named under \`sections\` in the whole-guide response`
-          : [...ids.slice(0, shown), `and ${ids.length - shown} more, all named under \`sections\` in the whole-guide response`].join(', '),
+          ? `${ids.length}, named under \`sections\` in the answer`
+          : [...ids.slice(0, shown), `and ${ids.length - shown} more, all named under \`sections\` in the answer`].join(', '),
       );
     let description = titled.length <= TOOL_DESCRIPTION_CAP ? titled : describe(ids.join(', '));
     for (let shown = ids.length; description.length > TOOL_DESCRIPTION_CAP && shown > 0; shown--) {
@@ -69,8 +82,10 @@ export function registerAgentGuideTool(
           section: {
             type: 'string',
             description:
-              'Optional: the id of one section to read instead of the whole guide (the ids are listed in this ' +
-              'description, and every one under `sections` in the whole-guide response). Omit it for the whole guide.',
+              'Optional: the id of one section to read (the ids are listed in this description, and every one under ' +
+              '`sections` in the answer), or `"' +
+              WHOLE_GUIDE_SECTION +
+              '"` for the whole guide. Omit it for the start section.',
           },
         },
         additionalProperties: false,
@@ -78,18 +93,18 @@ export function registerAgentGuideTool(
       outputs: {
         type: 'object',
         properties: {
-          guide: { type: 'string', description: 'The guide, or the one section asked for, as markdown.' },
+          guide: { type: 'string', description: 'The section asked for (the start section by default), or the whole guide, as markdown.' },
           sections: {
             type: 'array',
-            description: 'Without `section`: every section of the guide, in order, by id and heading — the complete list.',
+            description: `Without \`section\`, or with \`"${WHOLE_GUIDE_SECTION}"\`: every section of the guide, in order, by id and heading — the complete list.`,
             items: {
               type: 'object',
               properties: { id: { type: 'string' }, title: { type: 'string' } },
               required: ['id', 'title'],
             },
           },
-          section: { type: 'string', description: 'With `section`: the id of the section returned.' },
-          title: { type: 'string', description: 'With `section`: its heading.' },
+          section: { type: 'string', description: 'The id of the one section returned.' },
+          title: { type: 'string', description: 'Its heading.' },
         },
         required: ['guide'],
       },
@@ -104,13 +119,18 @@ export function registerAgentGuideTool(
     toolAuth,
     toolHandler(async (args) => {
       const list = await sections();
+      const index = list.map((s) => ({ id: s.id, title: s.title }));
       const wanted = typeof args.section === 'string' ? args.section.trim() : '';
-      if (!wanted) return { guide: joinGuideSections(list), sections: list.map((s) => ({ id: s.id, title: s.title })) };
+      // A distribution that dropped the start section gets the whole guide by
+      // default, as before there was one: never an answer with nothing in it.
+      const start = list.find((s) => s.id === START_HERE_SECTION_ID);
+      if (wanted === WHOLE_GUIDE_SECTION || (!wanted && !start)) return { guide: joinGuideSections(list), sections: index };
+      if (!wanted) return { guide: start!.body, section: start!.id, title: start!.title, sections: index };
       const one = list.find((s) => s.id === wanted);
       if (!one) {
         throw new ToolError(
           `The guide has no section "${wanted}". Sections: ${list.map((s) => `\`${s.id}\``).join(', ')}. ` +
-            'Omit `section` for the whole guide.',
+            `Omit \`section\` for the start section, or pass \`"${WHOLE_GUIDE_SECTION}"\` for the whole guide.`,
           400,
         );
       }

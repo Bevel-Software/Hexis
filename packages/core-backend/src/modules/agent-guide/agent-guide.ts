@@ -20,10 +20,17 @@
  * The sections ship as markdown files in the package's `agent-guide/` folder
  * (see `assets.ts`), one per section, with the layout placeholders the old
  * template carried (`{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`,
- * `{{agentsFile}}`). ONE section is computed rather than read: the rules every
- * file tool shares, which the MCP handshake also sends — the same string in
- * both places, from `shared-file-rules.ts`, so a rule cannot be changed in one
- * and left stale in the other.
+ * `{{agentsFile}}`), the checkout folder's `{{kbDirName}}` and the default
+ * branch's `{{defaultBranch}}`. ONE section is computed rather than read: the
+ * rules every file tool shares, which the MCP handshake also sends — the same
+ * string in both places, from `shared-file-rules.ts`, so a rule cannot be
+ * changed in one and left stale in the other.
+ *
+ * The guide is LAYERED (see openspec/changes/agent-guide-layers/design.md):
+ * `get_agent_guide` with no section answers with the short start section
+ * ({@link START_HERE_SECTION_ID}), which says which section answers which
+ * question, and an agent fetches the others by id when a task needs them.
+ * Each section has a token budget (`guide-budget.ts`), held by a test.
  */
 
 import fs from 'node:fs/promises';
@@ -87,20 +94,34 @@ export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
 export const NEW_KNOWLEDGE_BASE_SECTION_ID = 'new-knowledge-base';
 
 /**
+ * The first-contact section: what `get_agent_guide` answers when no section is
+ * named. Short on purpose, and the one place that maps each question to the
+ * section answering it, so an agent fetches one section rather than the guide.
+ */
+export const START_HERE_SECTION_ID = 'start-here';
+
+/** The `section` that asks `get_agent_guide` for every section at once. */
+export const WHOLE_GUIDE_SECTION = 'all';
+
+/**
  * Core's sections, in reading order. Every id but the shared-rules one names
  * a file in the package's `agent-guide/` folder.
  */
 export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
-  'introduction',
+  START_HERE_SECTION_ID,
+  'how-agents-find-things',
+  'for-git-users',
+  'glossary',
   'directory-structure',
   'where-a-new-file-goes',
   WORKING_WITH_FILES_SECTION_ID,
   'access-control',
+  'drafts-and-change-requests',
   'skills',
+  'tools',
   'tool-manuals',
   'html-views',
   'conventions',
-  'finding-things',
   NEW_KNOWLEDGE_BASE_SECTION_ID,
 ]);
 
@@ -174,10 +195,20 @@ export interface AgentGuideContext {
    * deployment's tools report back.
    */
   kbDirName?: string;
+  /**
+   * The knowledge base's default branch, rendered into `{{defaultBranch}}` so
+   * the start section names the branch every file tool's `branch` takes for
+   * what is live. Read when the guide is composed: a fresh deployment gets its
+   * branch model from the setup screen after the services are built.
+   */
+  defaultBranch?: string;
 }
 
 /** The checkout folder's name when none is given — core's own default. */
 const DEFAULT_KB_DIR_NAME = 'knowledge-base';
+
+/** What `{{defaultBranch}}` reads as when no branch is configured yet: a name no branch can have. */
+const UNCONFIGURED_DEFAULT_BRANCH = '<the default branch>';
 
 /** One section of the guide as an agent reads it: rendered, with the heading's text as its title. */
 export interface RenderedGuideSection {
@@ -217,11 +248,17 @@ export async function agentGuideSections(
   const core = await coreAgentGuideSections(resolved);
   const sections = hook ? await hook(core, resolved) : core;
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
+  const defaultBranch = context.defaultBranch?.trim() || UNCONFIGURED_DEFAULT_BRANCH;
   const rendered = sections.map((section) => {
     const body = (
       section.literal
         ? section.body
-        : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
+        : renderKbLayoutPlaceholders(
+            section.body
+              .replaceAll('{{kbDirName}}', () => kbDirName)
+              .replaceAll('{{defaultBranch}}', () => defaultBranch),
+            resolved,
+          )
     ).trim();
     return { id: section.id, title: titleOf(body, section.id), body };
   });

@@ -89,7 +89,9 @@ the guide for the version you run.
 
 An agent gets it two ways:
 
-- the `get_agent_guide` tool returns the guide on its own;
+- the `get_agent_guide` tool returns its short start section, which names the
+  default branch and says which section answers which question; an agent then
+  fetches the sections a task needs, or the whole guide with `section: "all"`;
 - a `read_file` of `AGENTS.md` at the top of the repository returns it too.
   When your repository has an `AGENTS.md` of its own, that file comes first,
   whole, and the platform's guide follows it after a marked separator.

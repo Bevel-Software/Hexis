@@ -1343,10 +1343,11 @@ export async function createCoreServices(
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
   // The guide every agent is told to read first, composed when asked for —
-  // the layout is read per call, so a name the setup save applies lands
-  // without a restart, and the distribution's hook sees every composition.
+  // the layout and the default branch are read per call, so a name the setup
+  // save applies lands without a restart, and the distribution's hook sees
+  // every composition.
   const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
-    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName });
+    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName, defaultBranch: kb.defaultBranch });
   const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is

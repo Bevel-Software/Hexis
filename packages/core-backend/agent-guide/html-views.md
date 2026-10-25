@@ -80,7 +80,7 @@ assume it is there:
 ```js
 const tools = window.bevel?.tools;
 if (tools) {
-  const file = await tools.callTool('read_file', { body: { branch: 'main', path: '{{knowledgeBaseDir}}/Foo.md' } });
+  const file = await tools.callTool('read_file', { body: { branch: '{{defaultBranch}}', path: '{{knowledgeBaseDir}}/Foo.md' } });
   // …show it
 } else {
   // …render without it
@@ -125,7 +125,7 @@ the app; the page never sees it.
 const input = document.getElementById('briefing');
 input.addEventListener('change', async () => {
   const answer = await window.bevel.tools.uploadFile(input.files[0], {
-    branch: 'main',
+    branch: '{{defaultBranch}}',
     destination: '{{knowledgeBaseDir}}/Campaigns/Easter',
   });
   // answer.files[0].path is where it landed

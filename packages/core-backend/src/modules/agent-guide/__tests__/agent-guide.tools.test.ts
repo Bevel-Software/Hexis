@@ -10,7 +10,13 @@ import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from '../agent-guide.tools.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { agentGuideSections, joinGuideSections, type RenderedGuideSection } from '../agent-guide.js';
+import {
+  START_HERE_SECTION_ID,
+  WHOLE_GUIDE_SECTION,
+  agentGuideSections,
+  joinGuideSections,
+  type RenderedGuideSection,
+} from '../agent-guide.js';
 
 let server: Server | null = null;
 
@@ -84,8 +90,9 @@ describe('get_agent_guide', () => {
     for (const list of [registry.listExternal(), registry.listInternal()]) {
       const def = (await list).find((t) => t.name === GET_AGENT_GUIDE_TOOL);
       expect(def).toBeDefined();
-      expect(def!.description).toContain('ALWAYS call this first and read the guide before you do anything else');
-      expect(def!.description).toContain("`read_file` on `AGENTS.md` at the KB root");
+      expect(def!.description).toContain('ALWAYS call this first, before anything else in the platform.');
+      expect(def!.description).toContain('With no `section` it returns the start section');
+      expect(def!.description).toContain('`"all"` returns the whole guide, as does `read_file` on `AGENTS.md` at the KB root');
       // The sections, a distribution's own included, by id and title.
       expect(def!.description).toContain(
         'Sections: `introduction` (Knowledge base), `access-control` (Access control), `knowledge-graph` (Knowledge graph).',
@@ -176,7 +183,7 @@ describe('get_agent_guide', () => {
     const shown = (counted.match(/`[^`]+`(?=, |\.$)/g) ?? []).filter((id) => id.startsWith('`a-section-id') || id === '`introduction`' || id === '`access-control`' || id === '`knowledge-graph`');
     expect(shown.length).toBeGreaterThan(0);
     expect(shown.length).toBeLessThan(203);
-    expect(counted).toMatch(new RegExp(`and ${203 - shown.length} more, all named under \`sections\` in the whole-guide response\\.$`));
+    expect(counted).toMatch(new RegExp(`and ${203 - shown.length} more, all named under \`sections\` in the answer\\.$`));
     // No id is ever cut mid-way: every listed id is one of the guide's.
     const all = new Set([...SECTIONS, ...flood].map((s) => `\`${s.id}\``));
     for (const id of shown) expect(all.has(id), id).toBe(true);
@@ -188,6 +195,27 @@ describe('get_agent_guide', () => {
     expect(await describedAs()).toContain('`introduction` (Knowledge base)');
   });
 
+  it('answers a call without a section with the start section and every section, and `all` with the whole guide', async () => {
+    const { call, sectionsNow } = await serve();
+    const platform = await agentGuideSections(DEFAULT_KB_LAYOUT, undefined, { defaultBranch: 'production' });
+    sectionsNow([...platform]);
+    const index = platform.map((s) => ({ id: s.id, title: s.title }));
+    const start = platform.find((s) => s.id === START_HERE_SECTION_ID)!;
+    // The first call every description asks for costs the start section, not the guide.
+    expect(await call()).toEqual({
+      status: 200,
+      body: { guide: start.body, section: START_HERE_SECTION_ID, title: 'Start here', sections: index },
+    });
+    expect(start.body.replace(/\s+/g, ' ')).toContain('`production` is the default branch');
+    expect(await call({ section: WHOLE_GUIDE_SECTION })).toEqual({
+      status: 200,
+      body: { guide: joinGuideSections(platform), sections: index },
+    });
+    // A refusal says how to reach both.
+    const unknown = await call({ section: 'nope' });
+    expect(String(unknown.body.error)).toContain('Omit `section` for the start section, or pass `"all"` for the whole guide.');
+  });
+
   it('returns the platform\'s HTML views section on its own, and inside the whole guide', async () => {
     const { call, registry, sectionsNow } = await serve();
     const platform = await agentGuideSections(DEFAULT_KB_LAYOUT);
@@ -197,7 +225,7 @@ describe('get_agent_guide', () => {
       status: 200,
       body: { guide: html.body, section: 'html-views', title: 'HTML views' },
     });
-    const whole = await call();
+    const whole = await call({ section: 'all' });
     expect(whole.body.guide).toBe(joinGuideSections(platform));
     expect(String(whole.body.guide)).toContain('## HTML views');
     // The description lists it, so an agent knows it can ask for it.
