@@ -33,7 +33,7 @@ const LIST_SKILLS_INPUTS = {
 const GET_SKILL_INPUTS = {
   type: 'object' as const,
   properties: {
-    name: { type: 'string' as const, minLength: 1, description: 'Skill name (its folder name, e.g. `rfi`).' },
+    name: { type: 'string' as const, minLength: 1, description: 'Skill name, as `list_skills` gives it (its `id`, else its `name`, else its folder name; e.g. `rfi`).' },
     file: {
       type: 'string' as const,
       description:

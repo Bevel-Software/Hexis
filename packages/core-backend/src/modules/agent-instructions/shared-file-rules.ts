@@ -108,7 +108,7 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'body (plain-text part preferred; an HTML-only body is stripped to text), and an `[attachments]` name list — ' +
         'attachments are listed, never extracted. grep searches inside all of those, through the same extractions.\n\n' +
         'Images (.png/.jpg/.jpeg/.gif/.webp) read as the IMAGE ITSELF, as native MCP image content with a one-line ' +
-        'text note naming the file, so you can look at the picture — up to 3.5 MB of raw image data; a larger image ' +
+        'text note naming the file, so you can look at the picture — up to 3.5 MiB of raw image data; a larger image ' +
         'gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as ' +
         'text). Images come back only on a DIRECT read_file: inside `call_tool_chain` an image read yields an ' +
         '`{ image_omitted, note }` stub instead, so read an image outside a chain when you mean to look at it. Any other ' +
@@ -184,7 +184,7 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       id: 'refused-for-permissions',
       heading: 'When a write is refused for permissions',
       body:
-        'A refusal is not necessarily the end of the road: the `write-denied` error says whether you may propose the ' +
+        'The `write-denied` error says whether you may propose the ' +
         'change instead (create a branch from this one, repeat the call on it, then `open_change_request` into this ' +
         'branch) and lists those steps.',
     },
@@ -230,9 +230,10 @@ function platformFileList(layout: KbLayout): string {
  */
 function conventionsRule(): string {
   return (
-    "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
-    `(whole, or one section). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
-    "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
+    "Before your first read or change in a workspace, call `get_agent_guide`: it answers the guide's start, " +
+    "which names the default branch and the section for each question. " +
+    `read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with ` +
+    "the whole guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
     `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
   );
 }

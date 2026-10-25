@@ -1744,13 +1744,13 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call, inside `call_tool_chain` too. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
       properties: {
-        sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.'),
+        sessionId: str('The minted session id — pass it as `sessionId` to the tools that take one, and to `ask` where there is one.'),
         firstRun: str(
           `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
@@ -1911,17 +1911,17 @@ export function registerWorkspaceTools(
       'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text as ' +
       'text, documents and email as extracted text, an image as the picture, anything else as a one-line ' +
       'description. Also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
-      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. `offset`/`limit` slice the ' +
+      'belongs to no workspace: any existing `branch` will do, and no `canWrite` comes back. `offset`/`limit` slice the ' +
       'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
-      'spills, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
+      'spills. `canWrite`: may you change this file directly on the default branch. ' +
       CAN_WRITE_CLAUSE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
-        offset: int('Start character index (default 0).'),
-        limit: int('Max characters to return from `offset`.'),
+        offset: int('Start character index (bytes for a spill ref; default 0).'),
+        limit: int('Max characters to return from `offset` (bytes for a spill ref).'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -2708,7 +2708,7 @@ export function registerWorkspaceTools(
                 enum: ['created', 'replaced', 'updated', 'refused'],
                 description: 'What happened at this path. `refused` means nothing was written there and the file is untouched.',
               },
-              error: str('Present when `outcome` is `refused`: the refusal code — `exists`, `missing` or `binary_not_writable`.'),
+              error: str('Present when `outcome` is `refused`: the refusal code, such as `exists`, `missing`, `binary_not_writable` or a code of the deployment\'s own write check.'),
               message: str('Present when `outcome` is `refused`: the full refusal, the same one write_file would have given.'),
             },
             required: ['path', 'outcome'],
@@ -3403,8 +3403,8 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. ' +
-      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place. ' +
-      'One exception to that shape: when the destination is one you may not write, the answer is the refusal alone — `allowed: false` with `reason`, and no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
+      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with the copy\'s own rules counted at its new place. ' +
+      'One exception to that shape: when the destination is one you may not write, the answer is the refusal (`allowed: false` with `reason`, and the access figures) with no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
     inputs: {
       type: 'object',
       properties: {
@@ -3858,7 +3858,7 @@ export function registerWorkspaceTools(
         '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
         '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
         'Every path is judged one by one — by your write access, the platform-file rules and what is already there — ' +
-        'exactly as `write_file` judges it, and a refused path does not stop the others. ' +
+        'as `write_file` judges it, except that platform files are refused and binary content is fine; a refused path does not stop the others. ' +
         'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
         'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {
@@ -3942,7 +3942,7 @@ export function registerWorkspaceTools(
         'each one inside a folder too, is included only if you may read AND download that file. Returns ' +
         '`{ expiresAt, expiresInSeconds, files: [{ path, bytes, sha256, downloadUrl }], folders: [{ path, bytes, ' +
         'downloadUrl, files }], refused: [{ path, reason }] }`: a link per file, with its own content type, and per ' +
-        `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
+        `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put them back). ` +
         'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
         '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
         'Refused: `not found` (missing or named-but-unreadable; folders omit unreadable files), ' +
