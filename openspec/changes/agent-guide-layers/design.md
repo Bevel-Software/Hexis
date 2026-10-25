@@ -17,9 +17,13 @@ With `js-tiktoken` and the `o200k_base` encoding. It is a real BPE tokenizer, de
 | Layer | What | Characters | Tokens |
 |---|---|---|---|
 | Always | Server instructions: header and shared rules (no admin preamble) | 7,782 | 1,852 |
-| Always | Tool list as served: 41 tools, name, description and input schema | | 15,654 |
-| First contact | Nothing short exists: `get_agent_guide` returns the whole guide | 78,706 | 19,341 |
-| | The same on an enterprise deployment, with its five sections | about 114,000 | 28,006 |
+| Always | Tool list as served: 41 tools, name, description and input schema | | 15,829 |
+| First contact | Nothing short exists: `get_agent_guide` returns the whole guide | 78,706 | 19,342 |
+| | The same on an enterprise deployment, with its five sections | about 114,000 | 28,007 |
+
+(Measured the way `guide-budget.test.ts` measures: the sections composed for a
+default branch named `main`, each tool through `toListedTool` as the hosted
+endpoint lists it.)
 
 | Section | Tokens | | Section | Tokens |
 |---|---|---|---|---|
@@ -83,9 +87,37 @@ Ten tasks from the customer's day. For each, the facts the guide must let an age
 | 9 | Make my skill check its tools first (10:56, sync) | Name the tools in `allowed-tools` · start with `list_tool_setup` and stop with a plain instruction when something is missing · never ask for a secret in the chat | 2 / 0 / 1 | skills, tool-manuals |
 | 10 | A guided skill for a non-technical colleague (15:56) | One question per message · proposals they confirm or correct · a checklist for "specified enough" · plain words, no platform terms · it reaches them only after merge | 0 / 1 / 4 | skills |
 
-**Today: 27 of 53 facts stated (12 partly, 14 missing).** No task can be answered without loading the whole guide, because nothing says which section answers what: 19,341 tokens per task on core, 28,006 on an enterprise deployment. An agent that guessed the right sections from their titles would still load between 410 and 12,539 tokens and miss the facts above.
+**Today: 27 of 53 facts stated (12 partly, 14 missing).** No task can be answered without loading the whole guide, because nothing says which section answers what: 19,342 tokens per task on core, 28,007 on an enterprise deployment. An agent that guessed the right sections from their titles would still load between 410 and 12,539 tokens and miss the facts above.
 
 **Target:** every fact stated, each task answered by `start-here` plus at most two sections, within 6,000 tokens. The evaluation becomes a test (`guide-eval.test.ts`): for each task, `start-here` routes it to its sections and those sections state each fact.
+
+## After
+
+Measured the same way, on this change's last commit:
+
+| Layer | Before | After | Budget |
+|---|---|---|---|
+| Server instructions (platform part) | 1,852 | 1,848 | 2,000 |
+| Tool list as served (41 tools) | 15,829 | 15,380 | 16,000 |
+| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 948 (`start-here`) | 1,200 |
+| The whole guide (`section: "all"`) | 19,342 | 18,018 | 19,000 |
+| One evaluation task | 19,342 | 948 to 3,267 | 6,000 |
+| Evaluation facts stated | 27 of 53 | 53 of 53 | all |
+
+| Section | Tokens | | Section | Tokens |
+|---|---|---|---|---|
+| `start-here` | 948 | | `drafts-and-change-requests` | 1,395 |
+| `how-agents-find-things` | 656 | | `skills` | 1,026 |
+| `for-git-users` | 635 | | `tools` | 931 |
+| `glossary` | 584 | | `tool-manuals` | 2,354 |
+| `directory-structure` | 1,356 | | `html-views` | 2,683 |
+| `where-a-new-file-goes` | 702 | | `conventions` | 445 |
+| `working-with-files` (computed) | 1,684 | | `new-knowledge-base` | 379 |
+| `access-control` | 2,238 | | | |
+
+The customer's fifteen guide loads would now cost about 14,000 tokens instead
+of about 420,000. On an enterprise deployment the whole guide is 26,683 tokens;
+its five sections are unchanged and outside core's checks.
 
 ## Decisions
 
