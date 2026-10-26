@@ -12,6 +12,8 @@ import { AccessControlService } from '../access-control.service.js';
 import { GroupsAdminService, GroupsAdminError } from '../groups-admin.service.js';
 import { createGroup, addGroupMember, GroupsEditError } from '../groups-edit.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import { UNSHOWN_REFERENCE_REFUSAL } from '../reference-scan.js';
 
 const KB = 'knowledge-base';
 const ADMIN: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
@@ -260,9 +262,10 @@ describe('GroupsAdminService', () => {
     expect(commits[0].summary).toContain('gtm team → Go To Market');
   });
 
-  // Another person's private plugin is closed to the Admin, and must neither
-  // block the rename nor keep a reference to the old name.
-  it('rename completes and rewrites a file the Admin cannot read', async () => {
+  // Another person's private plugin is closed to the Admin: the rewrite still
+  // covers it (no reference left behind). Whether the Admin may WRITE it is
+  // the commit gate's call — see the gated cases below; this stub allows it.
+  it('rename rewrites a file the Admin cannot read when the commit allows it', async () => {
     await write(
       repo,
       'Plugins/Sara/access.md',
@@ -278,6 +281,68 @@ describe('GroupsAdminService', () => {
       "---\nread: ['group/Go To Market']\n---\n# Notes\n",
     );
     expect(commits).toHaveLength(1);
+  });
+
+  describe('rename against the commit write gate', () => {
+    // The real commit gates every touched path on the actor's write rules and
+    // refuses the first one they may not write (git.service
+    // `assertCanWriteAtRef`); this stub does the same through the live model.
+    function gatedService(): { gated: GroupsAdminService; gatedCommits: { summary: string }[] } {
+      const workspace = stubWorkspace(root);
+      const access = new AccessControlService(workspace as never, KB, new NodeFs());
+      const workflow = stubWorkflow();
+      const svc = workflow.svc as unknown as Record<string, unknown>;
+      svc.commitChanges = async (ws: string, user: AuthUser, summary: string, onlyPaths: string[] = []) => {
+        const rel = onlyPaths.map((p) => p.slice(KB.length + 1));
+        const verdicts = await access.canWriteBatch(ws, user.email, rel);
+        const denied = rel.find((p) => verdicts.get(p) !== true);
+        if (denied) throw new AccessDeniedError({ path: denied, eligibleRoles: [], eligibleUsers: [] });
+        workflow.commits.push({ summary });
+        return {} as unknown;
+      };
+      const gated = new GroupsAdminService(workspace, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      return { gated, gatedCommits: workflow.commits };
+    }
+
+    const SARA_ACCESS = '---\nread:\n  - deny everyone\n  - Sara <sara@x.io>\nwrite:\n  - Sara <sara@x.io>\n---\n';
+
+    it('a file the Admin cannot read refuses generically, never naming it, and writes nothing', async () => {
+      await write(repo, 'Plugins/Sara/access.md', SARA_ACCESS);
+      const notes = "---\nread: ['group/GTM Team']\n---\n# Notes\n";
+      await write(repo, 'Plugins/Sara/Notes.md', notes);
+      const { gated, gatedCommits } = gatedService();
+
+      const err = await gated.renameGroup(ADMIN, 'gtm team', 'Go To Market').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(GroupsAdminError);
+      expect((err as GroupsAdminError).status).toBe(422);
+      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
+      expect((err as Error).message).not.toContain('Sara');
+      // Restored: the hidden file, and the roster, as they were.
+      expect(await fs.readFile(path.join(repo, 'Plugins/Sara/Notes.md'), 'utf-8')).toBe(notes);
+      expect(await groupsYaml()).toBe(GROUPS);
+      expect(gatedCommits).toHaveLength(0);
+    });
+
+    it('a file the Admin can read but not write keeps the refusal that names it', async () => {
+      await write(repo, 'Knowledge/Locked/access.md', '---\nread:\n  - everyone\nwrite:\n  - deny Admin\n---\n');
+      await write(repo, 'Knowledge/Locked/Plan.md', '---\nread:\n  - group/GTM Team\n---\n# Plan\n');
+      const { gated } = gatedService();
+
+      const err = await gated.renameGroup(ADMIN, 'gtm team', 'Go To Market').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AccessDeniedError);
+      expect((err as AccessDeniedError).access.path).toMatch(/^Knowledge\/Locked\//);
+    });
+
+    it('a hidden file that names something else does not block the rename', async () => {
+      await write(repo, 'Plugins/Sara/access.md', SARA_ACCESS);
+      await write(repo, 'Plugins/Sara/Notes.md', "---\nread: ['group/Product']\n---\n# Notes\n");
+      await write(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - group/GTM Team\n---\n');
+      const { gated, gatedCommits } = gatedService();
+
+      await gated.renameGroup(ADMIN, 'gtm team', 'Go To Market');
+      expect(await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8')).toContain('group/Go To Market');
+      expect(gatedCommits).toHaveLength(1);
+    });
   });
 
   it('rename rewrites a BODY-GOVERNED access.md (rules live below the frontmatter)', async () => {

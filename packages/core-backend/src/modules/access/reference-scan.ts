@@ -36,6 +36,7 @@ import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
 import { printable, sanitizedPath } from '../../shared/printable.js';
 import {
+  AccessDeniedError,
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
   accessMdSelfEntries,
@@ -427,6 +428,39 @@ export const UNSHOWN_REFERENCE_REFUSAL =
   'This rename rewrites access rules across the knowledge base, and part of the knowledge base could not be rewritten, so it may still reference the old principal; rename aborted with no changes. The server log names where.';
 
 /**
+ * The commit's own write gate refusing a rename's rewrite, translated for the
+ * person who asked. The gate judges every file the rewrite touches against the
+ * actor's WRITE rules (a rename's references reach files private to others,
+ * which an Admin may be unable to write), and its refusal names the file. A
+ * file its person may read keeps that refusal: the path and its eligible
+ * writers say whom to ask. A file they may not read gets
+ * `UNSHOWN_REFERENCE_REFUSAL` instead, so the hidden path stays unnamed; the
+ * log names it. Anything else comes back unchanged.
+ *
+ * The one bit left (some file the person cannot see names the old principal)
+ * is the hidden-blocker exception of "A Guard's Answer Is a Disclosure": an
+ * Admin's refused rename of a principal they manage says only that an unshown
+ * place blocks it.
+ */
+export async function translateRewriteWriteRefusal(
+  err: unknown,
+  visible: PathVisibility,
+  makeError: (message: string) => Error,
+): Promise<unknown> {
+  if (!(err instanceof AccessDeniedError)) return err;
+  const p = err.access.path;
+  let shown = false;
+  try {
+    shown = (await visible([p])).get(p) === true;
+  } catch {
+    // Cannot tell whether the person may see it: say nothing of it.
+  }
+  if (shown) return err;
+  log.warn(`reference rewrite: the acting person may not write ${printable(p)}`);
+  return makeError(UNSHOWN_REFERENCE_REFUSAL);
+}
+
+/**
  * The rows of `refs` whose file `readable` allows. The rest are dropped
  * outright, not counted: Admin status does not grant read, so even a count of
  * rules in content the viewer cannot read is a disclosure.
@@ -617,9 +651,11 @@ export class KbReferenceScanner {
    * Returns the writes WITH each file's original text (rollback snapshots).
    *
    * The rename keeps the KB's references to a principal whole, so it rewrites
-   * every candidate, files its person may not read included: a rename stays
-   * possible for an Admin however much of the KB is private to others. No
-   * outcome depends on what such a file holds. Every form the resolver reads
+   * every candidate, files its person may not read included: a file private
+   * to others blocks nothing here, and no answer of this method depends on
+   * what such a file holds. Whether the person may WRITE each rewritten file
+   * is the commit's gate to decide, not this method's (see
+   * `translateRewriteWriteRefusal`). Every form the resolver reads
    * is rewritten — block lists and `key: value` by the line walk, quoted and
    * flow-YAML own frontmatter by the structural rewrite — so there is no
    * "cannot rewrite" answer for hidden content to give. The writes reach a

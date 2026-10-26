@@ -56,7 +56,7 @@ import {
   type GroupsEditResult,
 } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
-import { KbReferenceScanner, readableReferences } from './reference-scan.js';
+import { KbReferenceScanner, readableReferences, translateRewriteWriteRefusal } from './reference-scan.js';
 
 /** Where role→group assignments live (`group:<canonical>` member entries). */
 const ROLES_YAML = 'roles.yaml';
@@ -428,12 +428,22 @@ export class GroupsAdminService {
     // Roster locks are already ours (withFileLocks; strict same-user acquire
     // forbids LockingFilesystem here). Grant-reference candidates are written
     // unlocked — same exposure every reference rewrite has always had.
-    await this.locked.writeAndCommitLocked(
-      workspaceId,
-      actor,
-      files,
-      `Rename group ${canonical} → ${newDisplayName.trim()}`,
-    );
+    // The commit gates every file on the actor's write rules and restores all
+    // of them on a refusal; a refused file the actor may not read goes unnamed.
+    try {
+      await this.locked.writeAndCommitLocked(
+        workspaceId,
+        actor,
+        files,
+        `Rename group ${canonical} → ${newDisplayName.trim()}`,
+      );
+    } catch (err) {
+      throw await translateRewriteWriteRefusal(
+        err,
+        (paths) => this.accessControl.canReadBatch(workspaceId, actor.email, paths),
+        (message) => new GroupsAdminError(message, 422),
+      );
+    }
     this.afterWrite(workspaceId, actor, files.map((f) => f.repoRel));
   }
 
