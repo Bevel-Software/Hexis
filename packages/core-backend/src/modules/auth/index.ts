@@ -15,6 +15,8 @@ export {
   AccountChangeRefusedError,
   AccountDeactivatedError,
   AuthBackendError,
+  SESSION_ENDED_MESSAGE,
+  SessionEndedError,
   admitEveryone,
   type AccountAdmissionVerdict,
   type AccountProvisionReason,

@@ -62,6 +62,8 @@ FROM node:22-slim AS production
 RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 
 # git backs every workspace operation (clone/commit/push of the KB repo).
+# ripgrep (`rg`) is what the agents' grep tool searches with; the server
+# refuses to start without it (`ripgrep-version.ts`).
 # tini is PID 1: the reaper. The server spawns git, MCP servers and the
 # shell tool's commands; a grandchild that outlives its parent reparents to
 # PID 1, and a node process there never reaps it — zombies accumulate until
@@ -74,7 +76,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 # ENTRYPOINT registers it as a child subreaper for exactly that case, so it
 # still reaps its subtree instead of warning on every boot.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates tini \
+      git ca-certificates tini ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # tsx runs the TypeScript server shell at runtime. It lives in apps/server's
