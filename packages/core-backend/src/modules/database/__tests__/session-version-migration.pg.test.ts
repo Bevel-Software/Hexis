@@ -115,8 +115,17 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0022 (users.session_version), on a rea
       expect(await columnShape(db)).toEqual(EXPECTED_SHAPE);
       expect(await generations(db)).toEqual([3, 7]);
       // And 0022 is recorded as applied, so the next start does not try it again.
-      const applied = await db.execute(sql`select count(*)::int as n from drizzle.__drizzle_migrations_core`);
-      expect((applied.rows[0] as { n: number }).n).toBe(23);
+      // Found by its own ledger row (drizzle records each migration under its
+      // journal `when`), not by a count: a later migration must not break this.
+      const journal = JSON.parse(readFileSync(path.join(coreMigrationsDir(), 'meta', '_journal.json'), 'utf-8')) as {
+        entries: Array<{ tag: string; when: number }>;
+      };
+      const entry = journal.entries.find((e) => e.tag.startsWith('0022_'));
+      expect(entry?.tag).toBe('0022_session_version');
+      const applied = await db.execute(
+        sql`select count(*)::int as n from drizzle.__drizzle_migrations_core where created_at = ${entry!.when}`,
+      );
+      expect((applied.rows[0] as { n: number }).n).toBe(1);
     },
     PG_TEST_TIMEOUT,
   );
