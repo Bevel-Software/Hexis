@@ -1,13 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { closeDb, createDb, type Database } from '../../database/connection.js';
-import { runCoreMigrations } from '../../database/migrate.js';
-import { users } from '../../database/schema.js';
-import { coreMigrationsDir } from '../../../assets.js';
-import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
+import { users, type Database } from '../../database/index.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { AuthService } from '../auth.service.js';
 import { createAuthRoutes } from '../auth.routes.js';
 import { AUTH_COOKIE_NAME, createAuthMiddleware } from '../auth.middleware.js';
@@ -39,18 +35,17 @@ vi.mock('../password-hash.js', async (importOriginal) => {
  * can stand in for, so this crosses a real Postgres (see `pg-scratch.ts`)
  * through the real routes and the real auth middleware.
  */
-const KEY = randomBytes(32).toString('base64');
 const JWT_SECRET = 'test-jwt-secret';
 
 describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before it, on a real Postgres', () => {
   let db: Database;
+  let closeDb: () => Promise<void>;
   let auth: AuthService;
   let server: Server;
   let base: string;
 
   beforeAll(async () => {
-    db = createDb(await scratchDatabaseUrl('hexis_pwchange'), { piiKey: KEY });
-    await runCoreMigrations(db, coreMigrationsDir());
+    ({ db, close: closeDb } = await openMigratedScratchDb('hexis_pwchange'));
     auth = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
     const app = express();
     app.use(express.json());
@@ -68,7 +63,7 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
       if (server) server.close(() => resolve());
       else resolve();
     });
-    if (db) await closeDb(db);
+    if (db) await closeDb();
     await dropScratchDatabases();
   }, PG_TEST_TIMEOUT);
 

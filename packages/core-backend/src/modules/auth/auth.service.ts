@@ -9,6 +9,7 @@ import {
   AccountChangeRefusedError,
   AccountDeactivatedError,
   AuthBackendError,
+  SessionEndedError,
   admitEveryone,
   type AccountProvisionReason,
   type IAccountAdmission,
@@ -80,6 +81,21 @@ export class PasswordChangedMeanwhileError extends Error {
   constructor() {
     super('Your password was changed from another session while this change was being made, so nothing was changed. Sign in with the new password.');
     this.name = 'PasswordChangedMeanwhileError';
+  }
+}
+
+/**
+ * A password write the service refuses on purpose: the policy, a wrong
+ * current password, an account whose password is not kept here. The message
+ * is written for the caller, and a route answers it with a 400 — unlike any
+ * other error a password write raises, which is a fault and answered generic.
+ */
+export class PasswordRefusedError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'PasswordRefusedError';
   }
 }
 
@@ -375,7 +391,7 @@ export class AuthService implements IAccountSwitchGuard {
     // than sending the admin off to pick a longer password first.
     this.assertNotSystemAccount(normalizedEmail);
     if (this.isEnvAdminEmail(normalizedEmail)) {
-      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
     await this.assertAdmitted(normalizedEmail, 'admin-create');
@@ -463,7 +479,7 @@ export class AuthService implements IAccountSwitchGuard {
       if (existing) {
         return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
       }
-      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
     await this.assertAdmitted(normalizedEmail, 'admin-create');
@@ -630,17 +646,17 @@ export class AuthService implements IAccountSwitchGuard {
     newPassword: string,
   ): Promise<{ token: string }> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!user) throw new Error('User not found');
+    if (!user) throw new PasswordRefusedError('User not found');
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
     this.assertNotSystemAccount(user.email);
     if (this.isEnvAdminEmail(user.email)) {
-      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(newPassword);
     if (user.passwordHash) {
       if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
-        throw new Error('Current password is incorrect');
+        throw new PasswordRefusedError('Current password is incorrect');
       }
     }
     const passwordHash = await hashPassword(newPassword);
@@ -707,13 +723,13 @@ export class AuthService implements IAccountSwitchGuard {
   /** Every password write calls this first: the system accounts never get one. */
   private assertNotSystemAccount(normalizedEmail: string): void {
     if (SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail)) {
-      throw new Error(SYSTEM_ACCOUNT_PASSWORD_REFUSAL);
+      throw new PasswordRefusedError(SYSTEM_ACCOUNT_PASSWORD_REFUSAL);
     }
   }
 
   private assertPasswordPolicy(password: string): void {
     if ((password ?? '').length < MIN_PASSWORD_LENGTH) {
-      throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      throw new PasswordRefusedError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
   }
 
@@ -785,8 +801,9 @@ export class AuthService implements IAccountSwitchGuard {
    * account still on, and issued since the account's password last changed.
    * A token outlives a deactivation or a password change by up to seven
    * days, so the signature alone no longer says the bearer may enter.
-   * Throws for an invalid or ended token, {@link AccountDeactivatedError}
-   * for one whose account was switched off.
+   * Throws for an invalid token, {@link SessionEndedError} for one a
+   * password change ended, {@link AccountDeactivatedError} for one whose
+   * account was switched off.
    */
   async resolveSession(token: string): Promise<{ userId: string; email: string }> {
     const { sessionVersion, ...claim } = this.decodeSession(token);
@@ -802,9 +819,7 @@ export class AuthService implements IAccountSwitchGuard {
       throw new AuthBackendError(err);
     }
     if (!account.active) throw new AccountDeactivatedError();
-    if (sessionVersion !== account.sessionVersion) {
-      throw new Error('Session ended: the password was changed since it was opened');
-    }
+    if (sessionVersion !== account.sessionVersion) throw new SessionEndedError();
     return claim;
   }
 

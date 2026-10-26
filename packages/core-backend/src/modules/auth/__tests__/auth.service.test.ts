@@ -4,11 +4,11 @@ import type { SQL } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
 import jwt from 'jsonwebtoken';
-import { AuthService, PasswordChangedMeanwhileError } from '../auth.service.js';
-import { AccountAdmissionRefusedError, type IAccountAdmission } from '../account-admission.js';
+import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';
+import { AccountAdmissionRefusedError, SessionEndedError, type IAccountAdmission } from '../account-admission.js';
 import { hashPassword, verifyPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
-import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/directory-sync-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../../workflow/index.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/index.js';
 
 /**
  * Minimal drizzle chain stub (same idiom as the secrets-vault tests): each
@@ -619,8 +619,20 @@ describe('AuthService.changePassword — the sessions opened before it', () => {
     const svc = new AuthService(db, makeConfig());
     const before = await svc.loginWithPassword('alice@example.com', 'old-password');
     const { token } = await svc.changePassword('user-1', 'old-password', 'new-password-1');
-    await expect(svc.resolveSession(before.token)).rejects.toThrow(/Session ended/);
+    // Named, and worded for the person: the middleware shows these words
+    // where a bare "invalid token" would leave them guessing.
+    const ended = svc.resolveSession(before.token);
+    await expect(ended).rejects.toBeInstanceOf(SessionEndedError);
+    await expect(ended).rejects.toThrow(/password was changed after this session was opened/);
     await expect(svc.resolveSession(token)).resolves.toEqual({ userId: ROW.id, email: ROW.email });
+  });
+
+  it('refuses a wrong current password as a refusal the caller is told, not a fault', async () => {
+    const passwordHash = await hashPassword('old-password');
+    const { db } = makeFakeDb([[{ ...ROW, passwordHash }]]);
+    const refused = new AuthService(db, makeConfig()).changePassword('user-1', 'not-it', 'new-password-1');
+    await expect(refused).rejects.toBeInstanceOf(PasswordRefusedError);
+    await expect(refused).rejects.toThrow('Current password is incorrect');
   });
 
   it('reads the account row for every session it resolves, whatever the cache holds', async () => {

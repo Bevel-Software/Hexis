@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Request, Response, NextFunction } from 'express';
 import { createAuthMiddleware, AUTH_COOKIE_NAME } from '../auth.middleware.js';
-import { AccountDeactivatedError, AuthBackendError } from '../account-admission.js';
+import { AccountDeactivatedError, AuthBackendError, SessionEndedError } from '../account-admission.js';
 import type { AuthService } from '../auth.service.js';
 
 /**
@@ -14,11 +14,13 @@ import type { AuthService } from '../auth.service.js';
 const GOOD_TOKEN = 'good-token';
 const OFF_TOKEN = 'switched-off-token';
 const DOWN_TOKEN = 'database-down-token';
+const ENDED_TOKEN = 'password-changed-since-token';
 const IDENTITY = { userId: 'user-1', email: 'alice@example.com' };
 
 async function run(headers: Record<string, string>) {
   const resolveSession = vi.fn(async (token: string) => {
     if (token === OFF_TOKEN) throw new AccountDeactivatedError();
+    if (token === ENDED_TOKEN) throw new SessionEndedError();
     if (token === DOWN_TOKEN) throw new AuthBackendError(new Error('db down'));
     if (token !== GOOD_TOKEN) throw new Error('bad token');
     return IDENTITY;
@@ -88,6 +90,15 @@ describe('createAuthMiddleware — a switched-off account', () => {
     expect(next).not.toHaveBeenCalled();
     expect(status).toHaveBeenCalledWith(401);
     expect(json.mock.calls[0][0].error).toContain('switched off');
+  });
+});
+
+describe('createAuthMiddleware — a session a password change ended', () => {
+  it('refuses it with a 401 that says the password was changed, so the sign-in form can', async () => {
+    const { next, status, json } = await run({ cookie: `${AUTH_COOKIE_NAME}=${ENDED_TOKEN}` });
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(401);
+    expect(json.mock.calls[0][0].error).toMatch(/password was changed after this session was opened/);
   });
 });
 

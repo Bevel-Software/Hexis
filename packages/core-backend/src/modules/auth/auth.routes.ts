@@ -2,19 +2,26 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('auth');
-import { PasswordChangedMeanwhileError, type AuthService } from './auth.service.js';
-import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
+import { PasswordChangedMeanwhileError, PasswordRefusedError, type AuthService } from './auth.service.js';
+import { setAuthCookie } from './auth.middleware.js'; // also imports Express Request augmentation
 import { FixedWindowRateLimiter } from './rate-limit.js';
 import { AccountDeactivatedError } from './account-admission.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 
-/**
- * Max age of the JWT cookie (seconds). Matches the JWT's own `expiresIn:
- * '7d'` so the cookie expires when the token does — browsers stop
- * sending it past expiry, sparing the auth middleware verifying tokens
- * that are guaranteed to fail.
- */
-export const AUTH_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
+// The cookie's lifetime lives beside its one issue site now; still offered
+// here for the providers that learnt it from this file.
+export { AUTH_COOKIE_MAX_AGE_S } from './auth.middleware.js';
+
+/** What {@link createAuthRoutes} takes beyond its services. */
+export interface AuthRoutesOptions {
+  /**
+   * Whether the auth cookie is marked `Secure`: the composition root derives
+   * it from the deployment's public URL (`authCookieSecure`), the one rule
+   * every provider's cookie follows too. Absent — a harness that mounts the
+   * routes on their own — it falls back to `NODE_ENV === 'production'`.
+   */
+  cookieSecure?: boolean;
+}
 
 /**
  * A pluggable SSO login method. Core ships password login and (when
@@ -44,29 +51,15 @@ export interface AuthProviderPlugin {
   mountRoutes(router: express.Router, authService: AuthService): void;
 }
 
-/**
- * Set the JWT as the HttpOnly auth cookie so transports that can't carry
- * headers (EventSource for SSE, image tags) authenticate automatically. JSON
- * callers continue to use the Bearer header returned in the body. Secure in
- * production; off in dev so the cookie survives `http://localhost` requests.
- */
-function setAuthCookie(res: express.Response, token: string): void {
-  res.cookie(AUTH_COOKIE_NAME, token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: AUTH_COOKIE_MAX_AGE_S * 1000,
-    path: '/',
-  });
-}
-
 export function createAuthRoutes(
   authService: AuthService,
   authMiddleware: express.RequestHandler,
   providers: AuthProviderPlugin[] = [],
   passwordLoginEnabled = true,
+  options: AuthRoutesOptions = {},
 ): express.Router {
   const router = express.Router();
+  const cookieSecure = options.cookieSecure ?? process.env.NODE_ENV === 'production';
 
   // Brute-force guards on the password endpoints (scrypt also makes each
   // attempt expensive server-side, so these double as DoS protection):
@@ -116,7 +109,7 @@ export function createAuthRoutes(
       // attempts isn't rate-limited on their next visit. (The wider per-ip
       // window intentionally keeps counting.)
       loginPairLimiter.reset(pairKey);
-      setAuthCookie(res, result.token);
+      setAuthCookie(res, result.token, cookieSecure);
       res.json(result);
     } catch (error) {
       // The password was right and an admin switched the account off: said
@@ -167,7 +160,7 @@ export function createAuthRoutes(
     }
     try {
       const { token } = await authService.changePassword(req.userId!, currentPassword, newPassword);
-      setAuthCookie(res, token);
+      setAuthCookie(res, token, cookieSecure);
       res.json({ ok: true, token });
     } catch (error) {
       // Another session changed the password first: what this one proved is
@@ -176,10 +169,17 @@ export function createAuthRoutes(
         res.status(409).json({ error: error.message });
         return;
       }
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      // Policy violations and a wrong current password are caller errors, not
-      // server faults — and the message is safe to show verbatim.
-      res.status(400).json({ error: msg });
+      // A refusal the service made on purpose — a policy violation, a wrong
+      // current password, an account whose password is not kept here — is
+      // the caller's to fix, and its words are written for them.
+      if (error instanceof PasswordRefusedError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      // Anything else is a fault, not a verdict: logged in full, answered
+      // generic, so a driver's message never reaches a browser.
+      log.error('Change-password error:', { err: error });
+      res.status(500).json({ error: 'Could not change the password' });
     }
   });
 
@@ -231,8 +231,10 @@ export function createAuthRoutes(
       }
       res.json(user);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      res.status(500).json({ error: msg });
+      // Logged in full, returned generic — the rule every route here follows:
+      // a raw driver message would hand the caller the schema or the host.
+      log.error('Auth me error:', { err: error });
+      res.status(500).json({ error: 'Could not load your account' });
     }
   });
 
