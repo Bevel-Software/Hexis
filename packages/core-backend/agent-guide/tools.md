@@ -24,7 +24,8 @@ platform set up with a key) is served only the tools whose personal secrets
 that key's person has already set. Set them first, then reconnect.
 
 **When a tool is not working, call `list_tool_setup`**, then explain the
-remaining steps rather than guessing. For each tool you can read:
+remaining steps rather than guessing: its `note` names what is left, the
+person's own sign-in and the reconnect included. For each tool you can read:
 
 - `setup.kind`, for an MCP server: `open` (no sign-in), `oauth-auto` (the
   platform registered itself with the service; people sign in on the Connect

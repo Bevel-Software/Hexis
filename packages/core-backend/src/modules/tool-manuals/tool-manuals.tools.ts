@@ -228,7 +228,9 @@ export function registerToolManualsTools(
         },
         note: {
           type: 'string',
-          description: 'Present when `onBranchOnly` is non-empty: what it takes for those tools to go live.',
+          description:
+            'Present when something is left to do: what it takes for the tools in `onBranchOnly` to go live, and for ' +
+            'tools that need your own value or sign-in to work.',
         },
       },
       required: ['tools', 'invalid', 'onBranchOnly'],
@@ -285,17 +287,27 @@ export function registerToolManualsTools(
         }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
-      if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
-      return {
-        tools,
-        invalid,
-        onBranchOnly,
-        note:
+      const notes: string[] = [];
+      if (onBranchOnly.length > 0) {
+        notes.push(
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
-          `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
-          'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
-      };
+            `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
+            'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
+            `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
+        );
+      }
+      // The person's own part, said where the agent is when a tool "does not work": the
+      // reconnect step is the one agents leave out (the agent-guide benchmark, 2026-10-26).
+      const needYou = tools.filter((t) => t.variables.some((v) => v.scope === 'user' && !(v.oauth ? v.authorized : v.userConfigured)));
+      if (needYou.length > 0) {
+        notes.push(
+          `${needYou.map((t) => `\`${t.name}\``).join(', ')} ${needYou.length === 1 ? 'needs' : 'need'} your own value or sign-in. ` +
+            'Set it yourself on the Connect page, never in the chat; then reconnect your assistant, or start a new chat, ' +
+            'so the tool is listed.',
+        );
+      }
+      if (notes.length === 0) return { tools, invalid, onBranchOnly };
+      return { tools, invalid, onBranchOnly, note: notes.join(' ') };
     }),
   );
 }

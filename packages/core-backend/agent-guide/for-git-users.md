@@ -6,7 +6,7 @@ platform's own words. What carries over, and what does not:
 
 | | Git and a code host | Here |
 |---|---|---|
-| Branches | Anyone branches anything | The default branch, `{{defaultBranch}}`, and any other protected branch are live. Work in progress goes on a draft branch, by convention `<email-localpart>/<topic>` |
+| Branches | Anyone branches anything | The default branch, `{{defaultBranch}}`, and any other protected branch are live. Work in progress goes on a draft branch named `<you>/<topic>` (see `drafts-and-change-requests`) |
 | Commits | `git commit`, then `git push` | Every save is committed and shared as the person, moments after the call returns. No separate push |
 | Pull requests | Opened and merged on the code host | A change request: you open it (`open_change_request`), a person reviews, approves and merges it in the app. No agent tool approves or merges one |
 | Who approves | Code owners, branch rules | The owners and writers of each file the request changes |

@@ -30,6 +30,12 @@ its task needs.
   `{{kbDirName}}/{{knowledgeBaseDir}}/Overview.md`. A path without that prefix
   is placed under it.
 
+### Before you write to `{{defaultBranch}}`
+
+A write there is live for everyone at once. Unless the person has already
+said where, ask first: directly on `{{defaultBranch}}` (only when they may
+write every file it touches), or on a draft with a change request.
+
 ### What is live, and what is only on a draft
 
 Work on a draft is visible to you, and to anyone who opens that draft: in the

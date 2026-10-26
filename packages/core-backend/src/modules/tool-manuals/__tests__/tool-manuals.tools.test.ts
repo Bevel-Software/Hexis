@@ -337,3 +337,30 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
     expect(toolManualService.listDeclaredOnlyOnBranch).not.toHaveBeenCalled();
   });
 });
+
+describe('list_tool_setup — a tool that needs the caller’s own value says so', () => {
+  const TICKETS = {
+    slug: 'ticketdesk',
+    name: 'ticketdesk',
+    path: 'Plugins/Support/ticketdesk.tool',
+    type: 'http' as const,
+    variables: [{ name: 'TICKETDESK_TOKEN', scope: 'user' as const, label: null }],
+  };
+
+  it('tells a caller without their own value where to set it, and to reconnect', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [TICKETS], invalid: [] } as never);
+    // Bob has configured nothing (see `statusFor`).
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toContain('`ticketdesk` needs your own value or sign-in');
+    expect(body.note).toContain('Connect page, never in the chat');
+    expect(body.note).toContain('reconnect your assistant');
+  });
+
+  it('says nothing to a caller who has set theirs', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [TICKETS], invalid: [] } as never);
+    const body = (await (await callSetup(base, 'bevel_alice')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
+  });
+});

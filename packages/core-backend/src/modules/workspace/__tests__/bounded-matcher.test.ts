@@ -106,6 +106,18 @@ describe('WorkerPatternMatcher', () => {
     expect(() => matcher().search('(', '')).toThrow(/^Invalid regex: /);
   });
 
+  it('names `ignore_case` when the pattern carries an inline flag group, and only then', () => {
+    expect(() => matcher().search('(?i)refund', '')).toThrow(/^Invalid regex: .*pass `ignore_case: true` instead\.$/);
+    let message = '';
+    try {
+      matcher().search('(', '');
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/^Invalid regex: /);
+    expect(message).not.toContain('ignore_case');
+  });
+
   it('refuses a pattern too long to compile on the request thread, and accepts one at the limit', () => {
     const m = matcher({ maxPatternLength: 10 });
     expect(() => m.search('a'.repeat(11), '')).toThrow(/^Pattern too long: /);

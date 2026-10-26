@@ -377,8 +377,9 @@ export function registerWorkflowTools(
     description:
       'Create a new unprotected draft named `name`, forked from the existing branch `branch`. The ' +
       `backend rejects protected names (${protectedInline(kb)}) and filesystem-invalid names — surface ` +
-      'those errors verbatim. Convention: `<email-localpart>/<kebab-slug>`. Does NOT switch the ' +
-      'agent onto the new draft.',
+      'those errors verbatim. Name it `<you>/<kebab-slug>`: `<you>` is the person\'s email before the @, in lower case, ' +
+      'with each run of characters other than letters and digits as one `-` (`paul.brandt@` gives `paul-brandt/`). ' +
+      'Only that prefix makes the draft theirs, to delete later. Does NOT switch the agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
     // workspace-`branch` injection ("the branch you are currently working on"),
     // whose wording invites filling in the draft being created instead.
@@ -389,7 +390,7 @@ export function registerWorkflowTools(
     inputs: {
       type: 'object',
       properties: {
-        name: { type: 'string', minLength: 1, description: 'Name of the draft to create (`<email-localpart>/<kebab-slug>` for user drafts). Must not exist yet.' },
+        name: { type: 'string', minLength: 1, description: 'Name of the draft to create (`<you>/<kebab-slug>` for user drafts, as the description says). Must not exist yet.' },
         branch: { type: 'string', minLength: 1, description: 'Existing branch to fork the new draft from — usually the branch you are currently on.' },
       },
       required: ['name', 'branch'],
@@ -619,7 +620,7 @@ export function registerWorkflowTools(
     name: 'delete_branch',
     description:
       'Delete branch `name` from the shared repository and the server. Allowed for the ' +
-      'branch\'s author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
+      'branch\'s author (`<you>/…` per `create_branch`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
       'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
       '(retry once they land). An open change request from or into it that proposes nothing is closed and the ' +
       'delete goes ahead; one that still proposes something refuses it, naming and linking it: its author ' +

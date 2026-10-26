@@ -125,6 +125,13 @@ word. Do not propose one. If your user is an Admin, `edit_file` the file on
 `{{defaultBranch}}`. If not, tell them who the Admins are (the `Admin` entries)
 and that the change is made in the app's Roles page or by an Admin.
 
+### Before you change access
+
+Check what the people named can already do: `file_stat` on the path with
+`explainAccess: true`, and the groups they are in (`groups.yaml`). When they
+already have it, say so and change nothing. A change nobody needed still
+widens or narrows access for everyone the rule names.
+
 ### Direct writes vs change requests
 
 - A person, or an agent acting for them, with **write or owner on every file a

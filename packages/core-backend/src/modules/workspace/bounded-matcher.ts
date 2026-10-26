@@ -104,6 +104,19 @@ type Lease = {
   readonly batchChars: number;
 };
 
+
+/**
+ * The refusal for a pattern JavaScript cannot compile. An inline flag group
+ * such as `(?i)` is the usual cause (agents bring it from PCRE and Python), so
+ * the refusal names the argument that does the same.
+ */
+function invalidRegex(source: string, message: string): ToolError {
+  const hint = /\(\?[a-zA-Z]+\)/.test(source)
+    ? ' JavaScript has no inline flags such as `(?i)`: pass `ignore_case: true` instead.'
+    : '';
+  return new ToolError(`Invalid regex: ${message}${hint}`, 400);
+}
+
 export class WorkerPatternMatcher implements IPatternMatcher {
   private readonly budgetMs: number;
   private readonly maxPatternLength: number;
@@ -147,7 +160,7 @@ export class WorkerPatternMatcher implements IPatternMatcher {
     try {
       new RegExp(source, flags);
     } catch (err) {
-      throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
+      throw invalidRegex(source, (err as Error).message);
     }
     return new BoundedSearch(this.lease, source, flags, this.budgetMs);
   }
@@ -217,7 +230,7 @@ class BoundedSearch implements IPatternSearch {
       this.spentMs = this.budgetMs;
       throw new PatternTooExpensiveError(this.source, this.budgetMs);
     }
-    if ('error' in reply) throw new ToolError(`Invalid regex: ${reply.error}`, 400);
+    if ('error' in reply) throw invalidRegex(this.source, reply.error);
     this.spentMs += reply.elapsed;
     if (this.spentMs > this.budgetMs) throw new PatternTooExpensiveError(this.source, this.budgetMs);
     return reply.hits;

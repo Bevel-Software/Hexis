@@ -98,25 +98,25 @@ Measured the same way, on this change's last commit:
 | Layer | Before | After | Budget |
 |---|---|---|---|
 | Server instructions (platform part) | 1,852 | 1,848 | 2,000 |
-| Tool list as served (41 tools) | 15,829 | 15,380 | 16,000 |
-| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 948 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,018 | 19,000 |
-| One evaluation task | 19,342 | 948 to 3,267 | 6,000 |
+| Tool list as served (41 tools) | 15,829 | 15,599 | 16,000 |
+| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,004 (`start-here`) | 1,200 |
+| The whole guide (`section: "all"`) | 19,342 | 18,280 | 19,000 |
+| One evaluation task | 19,342 | 1,004 to 3,329 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
 
 | Section | Tokens | | Section | Tokens |
 |---|---|---|---|---|
-| `start-here` | 948 | | `drafts-and-change-requests` | 1,395 |
+| `start-here` | 1,004 | | `drafts-and-change-requests` | 1,502 |
 | `how-agents-find-things` | 656 | | `skills` | 1,026 |
-| `for-git-users` | 635 | | `tools` | 931 |
+| `for-git-users` | 641 | | `tools` | 952 |
 | `glossary` | 584 | | `tool-manuals` | 2,354 |
 | `directory-structure` | 1,356 | | `html-views` | 2,683 |
 | `where-a-new-file-goes` | 702 | | `conventions` | 445 |
 | `working-with-files` (computed) | 1,684 | | `new-knowledge-base` | 379 |
-| `access-control` | 2,238 | | | |
+| `access-control` | 2,310 | | | |
 
-The customer's fifteen guide loads would now cost about 14,000 tokens instead
-of about 420,000. On an enterprise deployment the whole guide is 26,683 tokens;
+The customer's fifteen guide loads would now cost about 15,000 tokens instead
+of about 420,000. On an enterprise deployment the whole guide is 26,945 tokens;
 its five sections are unchanged and outside core's checks.
 
 ## Decisions

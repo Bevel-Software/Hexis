@@ -239,6 +239,10 @@ const str = (description: string): JsonSchema => ({ type: 'string', description 
  * (`agent-instructions/shared-file-rules.ts`): said in full on three
  * descriptions it took each of them past the length a client cuts at.
  */
+/** On every write tool: a write to the default branch is live at once, so the agent asks first. */
+const ASK_BEFORE_DEFAULT_BRANCH =
+  ' On the default branch a write is live for everyone at once: unless the person already said where, ask them first whether to write there or propose it on a draft.';
+
 const UPLOAD_ROUTE_NOTE =
   ' Large, escape-heavy or binary content does not go through here: use `request_file_upload` + `apply_file_upload`.';
 
@@ -2413,7 +2417,7 @@ export function registerWorkspaceTools(
         type: 'object',
         properties: {
           branch: BRANCH_INPUT,
-          pattern: str('JavaScript regular expression.'),
+          pattern: str('JavaScript regular expression. For a search that ignores case set `ignore_case`; inline flags such as `(?i)` are refused.'),
           path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
           ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
           max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
@@ -2581,6 +2585,7 @@ export function registerWorkspaceTools(
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
       '`created`, `replaced` or `updated`.' +
+      ASK_BEFORE_DEFAULT_BRANCH +
       UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
@@ -2671,6 +2676,7 @@ export function registerWorkspaceTools(
       '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
       'does not stop the others; read `files` to see what landed.' +
+      ASK_BEFORE_DEFAULT_BRANCH +
       UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
@@ -2843,6 +2849,7 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
+      ASK_BEFORE_DEFAULT_BRANCH +
       UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
@@ -2922,7 +2929,8 @@ export function registerWorkspaceTools(
     name: 'delete_file',
     gated: true,
     description:
-      'Delete ONE workspace file. Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`.',
+      'Delete ONE workspace file. Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`.' +
+      ASK_BEFORE_DEFAULT_BRANCH,
     inputs: {
       type: 'object',
       properties: {

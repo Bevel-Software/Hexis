@@ -4,11 +4,16 @@ An agent drafts, proposes and syncs; a person merges. No agent tool approves a
 file, bypasses an approval or merges a change request (`merge_change_request`
 no longer exists).
 
-- **Start a draft** with `create_branch`: `name` is the new draft, by
-  convention `<email-localpart>/<topic>`, and `branch` is the branch it forks
-  from, usually `{{defaultBranch}}`:
-  `create_branch({ body: { name: "ana/pricing-page", branch: "{{defaultBranch}}" } })`.
-  It is shared at once, and the file tools then take the draft as `branch`.
+- **Start a draft** with `create_branch`: `name` is the new draft and `branch`
+  the branch it forks from, usually `{{defaultBranch}}`:
+  `create_branch({ body: { name: "paul-brandt/pricing-page", branch: "{{defaultBranch}}" } })`.
+  Name it `<you>/<topic>`, where `<you>` is the person's email before the
+  `@`, in lower case, with each run of other characters than letters and
+  digits as one `-`: `paul.brandt@` gives `paul-brandt/`. Only that prefix
+  makes the draft theirs, so they can delete it later. Ask for the email if
+  you do not know it. A draft is shared at once, and the file tools then take
+  it as `branch`. In the app, the person sees it by choosing it in the branch
+  switcher; otherwise the app shows `{{defaultBranch}}`.
 - **Saving shares.** Every write is committed as the person and shared,
   moments after the call returns; there is no separate push. `branch_status`
   lists writes still landing. `share_current_branch` is only for sharing
@@ -75,8 +80,8 @@ finish.
   A draft whose open request turns out to propose nothing (its changes are
   already on the target) is removed the same way when that request is closed,
   and so is the draft of a request deleted in the app.
-- **`delete_branch`** removes a draft for everyone. Only its author
-  (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin may.
+- **`delete_branch`** removes a draft for everyone. Only its author (the
+  `<you>/…` prefix above, or your own `suggestions/…` bundle) or an Admin may.
   Preview with `dryRun: true`: it changes nothing and says whether the delete
   would go through, how many commits are not on `{{defaultBranch}}`, and the
   last commit. A draft holding such commits is refused unless you pass
