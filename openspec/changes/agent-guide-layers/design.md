@@ -100,7 +100,7 @@ Measured the same way, on this change's last commit:
 | Server instructions (platform part) | 1,852 | 1,848 | 2,000 |
 | Tool list as served (41 tools) | 15,829 | 15,598 | 16,000 |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,004 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,310 | 19,000 |
+| The whole guide (`section: "all"`) | 19,342 | 18,330 | 19,000 |
 | One evaluation task | 19,342 | 1,004 to 3,329 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
 
@@ -113,10 +113,10 @@ Measured the same way, on this change's last commit:
 | `directory-structure` | 1,356 | | `html-views` | 2,683 |
 | `where-a-new-file-goes` | 702 | | `conventions` | 445 |
 | `working-with-files` (computed) | 1,684 | | `new-knowledge-base` | 379 |
-| `access-control` | 2,340 | | | |
+| `access-control` | 2,360 | | | |
 
 The customer's fifteen guide loads would now cost about 15,000 tokens instead
-of about 420,000. On an enterprise deployment the whole guide is 26,975 tokens;
+of about 420,000. On an enterprise deployment the whole guide is 26,995 tokens;
 its five sections are unchanged and outside core's checks.
 
 ## Decisions

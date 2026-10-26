@@ -129,8 +129,9 @@ and that the change is made in the app's Roles page or by an Admin.
 
 Check what the people named can already do. `file_stat` on the path with
 `explainAccess: true` lists who holds each verb (`roster`, when you may manage
-the path's access); `groups.yaml` says who is in each group. It does not judge
-one named person for you. When they already have it, say so and change
+the path's access); the active group source (`synced-groups.yaml` when groups
+are synced, `groups.yaml` otherwise) says who is in each group. It does not
+judge one named person for you. When they already have it, say so and change
 nothing. A change nobody needed still widens or narrows access for everyone
 the rule names.
 
