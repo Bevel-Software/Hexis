@@ -1206,6 +1206,12 @@ describe('grep with a path that names a file', () => {
     expect(named.matches).toEqual([{ path: `${KB_DIR}/mixed/latin.txt`, line: 2, text: 'needle ok' }]);
     expect(named.matches).toEqual(folder.matches);
     expect(named.note).toBeUndefined();
+    // A line that is not UTF-8 counts toward ripgrep's cap, yet the line after it is still answered.
+    for (const path of [`${KB_DIR}/mixed/latin.txt`, `${KB_DIR}/mixed`]) {
+      const one = await grep(base, { pattern: 'needle', path, max_results: 1 });
+      expect(one.matches).toEqual([{ path: `${KB_DIR}/mixed/latin.txt`, line: 2, text: 'needle ok' }]);
+      expect(one.truncated).toBe(true);
+    }
   });
 
   it('a path with nothing at it fails with an error naming the path — never an empty success', async () => {

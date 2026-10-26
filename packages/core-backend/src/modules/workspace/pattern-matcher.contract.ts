@@ -48,7 +48,8 @@ export interface TreeSearchOptions {
   /**
    * The most lines one file answers: matching stops at it, so a file of
    * millions of matching lines costs its first few and one look for a NUL
-   * in the rest, not a record for every line.
+   * in the rest, not a record for every line. A matching line that is not
+   * UTF-8 is not answered and does not use up the cap.
    */
   maxLinesPerFile: number;
 }

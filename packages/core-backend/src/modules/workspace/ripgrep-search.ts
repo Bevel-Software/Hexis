@@ -182,37 +182,58 @@ class RipgrepSearch implements IPatternSearch {
     // Every name is checked before the first run, so none is half-searched.
     for (const p of opts.only) exactGlob(`${under}${p}`);
     let only = opts.only;
+    const max = opts.maxLinesPerFile;
     while (only.length > 0) {
-      const capped = yield* this.walkFiles(scope, under, only, opts.maxLinesPerFile);
+      let capped = yield* this.walkFiles(scope, under, only, max, max);
       if (capped === null) return;
+      const path = capped.path;
+      // A matching line that is not UTF-8 counts toward ripgrep's cap but is
+      // not answered, so a file can stop short of its lines: it is searched
+      // again on its own, with a cap raised at least twofold, until it has
+      // them or ripgrep reads it to its end (and answers it from the walk).
+      let maxCount = max;
+      while (capped !== null && capped.lines.length < max) {
+        maxCount += Math.max(max - capped.lines.length, maxCount);
+        capped = yield* this.walkFiles(scope, under, [path], max, maxCount);
+      }
       // ripgrep stopped reading the file at its cap, so a NUL past it went
       // unseen: the file is read on for one, by a run of its own once the
       // walk's has ended, and the walk goes on with the files after it.
-      if (!(await this.holdsNul(scope, under, capped.path))) yield capped;
-      only = only.filter((p) => compareSearchPaths(p, capped.path) > 0);
+      if (capped !== null && !(await this.holdsNul(scope, under, path))) yield capped;
+      only = only.filter((p) => compareSearchPaths(p, path) > 0);
     }
   }
 
   /**
-   * The walks of `only`, each file answered at its `end`, until one reaches
-   * `maxLinesPerFile` lines: the walk ends there, and that file is returned
+   * The walks of `only`, each file answered at its `end` with at most
+   * `maxLinesPerFile` lines, until ripgrep stops one at `maxCount` matching
+   * lines (UTF-8 or not): the walk ends there, and that file is returned
    * unanswered. `null` once every walk has finished.
    */
-  private async *walkFiles(scope: TreeScope, under: string, only: readonly string[], maxLinesPerFile: number): AsyncGenerator<FileMatches, FileMatches | null> {
+  private async *walkFiles(
+    scope: TreeScope,
+    under: string,
+    only: readonly string[],
+    maxLinesPerFile: number,
+    maxCount: number,
+  ): AsyncGenerator<FileMatches, FileMatches | null> {
     // `--max-count`: a file is read no further than the lines it may answer.
-    const cap = ['--max-count', String(maxLinesPerFile)];
+    const cap = ['--max-count', String(maxCount)];
     for (const walk of await realWalks(scope, walkPlan(only))) {
       const globs = walk.paths.flatMap((p) => ['--glob', exactGlob(`${under}${p}`)]);
       const depth = walk.ownFilesOnly ? ['--max-depth', '1'] : [];
       const args = [...BASE_ARGS, '--json', ...WALK_ARGS, ...depth, ...cap, ...globs, ...NO_GIT, ...this.flags, '-e', this.pattern, '--', ...walk.folders];
       let current: FileMatches | null = null;
+      let matched = 0;
       for await (const record of this.run(args, scope.cwd, undefined, '\n')) {
         const event = parseEvent(record);
         if (event === null) continue;
         if (event.type === 'begin') {
           const path = underRoot(scope.root, pathOf(event.data?.path));
           current = path === null ? null : { path, lines: [] };
+          matched = 0;
         } else if (event.type === 'match' && current !== null) {
+          matched++;
           const text = textOf(event.data?.lines);
           const line = event.data?.line_number;
           if (text !== null && typeof line === 'number' && current.lines.length < maxLinesPerFile) {
@@ -223,7 +244,7 @@ class RipgrepSearch implements IPatternSearch {
           // it matched before the NUL is dropped with the rest. That is known
           // only here, so a file is answered at its end and not before.
           const binary = event.data?.binary_offset !== null && event.data?.binary_offset !== undefined;
-          if (!binary && current.lines.length >= maxLinesPerFile) return current;
+          if (!binary && matched >= maxCount) return current;
           if (!binary && current.lines.length > 0) yield current;
           current = null;
         }

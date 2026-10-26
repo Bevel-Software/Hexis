@@ -213,6 +213,21 @@ describe('RipgrepPatternMatcher', () => {
     ]);
   });
 
+  it('counts matching lines that are not UTF-8 toward the cap, and reads the file on for the lines it may answer', async () => {
+    const latin = (n: number): Buffer => Buffer.from('needle \xff\n'.repeat(n), 'latin1');
+    await put('kb/latin.txt', Buffer.concat([latin(1), Buffer.from('needle ok\n')]));
+    // Many lines that are not UTF-8 before the first one that is: the cap is raised until it is reached.
+    await put('kb/many.txt', Buffer.concat([latin(1_000), Buffer.from('needle many\n'), Buffer.from('needle more\n')]));
+    // The raised cap reads on past the NUL the first run stopped short of.
+    await put('kb/nul.txt', Buffer.concat([latin(1), Buffer.alloc(200_000, 'x'), Buffer.from([0]), Buffer.from('\nneedle nul\n')]));
+    await put('kb/z.txt', 'needle z\n');
+    expect(await all(await search('needle'), [], { maxLinesPerFile: 1 })).toEqual([
+      { path: 'latin.txt', lines: [{ line: 2, text: 'needle ok' }] },
+      { path: 'many.txt', lines: [{ line: 1_001, text: 'needle many' }] },
+      { path: 'z.txt', lines: [{ line: 1, text: 'needle z' }] },
+    ]);
+  });
+
   it('walks only the folders holding the files it is given, a folder\'s own files without its subfolders, in the order one walk of the root would', async () => {
     for (const p of ['A/x/1.md', 'A/y/0.md', 'B/2.md', 'C/y/3.md', 'C/z/9.md', 'T/a/1.md', 'T/a/2.md', 'T/b/3.md', 'top.md', 'U/u.md']) {
       await put(`kb/${p}`, 'needle\n');
