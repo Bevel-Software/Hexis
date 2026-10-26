@@ -300,22 +300,27 @@ describe('KbReferenceScanner — references are what the resolver parses', () =>
     }
   });
 
-  it('a readable stranded file is named exactly as if no unreadable one stood beside it', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-mixed-'));
+  // A Guard's Answer Is a Disclosure: the outcome must not vary with what a
+  // file the renaming person cannot read holds — no reference, a rewritable
+  // one, or one the rewrite cannot make all get the same refusal, and none of
+  // them is written.
+  it.each([
+    ['no reference', '---\nread:\n  - Sales\n---\n'],
+    ['a rewritable reference', '---\nread:\n  - Admin\n---\n'],
+    ['a reference the rewrite cannot make', FLOW_ACCESS_MD],
+  ])('a file the renaming person cannot read refuses the rename whatever it holds (%s)', async (_label, secret) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hidden-gate-'));
     try {
       const repo = path.join(root, KB);
-      await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      await write(repo, 'Team/access.md', '---\nread:\n  - Admin\n---\n');
+      await write(repo, 'Secret/access.md', secret);
       const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
-      const alone = await scanner
-        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE)
-        .catch((e: Error) => e);
-      await write(repo, 'Secret/access.md', FLOW_ACCESS_MD);
       const onlyTeam: PathVisibility = async (paths) => new Map(paths.map((p) => [p, p.startsWith('Team/')]));
-      const beside = await scanner
+      const err = await scanner
         .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), onlyTeam)
         .catch((e: Error) => e);
-      expect((beside as Error).message).toBe((alone as Error).message);
-      expect((beside as Error).message).not.toContain('Secret');
+      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
+      expect(await fs.readFile(path.join(repo, 'Secret/access.md'), 'utf-8')).toBe(secret);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

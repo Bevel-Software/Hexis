@@ -355,14 +355,15 @@ export interface ReferenceRewrite {
 export type PathVisibility = (repoRelPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
 
 /**
- * The one refusal for a rename blocked by content the renaming person may not
- * be shown — a folder the walk cannot list, a file it cannot read, or a
- * reference in a file they cannot read. The same words whatever the cause:
- * no path, no count, no hint of the YAML form, since Admin status does not
- * grant read and each of those is a disclosure. The log names the place.
+ * The one refusal for a rename that would reach content the renaming person
+ * may not be shown — a folder the walk cannot list, a file it cannot read, or
+ * a file the person may not read. The same words whatever the cause, and
+ * never depending on what such a file holds: no path, no count, no hint of a
+ * reference, since Admin status does not grant read and each of those is a
+ * disclosure. The log names the place.
  */
 export const UNSHOWN_REFERENCE_REFUSAL =
-  'Content this rename cannot show you may reference the old principal in a way it cannot rewrite; rename aborted with no changes. The server log names where.';
+  'This rename rewrites access rules across the knowledge base, and part of it is closed to you, so it may reference the old principal; rename aborted with no changes. The server log names where.';
 
 /**
  * The rows of `refs` whose file `readable` allows. The rest are dropped
@@ -553,8 +554,15 @@ export class KbReferenceScanner {
    * half-renamed principal still pointed at by stragglers = silent access
    * drop) — so any read failure aborts via `makeError` with nothing written.
    * Returns the writes WITH each file's original text (rollback snapshots).
-   * A refusal names only the paths `visible` says the renaming person may
-   * read; anything else gets `UNSHOWN_REFERENCE_REFUSAL`, never named nor counted.
+   *
+   * READ-GATED before any content is looked at: the rename rewrites rules
+   * across the whole KB, and nothing is changed where its person cannot read
+   * — so a candidate `visible` refuses aborts it with
+   * `UNSHOWN_REFERENCE_REFUSAL` whatever that file holds. Asking about
+   * content first would make the outcome a read of it: refusing only when a
+   * hidden file held a reference the rewrite cannot make would tell an Admin,
+   * one rename at a time, what is in a file they may not read. Past the gate
+   * every candidate is readable, so a refusal names its paths.
    */
   async rewriteReferences(
     workspaceId: string,
@@ -573,6 +581,19 @@ export class KbReferenceScanner {
     // unreadable, so `visible` could not see the rules that close it.
     if (holes.length > 0) {
       log.warn(`reference rewrite: cannot list ${holes.map((h) => printable(h || '.')).join(', ')}`);
+      throw makeError(UNSHOWN_REFERENCE_REFUSAL);
+    }
+    // The gate rides on the read model alone, never on what a file holds: the
+    // same answer whether a hidden file names the old principal or not.
+    const verdicts = await visible(candidates);
+    const hidden = candidates.filter((p) => verdicts.get(p) !== true);
+    if (hidden.length > 0) {
+      log.warn(
+        `reference rewrite: ${hidden.length} candidate file(s) the renaming person cannot read, e.g. ${hidden
+          .slice(0, 5)
+          .map((p) => printable(p || '.'))
+          .join(', ')}`,
+      );
       throw makeError(UNSHOWN_REFERENCE_REFUSAL);
     }
     const texts = await Promise.all(
@@ -618,18 +639,10 @@ export class KbReferenceScanner {
       }
     });
     if (stranded.length > 0) {
-      // The readable ones are named with how to fix them. The rest add
-      // nothing to that refusal — it reads the same with or without them —
-      // and alone they get the one refusal that says nothing of them.
-      const verdicts = await visible(stranded);
-      const shown = stranded.filter((p) => verdicts.get(p) === true);
-      const unshown = stranded.filter((p) => verdicts.get(p) !== true);
-      if (unshown.length > 0) {
-        log.warn(`reference rewrite: unrewritable reference in ${unshown.map((p) => printable(p || '.')).join(', ')}`);
-      }
-      if (shown.length === 0) throw makeError(UNSHOWN_REFERENCE_REFUSAL);
+      // Every candidate passed the read gate above, so each is named with how
+      // to fix it.
       throw makeError(
-        `${shown.map((p) => sanitizedPath(p || '.')).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
+        `${stranded.map((p) => sanitizedPath(p || '.')).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
       );
     }
     return writes;
